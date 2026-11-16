@@ -79,6 +79,18 @@ func TestLengthVeto(t *testing.T) {
 			t.Errorf("LengthVeto(%q) = %q, want it to name %s and not %s", stmt, got, in[0], in[1])
 		}
 	}
+	// A number, NULL, TRUE or FALSE is no column, even when a safe column
+	// has that very name (a name like that is quoted to be one).
+	lit := []string{"123", "1e3", "NULL", "null", "True", "FALSE", "0x41", "1abc", "(123)", "( NULL )"}
+	for _, a := range lit {
+		got := LengthVeto(Shape("SELECT LENGTH("+a+") FROM t"), append([]string{"123", "1e3", "NULL", "null", "True", "FALSE", "0x41", "1abc"}, safe...), other)
+		if !strings.HasPrefix(got, VetoLength) {
+			t.Errorf("LENGTH(%s) with a safe column of that name: %q, want vetoed", a, got)
+		}
+	}
+	if got := LengthVeto(Shape("SELECT LENGTH(`NULL`), LENGTH(`123`) FROM t"), []string{"NULL", "123"}, other); got != "" {
+		t.Errorf("quoted names of safe columns: %q, want none", got)
+	}
 	// A name that is utf8mb4 in one table and latin1 in another.
 	if LengthVeto(Shape("SELECT LENGTH(u) FROM a JOIN b USING (k)"), []string{"u"}, []string{"U"}) == "" {
 		t.Error("u is latin1 in one of the tables, yet the copy answers")

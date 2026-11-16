@@ -27,7 +27,7 @@ import (
 // (#2806) whatever the collation.
 func TestIntegrationSQLCompareLengthFunctions(t *testing.T) {
 	srcDB, srcName := testutil.CreateTestDB(t)
-	lengthFunctions(t, srcDB, srcName, testutil.IntegrationDSN(srcName))
+	lengthFunctions(t, srcDB, srcName, testutil.IntegrationDSN(srcName), false)
 }
 
 // The same against a MariaDB source. A test of its own, with MariaDB in its
@@ -36,7 +36,7 @@ func TestIntegrationSQLCompareLengthFunctions(t *testing.T) {
 func TestIntegrationSQLCompareLengthFunctionsMariaDB(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	srcDB, srcName := testutil.CreateTestMariaDB(t)
-	lengthFunctions(t, srcDB, srcName, testutil.MariaDBBaseDSN()+"/"+srcName+"?parseTime=true")
+	lengthFunctions(t, srcDB, srcName, testutil.MariaDBBaseDSN()+"/"+srcName+"?parseTime=true", true)
 }
 
 // lengthTable is the fixture. a and cf are under the table's collation, where
@@ -51,7 +51,8 @@ const lengthTable = "CREATE TABLE ln (id INT NOT NULL PRIMARY KEY, k INT, side V
 	"a VARCHAR(16) CHARACTER SET utf8mb4, cf CHAR(8) CHARACTER SET utf8mb4, " +
 	"b VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, cb CHAR(8) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, " +
 	"m3 VARCHAR(16) CHARACTER SET utf8mb3 COLLATE utf8mb3_bin, l VARCHAR(16) CHARACTER SET latin1 COLLATE latin1_bin, " +
-	"vt VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, bn BINARY(4), js JSON)"
+	"vt VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, bn BINARY(4), js JSON, " +
+	"asc1 VARCHAR(16) CHARACTER SET ascii, u3 VARCHAR(16) CHARACTER SET utf8)"
 
 // lengthRows is one side's rows: live is what is inserted into the source,
 // copy is what the copy holds (a CHAR as MySQL reads it back, without its
@@ -65,15 +66,15 @@ func lengthRows(side string) [][]string {
 		return copy
 	}
 	return [][]string{
-		{"1", "1", side, "abc", pick("ab ", "ab"), "é", pick("é  ", "é"), "é", "é", "a  ", pick("é", "0xC3A90000"), `{"a": "é"}`},
-		{"2", "2", side, "x1", "x", "😀", "😀", "ü", "e", "b", pick("ab", "0x61620000"), `[]`},
-		{"3", "3", side, "", "", "é", "ñandú", "", "", "", pick("a", "0x61000000"), `\N`},
-		{"4", "4", side, `\N`, `\N`, `\N`, `\N`, `\N`, `\N`, `\N`, `\N`, `\N`},
-		{"5", "5", side, "hello world", "q  r", "", "", "x", "x", "x", pick("x", "0x78000000"), `\N`},
+		{"1", "1", side, "abc", pick("ab ", "ab"), "é", pick("é  ", "é"), "é", "é", "a  ", pick("é", "0xC3A90000"), `{"a": "é"}`, "abc", "é"},
+		{"2", "2", side, "x1", "x", "😀", "😀", "ü", "e", "b", pick("ab", "0x61620000"), `[]`, "x y", "ü"},
+		{"3", "3", side, "", "", "é", "ñandú", "", "", "", pick("a", "0x61000000"), `\N`, "", ""},
+		{"4", "4", side, `\N`, `\N`, `\N`, `\N`, `\N`, `\N`, `\N`, `\N`, `\N`, `\N`, `\N`},
+		{"5", "5", side, "hello world", "q  r", "", "", "x", "x", "x", pick("x", "0x78000000"), `\N`, "hello", "x"},
 	}
 }
 
-func lengthFunctions(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
+func lengthFunctions(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mariadb bool) {
 	now := time.Now().UTC().Truncate(time.Second)
 	indexDSN := seedFlashbackIndex(t, "alice", now.Truncate(time.Hour))
 	var version string
@@ -93,7 +94,7 @@ func lengthFunctions(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 				args[i] = v
 			}
 		}
-		if _, err := srcDB.Exec("INSERT INTO ln VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", args...); err != nil {
+		if _, err := srcDB.Exec("INSERT INTO ln VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", args...); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -134,10 +135,17 @@ func lengthFunctions(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	// The report of #2918, with AVG.
 	const avgReport = "SELECT MIN(side), k % 3 AS bucket, COUNT(*), AVG(LENGTH(cf)) FROM ln GROUP BY bucket ORDER BY bucket"
 	// ORDER BY k and WHERE k: a column with no index, so the plan reads the
-	// whole table and the copy is asked. who "" is not asserted.
+	// whole table and the copy is asked. JSON is its own type on MySQL, kept
+	// there, and LONGTEXT on MariaDB, which the copy answers.
+	jsWho := "live"
+	if mariadb {
+		jsWho = "copy"
+	}
 	cases := []struct{ stmt, who, why string }{
 		{"SELECT side, LENGTH(a), OCTET_LENGTH(a), BIT_LENGTH(a), CHAR_LENGTH(a), CHARACTER_LENGTH(a), LENGTH(cf), CHAR_LENGTH(cf) FROM ln ORDER BY k", "copy", "ASCII under the table's collation, and a CHAR"},
 		{"SELECT side, LENGTH(b), OCTET_LENGTH(b), BIT_LENGTH(b), CHAR_LENGTH(b), CHARACTER_LENGTH(b) FROM ln ORDER BY k", "copy", "utf8mb4_bin past ASCII"},
+		{"SELECT side, LENGTH(asc1), OCTET_LENGTH(asc1), BIT_LENGTH(asc1), CHAR_LENGTH(asc1) FROM ln ORDER BY k", "copy", "an ascii column"},
+		{"SELECT side, LENGTH(u3), OCTET_LENGTH(u3), BIT_LENGTH(u3), CHAR_LENGTH(u3) FROM ln ORDER BY k", "copy", "a column declared with the utf8 alias (utf8mb3)"},
 		{"SELECT side, LENGTH(cb), CHAR_LENGTH(cb), BIT_LENGTH(cb) FROM ln ORDER BY k", "copy", "a utf8mb4_bin CHAR"},
 		{"SELECT side, LENGTH(m3), CHAR_LENGTH(m3), BIT_LENGTH(m3) FROM ln ORDER BY k", "copy", "utf8mb3_bin"},
 		{"SELECT side, length (b), Char_Length(cb), OCTET_LENGTH/* x */(b) FROM ln ORDER BY k", "copy", "spelled otherwise"},
@@ -151,9 +159,10 @@ func lengthFunctions(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{"SELECT side, LENGTH(vt) FROM ln ORDER BY k", "live", "a trailing space (#2533)"},
 		{"SELECT side, LENGTH(LOWER(b)) FROM ln ORDER BY k", "live", "an expression"},
 		{"SELECT side, LENGTH(k) FROM ln ORDER BY k", "live", "a number"},
+		{"SELECT side, LENGTH(123), LENGTH(NULL) FROM ln ORDER BY k", "live", "a number and NULL as the argument"},
 		{"SELECT side, LENGTH(b) FROM ln ORDER BY LENGTH(b), k", "live", "after ORDER BY"},
 		{"SELECT side, x FROM (SELECT side, k, LENGTH(b) AS x FROM ln) q ORDER BY k", "live", "a subquery"},
-		{"SELECT side, LENGTH(js), CHAR_LENGTH(js) FROM ln ORDER BY k", "", "JSON: its own type on MySQL (kept there), LONGTEXT on MariaDB"},
+		{"SELECT side, LENGTH(js), CHAR_LENGTH(js) FROM ln ORDER BY k", jsWho, "JSON: its own type on MySQL (kept there), LONGTEXT on MariaDB"},
 	}
 	// The collation that compares like the copy, and utf8mb4_general_ci
 	// (go-sql-driver's default, MariaDB 10.11's for utf8mb4), which does not

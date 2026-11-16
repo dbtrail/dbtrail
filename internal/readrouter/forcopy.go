@@ -148,7 +148,8 @@ type CopyOptions struct {
 	// a dot. Only the routing port sets it, and the caller keeps on MySQL a
 	// call whose argument is not a text column in utf8mb4, utf8mb3 or ascii
 	// (LengthVeto). BIT_LENGTH, CHAR_LENGTH and CHARACTER_LENGTH need no
-	// rewrite: the copy's count the bits and the characters of the UTF-8.
+	// rewrite: the copy's own functions already count the bits and the
+	// characters of the UTF-8.
 	MySQLLength bool
 }
 

@@ -14,6 +14,11 @@ const VetoLength = "LENGTH, OCTET_LENGTH, BIT_LENGTH, CHAR_LENGTH or CHARACTER_L
 // quoted (the shape writes a backtick as a double quote).
 var lengthCall = regexp.MustCompile(`(?i)"?(?:length|octet_length|bit_length|char_length|character_length)"?` + callOpen)
 
+// lengthLiteral is a bare argument that columnRef accepts as a name but
+// MySQL reads as a literal: a number (123, 1e3) or NULL, TRUE, FALSE. A
+// column called like that must be quoted, and the quotes keep it out of here.
+var lengthLiteral = regexp.MustCompile(`(?i)^(?:\d|(?:null|true|false)$)`)
+
 // LengthVeto says why the copy must not answer a statement because of a
 // LENGTH, OCTET_LENGTH, BIT_LENGTH, CHAR_LENGTH or CHARACTER_LENGTH call, or
 // "" when it can (#2918). MySQL's LENGTH and OCTET_LENGTH count the bytes of
@@ -56,8 +61,9 @@ func LengthVeto(shape string, safe, other []string) string {
 			return lengthReason(strings.TrimRight(shape[l[0]:l[1]], " \t\n\r\f\v(") + " has no closing parenthesis")
 		}
 		call := strings.TrimRight(shape[l[0]:l[1]], " \t\n\r\f\v(") + "(" + strings.TrimSpace(body) + ")"
-		m := columnRef.FindStringSubmatch(unwrap(strings.TrimSpace(body)))
-		if m == nil {
+		arg := unwrap(strings.TrimSpace(body))
+		m := columnRef.FindStringSubmatch(arg)
+		if m == nil || lengthLiteral.MatchString(arg) {
 			return lengthReason(call + " takes something other than a column")
 		}
 		name := m[1]
