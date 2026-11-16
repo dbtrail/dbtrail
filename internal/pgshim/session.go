@@ -64,6 +64,14 @@ type session struct {
 	database      string
 	catalogTables []CatalogTable
 	catalogAt     time.Time
+	// up is the connection to the server's source (forward.go), nil until a
+	// statement needs it; upLost says why it was lost, after which nothing
+	// more is sent there.
+	up     *upstream
+	upLost string
+	// savepoints are the savepoints of the client's block on the source,
+	// oldest first (forward.go).
+	savepoints []savepoint
 }
 
 // initSettings sets a connection's settings before its start-up message is
@@ -137,6 +145,11 @@ func (s *session) handleSimpleQuery(qstr string) error {
 	// back when this returns: its answer is written by then, or never will
 	// be (the write failed, the client left, the statement was refused).
 	defer s.releaseResult()
+	// A statement the source answers (forward.go) is relayed from it.
+	if s.abortedRefusal(qstr) == nil && s.toSource(s.classify(qstr)) {
+		s.forwardSimple(qstr)
+		return s.readyFlush()
+	}
 	cols, types, rows, tag, perr := s.run(qstr)
 	if perr != nil {
 		s.fail(perr)
@@ -178,6 +191,17 @@ func (s *session) run(qstr string) (cols []string, types []colType, rows [][][]b
 	if c.kind != kindProbe || c.cmd == nil {
 		return cols, types, rows, tag, nil
 	}
+	// A transaction block the client opens lives on the source, when the
+	// connection can reach it: its start and end are sent there first.
+	srcTag, perr := s.forwardTxControl(qstr, c.cmd)
+	if perr != nil {
+		return nil, nil, nil, "", perr
+	}
+	if c.cmd.kind == cmdCommit && srcTag == "ROLLBACK" && s.txStatus() == 'T' {
+		// The source rolled the block back (it had failed there): so is it
+		// here, and the client is told ROLLBACK, as PostgreSQL tells it.
+		s.markFailed()
+	}
 	switch c.cmd.kind {
 	case cmdBegin:
 		if s.txStatus() != 'I' {
@@ -208,6 +232,7 @@ func (s *session) run(qstr string) (cols []string, types []colType, rows [][][]b
 			}
 		}
 		s.tx = 'I'
+		s.savepoints = nil
 		s.dropPortals()
 	}
 	return cols, types, rows, tag, nil
@@ -222,6 +247,11 @@ func (s *session) abortedRefusal(qstr string) *pgErr {
 	if c, ok, _ := parseSessionCmd(qstr); ok && (c.kind == cmdCommit || c.kind == cmdRollback) {
 		return nil
 	}
+	// A block on the source is brought back from its error by ROLLBACK TO
+	// SAVEPOINT, which the source answers (forward.go).
+	if s.pinned() && isRollbackTo(qstr) {
+		return nil
+	}
 	return &pgErr{"25P02", "current transaction is aborted, commands ignored until end of transaction block"}
 }
 
@@ -229,6 +259,12 @@ func (s *session) abortedRefusal(qstr string) *pgErr {
 // with it, and what the block set is undone, as on PostgreSQL.
 func (s *session) fail(perr *pgErr) {
 	s.errorResponse(perr.code, perr.msg)
+	s.markFailed()
+}
+
+// markFailed fails the transaction block a statement failed in, and undoes
+// what the block set.
+func (s *session) markFailed() {
 	if s.txStatus() == 'T' {
 		s.tx = 'E'
 		s.set, s.sessionLevel = s.txSaved, s.txSaved
@@ -642,6 +678,9 @@ func (s *session) errorResponse(code, msg string) {
 // failure — after a ParameterStatus for each reported parameter the
 // statements before it changed.
 func (s *session) readyFlush() error {
+	// A connection to the source nothing of the client's lives on goes back
+	// to the port (forward.go).
+	s.releaseIdleSource()
 	s.reportChanges()
 	s.be.Send(&pgproto3.ReadyForQuery{TxStatus: s.txStatus()})
 	return s.be.Flush()

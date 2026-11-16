@@ -745,7 +745,11 @@ listener, its own workers, its own memory.
 - **As of the last snapshot update.** Fresh mode does not apply to a
   PostgreSQL server, so an answer is as old as the copy's last update, and
   this process keeps no files of recent changes.
-- **The copy answers every statement.** Nothing is sent to the source, and a
+- **The copy answers reads.** A transaction block the client opens, and a
+  catalog statement the copy does not answer, go to the source as the
+  server's forwarding user, read-only (see
+  [Transactions on the source](#transactions-on-the-source-the-forwarding-user));
+  a server without a forwarding user is answered from the copy alone. A
   statement that is not a read is refused with an error. Unqualified names
   resolve in `public` until the client sets `search_path` (see
   [Session settings](#session-settings-and-query-cancel-on-the-postgresql-port)). NULL order, integer division and text comparison follow
@@ -893,6 +897,7 @@ it fits beside capture:
 | `--threads` | `BINTRAIL_PG_ROUTER_THREADS` | 2 | Threads each statement may use (1 to 16) |
 | `--sql-memory` | `BINTRAIL_CONSOLE_SQL_MEMORY` | 2GB, or the value saved in the web interface | Memory each statement may use |
 | `--max-connections` | `BINTRAIL_PG_ROUTER_MAX_CONNECTIONS` | 16 | Clients connected at once (1 to 1024). One more is refused with an error |
+| `--max-source-connections` | `BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS` | 16 | Connections to the servers' own PostgreSQL held at once, every server together (1 to 1024). A client holds one while its transaction block (or a catalog statement the copy does not answer) runs there; past the limit the statement that needed one is refused (`53300`) |
 | `--max-wait` | `BINTRAIL_PG_ROUTER_MAX_WAIT` | none | How long a statement waits for its turn before it is refused |
 | `--sql-port-max-rows` | `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS` | the port's row cap | Most rows one statement returns |
 | `--token` | `BINTRAIL_CONSOLE_TOKEN` | none | The access token, one more password. It does not open the port |
@@ -938,6 +943,91 @@ is refused with the reason: `SET TimeZone = 'UTC'` first. Its columns are text,
 written as the change history holds them. On `bintrail-pg flashback`, which
 answers time travel only, `TimeZone` is UTC only, at connect too: start a JDBC
 client with `-Duser.timezone=UTC`.
+
+### Transactions on the source: the forwarding user
+
+A transaction block a client opens on the PostgreSQL port (`BEGIN` or
+`START TRANSACTION` to `COMMIT` or `ROLLBACK`) runs on the server's own
+PostgreSQL, every statement in it, and so does a statement on the system
+catalog that the port does not answer from the copy
+([below](#listing-schemas-tables-and-columns-on-the-postgresql-port)). Every
+other statement is answered by the copy, as before. It needs the server's
+**forwarding user**, a role of its own on the source:
+
+```sql
+CREATE ROLE app_ro LOGIN PASSWORD <a password>;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO app_ro;
+```
+
+```bash
+bintrail-console server forward-user <server> -u app_ro -p
+```
+
+or in the web interface, edit the server (Forwarding user and password). It is
+laid over the source's own address, database and parameters (`sslmode`
+included), and must be another user than the one DBTrail captures with: the
+port never runs anything as that one, which holds `REPLICATION` and reads every
+published table. Without a forwarding user, a transaction block is answered by
+the copy alone, as before. Changing the forwarding user, or removing the
+server, closes the connections that use it; clients reconnect.
+
+- **Read-only, three ways.** A statement that is not a read is refused before
+  it is sent (`25006`, naming `INSERT`, `UPDATE`, `CREATE`...). The connection
+  to the source is opened with `default_transaction_read_only = on`, so
+  PostgreSQL itself refuses what the text does not show (a function that
+  writes, a `WITH` that deletes, `SELECT ... INTO`, `nextval`). The port watches
+  that setting, which PostgreSQL 14 and later report, and closes the connection
+  if anything turns it off. A source older than 14 is not forwarded to.
+  `BEGIN READ WRITE` and `SET default_transaction_read_only = off` are refused.
+- **Refused by name**: `COPY` (`0A000`; read rows with `SELECT`), `LISTEN` (a
+  notification would reach the client only when it next sent a statement),
+  `NOTIFY` and `pg_notify()`, `DO`, `PREPARE`/`EXECUTE`, advisory locks,
+  `set_config()`, `dblink`, and names written with `U&"..."` escapes. A
+  transaction statement inside a longer text (`SELECT 1; COMMIT`) is refused:
+  send it on its own.
+- **The source's answers as it gives them**: its rows as they come, never held
+  whole in this process; its errors with their code, detail and position, which
+  fail the block as on PostgreSQL; its notices (`RAISE NOTICE`). Savepoints
+  (`ROLLBACK TO SAVEPOINT` brings a failed block back, and the session's
+  settings to what they were at the savepoint, as psql's `ON_ERROR_ROLLBACK`
+  and JDBC's `autosave` expect),
+  cursors and the extended protocol work as on the source: a statement a driver
+  prepared outside the block (pgx, JDBC) is prepared on the source the first
+  time it runs inside one. When the copy had described its columns with
+  another type than the source sends in binary, that execution is refused with
+  `cached plan must not change result type` (`0A000`), the words drivers
+  prepare again on, never sent as the wrong value.
+- **The session goes with it**: `TimeZone`, `search_path`, `statement_timeout`,
+  `lock_timeout`, `extra_float_digits`, `client_min_messages` and the default
+  isolation are set on the source before a statement is sent, and the formats
+  the port writes in (`DateStyle` `ISO, MDY`, `IntervalStyle`, `bytea_output`,
+  UTF8) are the source connection's from the start.
+- **Cancel and disconnect reach the source.** A cancel request stops the
+  statement there (`57014`); a client that leaves in the middle of a
+  statement has it cancelled there. A source that does not stop a cancelled
+  statement within ten seconds has its connection closed.
+- **At most one connection to the source per client**, opened when a
+  statement needs it and given back as soon as nothing of the client's lives
+  there (the block ended, the batch synced, no portal open), so a connection
+  pool's clients do not hold one each for good; at most
+  `--max-source-connections` across every server. The next one is given the
+  session's settings again, and a prepared statement is prepared there again
+  the first time it runs; a cursor `WITH HOLD`, which would outlive the block,
+  is refused. A connection that is lost, or whose read-only guard was turned
+  off, is not replaced behind the client's back: a statement that needs the
+  source answers `08006 ... reconnect` (a block open at that moment fails, and
+  only its `ROLLBACK` is answered), while reads on the copy go on.
+- **Every wait for the source is bounded** by the port's five-minute cap on a
+  statement, besides the client's `statement_timeout` and cancel.
+- **When the source cannot be reached**: `08001 cannot connect to the source`;
+  when it refuses the forwarding user, `08004` with PostgreSQL's reason (not
+  `28P01`, which would read as the client's own password being wrong). The
+  `BEGIN` fails and the connection stays open on the copy.
+- **TLS to the source** follows the forwarding user's URL: the source's own
+  `sslmode` when the user was laid over it, `prefer` when none is written.
+- `REPEATABLE READ` and `SERIALIZABLE` are still refused, as on the copy:
+  inside a block the port still answers some statements itself (`SHOW`,
+  the catalog statements it recognizes, time travel).
 
 ### Listing schemas, tables and columns on the PostgreSQL port
 

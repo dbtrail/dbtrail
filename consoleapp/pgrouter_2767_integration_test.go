@@ -49,6 +49,8 @@ type pgExtEnv struct {
 	srv       *console.Server
 	serverID  string
 	eventAt   time.Time
+	// indexDSN is the server's index, for a test that adds more servers.
+	indexDSN string
 }
 
 func startPGExtPort(t *testing.T, ctx context.Context) pgExtEnv {
@@ -78,6 +80,11 @@ func startPGExtPortTLS(t *testing.T, ctx context.Context, tlsConfig *tls.Config)
 type pgPortFixture struct {
 	table, slot, pub string
 	setup            []string
+	// entry, when set, edits the server's registry entry before it is saved
+	// (its source and forwarding account, #2771); sources, when set, is the
+	// port's bound on connections to the sources.
+	entry   func(*console.ServerEntry)
+	sources int
 }
 
 func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx pgPortFixture) pgExtEnv {
@@ -137,7 +144,11 @@ func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx
 	testutil.InsertSnapshot(t, idx, 2, snapTS, "public", "users", "name", 2, "", "varchar", "YES")
 	testutil.InsertEvent(t, idx, "mysql-bin.000001", 300, 400, eventAt.Format("2006-01-02 15:04:05"), nil,
 		"public", "users", 1, "1", nil, nil, []byte(`{"id":1,"name":"alice"}`))
-	ent, err := f.owner.Add(console.ServerEntry{Name: "pgsrv", DSN: dsn, Flavor: console.FlavorPostgres, BaselineDir: outDir})
+	entry := console.ServerEntry{Name: "pgsrv", DSN: dsn, Flavor: console.FlavorPostgres, BaselineDir: outDir}
+	if fx.entry != nil {
+		fx.entry(&entry)
+	}
+	ent, err := f.owner.Add(entry)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,13 +160,16 @@ func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx
 	t.Cleanup(runner.Close)
 	srv.RefreshFollowedFiles()
 	router := &pgRouterPort{srv: srv, addr: freeAddr(t), maxConns: 32, poll: 20 * time.Millisecond, out: io.Discard, tls: tlsConfig}
+	if fx.sources > 0 {
+		router.sources = newPGSourceSlots(fx.sources)
+	}
 	portCtx, stopPort := context.WithCancel(context.Background())
 	served := make(chan struct{})
 	go func() { _ = router.serve(portCtx); close(served) }()
 	t.Cleanup(func() { stopPort(); <-served })
 	waitUntil(t, "the port to open", func() bool { return router.listening() != "" })
 	host, portNum, _ := net.SplitHostPort(router.listening())
-	return pgExtEnv{sourceDSN: baseDSN, host: host, port: portNum, owner: f.owner, srv: srv, serverID: ent.ID, eventAt: eventAt}
+	return pgExtEnv{sourceDSN: baseDSN, host: host, port: portNum, owner: f.owner, srv: srv, serverID: ent.ID, eventAt: eventAt, indexDSN: dsn}
 }
 
 func (e pgExtEnv) portDSN() string {

@@ -42,10 +42,6 @@ type indexTailSource struct {
 	// would claim a copy as current as the index.
 	captures        func(schema, table string) bool
 	capturesUnknown bool
-	// capturesKey is the server's setting captures was made from
-	// (tailCapturesKey): a keeper is kept for a new bundle only while it is
-	// the same.
-	capturesKey string
 
 	// schemaMu guards schema and schemaID: the resolver this source loaded
 	// itself, for a bundle that has none (indexSchema).

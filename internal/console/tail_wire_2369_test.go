@@ -2,7 +2,6 @@ package console
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -45,19 +44,8 @@ func TestTailKeeperForUnknownCapture(t *testing.T) {
 	if k == nil || s.tailKeeperFor("srv", b) != k {
 		t.Fatal("no keeper, or a new one at every statement")
 	}
-	// A new bundle over the same index connection keeps it (an edit of the
-	// server that leaves its index alone); one over another connection does
-	// not.
-	if s.tailKeeperFor("srv", &bundle{}) != k {
-		t.Error("a new bundle over the same index connection replaced the keeper")
-	}
-	other, err := sql.Open("mysql", "u:p@tcp(127.0.0.1:1)/idx") // never dialed
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer other.Close()
-	if s.tailKeeperFor("srv", &bundle{db: other}) == k {
-		t.Error("the keeper over another index connection was kept")
+	if s.tailKeeperFor("srv", &bundle{}) == k {
+		t.Error("the keeper over a replaced bundle was kept")
 	}
 }
 
