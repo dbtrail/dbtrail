@@ -104,3 +104,39 @@ func TestIntegrationPortReadsTheTail(t *testing.T) {
 		t.Fatalf("a table capture does not record: %v", got)
 	}
 }
+
+// Fresh mode over a table that cannot have a tail (capture does not record
+// it) reads its snapshot as without fresh mode: no warning, and a routing
+// connection is not sent to MySQL for it (its lag, in the answer's numbers,
+// is the snapshot's). Only a tail on its way is waited for.
+func TestIntegrationFreshOverATableThatCannotHaveATail(t *testing.T) {
+	t.Setenv("BINTRAIL_SQL_TAILS", "on")
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _ := newTailRig(t)
+	r.s.sqlRunner = sandboxRunner{sqlsandbox.New(sqlsandbox.Config{Exe: exe, Args: []string{}, Limits: sqlsandbox.Limits{Timeout: 60 * time.Second}})}
+	r.s.sqlLimits = resolveSQLLimits(sqlsandbox.Limits{})
+	r.b.baselineConfigured = true
+	r.s.tailCapturesHook = func(string) (func(string, string) bool, bool) {
+		return func(string, string) bool { return false }, true // capture records none: no tail
+	}
+	tbl := r.table(nil)
+	r.change(tbl.Table, event.EventUpdate, "1", "paid", "binlog.000008", 100, time.Now().UTC().Add(-time.Hour).Truncate(time.Second))
+	q := &SQLOnCopy{s: r.s, b: r.b, user: "u", id: bootServerID}
+	stmt := "SELECT CAST(id AS VARCHAR) || '=' || status FROM shop." + tbl.Table + " ORDER BY id"
+	for _, sess := range []sqlsandbox.Session{{}, {StrictStar: true}} {
+		start := time.Now()
+		res, err := q.Run(context.Background(), stmt, "", sess)
+		if err != nil {
+			t.Fatalf("routing %v: %v", sess.StrictStar, err)
+		}
+		if len(res.Rows) != 1 || res.Rows[0][0].(string) != "1=new" || res.Note != "" {
+			t.Fatalf("routing %v: rows %v, note %q", sess.StrictStar, res.Rows, res.Note)
+		}
+		if took := time.Since(start); took >= freshTailsWait {
+			t.Fatalf("routing %v: waited %v over a table that cannot have a tail", sess.StrictStar, took)
+		}
+	}
+}
