@@ -116,7 +116,7 @@ func TestRoutedSession_utf8mb3GeneralCIIsTheRestrictedPath_2917(t *testing.T) {
 	rig := narrowRig(t, "utf8mb3", "utf8mb3", "11001")
 	for _, stmt := range []string{
 		expensive,
-		"SELECT SUM(k), AVG(k), COUNT(*) FROM t",
+		"SELECT SUM(k), MAX(k), COUNT(*) FROM t", // not AVG: kept on MySQL under every session (#2806)
 	} {
 		if got := firstCell(t, rig.run(t, stmt)); got != "copy" {
 			t.Errorf("%q answered by %s (%s), want the copy\n%s", stmt, got, rig.last(), rig.logs.String())
