@@ -11,7 +11,9 @@ import "strings"
 func Fingerprint(stmt string) string {
 	toks, why := lexSQL(stmt)
 	var b strings.Builder
-	prev := ""
+	// prevWord is the previous token when it is a word: a function's
+	// parenthesis is written against its name, count(*).
+	prev, prevWord := "", ""
 	for _, t := range toks {
 		var text string
 		switch t.kind {
@@ -22,11 +24,15 @@ func Fingerprint(stmt string) string {
 		default:
 			text = t.text
 		}
-		if b.Len() > 0 && !noSpaceBetween(prev, text) {
+		call := text == "(" && t.kind == rtOp && prevWord != "" && !parenWords[prevWord]
+		if b.Len() > 0 && !noSpaceBetween(prev, text) && !call {
 			b.WriteByte(' ')
 		}
 		b.WriteString(text)
-		prev = text
+		prev, prevWord = text, ""
+		if t.kind == rtWord {
+			prevWord = t.text
+		}
 	}
 	if why != "" {
 		if b.Len() > 0 {

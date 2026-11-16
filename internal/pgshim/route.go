@@ -751,6 +751,15 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 		}
 		return append(out, cur)
 	}
+	// typedBy: a literal or a parameter compared with a column that is not
+	// text takes the column's type on PostgreSQL ('5' next to an integer
+	// column is the integer 5), so the comparison is not of text.
+	typedBy := func(col, lit rtToken) bool {
+		if lit.kind != rtString && lit.kind != rtParam && lit.kind != rtNumber {
+			return false
+		}
+		return col.kind == rtWord && all(col.text, func(ty string) bool { return !typeIsText(ty) })
+	}
 	// operandText: an operand next to a comparison may be text.
 	operandText := func(t rtToken) bool {
 		if textish(t) {
@@ -816,7 +825,7 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 					// Two parameters, or a parameter and a string, compare
 					// as text on PostgreSQL: nothing else gives them a type.
 					bothUntyped := (prev.kind == rtParam || prev.kind == rtString) && (next.kind == rtParam || next.kind == rtString)
-					if bothUntyped || operandText(prev) || operandText(next) {
+					if !typedBy(prev, next) && !typedBy(next, prev) && (bothUntyped || operandText(prev) || operandText(next)) {
 						return "text compared by order (the source compares it by its collation)"
 					}
 				} else if !copyOps[t.text] {
@@ -837,7 +846,7 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 					}
 				}
 			case t.text == "between":
-				if operandText(prev) || operandText(next) {
+				if !typedBy(prev, next) && (operandText(prev) || operandText(next)) {
 					return "text compared with BETWEEN (the source compares it by its collation)"
 				}
 			case next.kind == rtOp && next.text == "(":
