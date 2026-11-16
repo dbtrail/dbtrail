@@ -4,9 +4,7 @@ package console
 
 import (
 	"context"
-	"errors"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -107,11 +105,11 @@ func TestIntegrationPortReadsTheTail(t *testing.T) {
 	}
 }
 
-// Fresh mode never answers from the snapshot alone without saying so: over a
-// table that has no tail, a connection that routes is told to send the
-// statement to MySQL, and one that does not route gets the snapshot's answer
-// with a warning that says so.
-func TestIntegrationFreshNeverAnswersTheSnapshotAloneSilently(t *testing.T) {
+// Fresh mode over a table that cannot have a tail (capture does not record
+// it) reads its snapshot as without fresh mode: no warning, and a routing
+// connection is not sent to MySQL for it (its lag, in the answer's numbers,
+// is the snapshot's). Only a tail on its way is waited for.
+func TestIntegrationFreshOverATableThatCannotHaveATail(t *testing.T) {
 	t.Setenv("BINTRAIL_SQL_TAILS", "on")
 	exe, err := os.Executable()
 	if err != nil {
@@ -128,20 +126,17 @@ func TestIntegrationFreshNeverAnswersTheSnapshotAloneSilently(t *testing.T) {
 	r.change(tbl.Table, event.EventUpdate, "1", "paid", "binlog.000008", 100, time.Now().UTC().Add(-time.Hour).Truncate(time.Second))
 	q := &SQLOnCopy{s: r.s, b: r.b, user: "u", id: bootServerID}
 	stmt := "SELECT CAST(id AS VARCHAR) || '=' || status FROM shop." + tbl.Table + " ORDER BY id"
-
-	res, err := q.Run(context.Background(), stmt, "", sqlsandbox.Session{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res.Rows) != 1 || res.Rows[0][0].(string) != "1=new" {
-		t.Fatalf("the snapshot's answer: %v", res.Rows)
-	}
-	if !strings.Contains(res.Note, "without the newest captured changes") || !strings.Contains(res.Note, tbl.Table) {
-		t.Fatalf("a fresh answer from the snapshot alone with the note %q", res.Note)
-	}
-	_, err = q.Run(context.Background(), stmt, "", sqlsandbox.Session{StrictStar: true})
-	var changed *sqlsandbox.MayHaveChangedError
-	if !errors.As(err, &changed) || !strings.Contains(changed.Reason, "fresh mode") {
-		t.Fatalf("under routing: %v, want a refusal that sends the statement to MySQL", err)
+	for _, sess := range []sqlsandbox.Session{{}, {StrictStar: true}} {
+		start := time.Now()
+		res, err := q.Run(context.Background(), stmt, "", sess)
+		if err != nil {
+			t.Fatalf("routing %v: %v", sess.StrictStar, err)
+		}
+		if len(res.Rows) != 1 || res.Rows[0][0].(string) != "1=new" || res.Note != "" {
+			t.Fatalf("routing %v: rows %v, note %q", sess.StrictStar, res.Rows, res.Note)
+		}
+		if took := time.Since(start); took > 2*time.Second {
+			t.Fatalf("routing %v: waited %v over a table that cannot have a tail", sess.StrictStar, took)
+		}
 	}
 }

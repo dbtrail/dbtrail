@@ -74,9 +74,10 @@ type tailPublish struct {
 	// (followOnce).
 	auto                  bool
 	every, idle, deadline time.Duration
-	// refused are, by tailKey, the tables the last update said have no tail
-	// a wait would bring (over its cut, like views).
-	refused map[string]string
+	// building are, by tailKey, the tables the last update said have no
+	// view only because their tail is being built over their cut
+	// (refreshWithinBuilding); nil when the last update failed.
+	building map[string]bool
 	// wake cuts the follower's pause short: one pending wake, however many
 	// statements asked. pubCh is closed at every publish and replaced, so a
 	// statement can wait for the next one.
@@ -114,20 +115,31 @@ func (k *tailKeeper) nextPublish() <-chan struct{} {
 	return k.pub.pubCh
 }
 
-// refusedOf is why the last update said read's tables have no tail a wait
-// would bring, by tailKey, over the cuts read reads.
-func (k *tailKeeper) refusedOf(read []views.BaselineTable) map[string]string {
+// tailState is what the last update said of a table a statement reads
+// that has no published view: being built over its cut, known not to have
+// a tail now (asked over this cut, not being built), or not known (not
+// asked over this cut yet, or the last update failed).
+type tailState int
+
+const (
+	tailUnknown tailState = iota
+	tailBuilding
+	tailNone
+)
+
+// stateOf is tailState for t, over the cut t is read at.
+func (k *tailKeeper) stateOf(t views.BaselineTable) tailState {
 	p := &k.pub
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	out := map[string]string{}
-	for _, t := range read {
-		key := tailKey(t.Schema, t.Table)
-		if why, ok := p.refused[key]; ok && p.cuts[key] == tailCutOf(t) {
-			out[key] = why
-		}
+	key := tailKey(t.Schema, t.Table)
+	if c, ok := p.cuts[key]; !ok || c != tailCutOf(t) || p.building == nil {
+		return tailUnknown
 	}
-	return out
+	if p.building[key] {
+		return tailBuilding
+	}
+	return tailNone
 }
 
 // markPublishedLocked wakes the statements waiting for a publish (p.mu held).
@@ -219,7 +231,7 @@ func (k *tailKeeper) followOnce(ctx context.Context, d time.Duration) bool {
 	if tables == nil {
 		return false
 	}
-	got, refused, dropped, err := k.refreshWithinRefused(ctx, d, tables)
+	got, building, dropped, err := k.refreshWithinBuilding(ctx, d, tables)
 	if k.life.Err() == nil {
 		// Not a keeper closed under its update: nothing reads it any more.
 		k.note(err)
@@ -261,16 +273,13 @@ func (k *tailKeeper) followOnce(ctx context.Context, d time.Duration) bool {
 		if len(kept) == 0 {
 			kept = nil
 		}
-		// A refusal stands only over the cut it was made for.
-		for key := range p.refused {
-			if p.cuts[key] != cuts[key] {
-				delete(p.refused, key)
-			}
-		}
+		// What was being built is not known any more: a statement waits
+		// for the next update to say.
+		p.building = nil
 		p.views, p.cuts = kept, cuts
 		return true
 	}
-	p.views, p.cuts, p.refused, p.okAt = got, cuts, refused, k.now()
+	p.views, p.cuts, p.building, p.okAt = got, cuts, building, k.now()
 	return true
 }
 

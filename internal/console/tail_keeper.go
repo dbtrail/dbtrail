@@ -345,15 +345,19 @@ func (k *tailKeeper) refresh(ctx context.Context, tables []views.BaselineTable) 
 // refreshWithin is refresh with d to do it in, counted from when the keeper
 // is this statement's: not spent waiting on another statement's refresh.
 func (k *tailKeeper) refreshWithin(ctx context.Context, d time.Duration, tables []views.BaselineTable) (map[string]tailView, error) {
-	out, _, _, err := k.refreshWithinRefused(ctx, d, tables)
+	out, _, _, err := k.refreshWithinBuilding(ctx, d, tables)
 	return out, err
 }
 
-// refreshWithinRefused is refreshWithin that also says, by tailKey, why a
-// table of tables has no tail that a wait would bring (refused: its key, its
-// budget, its definition; until the next snapshot). A table with neither a
-// view nor a refusal is on its way (being built).
-func (k *tailKeeper) refreshWithinRefused(ctx context.Context, d time.Duration, tables []views.BaselineTable) (map[string]tailView, map[string]string, bool, error) {
+// refreshWithinBuilding is refreshWithin that also says which tables of
+// tables have no view yet only because their tail is being built over the
+// cut they are read at (a build running, or started and not failed yet):
+// the one case where a statement's tail is on its way. A table with no view
+// and no such build cannot have a tail now (refused: its key, its budget,
+// its definition; capture does not record it; an index with no captured
+// change), and no wait brings one. dropped says the update started every
+// tail over before it returned.
+func (k *tailKeeper) refreshWithinBuilding(ctx context.Context, d time.Duration, tables []views.BaselineTable) (map[string]tailView, map[string]bool, bool, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, d)
@@ -364,26 +368,17 @@ func (k *tailKeeper) refreshWithinRefused(ctx context.Context, d time.Duration, 
 	if err != nil {
 		return nil, nil, dropped, err
 	}
-	refused := map[string]string{}
-	if out == nil {
-		// No event the tails can follow (an empty index, or one `bintrail
-		// index` also wrote): no wait brings one.
-		why := "the index holds no change capture recorded that tails can follow"
-		for _, t := range tables {
-			refused[tailKey(t.Schema, t.Table)] = why
-		}
-		return out, refused, dropped, nil
-	}
+	building := map[string]bool{}
 	for _, t := range tables {
 		key := tailKey(t.Schema, t.Table)
 		if _, ok := out[key]; ok {
 			continue
 		}
-		if e := k.tables[key]; e != nil && e.refused != "" && e.cut == tailCutOf(t) {
-			refused[key] = e.refused
+		if b := k.builds[key]; b != nil && !b.dead && b.cut == tailCutOf(t) && b.failures == 0 {
+			building[key] = true
 		}
 	}
-	return out, refused, dropped, nil
+	return out, building, dropped, nil
 }
 
 func (k *tailKeeper) refreshLocked(ctx context.Context, tables []views.BaselineTable) (map[string]tailView, error) {
