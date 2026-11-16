@@ -98,7 +98,7 @@ func TestIntegrationPGCheckpointEvent_2756(t *testing.T) {
 	send(rowAt(0x100, 1))
 	send(rowAt(0x100, 2))
 	send(event.Event{EventType: event.EventCommit, EndPos: 0x100})
-	waitFor(t, 5*time.Second, func() bool { return newestID(t, db) > 0 && stamped(newestID(t, db), 0x100) }, "the event of the first transaction's position")
+	waitCaughtUp(t, "the event of the first transaction's position", 5*time.Second, func() bool { return newestID(t, db) > 0 && stamped(newestID(t, db), 0x100) })
 	first := newestID(t, db)
 
 	// The capture stopped and started again: the transaction at the saved
@@ -116,7 +116,7 @@ func TestIntegrationPGCheckpointEvent_2756(t *testing.T) {
 	left := leftAt(t, db, 0x300, 9)
 	send(rowAt(0x100, 2))
 	send(event.Event{EventType: event.EventCommit, EndPos: 0x100})
-	waitFor(t, 5*time.Second, func() bool { return newestID(t, db) > left && stamped(newestID(t, db), 0x100) }, "the event once the second delivery is whole")
+	waitCaughtUp(t, "the event once the second delivery is whole", 5*time.Second, func() bool { return newestID(t, db) > left && stamped(newestID(t, db), 0x100) })
 	second := newestID(t, db)
 	if second <= left {
 		t.Fatalf("the redelivered row has id %d, not above the row left at 0x300 (%d)", second, left)
@@ -125,13 +125,13 @@ func TestIntegrationPGCheckpointEvent_2756(t *testing.T) {
 	// A transaction with no row of a captured table, at 0x200: the position
 	// moves, and the event is still the newest at or before it.
 	send(event.Event{EventType: event.EventCommit, EndPos: 0x200})
-	waitFor(t, 5*time.Second, func() bool { return stamped(second, 0x200) }, "the same event under the next position")
+	waitCaughtUp(t, "the same event under the next position", 5*time.Second, func() bool { return stamped(second, 0x200) })
 
 	// Past the row left behind: now it is at or before the position, and it
 	// is not the newest such row.
 	send(rowAt(0x400, 5))
 	send(event.Event{EventType: event.EventCommit, EndPos: 0x400})
-	waitFor(t, 5*time.Second, func() bool { return newestID(t, db) > second && stamped(newestID(t, db), 0x400) }, "the event of the last transaction")
+	waitCaughtUp(t, "the event of the last transaction", 5*time.Second, func() bool { return newestID(t, db) > second && stamped(newestID(t, db), 0x400) })
 }
 
 // An index with no event at or before the position records none.
