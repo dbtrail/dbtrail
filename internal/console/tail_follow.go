@@ -85,6 +85,10 @@ type tailPublish struct {
 	// okAt is when an update last published without an error: views kept
 	// over failures are kept only while their files are (tailKeepOld).
 	okAt time.Time
+	// pubBegan is when the update whose views are published began, no later
+	// than its first read of the index (#2645). Not moved by a failed
+	// update: the views kept then are the earlier one's.
+	pubBegan time.Time
 }
 
 type tailAsk struct {
@@ -128,6 +132,33 @@ func (k *tailKeeper) refusedOf(read []views.BaselineTable) map[string]string {
 		}
 	}
 	return out
+}
+
+// publishedSince says whether the published views come from an update that
+// began at or after since.
+func (k *tailKeeper) publishedSince(since time.Time) bool {
+	p := &k.pub
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.views != nil && !p.pubBegan.Before(since)
+}
+
+// waitPublishedSince waits until an update that began at or after since has
+// published views, and says whether one did before ctx ended (#2645).
+func (k *tailKeeper) waitPublishedSince(ctx context.Context, since time.Time) bool {
+	for {
+		ch := k.nextPublish()
+		if k.publishedSince(since) {
+			return true
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return false
+		case <-k.life.Done():
+			return false
+		}
+	}
 }
 
 // markPublishedLocked wakes the statements waiting for a publish (p.mu held).
@@ -215,6 +246,10 @@ func (k *tailKeeper) published(read []views.BaselineTable) (map[string]tailView,
 // started last is published.
 func (k *tailKeeper) followOnce(ctx context.Context, d time.Duration) bool {
 	p := &k.pub
+	// Before the update's first read of the index, so that a statement
+	// waiting for an update begun after a moment never takes one that read
+	// the index before it (waitPublishedSince).
+	began := k.now()
 	tables, cuts, gen := k.toFollow()
 	if tables == nil {
 		return false
@@ -270,7 +305,7 @@ func (k *tailKeeper) followOnce(ctx context.Context, d time.Duration) bool {
 		p.views, p.cuts = kept, cuts
 		return true
 	}
-	p.views, p.cuts, p.refused, p.okAt = got, cuts, refused, k.now()
+	p.views, p.cuts, p.refused, p.okAt, p.pubBegan = got, cuts, refused, k.now(), began
 	return true
 }
 

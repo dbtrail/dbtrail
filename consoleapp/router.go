@@ -305,7 +305,20 @@ func newRouterConsole(st routerSettings, pool console.SQLPool) (*console.Server,
 	if st.StatementTable {
 		shape = readrouter.Fingerprint
 	}
+	// Fresh mode's wait for the source (#2645): environment only for now.
+	freshWait, warn := console.FreshWaitSetting()
+	if warn != "" {
+		slog.Warn("Engine Routing: " + warn)
+	}
+	var positions console.SourcePositionReader
+	if freshWait > 0 {
+		positions = newSourcePositions()
+		slog.Info("Engine Routing: in fresh mode a statement waits for the source's binary log position, up to the limit, before it reads the copy",
+			"limit", freshWait)
+	}
 	srv, err := console.New(console.Config{
+		SourcePosition: positions,
+		FreshWait:      freshWait,
 		StatementShape: shape,
 		Token:          st.Token,
 		Registry:       registry,

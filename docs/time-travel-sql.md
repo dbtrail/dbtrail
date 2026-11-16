@@ -1332,6 +1332,35 @@ in the setting for every server) the copy answers as it
 was at its last snapshot. A value of the setting that is neither on nor off is named in the
 startup line and decides nothing. The console's own SQL card always reads the snapshot.
 
+**Waiting for the source (`BINTRAIL_SQL_FRESH_WAIT`, `SQL_FRESH_WAIT` in
+the compose `.env`).** In fresh mode a statement reads the newest tails ready
+when it arrives, so a row a client wrote a few milliseconds before can be
+missing. With the wait on (`on` is 200 ms; a duration like `500ms` sets it, up
+to `10s`), a statement whose tables all have tails first reads where the
+source's binary log stands (`SHOW BINARY LOG STATUS`, `SHOW MASTER STATUS` on
+older MySQL and MariaDB), waits until capture's saved position reaches it
+(capture saves it about every 150 ms while it writes), wakes the tails'
+update and waits for it. Past the limit it answers with what is ready, as
+without the wait. It is read with the account capture uses, which has
+`REPLICATION CLIENT`, over a small pool of the router's own per server; a
+source that refuses the read is said once in the log, shown in `/status`,
+and tried again after 5 minutes. Statements that arrive while a read is in
+flight share it. A statement does not wait when a table it reads has no
+tail, when capture is known to be behind (a source position read 2 s ago
+not reached yet), when the two positions belong to different binary logs
+(the source was replaced), or when capture saved no position. A statement
+in a transaction goes to MySQL, and a time-travel statement reads no tails,
+so neither waits. A waiting statement holds its place among those that run
+on the copy at once. The router's `/status` shows per server `fresh_wait`:
+`limit_ms`, `statements`, `reached`, `ran_out`, `cancelled`, `skipped` by
+reason, `median_wait_ms`, and `position_refused` while the source refuses.
+Measured with capture alone (no router): under 10,000 to 19,000 row changes
+a second, capture's saved position reached the source's within 200 ms for
+96 % of writes (median 0.12 s); with little traffic the floor is the second
+complete transactions wait before they are written (`BINTRAIL_COMMIT_WITHIN`),
+so a statement there often runs out of a 200 ms wait. Not yet per server
+(environment only). PostgreSQL sources do not wait.
+
 Two budgets bound the tails, because they live in the router's memory:
 
 - `BINTRAIL_SQL_TAIL_MAX_KEYS` is the most keys one table's tail holds,
