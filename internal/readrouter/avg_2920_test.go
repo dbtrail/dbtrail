@@ -253,15 +253,15 @@ func TestAvgVeto_star_2920(t *testing.T) {
 func TestAvgVeto_reasons_2920(t *testing.T) {
 	whole, other := []string{"k"}, []string{"dc"}
 	want := map[string]string{
-		"SELECT AVG(dc) FROM t":                              VetoAvgArgument,
-		"SELECT AVG(LENGTH(s)) FROM t":                       VetoAvgArgument,
-		"SELECT AVG(k) * 3 FROM t":                           VetoAvgPlace,
-		"SELECT g FROM t GROUP BY g HAVING AVG(k) > 1":       VetoAvgPlace,
-		"SELECT g, AVG(k) FROM t GROUP BY g ORDER BY 2":      VetoAvgPlace,
-		"SELECT DISTINCT g, AVG(k) FROM t GROUP BY g":        VetoAvgPlace,
+		"SELECT AVG(dc) FROM t":                             VetoAvgArgument,
+		"SELECT AVG(LENGTH(s)) FROM t":                      VetoAvgArgument,
+		"SELECT AVG(k) * 3 FROM t":                          VetoAvgPlace,
+		"SELECT g FROM t GROUP BY g HAVING AVG(k) > 1":      VetoAvgPlace,
+		"SELECT g, AVG(k) FROM t GROUP BY g ORDER BY 2":     VetoAvgPlace,
+		"SELECT DISTINCT g, AVG(k) FROM t GROUP BY g":       VetoAvgPlace,
 		"SELECT AVG(k) FROM t WHERE k IN (SELECT k FROM t)": VetoAvgShape,
-		"SELECT AVG(k) FROM t UNION SELECT AVG(k) FROM t":    VetoAvgShape,
-		"SELECT t.avg(k) FROM t":                             VetoAvgShape,
+		"SELECT AVG(k) FROM t UNION SELECT AVG(k) FROM t":   VetoAvgShape,
+		"SELECT t.avg(k) FROM t":                            VetoAvgShape,
 	}
 	for s, w := range want {
 		if got := AvgVeto(Shape(s), whole, other); got != w {
@@ -278,13 +278,14 @@ func TestAvgVeto_reasons_2920(t *testing.T) {
 }
 
 // A backtick-quoted `avg`(k) is an unknown function on MySQL (an error); the
-// copy would read "avg"(k) as its own average, a DOUBLE. It stays on MySQL,
-// with or without the routing option.
+// copy would read "avg"(k) as its own average, a DOUBLE. The veto on a quoted
+// name before a parenthesis keeps it on MySQL, with or without the routing
+// option; this pins that it covers AVG and MEDIAN.
 func TestVetoOpts_quotedAvg_2920(t *testing.T) {
 	for _, stmt := range []string{"SELECT `avg`(k) FROM t", "SELECT `AVG` (k) FROM t", "SELECT `median`(k) OVER () FROM t", "SELECT 1 + `avg`(k) FROM t"} {
 		for _, o := range []CopyOptions{avgRoutedOpts, {}} {
-			if got := VetoOpts(stmt, o); got != vetoQuotedAvg {
-				t.Errorf("VetoOpts(%q, MySQLAvg=%v) = %q, want %q", stmt, o.MySQLAvg, got, vetoQuotedAvg)
+			if got := VetoOpts(stmt, o); got != vetoNameCall {
+				t.Errorf("VetoOpts(%q, MySQLAvg=%v) = %q, want %q", stmt, o.MySQLAvg, got, vetoNameCall)
 			}
 		}
 	}

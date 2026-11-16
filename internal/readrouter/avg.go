@@ -121,8 +121,12 @@ func AvgVeto(shape string, whole, other []string) string {
 	positions := map[int]bool{}
 	next := 0
 	for _, l := range locs {
-		if l[0] < listStart || l[0] >= listEnd || (l[0] > 0 && (shape[l[0]-1] == '.' || shape[l[0]-1] == '"')) {
-			// Outside the select list, or db.avg(...), a stored function.
+		if l[0] < listStart || l[0] >= listEnd {
+			// In HAVING, WHERE, ORDER BY, ...: not a column of the select list.
+			return VetoAvgPlace
+		}
+		if l[0] > 0 && (shape[l[0]-1] == '.' || shape[l[0]-1] == '"') {
+			// db.avg(...), a stored function.
 			return VetoAvgShape
 		}
 		for next < len(items) && items[next][1] <= l[0] {
