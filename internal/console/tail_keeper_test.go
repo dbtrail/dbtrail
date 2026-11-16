@@ -68,6 +68,13 @@ type fakeIndex struct {
 	fillDeaf    bool
 	fillEntered chan string
 	fillPanic   map[string]bool
+	// bases is BaseFile by path, a file the way the file system names it:
+	// two paths with the same value are two names of one file (a refresh's
+	// hard link). nil: every path is a file of its own.
+	bases map[string]string
+	// startBases replaces a path's bases entry when Start reads it: the
+	// file was replaced under its name while the build read it.
+	startBases map[string]string
 }
 
 const fakePage = 2
@@ -102,6 +109,10 @@ func (f *fakeIndex) Start(_ context.Context, t views.BaselineTable) (tailTable, 
 	if err := f.startErr[tailKey(t.Schema, t.Table)]; err != nil {
 		delete(f.startErr, tailKey(t.Schema, t.Table))
 		return nil, "", err
+	}
+	if id, ok := f.startBases[t.Path]; ok {
+		f.bases[t.Path] = id
+		delete(f.startBases, t.Path)
 	}
 	if why := f.startWhy[tailKey(t.Schema, t.Table)]; why != "" {
 		return nil, why, nil
@@ -222,6 +233,15 @@ func (f *fakeIndex) Cut(t views.BaselineTable) (tailFloor, string) {
 		c.lastEventID = last
 	}
 	return c, ""
+}
+
+func (f *fakeIndex) BaseFile(t views.BaselineTable) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.bases == nil {
+		return "file " + t.Path
+	}
+	return f.bases[t.Path]
 }
 
 func (f *fakeIndex) Broken(context.Context, []views.BaselineTable) (map[string]string, error) {

@@ -1291,11 +1291,21 @@ them, and a statement reads the newest version ready instead of waiting for
 the index. While an update is slow, the answers are older by as long as it
 takes.
 A statement reads every table at one moment, with every table's tail, so a
-join never pairs a row of now with a row of an hour ago. When a table it
-reads has its tail on the way (being built: the first statement over it,
-the first after a newer snapshot of it), the statement waits for it, up to 3
-seconds, and the router brings it up to date at once instead of after its
-pause. When the tail is still not there after that, a statement on a
+join never pairs a row of now with a row of an hour ago. A newer snapshot
+that links the table's file forward, as a snapshot update does, usually
+does not rebuild its tail: at the first update over the new snapshot the
+tail is trimmed in memory to the changes the snapshot does not hold, with no
+read of the index. A tail is built from the index the first time a
+statement reads the table in a router's life (or after 30 minutes in which
+none did); after a snapshot that wrote the table's file again instead of
+linking it (a full backup, a compaction of its changes, snapshot folders on
+two filesystems) or whose file cannot be told apart by the file system; and
+when the tail could not go on (over its budget, a changed definition, a
+binary log that started again, capture behind the new snapshot). When a table it
+reads has its tail on the way (being built), the statement waits for it, up
+to 3 seconds, and the router brings it up to date at once instead of after
+its pause, both when the statement starts waiting and when the build ends.
+When the tail is still not there after that, a statement on a
 connection that routes goes to your MySQL (counted as `copy_too_old` in the
 router's reasons), and one on a connection that does not route
 (`<server>@copy`, Engine Routing off) is answered from the snapshot with a
