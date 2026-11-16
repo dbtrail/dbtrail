@@ -44,7 +44,8 @@ func waitRows(t *testing.T, db *sql.DB, want int, limit time.Duration) time.Dura
 }
 
 // One transaction, then silence, with a checkpoint an hour away: the row is
-// visible after commitWithin. The position is not saved by that commit.
+// visible after commitWithin, and since #2645 its position is saved right
+// after that commit (checkpoint_often_2645_integration_test.go).
 func TestIntegrationAQuietSourcesTransactionIsVisibleWithinTheWait_2666(t *testing.T) {
 	setCommitWithin(t, 200*time.Millisecond)
 	idx, db := floorIndex(t, 1000)
@@ -53,13 +54,6 @@ func TestIntegrationAQuietSourcesTransactionIsVisibleWithinTheWait_2666(t *testi
 	l.send(t, floorCommit(2, ""))
 	l.settle(t)
 	waitRows(t, db, 1, 10*time.Second)
-	st, err := loadStreamState(db)
-	if err != nil {
-		t.Fatalf("loadStreamState: %v", err)
-	}
-	if st != nil {
-		t.Fatalf("the commit after the wait saved a position (%s:%d); only the checkpoint saves one", st.binlogFile, st.binlogPos)
-	}
 
 	// The wait starts again for what ends after that commit.
 	l.send(t, floorEvent(3, ""))
