@@ -12,6 +12,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/pgdelta"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
@@ -362,7 +363,7 @@ func TestPGTail_KeyGuards(t *testing.T) {
 
 func TestPGKeyParts(t *testing.T) {
 	for _, parts := range [][]string{{"1"}, {""}, {"a", "b"}, {`a|b`, `c\d`}, {`\`, `|`}, {"", ""}, {"é", "日本"}} {
-		key := pgKeyOf(parts)
+		key := pgdelta.KeyOf(parts)
 		got, err := pgKeyParts(key, len(parts))
 		if err != nil || !reflect.DeepEqual(got, parts) {
 			t.Errorf("%q: %q, %v; want %q", key, got, err, parts)

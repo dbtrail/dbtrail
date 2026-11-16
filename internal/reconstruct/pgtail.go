@@ -10,6 +10,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/pgdelta"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
@@ -343,7 +344,7 @@ func (t *PGTail) tailRow(key string, ev *query.ResultRow) (map[string]any, error
 			}
 			parts[i] = s
 		}
-		if got := pgKeyOf(parts); got != key {
+		if got := pgdelta.KeyOf(parts); got != key {
 			return nil, fmt.Errorf("%s: a row whose key columns (%s) make %q is filed under key %q", name, strings.Join(t.pkNames, ", "), got, key)
 		}
 		row[baseline.TableDeltaOpColumn] = baseline.TableDeltaOpUpsert
@@ -352,18 +353,8 @@ func (t *PGTail) tailRow(key string, ev *query.ResultRow) (map[string]any, error
 	return row, nil
 }
 
-// pgKeyOf is a key as the index names it, from the text of its columns:
-// each escaped (event.EscapePKValue), joined by a pipe.
-func pgKeyOf(parts []string) string {
-	esc := make([]string, len(parts))
-	for i, p := range parts {
-		esc[i] = event.EscapePKValue(p)
-	}
-	return strings.Join(esc, "|")
-}
-
 // pgKeyParts splits a key into the text of its n columns, the inverse of
-// pgKeyOf, so a deleted row's tombstone carries the key it deletes. A key
+// pgdelta.KeyOf, so a deleted row's tombstone carries the key it deletes. A key
 // that does not split into n parts, or that is not what its parts make (a
 // backslash that escapes nothing), is refused: a guessed key would let the
 // deleted row come back.
@@ -386,7 +377,7 @@ func pgKeyParts(key string, n int) ([]string, error) {
 		}
 	}
 	parts = append(parts, cur.String())
-	if len(parts) != n || pgKeyOf(parts) != key {
+	if len(parts) != n || pgdelta.KeyOf(parts) != key {
 		return nil, fmt.Errorf("the key %q does not read as %d key column(s)", key, n)
 	}
 	return parts, nil
