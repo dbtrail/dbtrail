@@ -17,7 +17,10 @@ MariaDB 11.4.13 with `mariadb-plugin-duckdb` (DuckDB 1.5.5), and the MariaDB 11.
 commit `095cfb5e468e` built from source.
 
 **Replace `CHANGE_ME` with a password of your own everywhere it appears,** and `SRC`, `DBT` and
-`REP` with the private addresses of the source, DBTrail and replica machines.
+`REP` with the private addresses of the source, DBTrail and replica machines. In the
+`CREATE USER` statements, write each `<..., in single quotes>` as that password in single quotes
+(`app-pw` and `monitor` are the ones the scripts below log in with); the statements fail until
+you do.
 
 ## Results
 
@@ -118,14 +121,14 @@ collation-server=utf8mb4_general_ci
 C
 systemctl restart mariadb
 mariadb -e "CREATE DATABASE sbtest;
-CREATE USER app@'%' IDENTIFIED BY 'app-pw'; GRANT ALL ON sbtest.* TO app@'%';
-CREATE USER dbtrail@'%' IDENTIFIED BY 'CHANGE_ME';
+CREATE USER app@'%' IDENTIFIED BY <app-pw, in single quotes>; GRANT ALL ON sbtest.* TO app@'%';
+CREATE USER dbtrail@'%' IDENTIFIED BY <CHANGE_ME, in single quotes>;
 GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT, RELOAD, PROCESS, SHOW VIEW ON *.* TO dbtrail@'%';
-CREATE USER app_fwd@'%' IDENTIFIED BY 'CHANGE_ME'; GRANT SELECT ON sbtest.* TO app_fwd@'%';
-CREATE USER repl@'%' IDENTIFIED BY 'CHANGE_ME';
+CREATE USER app_fwd@'%' IDENTIFIED BY <CHANGE_ME, in single quotes>; GRANT SELECT ON sbtest.* TO app_fwd@'%';
+CREATE USER repl@'%' IDENTIFIED BY <CHANGE_ME, in single quotes>;
 GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT, RELOAD, SHOW VIEW, EVENT, TRIGGER, LOCK TABLES ON *.* TO repl@'%';
-CREATE USER monitor@'%' IDENTIFIED BY 'monitor'; GRANT USAGE, REPLICATION CLIENT ON *.* TO monitor@'%';
-CREATE USER bench@'%' IDENTIFIED BY 'CHANGE_ME'; GRANT ALL ON *.* TO bench@'%';"
+CREATE USER monitor@'%' IDENTIFIED BY <monitor, in single quotes>; GRANT USAGE, REPLICATION CLIENT ON *.* TO monitor@'%';
+CREATE USER bench@'%' IDENTIFIED BY <CHANGE_ME, in single quotes>; GRANT ALL ON *.* TO bench@'%';"
 sysbench oltp_read_write --db-driver=mysql --mysql-socket=/run/mysqld/mysqld.sock --mysql-user=root \
   --mysql-db=sbtest --tables=8 --table-size=10000000 --threads=8 prepare    # about 17 minutes
 ```
@@ -234,8 +237,8 @@ grep -m1 "CHANGE MASTER" dump.sql                  # the binlog file and positio
 mariadb sbtest < dump.sql                          # about 11 minutes for 80M rows
 mariadb -e "CHANGE MASTER TO MASTER_HOST='SRC', MASTER_USER='repl', MASTER_PASSWORD='CHANGE_ME',
   MASTER_LOG_FILE='<file>', MASTER_LOG_POS=<pos>, MASTER_SSL=0; START SLAVE;"
-mariadb -e "CREATE USER app@'%' IDENTIFIED BY 'app-pw'; GRANT SELECT ON sbtest.* TO app@'%';
-  CREATE USER monitor@'%' IDENTIFIED BY 'monitor';
+mariadb -e "CREATE USER app@'%' IDENTIFIED BY <app-pw, in single quotes>; GRANT SELECT ON sbtest.* TO app@'%';
+  CREATE USER monitor@'%' IDENTIFIED BY <monitor, in single quotes>;
   GRANT USAGE, REPLICATION CLIENT, SLAVE MONITOR ON *.* TO monitor@'%';"
 ```
 
