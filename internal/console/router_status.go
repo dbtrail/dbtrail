@@ -222,6 +222,11 @@ type RouterServerNumbers struct {
 	BehindSourceRan           string `json:"behind_source_ran,omitempty"`
 	BehindSourcePending       bool   `json:"behind_source_pending,omitempty"`
 	BehindSourceUnknownReason string `json:"behind_source_unknown_reason,omitempty"`
+	// FreshWait is how this server's fresh-mode statements waited for the
+	// source (#2645): present only while BINTRAIL_SQL_FRESH_WAIT is on and
+	// the server is in fresh mode, absent from a router older than the
+	// wait.
+	FreshWait *RouterFreshWait `json:"fresh_wait,omitempty"`
 	// Answers is what each side ("copy", "mysql") finished: counts and
 	// times. Absent until a statement finishes.
 	Answers map[string]RouteAnswers `json:"answers,omitempty"`
@@ -325,6 +330,31 @@ func (s *Server) RouterNumbers() RouterNumbers {
 		if n.SQLMode == "" {
 			n.SQLMode, n.SQLModeFrom = s.SQLModeOf(id)
 			n.SQLModeWarming = n.SQLMode == "fresh" && s.SQLModeWarming(id)
+			out.Servers[id] = n
+		}
+	}
+	// The wait for the source (#2645), for every server it applies to now
+	// and every one that waited since (its counts stay after a switch).
+	if s.freshWait > 0 && s.sourcePos != nil {
+		waits := s.freshWaits.snapshot()
+		now := time.Now()
+		for id := range waits {
+			if _, ok := out.Servers[id]; !ok {
+				n := RouterServerNumbers{Reasons: map[string]uint64{}}
+				n.SQLMode, n.SQLModeFrom = s.SQLModeOf(id)
+				out.Servers[id] = n
+			}
+		}
+		for id, n := range out.Servers {
+			w, ok := waits[id]
+			if !ok && n.SQLMode != "fresh" {
+				continue
+			}
+			if !ok {
+				w = &freshWaitServer{skipped: map[string]uint64{}}
+			}
+			fw := w.numbers(s.freshWait, now)
+			n.FreshWait = &fw
 			out.Servers[id] = n
 		}
 	}

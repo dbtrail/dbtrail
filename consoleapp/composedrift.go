@@ -58,20 +58,21 @@ import (
 // two together (TestComposeVersionMatchesTheBinary asserts they agree) and add
 // a composeVersionAdded entry saying what the new number buys, or the daemon
 // can only tell an operator that their file is old and not what it is missing.
-const bundledComposeVersion = 9
+const bundledComposeVersion = 10
 
 // composeVersionAdded names, per version, the wiring that version added. Only
 // versions ABOVE the operator's are read, so version 1 (the first numbered
 // file) has no entry: there is nothing before it to be missing.
 var composeVersionAdded = map[int]string{
-	2: "host.docker.internal on Linux: the services that reach your database map it to this machine (extra_hosts host-gateway, HOST_GATEWAY to override)",
-	3: "the router service: the MySQL port with Engine Routing, run apart from capture on port 3310",
-	4: "the MySQL port (3309) is served by the router service and no longer by this one: with an older file nothing listens on 3309, and a MySQL client that connected there is refused",
-	5: "the usage telemetry choice is kept on the state volume (BINTRAIL_TELEMETRY_DIR) and read by the router and shim services too: with an older file it lives inside the container, so telemetry turned off in the web interface is back on after the next upgrade, and those two services never follow it",
-	6: "the bundled index MySQL sizes its buffer pool to the machine when INDEX_BUFFER_POOL is unset: with an older file it keeps InnoDB's 128 MB default, which caps capture at about 1,400 row changes per second on a busy server",
-	7: "the router runs at a lower CPU priority than capture (cpu_shares), so statements on the copy use every core instead of half of them: with an older file they run with half the machine's cores unless ROUTER_CPUS is set",
-	8: "SQL_FRESH in .env reaches the router: with an older file the mode cannot be set for every server from .env (off: answers as old as each table's last snapshot; on: about as far behind as capture), and each server answers in its own, fresh unless Fast was saved for it",
-	9: "the pg-router service: the PostgreSQL port (5433), where PostgreSQL clients read the copy of a PostgreSQL server: with an older file nothing listens on 5433, and the port for SQL clients can be turned on in the web interface with nothing answering it",
+	2:  "host.docker.internal on Linux: the services that reach your database map it to this machine (extra_hosts host-gateway, HOST_GATEWAY to override)",
+	3:  "the router service: the MySQL port with Engine Routing, run apart from capture on port 3310",
+	4:  "the MySQL port (3309) is served by the router service and no longer by this one: with an older file nothing listens on 3309, and a MySQL client that connected there is refused",
+	5:  "the usage telemetry choice is kept on the state volume (BINTRAIL_TELEMETRY_DIR) and read by the router and shim services too: with an older file it lives inside the container, so telemetry turned off in the web interface is back on after the next upgrade, and those two services never follow it",
+	6:  "the bundled index MySQL sizes its buffer pool to the machine when INDEX_BUFFER_POOL is unset: with an older file it keeps InnoDB's 128 MB default, which caps capture at about 1,400 row changes per second on a busy server",
+	7:  "the router runs at a lower CPU priority than capture (cpu_shares), so statements on the copy use every core instead of half of them: with an older file they run with half the machine's cores unless ROUTER_CPUS is set",
+	8:  "SQL_FRESH in .env reaches the router: with an older file the mode cannot be set for every server from .env (off: answers as old as each table's last snapshot; on: about as far behind as capture), and each server answers in its own, fresh unless Fast was saved for it",
+	9:  "the pg-router service: the PostgreSQL port (5433), where PostgreSQL clients read the copy of a PostgreSQL server: with an older file nothing listens on 5433, and the port for SQL clients can be turned on in the web interface with nothing answering it",
+	10: "SQL_FRESH_WAIT in .env reaches the router: with an older file a statement in fresh mode cannot be made to wait for what the source had committed when it arrived",
 }
 
 // composeIndexHost is the bundled index MySQL's service name in

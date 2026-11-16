@@ -305,7 +305,20 @@ func newRouterConsole(st routerSettings, pool console.SQLPool) (*console.Server,
 	if st.StatementTable {
 		shape = readrouter.Fingerprint
 	}
+	// Fresh mode's wait for the source (#2645): environment only for now.
+	freshWait, warn := console.FreshWaitSetting()
+	if warn != "" {
+		slog.Warn("Engine Routing: " + warn)
+	}
+	var positions console.SourcePositionReader
+	if freshWait > 0 {
+		positions = newSourcePositions()
+		slog.Info("Engine Routing: in fresh mode a statement waits for the source's binary log position, up to the limit, before it reads the copy",
+			"limit", freshWait)
+	}
 	srv, err := console.New(console.Config{
+		SourcePosition: positions,
+		FreshWait:      freshWait,
 		StatementShape: shape,
 		Token:          st.Token,
 		Registry:       registry,
@@ -852,9 +865,9 @@ func routerStartupLines(u routerStartup) string {
 	rule := fmt.Sprintf("SELECTs with plan cost >= %.0f or a full scan over >= %d rows (on a MariaDB source, also joins that read that many rows in all) run on the copy, whatever the age of its snapshot unless the server has a lag limit of its own (max_behind_source_seconds). When every worker is busy such a statement waits its turn, in the order it arrived, %s",
 		u.Cfg.RoutePolicy.CostThreshold, u.Cfg.RoutePolicy.ScanRows, routerWaitText(u.MaxWait))
 	if u.Cfg.RouteReadOnly {
-		b.WriteString("Router: Engine Routing is read-only (--route-read-only): reads go to each server's source MySQL with that server's forwarding account; a server that has none is not forwarded for and is answered from the copy alone, since the account DBTrail captures with is never used; " + rule + ". A statement that is not a read is refused and never sent to the source. The check reads the statement's text: what a stored function does when a SELECT calls it is up to that account's grants.\n")
+		b.WriteString("Router: Engine Routing is read-only (--route-read-only): reads go to each server's source MySQL with that server's forwarding account; a server that has none is not forwarded for and is answered from the copy alone, since the account DBTrail captures with never runs a client's statement; " + rule + ". A statement that is not a read is refused and never sent to the source. The check reads the statement's text: what a stored function does when a SELECT calls it is up to that account's grants.\n")
 	} else {
-		b.WriteString("Router: Engine Routing is read-write: statements, writes included, go to each server's source MySQL with that server's forwarding account; a server that has none is not forwarded for and is answered from the copy alone, since the account DBTrail captures with is never used; " + rule + ". Anyone holding a credential of this port can do on each source what that account can. Set --route-read-only to refuse writes, and a forwarding account on each server to bound the rest.\n")
+		b.WriteString("Router: Engine Routing is read-write: statements, writes included, go to each server's source MySQL with that server's forwarding account; a server that has none is not forwarded for and is answered from the copy alone, since the account DBTrail captures with never runs a client's statement; " + rule + ". Anyone holding a credential of this port can do on each source what that account can. Set --route-read-only to refuse writes, and a forwarding account on each server to bound the rest.\n")
 	}
 	if u.StatementTable {
 		if u.MetricsAddr == "" {

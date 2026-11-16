@@ -142,6 +142,13 @@ type Config struct {
 	// the process that is connected to the sources; nil elsewhere, where
 	// GET /api/capture-status answers unknown.
 	CaptureStatus CaptureStatusReporter
+	// SourcePosition reads where a server's source binary log stands, for
+	// fresh mode's wait (#2645); nil, no statement waits.
+	SourcePosition SourcePositionReader
+	// FreshWait is how long a fresh-mode statement on the SQL port may wait
+	// for its tails to reach the source's position (#2645,
+	// BINTRAIL_SQL_FRESH_WAIT); 0, none waits.
+	FreshWait time.Duration
 	// SQLExport builds custom .sql backups (fold at a chosen instant,
 	// download as a mydumper-format dump). Wired with BaselineRestore.
 	SQLExport SQLExporter
@@ -552,6 +559,14 @@ type Server struct {
 	// backupSchedules: non-nil only on a watch daemon with a baseline
 	// supervisor (see Config.BackupSchedules).
 	backupSchedules BackupScheduleReporter
+	// sourcePos and freshWait are Config.SourcePosition and
+	// Config.FreshWait; freshWaits the wait's per-server state (#2645).
+	sourcePos  SourcePositionReader
+	freshWait  time.Duration
+	freshWaits freshWaits
+	// freshSavedHook, set by tests, reads capture's saved position in place
+	// of the index.
+	freshSavedHook savedPositionRead
 	// captureStatus is Config.CaptureStatus (#1794); nil = never asked.
 	captureStatus   CaptureStatusReporter
 	sqlExport       SQLExporter
@@ -889,6 +904,8 @@ func New(cfg Config) (*Server, error) {
 		baselineRestore:         cfg.BaselineRestore,
 		backupSchedules:         cfg.BackupSchedules,
 		captureStatus:           cfg.CaptureStatus,
+		sourcePos:               cfg.SourcePosition,
+		freshWait:               cfg.FreshWait,
 		sqlExport:               cfg.SQLExport,
 		baselineHistory:         cfg.BaselineHistory,
 		series:                  newSeriesStoreOrNil(cfg.SeriesGatherer),

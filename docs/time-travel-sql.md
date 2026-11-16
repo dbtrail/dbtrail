@@ -639,8 +639,9 @@ Every cell of a forwarded result is the text MySQL sent, unchanged: a
 `FLOAT` holding `1e38` reads `1e38`, a `FLOAT(7,2)` `0.10` reads `0.10`
 and an `INT ZEROFILL` `00042` reads `00042`. A
 server with no forwarding account is not forwarded for: the account
-DBTrail captures with is never used by this port, so the copy answers that
-server alone. Resultsets are streamed to the client as they arrive, never held
+DBTrail captures with never runs a client's statement on this port (with
+`BINTRAIL_SQL_FRESH_WAIT` on, the router uses it only to read the source's
+binary log position), so the copy answers that server alone. Resultsets are streamed to the client as they arrive, never held
 in the router. The one exception is a `SELECT` whose plan says it is
 expensive: it runs on the copy, and if the copy rejects it (DuckDB does not
 know the syntax, the table is not in the copy, the result exceeds the
@@ -1341,6 +1342,43 @@ In fast mode (saved for the server, or `off`, `false`, `0`, `no` or `fast`
 in the setting for every server) the copy answers as it
 was at its last snapshot. A value of the setting that is neither on nor off is named in the
 startup line and decides nothing. The console's own SQL card always reads the snapshot.
+
+**Waiting for the source (`BINTRAIL_SQL_FRESH_WAIT`, `SQL_FRESH_WAIT` in
+the compose `.env`).** In fresh mode a statement reads the newest tails ready
+when it arrives, so a row a client wrote a few milliseconds before can be
+missing. With the wait on (`on` is 200 ms; a duration like `500ms` sets it, up
+to `10s`), a statement whose tables all have tails first reads where the
+source's binary log stands (`SHOW BINARY LOG STATUS`, `SHOW MASTER STATUS` on
+older MySQL and MariaDB), waits until capture's saved position reaches it
+(capture saves it about every 150 ms while it writes), wakes the tails'
+update and waits for it. Past the limit it answers with what is ready, as
+without the wait. It is read with the account capture uses, which has
+`REPLICATION CLIENT`, over a small pool of the router's own per server; a
+source that refuses the read is said once in the log, shown in `/status`,
+and tried again after 5 minutes. Statements that arrive while a read is in
+flight share it. A statement does not wait when a table it reads has no
+tail, when capture is known to be behind (a source position read 2 s ago
+not reached yet), when the two positions belong to different binary logs
+or capture's position is of another server (by `@@server_uuid`, or
+`server_id` on MariaDB: a failover, a replaced source), or when capture saved
+no position. Two limits to know: the wait holds only when capture reads the
+server your clients write to (with capture on a replica, the replica's
+position may not hold a write yet); and after a statement with no row and no
+commit of its own (a `GRANT`, a `CREATE USER`, a binary log rotation) on a
+source that then goes quiet, capture's saved position stays behind the
+source's until the next write, so statements in the meantime run out of the
+wait, then skip it as `capture_behind`. A statement
+in a transaction goes to MySQL, and a time-travel statement reads no tails,
+so neither waits. A waiting statement holds its place among those that run
+on the copy at once. The router's `/status` shows per server `fresh_wait`:
+`limit_ms`, `statements`, `reached`, `ran_out`, `cancelled`, `skipped` by
+reason, `median_wait_ms`, and `position_refused` while the source refuses.
+Measured with capture alone (no router): under 10,000 to 19,000 row changes
+a second, capture's saved position reached the source's within 200 ms for
+96 % of writes (median 0.12 s); with little traffic the floor is the second
+complete transactions wait before they are written (`BINTRAIL_COMMIT_WITHIN`),
+so a statement there often runs out of a 200 ms wait. Not yet per server
+(environment only). PostgreSQL sources do not wait.
 
 Two budgets bound the tails, because they live in the router's memory:
 

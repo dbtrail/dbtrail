@@ -61,7 +61,7 @@
 # instead of leaving you to diff two files (#1529). It is passed to the
 # console service below through the YAML anchor, so there is one number to
 # bump: raise it whenever this file gains wiring a running stack would need.
-x-bintrail-compose-version: &compose_version 9
+x-bintrail-compose-version: &compose_version 10
 
 volumes:
   bintrail-index-data:    # MySQL 8.4 datadir — the forensic record (NEW volume:
@@ -718,6 +718,11 @@ services:
       # its last refresh (set the cadence on the Snapshots page).
       # SQL_FRESH=on is the fresh mode for every server.
       BINTRAIL_SQL_TAILS: ${SQL_FRESH:-}
+      # SQL_FRESH_WAIT=on in .env: in fresh mode a statement first waits,
+      # up to 200 ms (or the duration given, like 500ms, up to 10s), until
+      # the copy holds what the source had committed when it arrived; past
+      # it, it answers as without the wait. Off when unset.
+      BINTRAIL_SQL_FRESH_WAIT: ${SQL_FRESH_WAIT:-}
       BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS: ${SQL_PORT_MAX_ROWS:-}
       # How many statements run on the copy at once (1 to 64). Empty = the
       # router works it out from the cores and memory it may use, one

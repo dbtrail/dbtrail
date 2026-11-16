@@ -761,7 +761,9 @@ CREATE USER 'report_ro'@'%' IDENTIFIED BY <choose a password>;
 GRANT SELECT ON shop.* TO 'report_ro'@'%';
 ```
 
-The account DBTrail captures with is never used by the router: it reads
+The account DBTrail captures with never runs a client's statement on the
+router (with `SQL_FRESH_WAIT` on, the router uses it only to read the
+source's binary log position, `SHOW BINARY LOG STATUS`): it reads
 whatever capture needs, which with `SELECT ON *.*` includes the `mysql`
 schema and the password hashes of every account. So a server with no
 forwarding account is not forwarded for: the copy answers every statement
