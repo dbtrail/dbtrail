@@ -16,11 +16,11 @@ import (
 func resetCatalogGlobals(t *testing.T) {
 	t.Helper()
 	resetExportGlobals(t)
-	sKind, sURI, sWh, sV4, sV4R, sV4S, sCred, sTok, sScope := eiCatalog, eiCatalogURI, eiCatalogWarehouse, eiSigV4, eiSigV4Region, eiSigV4Service, eiCredentialFile, eiTokenFile, eiCatalogScope
+	sKind, sURI, sWh, sV4, sV4R, sV4S, sCred, sTok, sScope, sDeleg := eiCatalog, eiCatalogURI, eiCatalogWarehouse, eiSigV4, eiSigV4Region, eiSigV4Service, eiCredentialFile, eiTokenFile, eiCatalogScope, eiAccessDelegation
 	t.Cleanup(func() {
-		eiCatalog, eiCatalogURI, eiCatalogWarehouse, eiSigV4, eiSigV4Region, eiSigV4Service, eiCredentialFile, eiTokenFile, eiCatalogScope = sKind, sURI, sWh, sV4, sV4R, sV4S, sCred, sTok, sScope
+		eiCatalog, eiCatalogURI, eiCatalogWarehouse, eiSigV4, eiSigV4Region, eiSigV4Service, eiCredentialFile, eiTokenFile, eiCatalogScope, eiAccessDelegation = sKind, sURI, sWh, sV4, sV4R, sV4S, sCred, sTok, sScope, sDeleg
 	})
-	eiCatalog, eiCatalogURI, eiCatalogWarehouse, eiSigV4, eiSigV4Region, eiSigV4Service, eiCredentialFile, eiTokenFile, eiCatalogScope = "hadoop", "", "", false, "", "", "", "", ""
+	eiCatalog, eiCatalogURI, eiCatalogWarehouse, eiSigV4, eiSigV4Region, eiSigV4Service, eiCredentialFile, eiTokenFile, eiCatalogScope, eiAccessDelegation = "hadoop", "", "", false, "", "", "", "", "", ""
 	t.Setenv(envCatalogCredential, "")
 	t.Setenv(envCatalogToken, "")
 }
@@ -88,6 +88,13 @@ func TestRunExportIceberg_catalogFlags(t *testing.T) {
 		{"positive control: rest credential with a scope stops at the catalog", func(t *testing.T) {
 			eiCatalog, eiWarehouse, eiCatalogURI, eiCatalogScope = "rest", "", "http://127.0.0.1:1", "PRINCIPAL_ROLE:ALL"
 			t.Setenv(envCatalogCredential, "S3CR3T-cred:x")
+		}, "open the REST catalog"},
+		{"hadoop with access delegation", func(t *testing.T) { eiAccessDelegation = "none" }, "--catalog-access-delegation only applies to --catalog rest"},
+		{"rest with unknown access delegation", func(t *testing.T) {
+			eiCatalog, eiWarehouse, eiCatalogURI, eiAccessDelegation = "rest", "", "http://127.0.0.1:1", "maybe"
+		}, `--catalog-access-delegation "maybe" is not vended-credentials or none`},
+		{"positive control: rest with access delegation none stops at the catalog", func(t *testing.T) {
+			eiCatalog, eiWarehouse, eiCatalogURI, eiAccessDelegation = "rest", "", "http://127.0.0.1:1", "none"
 		}, "open the REST catalog"},
 		{"positive control: glue stops at the region", func(t *testing.T) {
 			eiCatalog, eiWarehouse = "glue", "s3://b/p"
