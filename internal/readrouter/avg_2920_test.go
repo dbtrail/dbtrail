@@ -104,11 +104,11 @@ func TestAvgVeto_2920(t *testing.T) {
 		"SELECT g, AVG(k) FROM t GROUP BY 1 ORDER BY 1 DESC",
 		"SELECT g, AVG(k) AS a FROM t GROUP BY g ORDER BY g LIMIT 2",
 		"SELECT AVG(k) a FROM t",
-		`SELECT AVG(k) AS "my avg" FROM t`,
+		"SELECT AVG(k) AS `my avg` FROM t",
 		"SELECT AVG(DISTINCT k) FROM t",
 		"SELECT AVG(DISTINCT(k)) FROM t",
 		"SELECT AVG(t.k), AVG(db.t.k) FROM db.t",
-		`SELECT AVG("k") FROM t`,
+		"SELECT AVG(`k`) FROM t",
 		"SELECT AVG((k)) FROM t",
 		"SELECT AVG( k ) FROM t",
 		"SELECT avg (k) FROM t",
@@ -118,6 +118,8 @@ func TestAvgVeto_2920(t *testing.T) {
 		"SELECT AVG(k) FROM t;",
 		"SELECT AVG(k) FROM t HAVING COUNT(*) > 1",
 		"SELECT avg, AVG(k) FROM t",
+		"SELECT COUNT(DISTINCT g), AVG(k) FROM t",
+		"SELECT SQL_NO_CACHE g, AVG(k) FROM t GROUP BY g",
 		"SELECT g FROM t", // no AVG
 	}
 	for _, s := range answered {
@@ -161,6 +163,10 @@ func TestAvgVeto_2920(t *testing.T) {
 		"SELECT DISTINCT g, AVG(k) FROM t GROUP BY g",
 		"SELECT AVG(k) AS '' FROM t",
 		"SELECT AVG(k) 'a' FROM t",
+		`SELECT AVG(k) AS "a" FROM t`, // a string on MySQL, its name not read
+		`SELECT AVG("k") FROM t`,      // the average of a string on MySQL
+		"SELECT DISTINCTROW g, AVG(k) FROM t GROUP BY g",
+		"SELECT SQL_NO_CACHE DISTINCT g, AVG(k) FROM t GROUP BY g",
 		"SELECT g FROM t GROUP BY g HAVING AVG(k) > 1",
 		"SELECT g, AVG(k) a FROM t GROUP BY g HAVING a > 2.3333",
 		"SELECT g, AVG(k) a FROM t GROUP BY g ORDER BY a",

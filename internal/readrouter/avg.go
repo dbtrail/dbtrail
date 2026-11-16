@@ -39,6 +39,8 @@ var (
 	listClauseEnd = regexp.MustCompile(`(?i)\b(?:having|group[\s\v]+by|order[\s\v]+by|limit|window|for|lock|into|procedure)\b|;`)
 	// sortDirection is ASC or DESC after an ORDER BY item.
 	sortDirection = regexp.MustCompile(`(?i)[\s\v]+(?:asc|desc)$`)
+	// avgSelectDistinct is DISTINCT or DISTINCTROW as a word.
+	avgSelectDistinct = regexp.MustCompile(`(?i)\bdistinct(?:row)?\b`)
 	// avgSelectWord is the SELECT a statement opens with.
 	avgSelectWord = regexp.MustCompile(`(?i)^[\s\v]*select(?:[^\pL\pN_$]|$)`)
 )
@@ -86,6 +88,12 @@ func AvgVeto(shape string, whole, other []string) string {
 	// Right after the word SELECT.
 	listStart := m[0] + strings.Index(strings.ToLower(shape[m[0]:m[1]]), "select") + len("select")
 	items, listEnd := selectItems(shape, listStart)
+	if first := shape[items[0][0]:items[0][1]]; avgSelectDistinct.MatchString(first[:strings.IndexByte(first+"(", '(')]) {
+		// SELECT DISTINCT compares the rows, the averages among them. The
+		// modifier may come after another (SELECT SQL_NO_CACHE DISTINCT),
+		// always before the first item's first parenthesis.
+		return VetoAvg
+	}
 	known := knownNames(whole, other)
 	aliases := map[string]bool{}
 	positions := map[int]bool{}
