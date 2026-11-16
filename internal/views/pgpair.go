@@ -56,15 +56,16 @@ func pgPairStateBody(in Input, t BaselineTable) (body string, ok bool) {
 	if err != nil {
 		return pgPairRefusal(t, err), true
 	}
-	// Through fileGlob like every file a view names (#2235): read_parquet
-	// takes a path as a glob.
+	// The paths as they are: StateSQL names each file so that it matches
+	// itself alone, as fileGlob does for every other file a view names
+	// (#2235: read_parquet takes a path as a glob).
 	deadFiles := make([]string, len(chain.Pairs))
 	newFiles := make([]string, len(chain.Pairs))
 	for i, p := range chain.Pairs {
-		deadFiles[i] = fileGlob(filepath.Join(dir, p.Dead))
-		newFiles[i] = fileGlob(filepath.Join(dir, p.New))
+		deadFiles[i] = filepath.Join(dir, p.Dead)
+		newFiles[i] = filepath.Join(dir, p.New)
 	}
-	state := pgdelta.StateSQL(fileGlob(t.Path), deadFiles, newFiles)
+	state := pgdelta.StateSQL(t.Path, deadFiles, newFiles)
 	return ordered(t, func(replace string) string {
 		if t.Tail != nil {
 			segs := make([]string, len(t.Tail.Paths))

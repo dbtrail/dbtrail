@@ -46,7 +46,7 @@ func BasePositions(ctx context.Context, db *sql.DB, basePath string, keyColumns 
 		cols[i] = `"` + strings.ReplaceAll(c, `"`, `""`) + `"`
 	}
 	rows, err := db.QueryContext(ctx, "SELECT file_row_number, "+strings.Join(cols, ", ")+
-		" FROM read_parquet("+quote(basePath)+", file_row_number=true"+noHive+")")
+		" FROM read_parquet("+file(basePath)+", file_row_number=true"+noHive+")")
 	if err != nil {
 		return nil, fmt.Errorf("read the keys of %s: %w", basePath, err)
 	}
@@ -88,29 +88,29 @@ func BasePositions(ctx context.Context, db *sql.DB, basePath string, keyColumns 
 // BaseRows is how many rows a base file holds, for BaseID.
 func BaseRows(ctx context.Context, db *sql.DB, basePath string) (int64, error) {
 	var n int64
-	if err := db.QueryRowContext(ctx, "SELECT coalesce(sum(num_rows), 0) FROM parquet_file_metadata("+quote(basePath)+")").Scan(&n); err != nil {
+	if err := db.QueryRowContext(ctx, "SELECT coalesce(sum(num_rows), 0) FROM parquet_file_metadata("+file(basePath)+")").Scan(&n); err != nil {
 		return 0, fmt.Errorf("read the row count of %s: %w", basePath, err)
 	}
 	return n, nil
 }
 
 // Footer reads a file's own metadata, key by key.
-func Footer(ctx context.Context, db *sql.DB, file string) (map[string]string, error) {
-	rows, err := db.QueryContext(ctx, "SELECT decode(key), decode(value) FROM parquet_kv_metadata("+quote(file)+")")
+func Footer(ctx context.Context, db *sql.DB, name string) (map[string]string, error) {
+	rows, err := db.QueryContext(ctx, "SELECT decode(key), decode(value) FROM parquet_kv_metadata("+file(name)+")")
 	if err != nil {
-		return nil, fmt.Errorf("read the footer of %s: %w", file, err)
+		return nil, fmt.Errorf("read the footer of %s: %w", name, err)
 	}
 	defer rows.Close()
 	md := map[string]string{}
 	for rows.Next() {
 		var k, v string
 		if err := rows.Scan(&k, &v); err != nil {
-			return nil, fmt.Errorf("read the footer of %s: %w", file, err)
+			return nil, fmt.Errorf("read the footer of %s: %w", name, err)
 		}
 		md[k] = v
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read the footer of %s: %w", file, err)
+		return nil, fmt.Errorf("read the footer of %s: %w", name, err)
 	}
 	return md, nil
 }
@@ -136,25 +136,25 @@ func CheckChain(ctx context.Context, db *sql.DB, dir string, chain Chain, base s
 	for _, p := range chain.Pairs {
 		var run string
 		for i, name := range []string{p.Dead, p.New} {
-			file := join(dir, name)
-			md, err := Footer(ctx, db, file)
+			at := join(dir, name)
+			md, err := Footer(ctx, db, at)
 			if err != nil {
 				return nil, err
 			}
 			switch {
 			case md[MetaKeyBase] != base:
-				return nil, fmt.Errorf("%w: %s was written for another table file (%q, and this one is %q)", ErrBrokenChain, file, md[MetaKeyBase], base)
+				return nil, fmt.Errorf("%w: %s was written for another table at (%q, and this one is %q)", ErrBrokenChain, at, md[MetaKeyBase], base)
 			case md[MetaKeySeq] != strconv.Itoa(p.Seq):
-				return nil, fmt.Errorf("%w: %s says it is pair %q", ErrBrokenChain, file, md[MetaKeySeq])
+				return nil, fmt.Errorf("%w: %s says it is pair %q", ErrBrokenChain, at, md[MetaKeySeq])
 			case md[MetaKeyRun] == "":
-				return nil, fmt.Errorf("%w: %s does not say which write it is from", ErrBrokenChain, file)
+				return nil, fmt.Errorf("%w: %s does not say which write it is from", ErrBrokenChain, at)
 			case i == 1 && md[MetaKeyRun] != run:
 				return nil, fmt.Errorf("%w: the two files of pair %0*d of %s are from different writes", ErrBrokenChain, seqWidth, p.Seq, chain.Table)
 			case md[MetaKeyPrev] != prev:
 				return nil, fmt.Errorf("%w: pair %0*d of %s does not follow the pair before it (it was written after %q, and that pair is %q)",
 					ErrBrokenChain, seqWidth, p.Seq, chain.Table, md[MetaKeyPrev], prev)
 			case md[MetaKeyColumns] != wantColumns:
-				return nil, fmt.Errorf("%w: %s was written with the columns %s, and the table file has %s", ErrBrokenChain, file, md[MetaKeyColumns], wantColumns)
+				return nil, fmt.Errorf("%w: %s was written with the columns %s, and the table at has %s", ErrBrokenChain, at, md[MetaKeyColumns], wantColumns)
 			}
 			run, last = md[MetaKeyRun], md
 		}
