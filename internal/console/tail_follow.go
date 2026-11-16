@@ -74,6 +74,17 @@ type tailPublish struct {
 	// (followOnce).
 	auto                  bool
 	every, idle, deadline time.Duration
+	// refused are, by tailKey, the tables the last update said have no tail
+	// a wait would bring (over its cut, like views).
+	refused map[string]string
+	// wake cuts the follower's pause short: one pending wake, however many
+	// statements asked. pubCh is closed at every publish and replaced, so a
+	// statement can wait for the next one.
+	wake  chan struct{}
+	pubCh chan struct{}
+	// okAt is when an update last published without an error: views kept
+	// over failures are kept only while their files are (tailKeepOld).
+	okAt time.Time
 }
 
 type tailAsk struct {
@@ -82,7 +93,47 @@ type tailAsk struct {
 }
 
 func newTailPublish() tailPublish {
-	return tailPublish{every: tailFollowEvery, idle: tailFollowIdle, deadline: tailFollowTimeout}
+	return tailPublish{every: tailFollowEvery, idle: tailFollowIdle, deadline: tailFollowTimeout,
+		wake: make(chan struct{}, 1), pubCh: make(chan struct{})}
+}
+
+// wakeFollower ends the follower's pause now, so its next update starts as
+// soon as the running one (if any) ends. Many calls before it wakes are one
+// wake.
+func (k *tailKeeper) wakeFollower() {
+	select {
+	case k.pub.wake <- struct{}{}:
+	default:
+	}
+}
+
+// nextPublish is closed at the next publish (or when the keeper closes).
+func (k *tailKeeper) nextPublish() <-chan struct{} {
+	k.pub.mu.Lock()
+	defer k.pub.mu.Unlock()
+	return k.pub.pubCh
+}
+
+// refusedOf is why the last update said read's tables have no tail a wait
+// would bring, by tailKey, over the cuts read reads.
+func (k *tailKeeper) refusedOf(read []views.BaselineTable) map[string]string {
+	p := &k.pub
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := map[string]string{}
+	for _, t := range read {
+		key := tailKey(t.Schema, t.Table)
+		if why, ok := p.refused[key]; ok && p.cuts[key] == tailCutOf(t) {
+			out[key] = why
+		}
+	}
+	return out
+}
+
+// markPublishedLocked wakes the statements waiting for a publish (p.mu held).
+func (p *tailPublish) markPublishedLocked() {
+	close(p.pubCh)
+	p.pubCh = make(chan struct{})
 }
 
 // latest is what a statement over read reads of the tails: the follower's
@@ -168,7 +219,7 @@ func (k *tailKeeper) followOnce(ctx context.Context, d time.Duration) bool {
 	if tables == nil {
 		return false
 	}
-	got, err := k.refreshWithin(ctx, d, tables)
+	got, refused, dropped, err := k.refreshWithinRefused(ctx, d, tables)
 	if k.life.Err() == nil {
 		// Not a keeper closed under its update: nothing reads it any more.
 		k.note(err)
@@ -182,15 +233,44 @@ func (k *tailKeeper) followOnce(ctx context.Context, d time.Duration) bool {
 		return true
 	}
 	p.pubGen = gen
+	defer p.markPublishedLocked()
 	if err != nil {
-		// As a statement that met the error itself did: no tails until an
-		// update succeeds, not the last ones kept as if current. The cuts
-		// stay: statements do not wake the follower for tables it just failed
-		// on, which it tries again in its own time.
-		p.views, p.cuts = nil, cuts
+		// The last views published stay, where their cut is still the one
+		// statements read: older than the index by the time the update took,
+		// and saying how old (their through), which a statement reading the
+		// snapshot alone in their place would not. Dropping them sent every
+		// statement back minutes, to the snapshot, until an update succeeded,
+		// with nothing in the answer to say so (the update that failed may be
+		// a statement's own, run in its 2 s). The cuts move: statements do
+		// not wake the follower for tables it just failed on, which it tries
+		// again in its own time.
+		kept := map[string]tailView{}
+		if dropped || k.now().Sub(p.okAt) > k.keepOld/2 {
+			// dropped: the update started every tail over (the index was
+			// rebuilt, the directory removed) before it failed, and the last
+			// views are of what it threw away. Past half of keepOld: replaced
+			// versions are removed after it, and the files these views read
+			// may be the next to go.
+			p.views = nil
+		}
+		for key, v := range p.views {
+			if c, ok := p.cuts[key]; ok && c == cuts[key] {
+				kept[key] = v
+			}
+		}
+		if len(kept) == 0 {
+			kept = nil
+		}
+		// A refusal stands only over the cut it was made for.
+		for key := range p.refused {
+			if p.cuts[key] != cuts[key] {
+				delete(p.refused, key)
+			}
+		}
+		p.views, p.cuts = kept, cuts
 		return true
 	}
-	p.views, p.cuts = got, cuts
+	p.views, p.cuts, p.refused, p.okAt = got, cuts, refused, k.now()
 	return true
 }
 
@@ -235,6 +315,7 @@ func (k *tailKeeper) runFollower() {
 	stopped := func() {
 		p.mu.Lock()
 		p.views, p.cuts, p.running = nil, nil, false
+		p.markPublishedLocked()
 		p.mu.Unlock()
 	}
 	defer func() {
@@ -244,6 +325,7 @@ func (k *tailKeeper) runFollower() {
 		}
 		p.mu.Lock()
 		p.views, p.cuts, p.running, p.updating = nil, nil, false, false
+		p.markPublishedLocked()
 		p.panics++
 		wait := k.retryWait(p.panics)
 		p.restartAt = k.now().Add(wait)
@@ -274,6 +356,7 @@ func (k *tailKeeper) runFollower() {
 			stopped()
 			return
 		case <-time.After(p.every):
+		case <-p.wake:
 		}
 	}
 }
