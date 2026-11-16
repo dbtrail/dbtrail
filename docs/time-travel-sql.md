@@ -1186,7 +1186,10 @@ The decision, in order, for every statement:
    - a statement that holds such a character anywhere in its text, or bytes
      that are not UTF-8, when the connection's character set is utf8mb3
      (MySQL reads it as `?`, the copy as it is); a prepared statement's
-     string arguments count too. Counted as `veto`.
+     string arguments count too. Counted as `veto`. (A string literal
+     outside printable ASCII stays on MySQL under any session already, see
+     "The copy itself compares text"; this also covers a comment, a name and
+     an argument.)
    - an answer of the copy with such a character (or bytes that are not
      UTF-8) in a text cell, when the results are in utf8mb3: MySQL would
      send `?` there, so the copy's answer is not sent and the statement runs

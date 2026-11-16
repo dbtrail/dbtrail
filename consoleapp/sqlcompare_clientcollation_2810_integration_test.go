@@ -237,25 +237,27 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 	}
 
 	// #2917: under utf8mb3 the copy answers, except a statement with a
-	// character utf8mb3 does not have (MySQL reads it as '?', or refuses
-	// it). utf8_unicode_ci compares as the copy does, so there a string
-	// literal is the copy's too; utf8_general_ci does not (#2836). Under
-	// utf8mb4 the same statements are the copy's: each refusal below is
-	// this rule's.
+	// character utf8mb3 does not have. A string literal outside printable
+	// ASCII is MySQL's under any session already (#2533), so the character
+	// is put in a comment, which MySQL skips and the copy reads past: under
+	// utf8mb4 the copy answers that statement, so its refusal under utf8mb3
+	// is this rule's. utf8_unicode_ci compares as the copy does, so there a
+	// string literal is the copy's too; utf8_general_ci does not (#2836).
 	const (
-		emoNoText  = "SELECT side, k FROM emo ORDER BY k"
-		emoLiteral = "SELECT side, k FROM emo WHERE s <> 'x\U0001F600' ORDER BY k"
-		bmpLiteral = "SELECT side, k FROM emo WHERE s <> 'zz\u4e2d' ORDER BY k"
+		emoNoText    = "SELECT side, k FROM emo ORDER BY k"
+		emoComment   = "SELECT side, k FROM emo /* \U0001F600 */ ORDER BY k"
+		asciiLiteral = "SELECT side, k FROM emo WHERE s <> 'zz' ORDER BY k"
 	)
 	for _, c := range []struct{ collation, stmt, wantWho string }{
 		{"utf8mb4_unicode_ci", emoNoText, "copy"},
-		{"utf8mb4_unicode_ci", emoLiteral, "copy"},
-		{"utf8mb4_unicode_ci", bmpLiteral, "copy"},
+		{"utf8mb4_unicode_ci", emoComment, "copy"},
+		{"utf8mb4_unicode_ci", asciiLiteral, "copy"},
 		{"utf8_general_ci", emoNoText, "copy"},
-		{"utf8_general_ci", bmpLiteral, "live"},
+		{"utf8_general_ci", emoComment, "live"},
+		{"utf8_general_ci", asciiLiteral, "live"},
 		{"utf8_unicode_ci", emoNoText, "copy"},
-		{"utf8_unicode_ci", emoLiteral, "live"},
-		{"utf8_unicode_ci", bmpLiteral, "copy"},
+		{"utf8_unicode_ci", emoComment, "live"},
+		{"utf8_unicode_ci", asciiLiteral, "copy"},
 	} {
 		port := openRaw(t, withCollation(portDSN, c.collation))
 		live := openRaw(t, withCollation(liveDSN, c.collation))
@@ -268,11 +270,12 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 			t.Errorf("%s: %q through the port:\n  got  %s\n  want %s, the source's own answer", c.collation, c.stmt, got, want)
 		}
 	}
-	// And an answer with such a character, on a session whose results alone
-	// are utf8mb3: MySQL sends it as '?', so the copy's answer is not sent.
-	// Under utf8mb4 results the copy answers the same statement.
+	// An answer with such a character, on a session whose results alone are
+	// utf8mb3: MySQL sends it as '?', and so does the port. (The literal
+	// keeps it on MySQL already, #2533; the port's own check of the copy's
+	// answers is covered in internal/shim.)
 	const emoOut = "SELECT side, k, 'x\U0001F600' AS e FROM emo ORDER BY k"
-	for _, results := range []struct{ cs, wantWho string }{{"utf8mb4", "copy"}, {"utf8mb3", "live"}} {
+	for _, cs := range []string{"utf8mb4", "utf8mb3"} {
 		pc, err := openRaw(t, portDSN).Conn(context.Background())
 		if err != nil {
 			t.Fatal(err)
@@ -282,17 +285,14 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 			t.Fatal(err)
 		}
 		for _, cn := range []*sql.Conn{pc, lc} {
-			if _, err := cn.ExecContext(context.Background(), "SET character_set_results = "+results.cs); err != nil {
+			if _, err := cn.ExecContext(context.Background(), "SET character_set_results = "+cs); err != nil {
 				t.Fatal(err)
 			}
 		}
 		got, want := connAnswer(t, pc, emoOut), connAnswer(t, lc, emoOut)
-		t.Logf("results %-8s port %-70.200s %s (source %s)", results.cs, got, emoOut, connAnswer(t, lc, session))
-		if who := map[bool]string{true: "copy", false: "live"}[strings.Contains(got, "copy|")]; who != results.wantWho {
-			t.Errorf("results %s: %q answered by %s, want %s", results.cs, emoOut, who, results.wantWho)
-		}
+		t.Logf("results %-8s port %-70.200s %s (source %s)", cs, got, emoOut, connAnswer(t, lc, session))
 		if strings.ReplaceAll(got, "copy|", "live|") != want {
-			t.Errorf("results %s: %q through the port:\n  got  %s\n  want %s, the source's own answer", results.cs, emoOut, got, want)
+			t.Errorf("results %s: %q through the port:\n  got  %s\n  want %s, the source's own answer", cs, emoOut, got, want)
 		}
 		pc.Close()
 		lc.Close()
