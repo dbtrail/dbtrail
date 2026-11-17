@@ -252,7 +252,7 @@ func runSnapshotRun(ctx context.Context, c *ctlClient, name string, wait bool, o
 		switch st.Baseline.State {
 		case "running":
 		case "succeeded":
-			fmt.Fprintln(out, snapshotDoneText(s.Name, st.Baseline))
+			fmt.Fprintln(out, snapshotDoneText(s.Name, s.Flavor == console.FlavorPostgres, st.Baseline))
 			return nil
 		case "failed":
 			return snapshotFailure(st.Baseline)
@@ -278,12 +278,16 @@ func runSnapshotRun(ctx context.Context, c *ctlClient, name string, wait bool, o
 	}
 }
 
-func snapshotDoneText(name string, b console.BaselineStatus) string {
+func snapshotDoneText(name string, pg bool, b console.BaselineStatus) string {
 	text := fmt.Sprintf("The copy of %q is ready: %s.", name, plural(b.Tables, "table"))
 	if n := len(b.LeftOutTables) + b.LeftOutTablesOmitted; n > 0 {
 		text += fmt.Sprintf(" %s left out: the web interface names each and says why"+console.OnPage(console.PageSnapshots)+".", plural(n, "table"))
 	}
-	return text + fmt.Sprintf("\nKeep it current:  bintrail-console snapshot schedule %s --every 1h\nThe MySQL port:  bintrail-console port status", name)
+	port := "The MySQL port:"
+	if pg {
+		port = "The PostgreSQL port:"
+	}
+	return text + fmt.Sprintf("\nKeep it current:  bintrail-console snapshot schedule %s --every 1h\n%s  bintrail-console port status", name, port)
 }
 
 // snapshotFailure says why a read failed. A read can fail AFTER leaving a
@@ -700,7 +704,11 @@ func runPortMode(ctx context.Context, c *ctlClient, name, want string, wait time
 	case s.Kind == "ephemeral":
 		return fmt.Errorf("%q was given where DBTrail starts and has no choice of its own: it answers in fast mode unless SQL_FRESH=on (BINTRAIL_SQL_TAILS=on) says fresh for every server. Add it as a server (dbtrail server add) to choose", s.Name)
 	case !s.HasSource:
-		return fmt.Errorf("%q has no source database, so the MySQL port does not answer for it", s.Name)
+		port := "MySQL"
+		if s.Flavor == console.FlavorPostgres {
+			port = "PostgreSQL"
+		}
+		return fmt.Errorf("%q has no source database, so the %s port does not answer for it", s.Name, port)
 	}
 	pg := s.Flavor == console.FlavorPostgres
 	if want != "" {

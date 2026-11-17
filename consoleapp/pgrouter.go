@@ -102,11 +102,14 @@ Example:
 
 const (
 	defaultPGRouterListen = "127.0.0.1:5433"
-	// Small on purpose: nobody sized this process for the machine, and it
-	// runs beside the one that captures.
-	defaultPGRouterWorkers  = 2
+	// Nobody sized this process for the machine, and it runs beside the one
+	// that captures: four statements of two threads fill the 8 cores of the
+	// recommended machine and leave capture its share of the minimum one. The
+	// clients are cheap, waiting for a worker: 16 refused the 50 of a
+	// measured dashboard load.
+	defaultPGRouterWorkers  = 4
 	defaultPGRouterThreads  = 2
-	defaultPGRouterMaxConns = 16
+	defaultPGRouterMaxConns = 256
 	maxPGRouterWorkers      = 16
 	maxPGRouterThreads      = 16
 	maxPGRouterMaxConns     = 1024
@@ -450,6 +453,7 @@ func runPGRouter(cmd *cobra.Command, _ []string) error {
 		slog.Warn("PostgreSQL router: " + p)
 	}
 	routes := newPGRouteStats(time.Now(), st.StatusStatements && st.StatusAddr != "")
+	routes.modes = srv
 	if st.StatusAddr != "" {
 		stopStatus, err := streamrun.StartMetricsServerWith(st.StatusAddr, map[string]http.Handler{
 			"GET " + routerStatusPath: pgRouterStatusHandler(routes, st.Listen),

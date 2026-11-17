@@ -886,6 +886,9 @@ type sqlOutcome struct {
 	// TailThroughID is the least id of the index's event the tails it read
 	// hold every event through (#2556), 0 when unknown or none.
 	TailThroughID uint64
+	// ReadCopyTables says the statement read at least one table of the copy
+	// (its views, not only the change log or nothing at all).
+	ReadCopyTables bool
 	// PrintNote is the warning the MySQL port without routing sends with
 	// the answer: a column the copy prints without the decimals or the zero
 	// padding MySQL gives it (sqlFixedPrintNote, #2829); "" when none.
@@ -1523,7 +1526,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	res.DateScales = dateScales
 	return sqlOutcome{Result: res, CopyUpdatedAt: copyUpdatedAt, Phases: parent,
 		ReadFrom: readFrom, ReadFromOK: readFromOK, TailThrough: tailThrough, TailThroughID: tailThroughID, AllTailed: allTailed,
-		PrintNote: printNote, OlderCopyNote: freshNote}, nil
+		ReadCopyTables: len(readTables) > 0, PrintNote: printNote, OlderCopyNote: freshNote}, nil
 }
 
 // sqlWantedViews decides which of the copy's views a statement needs, from

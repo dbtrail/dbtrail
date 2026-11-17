@@ -759,6 +759,28 @@ listener, its own workers, its own memory.
   `--workers` is not lowered for them.
   They are also kept as small files in the temporary directory, which the
   MySQL router on the same machine can share: neither removes the other's.
+  What it gives and what it costs, as measured on 2026-11-17 (a table of 2
+  and of 10 million rows of about 100 bytes, 400 transactions a second at the
+  source, a snapshot update every 5 minutes, 8 statements at once):
+  - **How far behind an answer is:** about 1.2 seconds at the median and
+    never more than 3.2, at both sizes, with 10, 50 and 200 clients, and
+    while a snapshot update ran.
+  - **What a statement costs:** 2 to 3 times what it costs in fast mode. The
+    size of the table counts for more than the mode: a statement on the
+    10-million-row table took 0.4 to 0.6 seconds in fresh mode (0.13 to 0.35
+    in fast), and 0.12 to 0.17 on the 2-million-row one (0.03 to 0.09).
+  - **A statement that reads one row by its key reads the whole table too**:
+    the copy has no index. With a forwarding user such a statement can be
+    answered by the source (see
+    [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port)).
+  - **How many statements it answers** is set by `--workers`, which is 4
+    out of the box, with 256 clients connected at most
+    (`--max-connections`); in the compose `.env`, `PG_ROUTER_WORKERS` and
+    `PG_ROUTER_MAX_CONNECTIONS`. The measurement above ran 8 at once.
+  - **Switching a server from fresh to fast** makes the connections already
+    open read the snapshot from their next statement on: an answer older
+    than the one before it on the same connection, which is told once by a
+    NOTICE.
   What fresh mode does not cover yet, where the answer comes from the
   snapshot alone. The client is told only by a NOTICE that comes with the
   answer (drivers that drop notices, or `client_min_messages` above
@@ -924,18 +946,21 @@ listener, its own workers, its own memory.
   travel on this port, with the reason: time travel reads the history
   directly, past the views that hide them.
 
-What the process may use is said where it is started, with small defaults so
-it fits beside capture:
+What the process may use is said where it is started, with defaults that fit
+beside capture on the recommended machine (8 cores). Each statement may take
+the SQL memory, so four at once can take 8GB, plus the recent changes fresh
+mode holds (up to a fifth of the process's memory for each server in fresh
+mode): on a 16GB machine, set `--workers 2`.
 
 | Flag | Environment variable | Default | What it does |
 |---|---|---|---|
 | `--listen` | `BINTRAIL_PG_ROUTER_LISTEN` | `127.0.0.1:5433` | Where the port listens |
 | `--tls-cert` | `BINTRAIL_PG_ROUTER_TLS_CERT` | none: a certificate made up at start | The certificate (PEM, its chain after it) a client that asks for TLS gets. Requires `--tls-key` |
 | `--tls-key` | `BINTRAIL_PG_ROUTER_TLS_KEY` | none | Its private key (PEM, not encrypted with a passphrase) |
-| `--workers` | `BINTRAIL_PG_ROUTER_WORKERS` | 2 | How many statements run on the copy at once (1 to 16). The rest wait their turn |
+| `--workers` | `BINTRAIL_PG_ROUTER_WORKERS` | 4 | How many statements run on the copy at once (1 to 16). The rest wait their turn |
 | `--threads` | `BINTRAIL_PG_ROUTER_THREADS` | 2 | Threads each statement may use (1 to 16) |
 | `--sql-memory` | `BINTRAIL_CONSOLE_SQL_MEMORY` | 2GB, or the value saved in the web interface | Memory each statement may use |
-| `--max-connections` | `BINTRAIL_PG_ROUTER_MAX_CONNECTIONS` | 16 | Clients connected at once (1 to 1024). One more is refused with an error |
+| `--max-connections` | `BINTRAIL_PG_ROUTER_MAX_CONNECTIONS` | 256 | Clients connected at once (1 to 1024). One more is refused with an error |
 | `--max-source-connections` | `BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS` | 16 | Connections to the servers' own PostgreSQL held at once, every server together (1 to 1024). A client holds one while its transaction block (or a catalog statement the copy does not answer) runs there; past the limit the statement that needed one is refused (`53300`) |
 | `--max-wait` | `BINTRAIL_PG_ROUTER_MAX_WAIT` | none | How long a statement waits for its turn before it is refused |
 | `--sql-port-max-rows` | `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS` | the port's row cap | Most rows one statement returns |
@@ -1146,7 +1171,13 @@ curl -s http://127.0.0.1:9092/status
 
 `/status` is JSON: per server (by its id), how many statements each side
 answered (`copy`, `source`, `refused`), why (`reasons`), and per side how many
-finished, how many got an error and how long they took (`answers`). With
+finished, how many got an error and how long they took (`answers`), and its
+mode: `sql_mode` (`fresh` or `fast`) and where that comes from,
+`sql_mode_from` (`environment`, `saved` or `default`). Every PostgreSQL server
+is listed with its mode, whether or not a statement reached it yet. The
+document also says `fresh` (true when `BINTRAIL_SQL_TAILS` puts every server in
+fresh mode) and `sql_mode_forced` (`fresh` or `fast` when that setting decides
+for every server), as the MySQL router's does. With
 `--status-statements` each server also carries `statements`: a row per
 statement shape and side, values blanked and table and column names kept. That
 address asks for no password: whoever reaches it reads the counts, and with

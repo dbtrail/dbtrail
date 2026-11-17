@@ -816,8 +816,8 @@ services:
   # It reads the servers the web interface manages and the copies on the state
   # volume, mounted READ-ONLY here: it writes nothing there.
   #
-  # It is sized small on purpose, to fit beside capture without asking: two
-  # statements at once with two threads each, sixteen clients. PG_ROUTER_WORKERS,
+  # It is sized to fit beside capture without asking: four statements at once
+  # with two threads each, 256 clients. PG_ROUTER_WORKERS,
   # PG_ROUTER_THREADS and PG_ROUTER_MAX_CONNECTIONS in .env change that, and
   # PG_ROUTER_MEMORY (e.g. 8g) and PG_ROUTER_CPUS (e.g. 4) give this service
   # ceilings of its own. Each statement may take the memory saved in the web

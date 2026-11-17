@@ -35,7 +35,7 @@ TimeoutStopSec=30
 # Hands the control groups below this unit to the service, which gives each
 # statement on the copy a memory ceiling of its own (see bintrail-router).
 Delegate=yes
-# Small unless told otherwise: two statements at once, two threads each
+# Unless told otherwise: four statements at once, two threads each
 # (BINTRAIL_PG_ROUTER_WORKERS and BINTRAIL_PG_ROUTER_THREADS in the settings
 # file). For a ceiling on the whole service, `systemctl edit
 # bintrail-pg-router` and set, under [Service], for example:

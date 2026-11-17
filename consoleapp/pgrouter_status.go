@@ -39,8 +39,18 @@ type pgRouterStatusDoc struct {
 	// StatementTable: each server carries Statements.
 	StatementTable bool `json:"statement_table,omitempty"`
 	// Servers is keyed by registry id; a server no statement reached yet
-	// has no entry. Never null.
+	// has no entry, unless its mode is said (PerServerMode). Never null.
 	Servers map[string]pgRouterServerNumbers `json:"servers"`
+	// The fresh-mode fields of the MySQL router's document, with the same
+	// meaning, so the web interface reads either the same way. Fresh is
+	// true when BINTRAIL_SQL_TAILS puts every server in fresh mode, and
+	// SQLModeForced is "fresh" or "fast" when it decides for every server.
+	// PerServerMode and FreshByDefault are true from this version on: every
+	// PostgreSQL server is listed with its sql_mode.
+	Fresh          *bool  `json:"fresh,omitempty"`
+	SQLModeForced  string `json:"sql_mode_forced,omitempty"`
+	FreshByDefault bool   `json:"fresh_by_default,omitempty"`
+	PerServerMode  bool   `json:"per_server_mode,omitempty"`
 }
 
 // pgRouterServerNumbers is one server's decisions.
@@ -61,10 +71,24 @@ type pgRouterServerNumbers struct {
 	// it has a forwarding account (it hides tables or columns), as its last
 	// statement found; absent when statements may go there.
 	ForwardingOff string `json:"forwarding_off,omitempty"`
+	// SQLMode is "fresh" or "fast" as this process answers the server now,
+	// and SQLModeFrom where that comes from ("environment", "saved",
+	// "default"), as in the MySQL router's document. Its warm-up is not
+	// said: this process does not record which answers read every tail.
+	SQLMode     string `json:"sql_mode,omitempty"`
+	SQLModeFrom string `json:"sql_mode_from,omitempty"`
+}
+
+// pgModes is what the status asks the console about each server's mode.
+type pgModes interface {
+	SQLModeOf(id string) (mode, from string)
+	PostgresServerIDs() []string
 }
 
 // pgRouteStats is the tally.
 type pgRouteStats struct {
+	// modes, when set, gives the document each server's mode.
+	modes      pgModes
 	mu         sync.Mutex
 	since      time.Time
 	statements bool
@@ -198,8 +222,34 @@ func (r *pgRouteStats) forServer(id string) func(pgshim.RouteNote) {
 	return func(n pgshim.RouteNote) { r.note(id, n) }
 }
 
-// doc is the status document now.
+// doc is the status document now: the counts, then each server's mode,
+// asked of the console outside the tally's lock, which every statement takes.
 func (r *pgRouteStats) doc(listen string) pgRouterStatusDoc {
+	d := r.counts(listen)
+	if r.modes != nil {
+		forced, _ := console.SQLModeSetting()
+		fresh := forced == console.SQLModeForcedFresh
+		d.Fresh, d.SQLModeForced, d.FreshByDefault, d.PerServerMode = &fresh, forced, true, true
+		ids := r.modes.PostgresServerIDs()
+		for id := range d.Servers {
+			if !slices.Contains(ids, id) {
+				ids = append(ids, id)
+			}
+		}
+		for _, id := range ids {
+			n, ok := d.Servers[id]
+			if !ok {
+				n = pgRouterServerNumbers{Reasons: map[string]uint64{}, Answers: map[string]console.RouteAnswers{}}
+			}
+			n.SQLMode, n.SQLModeFrom = r.modes.SQLModeOf(id)
+			d.Servers[id] = n
+		}
+	}
+	return d
+}
+
+// counts is the document's counts, under the tally's lock.
+func (r *pgRouteStats) counts(listen string) pgRouterStatusDoc {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	d := pgRouterStatusDoc{Version: pgRouterStatusVersion, Listen: listen, ReadOnly: true,
