@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
 	"github.com/dbtrail/dbtrail/internal/pgdelta"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/testutil"
@@ -32,6 +34,75 @@ func (f *pgFixture) eventKey(lsn uint64, d time.Duration, typ uint8, pk, id stri
 	}
 	testutil.InsertEvent(f.t, f.db, lsnString(lsn), lsn, lsn, f.at(d).Format("2006-01-02 15:04:05"), nil,
 		"public", "orders", typ, pk, nil, before, img)
+}
+
+// A delta's files are in their snapshot's manifest, and a damaged one is not
+// carried forward: the update refuses the table and says why, where it would
+// have published the damage into a new snapshot with a clean manifest.
+func TestReconstructTables_PGTablePairDamagedIsNotCarried(t *testing.T) {
+	for _, suffix := range []string{pgdelta.DeadSuffix, pgdelta.NewSuffix} {
+		t.Run(suffix, func(t *testing.T) {
+			baselineintegrity.ForgetVerified()
+			t.Cleanup(baselineintegrity.ForgetVerified)
+			f := newPGFixture(t)
+			root := t.TempDir()
+			// As in the test below: a first update that carries the file,
+			// then one that writes a pair beside it.
+			f.baseline(root, f.at(10*time.Minute), 0x500, "", pairRows()...)
+			f.other(0x600, 12*time.Minute)
+			if _, _, _, err := f.run(root, pgRun{at: f.at(20 * time.Minute), carry: true}); err != nil {
+				t.Fatal(err)
+			}
+			f.event(0x700, 22*time.Minute, 2, "1", s("late"))
+			f.event(0x710, 23*time.Minute, 3, "2", nil)
+			f.checkpoint(0x710)
+			at2 := f.at(30 * time.Minute)
+			reconstruct.SetPGTableDeltas(t, true)
+			if _, _, _, err := f.run(root, pgRun{at: at2, carry: true, chainFloor: f.base}); err != nil {
+				t.Fatal(err)
+			}
+			snap := filepath.Join(root, reconstruct.SnapshotDirName(at2))
+			m, ok, err := baselineintegrity.LoadManifest(snap)
+			if err != nil || !ok {
+				t.Fatalf("the update's manifest: %v, %v", ok, err)
+			}
+			var damaged string
+			for _, name := range f.pairFiles(root, at2) {
+				if m.Files["public/"+name] == "" {
+					t.Fatalf("%s is not in its snapshot's manifest: %v", name, m.Files)
+				}
+				if strings.HasSuffix(name, suffix) {
+					damaged = filepath.Join(snap, "public", name)
+				}
+			}
+			if damaged == "" {
+				t.Fatalf("no %s file beside the table: %v", suffix, f.pairFiles(root, at2))
+			}
+			whole, err := os.ReadFile(damaged)
+			if err != nil {
+				t.Fatal(err)
+			}
+			whole[len(whole)/2] ^= 0xff
+			if err := os.Remove(damaged); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(damaged, whole, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			baselineintegrity.ForgetVerified()
+
+			// Nothing in the window: the table would be carried.
+			testutil.MustExec(t, f.db, "DELETE FROM binlog_events")
+			at3 := f.at(40 * time.Minute)
+			_, _, _, err = f.run(root, pgRun{at: at3, carry: true, chainFloor: f.base})
+			if !errors.Is(err, baselineintegrity.ErrIntegrity) {
+				t.Fatalf("the update over a damaged %s: %v; want the integrity refusal", suffix, err)
+			}
+			if _, serr := os.Stat(f.tableFile(root, at3)); serr == nil {
+				t.Fatal("the table's file was published beside a delta that was refused")
+			}
+		})
+	}
 }
 
 // pairFiles is the names of the delta files beside the table file of the
