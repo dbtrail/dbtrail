@@ -2,6 +2,7 @@ package console
 
 import (
 	"os"
+	"slices"
 	"sync/atomic"
 	"time"
 )
@@ -77,4 +78,22 @@ func (s *Server) tailKeeperForPG(id string, b *bundle) *tailKeeper {
 		old.removeDirAfter(tailKeepOld)
 	}
 	return k
+}
+
+// PostgresServerIDs is the registry ids of the PostgreSQL servers, sorted:
+// what the PostgreSQL router's status says the mode of, each one whether or
+// not a statement reached it yet, since that it is fresh or fast is what an
+// operator who switched it looks for.
+func (s *Server) PostgresServerIDs() []string {
+	if s == nil || s.cm == nil || s.cm.reg == nil {
+		return nil
+	}
+	var out []string
+	for _, e := range s.cm.reg.List() {
+		if s.SourceIsPostgres(e.ID) {
+			out = append(out, e.ID)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
