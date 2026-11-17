@@ -86,7 +86,7 @@ func TestPGConnAgesKeepOnlyTheCopysAnswers(t *testing.T) {
 	}
 	c.stash(fresh(0, -2*time.Second))
 	routed(pgshim.RouteNote{Statement: "SELECT * FROM t", Side: pgshim.RouteCopy, Reason: pgshim.ReasonAnswersTheSame})
-	if n := r.doc("").Servers["p"]; n.DataAgeSeconds == nil || *n.DataAgeSeconds != 2 || n.Copy != 1 {
+	if n := r.doc("").Servers["p"]; n.DataAgeSeconds == nil || *n.DataAgeSeconds != 2 || n.Copy != 2 {
 		t.Fatalf("the copy's answer: %+v", n)
 	}
 	// What was stashed is used once: a later statement with no run of the
