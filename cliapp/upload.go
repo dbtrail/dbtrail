@@ -266,5 +266,6 @@ func uploadable(path string) bool {
 	lower := strings.ToLower(path)
 	return strings.HasSuffix(lower, ".parquet") ||
 		strings.HasSuffix(lower, baseline.TableDeltaPosdelSuffix) ||
-		strings.HasSuffix(lower, baseline.TableDeltaUpsertsSuffix)
+		strings.HasSuffix(lower, baseline.TableDeltaUpsertsSuffix) ||
+		uploadablePG(path)
 }
