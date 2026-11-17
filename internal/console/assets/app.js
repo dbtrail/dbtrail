@@ -8041,7 +8041,8 @@ async function renderSnapshots() {
   // Run states for the selected server: only the endpoints this daemon
   // actually serves (each 403s when its feature is off).
   const selId = currentServer || defaultServerId;
-  const [dumpSt, restoreSt, sqlSt, jobsRes] = await Promise.all([
+  const selPG = !!snapRegistry.find((s) => s.id === selId && s.flavor === "postgres");
+  const [dumpSt, restoreSt, sqlSt, jobsRes, pgRouterRes] = await Promise.all([
     (capsCache.baseline_trigger && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/baseline").catch(() => null) : null,
     (capsCache.baseline_restore && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/baseline/restore").catch(() => null) : null,
     // asErr, not a swallow: the .sql build's outcome appears in exactly one
@@ -8051,6 +8052,9 @@ async function renderSnapshots() {
     // The daemon keeps the job history, so a standalone serve has none to
     // read. A failed read is kept as one: the list still draws without it.
     (capsCache.monitor && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/copy-jobs").catch((err) => Object.assign(asErr(err), { status: err && err.status })) : null,
+    // A PostgreSQL server's mode is the PostgreSQL router's (the MySQL
+    // router does not serve those servers): asked only for one.
+    (selPG && sessionMay("settings:read")) ? api("/api/pg-router").catch((err) => (err && (err.status === 403 || err.status === 404) ? undefined : { configured: true, error: (err && err.message) || String(err) })) : Promise.resolve(undefined),
   ]);
   if (gen !== serverGen || vgen !== viewGen) return;
   try {
@@ -8242,7 +8246,7 @@ async function renderSnapshots() {
       // Its own part: a failure drawing the schedule above must not take
       // this card with it.
       part("How current SQL answers are", () => {
-        const sqlMode = cur && cur.id !== "default" ? sqlModeCard(cur, routerRes) : null;
+        const sqlMode = cur && cur.id !== "default" ? sqlModeCard(cur, cur.flavor === "postgres" ? pgRouterRes : routerRes) : null;
         if (sqlMode) panel.append(sqlMode);
       });
       v.append(panel);
@@ -12160,6 +12164,12 @@ function choicePills(choices, value, label, onChange) {
 // saved). A router older than that default answers such a server in fast
 // mode, and the card says so instead of "applied".
 function sqlModeModel(cur, rt, mayWrite) {
+  // A PostgreSQL server's mode is applied by the PostgreSQL router (rt is
+  // then GET /api/pg-router), a MySQL or MariaDB server's by the router.
+  const pg = !!cur && cur.flavor === "postgres";
+  const R = pg ? "PostgreSQL router" : "router";
+  const urlVar = pg ? "PG_ROUTER_URL" : "ROUTER_URL";
+  const svc = pg ? "pg-router" : "router";
   const saved = cur && cur.sql_fresh ? "fresh" : "fast";
   const word = (m) => (m === "fresh" ? "Fresh" : "Fast");
   const chosen = !!(cur && cur.sql_fresh_saved);
@@ -12171,16 +12181,16 @@ function sqlModeModel(cur, rt, mayWrite) {
   // under whatever mode applies.
   if (st && st.servers && cur) out.behind = behindSourceLine(st.servers[cur.id]);
   if (!st) {
-    const why = rt === undefined ? "This session cannot read the router's numbers"
-      : rt && rt.configured === false ? "This DBTrail does not know where its router runs (ROUTER_URL in the compose .env)"
-      : "The router could not be read" + (rt && rt.error ? " (" + rt.error + ")" : "");
-    out.state = savedSay + ". " + why + ", so which mode it applies cannot be shown here. A router that serves this server reads the choice within a few seconds of a save.";
+    const why = rt === undefined ? "This session cannot read the " + R + "'s numbers"
+      : rt && rt.configured === false ? "This DBTrail does not know where its " + R + " runs (" + urlVar + " in the compose .env)"
+      : "The " + R + " could not be read" + (rt && rt.error ? " (" + rt.error + ")" : "");
+    out.state = savedSay + ". " + why + ", so which mode it applies cannot be shown here. A " + R + " that serves this server reads the choice within a few seconds of a save.";
     return out;
   }
   if (st.fresh === true) {
     out.pick = "fresh";
     out.editable = false;
-    out.state = "Fresh mode, for every server: it is set where the router starts (SQL_FRESH=on in the compose .env, or BINTRAIL_SQL_TAILS=on). For this server alone: " + word(saved) + ", which applies once that setting is removed (then docker compose up -d router).";
+    out.state = "Fresh mode, for every server: it is set where the " + R + " starts (SQL_FRESH=on in the compose .env, or BINTRAIL_SQL_TAILS=on). For this server alone: " + word(saved) + ", which applies once that setting is removed (then docker compose up -d " + svc + ").";
     const env = st.servers ? st.servers[cur.id] : null;
     if (env && env.sql_mode_warming) out.state += " This server has not answered with the newest changes yet, so its answers can still be as old as the snapshot.";
     return out;
@@ -12188,7 +12198,7 @@ function sqlModeModel(cur, rt, mayWrite) {
   if (st.sql_mode_forced === "fast") {
     out.pick = "fast";
     out.editable = false;
-    out.state = "Fast mode, for every server: it is set where the router starts (SQL_FRESH=off in the compose .env, or BINTRAIL_SQL_TAILS=off). For this server alone: " + word(saved) + ", which applies once that setting is removed (then docker compose up -d router).";
+    out.state = "Fast mode, for every server: it is set where the " + R + " starts (SQL_FRESH=off in the compose .env, or BINTRAIL_SQL_TAILS=off). For this server alone: " + word(saved) + ", which applies once that setting is removed (then docker compose up -d " + svc + ").";
     return out;
   }
   if (!st.per_server_mode) {
@@ -12196,14 +12206,14 @@ function sqlModeModel(cur, rt, mayWrite) {
     // whether or not it lists any server yet.
     out.pick = "fast";
     out.editable = false;
-    out.state = "The router is older than this choice and answers every server in fast mode, whatever is saved here (for this server: " + word(saved) + "). Update the router to choose here for each server.";
+    out.state = "The " + R + " is older than this choice and answers every server in fast mode, whatever is saved here (for this server: " + word(saved) + "). Update the " + R + " to choose here for each server.";
     out.tone = "warn";
     return out;
   }
   if (!st.fresh_by_default && !chosen) {
     // A router from before fresh was the default reads "nothing saved" as
     // fast, and goes on doing so however long the reader waits.
-    out.state = "Nothing is saved for this server, and the router is older than Fresh being the default: it answers this server in fast mode. Save Fresh here, or update the router.";
+    out.state = "Nothing is saved for this server, and the " + R + " is older than Fresh being the default: it answers this server in fast mode. Save Fresh here, or update the " + R + ".";
     out.tone = "warn";
     return out;
   }
@@ -12212,7 +12222,7 @@ function sqlModeModel(cur, rt, mayWrite) {
   const mine = st.servers ? st.servers[cur.id] : null;
   const applied = mine && mine.sql_mode ? mine.sql_mode : "fast";
   if (applied !== saved) {
-    out.state = savedSay + ". The router still answers in " + applied + " mode: it reads the change within a few seconds. Refresh to see it applied.";
+    out.state = savedSay + ". The " + R + " still answers in " + applied + " mode: it reads the change within a few seconds. Refresh to see it applied.";
     out.tone = "warn";
     return out;
   }
@@ -12226,8 +12236,8 @@ function sqlModeModel(cur, rt, mayWrite) {
 
 // What each mode gives and costs, said beside its pill.
 const SQL_MODE_COSTS = {
-  fast: "Answers come from this server's last snapshot, so they are as old as its last refresh. The router's memory goes to statements.",
-  fresh: "Answers include what capture recorded since this server's last snapshot, so they are about as far behind as capture. The router keeps those changes in memory and looks for new ones every second, and fewer statements may run at once.",
+  fast: "Answers come from this server's last snapshot, so they are as old as its last refresh. The port's memory goes to statements.",
+  fresh: "Answers include what capture recorded since this server's last snapshot, so they are about as far behind as capture. The port keeps those changes in memory and looks for new ones every second, and fewer statements may run at once.",
 };
 
 // sqlModeCard (#2546): the per-server choice between fast and fresh answers
@@ -12255,12 +12265,12 @@ function sqlModeCard(cur, rt) {
     if (!sessionMay("servers:write")) card.append(el("p", { class: "form-hint", text: "Changing it needs permission to change servers." }));
     return card;
   }
-  save.onclick = () => saveSQLMode(cur.id, pills.value === "fresh", save, msg);
+  save.onclick = () => saveSQLMode(cur.id, pills.value === "fresh", save, msg, cur.flavor === "postgres");
   card.append(pills, cost, el("div", { class: "bk-restore-row" }, save), msg);
   return card;
 }
 
-async function saveSQLMode(id, fresh, btn, msgEl) {
+async function saveSQLMode(id, fresh, btn, msgEl, pg) {
   msgEl.hidden = true;
   btn.disabled = true;
   try {
@@ -12272,7 +12282,7 @@ async function saveSQLMode(id, fresh, btn, msgEl) {
     return;
   }
   btn.disabled = false;
-  toast((fresh ? "Fresh" : "Fast") + " mode saved. The router applies it within a few seconds.");
+  toast((fresh ? "Fresh" : "Fast") + " mode saved. The " + (pg ? "PostgreSQL router" : "router") + " applies it within a few seconds.");
   if (backupsOnScreen()) renderSnapshots();
   // Once more after the router had time to read it, so the card can say it
   // is applied instead of leaving the reader to guess.

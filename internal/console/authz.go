@@ -254,6 +254,9 @@ var apiRoutePerms = []routePerm{
 	// counts, times and its settings, shown beside the port's on the same
 	// page, so the same tier. No row data and no account's name.
 	{"GET", "/api/router", ext.PermSettingsRead},
+	// The PostgreSQL router's mode per server, read from it the same way:
+	// only modes, on the same tier.
+	{"GET", "/api/pg-router", ext.PermSettingsRead},
 	// What the forwarding account may do on the source (SHOW GRANTS):
 	// shown beside the router's numbers, read on the same tier.
 	{"GET", "/api/servers/{}/route-grants", ext.PermSettingsRead},
