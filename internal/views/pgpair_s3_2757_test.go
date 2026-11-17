@@ -2,6 +2,7 @@ package views
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -20,6 +21,27 @@ func linesWith(text, sub string) []string {
 		}
 	}
 	return out
+}
+
+// plainRows is a table's rows as text. The files of these tests carry no
+// PostgreSQL types (pgPairRows asks for them), which is not what is tested
+// here.
+func plainRows(t *testing.T, db *sql.DB, table string) ([]string, error) {
+	t.Helper()
+	rs, err := db.Query(`SELECT id || '=' || status FROM public."` + table + `" ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rs.Close()
+	var out []string
+	for rs.Next() {
+		var v string
+		if err := rs.Scan(&v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rs.Err()
 }
 
 // The views file of a snapshot is written from the snapshot's own folder and
@@ -45,10 +67,10 @@ func TestGenerateSnapshotViews_pgPair(t *testing.T) {
 	}
 	t.Chdir(snap)
 	db := execViews(t, relText)
-	if got, err := pgPairRows(t, db, "orders"); err != nil || !reflect.DeepEqual(got, []string{"1=ONE"}) {
+	if got, err := plainRows(t, db, "orders"); err != nil || !reflect.DeepEqual(got, []string{"1=ONE"}) {
 		t.Fatalf("orders, with its delta: %v, %v\n%s", got, err, relText)
 	}
-	if got, err := pgPairRows(t, db, "items"); err != nil || !reflect.DeepEqual(got, []string{"5=five"}) {
+	if got, err := plainRows(t, db, "items"); err != nil || !reflect.DeepEqual(got, []string{"5=five"}) {
 		t.Fatalf("items, which has none: %v, %v\n%s", got, err, relText)
 	}
 
