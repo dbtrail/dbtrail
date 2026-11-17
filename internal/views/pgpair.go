@@ -22,15 +22,12 @@ import (
 // file was written. The file alone is then the table as it was at an
 // earlier update, and a view that read it alone would answer with that.
 //
-// It answers only for a view pinned to one snapshot whose file is on this
-// machine, which is what every statement on the copy reads through (the SQL
-// page, the ports, the AI connection): only there can the folder be looked
-// at when the view is written. A path that is not absolute is looked for
-// from where this process runs, as the engine will read it (a snapshot
-// folder given as a relative path). A view that follows later snapshots, or
-// names its files in S3, is written as before; so is one whose relative
-// paths are for a folder the file will be moved with, where nothing is found
-// from here.
+// It reads the pair only for a view pinned to one snapshot whose file is on
+// this machine, which is what every statement on the copy reads through (the
+// SQL page, the ports, the AI connection): only there can the folder be
+// looked at when the view is written. A path that is not absolute is looked
+// for from where this process runs, as the engine will read it (a snapshot
+// folder given as a relative path).
 //
 // A table whose definition is known is a MySQL one and is never looked at:
 // no file of its folder is asked for. For the others, two names are asked
@@ -40,20 +37,31 @@ import (
 // folder that cannot be listed) gives a view that refuses when it is read:
 // the table cannot be said, and the file alone would say it wrong.
 //
-// Where the folder cannot be looked at from here (a view that follows later
-// snapshots, a file in S3, a relative path for a folder that is not this
-// one), a table known to be a PostgreSQL one reads its file alone behind a
-// guard: when the view is read, the engine is asked whether a delta sits
-// beside the file, and the view refuses if one does (pgPairGuardedBody).
+// Where the folder cannot be looked at from here, a table known to be a
+// PostgreSQL one reads its file alone behind a guard: when the view is read,
+// the engine is asked whether a delta sits beside the file, and the view
+// refuses if one does (pgPairGuardedBody). That is for a view that follows
+// later snapshots, which already asks the store for the files beside the
+// table's at every read, and for one with relative paths whose file is not
+// here (the views of a folder that is moved).
+//
+// A view pinned to a snapshot in S3 is written as before, with no guard: it
+// names its files by their exact keys and lists nothing, and a guard would
+// make every read list the store, which a reader allowed only to get objects
+// cannot do. Such a view reads the file alone also when a delta is beside
+// it: whoever writes it has the snapshot's folder and can say so then.
 func pgPairStateBody(in Input, t BaselineTable) (body string, ok bool) {
 	if t.SchemaKnown || t.Delta || !strings.HasSuffix(t.Path, ".parquet") {
 		return "", false
 	}
 	knownPG := len(t.PGCasts) > 0 || t.PGRelation != nil
-	if in.Follow.follows() || strings.Contains(t.Path, "://") {
+	if in.Follow.follows() {
 		if knownPG {
 			return pgPairGuardedBody(in, t), true
 		}
+		return "", false
+	}
+	if strings.Contains(t.Path, "://") {
 		return "", false
 	}
 	// Where the file is, for looking beside it. The view names it as t.Path
@@ -67,9 +75,10 @@ func pgPairStateBody(in Input, t BaselineTable) (body string, ok bool) {
 		return "", false
 	}
 	if pgPairFileMissing(dead) && pgPairFileMissing(rows) {
-		// Looked, and none is there. Unless the file itself is not here:
-		// then nothing was looked at.
-		if knownPG && pgPairFileMissing(at) {
+		// Looked, and none is there. Unless the path is relative and the
+		// file is not here: it is for another folder, and nothing was
+		// looked at.
+		if knownPG && !filepath.IsAbs(t.Path) && pgPairFileMissing(at) {
 			return pgPairGuardedBody(in, t), true
 		}
 		return "", false
@@ -154,14 +163,16 @@ func pgPairRefusal(t BaselineTable, cause error) string {
 // pgPairGuardedBody is a PostgreSQL table's file read alone, as
 // writeStateBody would write it for the view's mode, behind a guard that
 // refuses when the engine finds a table delta beside the file: the body for
-// a view whose folder could not be looked at when it was written.
+// a view whose folder could not be looked at when it was written. A table's
+// tail is not laid over it: a tail is given only to a pinned view of a local
+// file, which never comes here.
 //
 // The guard is a filter over the file's rows, as the one a following view of
 // a MySQL table carries (deltaAppearedGuard): over a file that holds no row
 // it is never run.
 func pgPairGuardedBody(in Input, t BaselineTable) string {
 	msg := fmt.Sprintf("bintrail views: %s.%s has a PostgreSQL table delta beside its file, and this view reads the file alone "+
-		"(it follows later snapshots, or names its files in S3 or by a relative path), so it would show the table as it was "+
+		"(it follows later snapshots, or names its files by a relative path), so it would show the table as it was "+
 		"when it was last written in full. Read the table through DBTrail (the SQL page, the PostgreSQL port), "+
 		"or generate the views pinned to a snapshot in a local folder", t.Schema, t.Table)
 	guard := func(pattern string) string {

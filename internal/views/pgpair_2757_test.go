@@ -362,17 +362,33 @@ func TestPGPairGuard(t *testing.T) {
 		check(t, sqlText)
 	})
 
-	t.Run("a file in S3 carries the guard", func(t *testing.T) {
+	// A view pinned to a snapshot in S3 names exact keys and lists nothing:
+	// it is written as before, with no guard. One that follows over S3
+	// already lists, and carries the guard, with the file named as it was.
+	t.Run("in S3: pinned is left as it was, following is guarded", func(t *testing.T) {
 		s3 := pgPairTable("s3://bucket/"+stamp+"/public/orders.parquet", "orders")
-		body, ok := pgPairStateBody(Input{}, s3)
-		if !ok || !strings.Contains(body, "s3://bucket/"+stamp+"/public/orders.[0-9][0-9][0-9][0-9][0-9][0-9].pgnew") || !strings.Contains(body, "error(") {
-			t.Fatalf("body %q, %v", body, ok)
+		if body, ok := pgPairStateBody(Input{}, s3); ok {
+			t.Fatalf("a pinned view of a file in S3 was given a body: %s", body)
 		}
-		// Its columns keep their casts and their order.
-		if !strings.Contains(body, `CAST("id" AS BIGINT)`) {
-			t.Fatalf("the guarded body lost the table's casts: %s", body)
+		pinned := pgPairGenerate("s3://bucket", FollowNone, s3)
+		if strings.Contains(pinned, ".pgnew") || strings.Contains(pinned, "glob(") {
+			t.Fatalf("a pinned view of a file in S3 lists the store:\n%s", pinned)
+		}
+		body, ok := pgPairStateBody(Input{Follow: FollowNewest, BaselineSource: "s3://bucket"}, s3)
+		if !ok || !strings.Contains(body, "public/orders.[0-9][0-9][0-9][0-9][0-9][0-9].pgnew") {
+			t.Fatalf("a following view of a file in S3: %q, %v", body, ok)
 		}
 	})
+
+	// An absolute path whose file is not there is not a folder that was
+	// moved: written as before.
+	t.Run("an absolute path with no file there is left as it was", func(t *testing.T) {
+		gone := pgPairTable(filepath.Join(t.TempDir(), stamp, "public", "orders.parquet"), "orders")
+		if body, ok := pgPairStateBody(Input{}, gone); ok {
+			t.Fatalf("body %s", body)
+		}
+	})
+
 }
 
 // A snapshot folder given as a relative path: the file is looked for from
