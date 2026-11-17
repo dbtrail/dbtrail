@@ -7,9 +7,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -180,6 +180,46 @@ func (r *pgTailRig) update(table, id, from, to string, lsn uint64, d time.Durati
 	after, _ := json.Marshal(map[string]string{"id": id, "status": to})
 	testutil.InsertEvent(r.t, r.db, pgLSN(lsn), lsn, lsn, r.base.Add(d).Format("2006-01-02 15:04:05"), nil,
 		"public", table, uint8(event.EventUpdate), id, nil, before, after)
+}
+
+// pair writes a table delta of PostgreSQL's own beside tbl's file, as a
+// snapshot update does: each change is a key and its new status, "" for a
+// deleted key.
+func (r *pgTailRig) pair(tbl views.BaselineTable, changes map[string]string) {
+	r.t.Helper()
+	duck, err := sql.Open("duckdb", "")
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	defer duck.Close()
+	keys := make([]string, 0, len(changes))
+	for k := range changes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	at, err := pgdelta.BasePositions(context.Background(), duck, tbl.Path, []string{"id"}, func(k string) bool { _, ok := changes[k]; return ok })
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	_, _, _, err = pgdelta.WritePair(pgdelta.PairInput{
+		BasePath: tbl.Path, Seq: 0, Base: "base-of-" + tbl.Table, Run: "run-0",
+		Columns: []string{"id", "status"}, KeyColumns: []string{"id"}, Positions: at,
+		Changes: func(yield func(pgdelta.Change) error) error {
+			for _, k := range keys {
+				c := pgdelta.Change{Key: k, Delete: changes[k] == ""}
+				if !c.Delete {
+					c.Values, c.Nulls = []string{k, changes[k]}, []bool{false, false}
+				}
+				if err := yield(c); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		r.t.Fatalf("WritePair: %v", err)
+	}
 }
 
 // state is tbl as a statement reads it: its tail over its file, or "no tail"
@@ -382,19 +422,20 @@ func TestIntegrationPGTailSource(t *testing.T) {
 		}
 	})
 
-	t.Run("a table delta beside the file: no tail", func(t *testing.T) {
-		tbl := r.table(nil, [2]string{"1", "one"})
-		_, rows, err := pgdelta.Paths(tbl.Path, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(rows, []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		r.change(tbl.Table, event.EventUpdate, "1", "paid", 0x900, 24*time.Minute)
+	t.Run("a table delta beside the file: the tail starts at the file's floor all the same", func(t *testing.T) {
+		tbl := r.table(nil, [2]string{"1", "one"}, [2]string{"2", "two"})
+		// A snapshot update published the file with what changed since it
+		// was written: row 1 changed, row 2 gone.
+		r.change(tbl.Table, event.EventUpdate, "1", "ONE", 0x8e0, 24*time.Minute)
+		r.change(tbl.Table, event.EventDelete, "2", "two", 0x8e8, 24*time.Minute)
+		r.pair(tbl, map[string]string{"1": "ONE", "2": ""})
+		// And one more change after that update.
+		r.change(tbl.Table, event.EventInsert, "3", "three", 0x900, 24*time.Minute)
 		r.checkpoint(0x900)
-		if got := r.state(ctx, tbl); !reflect.DeepEqual(got, noTail) {
-			t.Fatalf("state %v, want no tail", got)
+		// The tail over the FILE: every change since the file's floor, the
+		// delta's among them. (merged reads the file alone under it.)
+		if got, want := r.state(ctx, tbl), []string{"1=ONE", "3=three"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("state %v, want %v", got, want)
 		}
 	})
 
