@@ -22,7 +22,6 @@ import (
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/observe"
-	"github.com/dbtrail/dbtrail/internal/readrouter"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/views"
@@ -1839,6 +1838,76 @@ func sqlRoundRefusalFor(narrowed views.Input, statement string, types sqlsandbox
 // takes them for. A string is blanked too, which only spares a refusal.
 var lengthWord = regexp.MustCompile(`(?i)length[\s\v"` + "`" + `]*\(`)
 
+// blankCommentsAndStrings is the statement with every comment (/* */, -- and
+// #) and every single-quoted string replaced by spaces, for the one search
+// that has no reading of the statement (sqlLengthRefusalFor). The console
+// cannot import the routing package (its read layer must not link a capture
+// library), so this is the small part of its Shape the search needs. A name
+// quoted with a backtick or a double quote is kept as written. An
+// unterminated comment or string blanks to the end: over-blanking can only
+// hide a call that MySQL does not run either.
+func blankCommentsAndStrings(s string) string {
+	b := []byte(s)
+	blank := func(from, to int) {
+		for i := from; i < to && i < len(b); i++ {
+			if b[i] != '\n' {
+				b[i] = ' '
+			}
+		}
+	}
+	for i := 0; i < len(b); {
+		switch {
+		case b[i] == '/' && i+1 < len(b) && b[i+1] == '*':
+			end := strings.Index(string(b[i+2:]), "*/")
+			to := len(b)
+			if end >= 0 {
+				to = i + 2 + end + 2
+			}
+			blank(i, to)
+			i = to
+		case b[i] == '#' || b[i] == '-' && i+1 < len(b) && b[i+1] == '-' && (i+2 >= len(b) || b[i+2] == ' ' || b[i+2] == '\t' || b[i+2] == '\n' || b[i+2] == '\r'):
+			to := i
+			for to < len(b) && b[to] != '\n' {
+				to++
+			}
+			blank(i, to)
+			i = to
+		case b[i] == '\'':
+			to := i + 1
+			for to < len(b) {
+				if b[to] == '\\' {
+					to += 2
+					continue
+				}
+				if b[to] == '\'' {
+					if to+1 < len(b) && b[to+1] == '\'' {
+						to += 2
+						continue
+					}
+					to++
+					break
+				}
+				to++
+			}
+			if to > len(b) {
+				to = len(b)
+			}
+			blank(i, to)
+			i = to
+		case b[i] == '`' || b[i] == '"':
+			q := b[i]
+			i++
+			for i < len(b) && b[i] != q {
+				i++
+			}
+			i++
+		default:
+			i++
+		}
+	}
+	return string(b)
+}
+
 // sqlLengthRefusalFor says why the copy must not answer a statement because of
 // a LENGTH, OCTET_LENGTH, BIT_LENGTH, CHAR_LENGTH or CHARACTER_LENGTH call, or
 // "" when it can (#2918). MySQL counts the bytes of a text in its column's
@@ -1853,7 +1922,7 @@ var lengthWord = regexp.MustCompile(`(?i)length[\s\v"` + "`" + `]*\(`)
 func sqlLengthRefusalFor(narrowed views.Input, statement string, types sqlsandbox.ColumnTypes) string {
 	why := ""
 	switch {
-	case types == nil && lengthWord.MatchString(readrouter.Shape(statement)):
+	case types == nil && lengthWord.MatchString(blankCommentsAndStrings(statement)):
 		why = "the statement could not be searched for its LENGTH and CHAR_LENGTH calls"
 	case types != nil:
 		var safe, other []string

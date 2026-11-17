@@ -32,12 +32,14 @@ var visitRows = [][2]string{
 }
 
 const visitsCreate = "CREATE TABLE `visits` (\n  `id` int NOT NULL,\n  `side` varchar(8) DEFAULT NULL,\n  `code` char(6) DEFAULT NULL,\n" +
-	"  `seen_at` datetime DEFAULT NULL,\n  `stamped` timestamp NULL DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n"
+	"  `seen_at` datetime DEFAULT NULL,\n  `stamped` timestamp NULL DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n"
 
 // writeVisitsBaseline writes the copy of <schema>.visits with the same times
 // as the source and `side` in every row, the CREATE TABLE in the footer (the
 // way `bintrail baseline` writes one), so the copy can tell the DATETIME
-// from the TIMESTAMP.
+// from the TIMESTAMP. The table ends with its character set, as a real
+// SHOW CREATE TABLE does: the scan counts LENGTH(code), which the copy answers
+// only over a column whose character set the definition names (#2918).
 func writeVisitsBaseline(t *testing.T, dir, schema, side string) {
 	t.Helper()
 	cols, err := baseline.ParseSchemaText(visitsCreate)
