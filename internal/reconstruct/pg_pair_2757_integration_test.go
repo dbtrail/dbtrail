@@ -46,9 +46,15 @@ func TestReconstructTables_PGTablePairDamagedIsNotCarried(t *testing.T) {
 			t.Cleanup(baselineintegrity.ForgetVerified)
 			f := newPGFixture(t)
 			root := t.TempDir()
+			// As in the test below: a first update that carries the file,
+			// then one that writes a pair beside it.
 			f.baseline(root, f.at(10*time.Minute), 0x500, "", pairRows()...)
-			f.event(0x700, 12*time.Minute, 2, "1", s("late"))
-			f.event(0x710, 13*time.Minute, 3, "2", nil)
+			f.other(0x600, 12*time.Minute)
+			if _, _, _, err := f.run(root, pgRun{at: f.at(20 * time.Minute), carry: true}); err != nil {
+				t.Fatal(err)
+			}
+			f.event(0x700, 22*time.Minute, 2, "1", s("late"))
+			f.event(0x710, 23*time.Minute, 3, "2", nil)
 			f.checkpoint(0x710)
 			at2 := f.at(30 * time.Minute)
 			reconstruct.SetPGTableDeltas(t, true)
@@ -92,7 +98,7 @@ func TestReconstructTables_PGTablePairDamagedIsNotCarried(t *testing.T) {
 			if !errors.Is(err, baselineintegrity.ErrIntegrity) {
 				t.Fatalf("the update over a damaged %s: %v; want the integrity refusal", suffix, err)
 			}
-			if _, serr := os.Stat(filepath.Join(root, reconstruct.SnapshotDirName(at3), "public", "orders.parquet")); serr == nil {
+			if _, serr := os.Stat(f.tableFile(root, at3)); serr == nil {
 				t.Fatal("the table's file was published beside a delta that was refused")
 			}
 		})
