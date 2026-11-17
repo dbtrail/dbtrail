@@ -129,6 +129,40 @@ type SQLOnCopy struct {
 	seen atomic.Uint64
 }
 
+// The notes of an answer from the snapshot alone that may be behind an
+// earlier answer of the copy on the same connection.
+const (
+	snapshotOlderNote      = "Answered from the snapshot alone: its captured changes are older than an earlier answer of the copy on this connection."
+	snapshotMaybeOlderNote = "Answered from the snapshot alone, which may hold captured changes older than an earlier answer of the copy on this connection."
+)
+
+// snapshotOlderThanSeen decides, for an answer read from the snapshot without
+// tails on a connection whose earlier answers held every event through the
+// index event id was (not 0), what the client is told and the connection's
+// new floor. cut is how far the snapshot read holds every event, asked only
+// when the answer read one. A snapshot at or past the floor says nothing; one
+// before it says so and lowers the floor to it, so the next answers from the
+// same snapshot do not say it again; one that cannot be placed says it may be
+// older, and the floor is dropped, since nothing it is compared with later
+// would be what the connection was last shown.
+func snapshotOlderThanSeen(was uint64, readFrom map[string][]string, readFromOK bool, cut func() (uint64, string)) (note string, seen uint64) {
+	if readFromOK && len(readFrom) == 0 {
+		// No table of the snapshot was read (a probe, the change log).
+		return "", was
+	}
+	if !readFromOK {
+		return snapshotMaybeOlderNote, 0
+	}
+	id, why := cut()
+	switch {
+	case why != "" || id == 0:
+		return snapshotMaybeOlderNote, 0
+	case id >= was:
+		return "", was
+	}
+	return snapshotOlderNote, id
+}
+
 // Run runs one statement; schema is where unqualified names resolve (the
 // connection's USE), empty for DuckDB's default; sess is what the connection
 // set for itself (its time zone and sql_select_limit). The error is one the
@@ -207,6 +241,22 @@ func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string, sess sqls
 			if id <= was || q.seen.CompareAndSwap(was, id) {
 				break
 			}
+		}
+	} else if was := q.seen.Load(); was != 0 {
+		// Answered without tails after an answer with them: the server was
+		// changed to fast mode while the connection was open, or the tails
+		// were not read this time. Fresh mode's own check (seenFloor) only
+		// looks at tails, so the snapshot alone could go back in time on
+		// this connection with nothing said.
+		note, seen := snapshotOlderThanSeen(was, out.ReadFrom, out.ReadFromOK, func() (uint64, string) {
+			_, id, why := q.s.snapshotCutFor(ctx, q.b, q.id, out.ReadFrom)
+			return id, why
+		})
+		if seen != was {
+			q.seen.CompareAndSwap(was, seen)
+		}
+		if out.OlderCopyNote == "" {
+			out.OlderCopyNote = note
 		}
 	}
 	out.Result.Note = out.OlderCopyNote
