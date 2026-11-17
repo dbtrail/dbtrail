@@ -250,12 +250,12 @@ func TestPGPairStateBody_leavesTheOthersAlone(t *testing.T) {
 		in Input
 		t  BaselineTable
 	}{
-		"a table whose definition is known": {Input{}, mysql},
-		"a table with a MySQL delta":        {Input{}, mysqlDelta},
-		"a view that follows the pointer":   {Input{Follow: FollowPointer}, pg},
-		"a view that follows the newest":    {Input{Follow: FollowNewest}, pg},
+		"a table whose definition is known":  {Input{}, mysql},
+		"a table with a MySQL delta":         {Input{}, mysqlDelta},
+		"a view that follows the pointer":    {Input{Follow: FollowPointer}, pg},
+		"a view that follows the newest":     {Input{Follow: FollowNewest}, pg},
 		"a relative path with nothing there": {Input{}, relative},
-		"a file in S3":                      {Input{}, s3},
+		"a file in S3":                       {Input{}, s3},
 	} {
 		if body, ok := pgPairStateBody(c.in, c.t); ok {
 			t.Errorf("%s: the pair's body was written: %s", name, body)
