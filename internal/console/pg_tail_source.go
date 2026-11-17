@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,7 +14,6 @@ import (
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/dbtrail/dbtrail/internal/metadata"
-	"github.com/dbtrail/dbtrail/internal/pgdelta"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/snapshotdir"
@@ -233,16 +231,11 @@ func (x *pgTailSource) cut(t views.BaselineTable) pgCut {
 	case from == nil || !proven || md.LSN == 0:
 		return refuse("the snapshot of %s does not record an LSN to continue from", name)
 	}
-	// A table delta of PostgreSQL's own (#2757): the table is its file and
-	// the pair. The views read both and can lay a tail over them; no
-	// statement has been run that way yet, so none is.
-	if dead, rows, perr := pgdelta.Paths(t.Path, 0); perr == nil {
-		for _, f := range []string{dead, rows} {
-			if _, serr := os.Lstat(f); serr == nil || !errors.Is(serr, os.ErrNotExist) {
-				return refuse("the copy of %s has a table delta beside its file, and a tail is not laid over one yet", name)
-			}
-		}
-	}
+	// A table delta of PostgreSQL's own beside the file (#2757) changes
+	// nothing here: the tail starts at the FILE's floor, which does not move
+	// while deltas are written beside it, so it holds every change the delta
+	// holds and the ones after. The views lay it over the file and its
+	// delta, where it wins key by key.
 	return pgCut{md: md, floor: md.LSN, from: from, since: since}
 }
 

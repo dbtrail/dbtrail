@@ -796,8 +796,6 @@ listener, its own workers, its own memory.
     lay over it, which is the right answer for that table alone. But a
     statement answers fresh only when every table it reads does, so a join
     with such a table is answered from the snapshot for all of its tables.
-  - **Tables updated with `BINTRAIL_PG_TABLE_DELTAS`** get no recent changes
-    laid over them, and neither does a statement that reads one.
   - **Waiting for the source** (`BINTRAIL_SQL_FRESH_WAIT`) does not apply to
     PostgreSQL yet: a statement does not wait for the newest changes to
     arrive before it reads.
