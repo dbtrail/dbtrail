@@ -924,18 +924,21 @@ listener, its own workers, its own memory.
   travel on this port, with the reason: time travel reads the history
   directly, past the views that hide them.
 
-What the process may use is said where it is started, with small defaults so
-it fits beside capture:
+What the process may use is said where it is started, with defaults that fit
+beside capture on the recommended machine (8 cores). Each statement may take
+the SQL memory, so four at once can take 8GB, plus the recent changes fresh
+mode holds (up to a fifth of the process's memory for each server in fresh
+mode): on a 16GB machine, set `--workers 2`.
 
 | Flag | Environment variable | Default | What it does |
 |---|---|---|---|
 | `--listen` | `BINTRAIL_PG_ROUTER_LISTEN` | `127.0.0.1:5433` | Where the port listens |
 | `--tls-cert` | `BINTRAIL_PG_ROUTER_TLS_CERT` | none: a certificate made up at start | The certificate (PEM, its chain after it) a client that asks for TLS gets. Requires `--tls-key` |
 | `--tls-key` | `BINTRAIL_PG_ROUTER_TLS_KEY` | none | Its private key (PEM, not encrypted with a passphrase) |
-| `--workers` | `BINTRAIL_PG_ROUTER_WORKERS` | 2 | How many statements run on the copy at once (1 to 16). The rest wait their turn |
+| `--workers` | `BINTRAIL_PG_ROUTER_WORKERS` | 4 | How many statements run on the copy at once (1 to 16). The rest wait their turn |
 | `--threads` | `BINTRAIL_PG_ROUTER_THREADS` | 2 | Threads each statement may use (1 to 16) |
 | `--sql-memory` | `BINTRAIL_CONSOLE_SQL_MEMORY` | 2GB, or the value saved in the web interface | Memory each statement may use |
-| `--max-connections` | `BINTRAIL_PG_ROUTER_MAX_CONNECTIONS` | 16 | Clients connected at once (1 to 1024). One more is refused with an error |
+| `--max-connections` | `BINTRAIL_PG_ROUTER_MAX_CONNECTIONS` | 256 | Clients connected at once (1 to 1024). One more is refused with an error |
 | `--max-source-connections` | `BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS` | 16 | Connections to the servers' own PostgreSQL held at once, every server together (1 to 1024). A client holds one while its transaction block (or a catalog statement the copy does not answer) runs there; past the limit the statement that needed one is refused (`53300`) |
 | `--max-wait` | `BINTRAIL_PG_ROUTER_MAX_WAIT` | none | How long a statement waits for its turn before it is refused |
 | `--sql-port-max-rows` | `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS` | the port's row cap | Most rows one statement returns |
