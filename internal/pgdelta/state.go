@@ -82,7 +82,10 @@ func quote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'
 // "orders" beside it, and the row numbers of one file taken for the other's.
 // Each pattern character is wrapped in a class of its own, which is how the
 // engine takes one literally (a backslash does not escape).
-func file(path string) string {
+func file(path string) string { return quote(literal(path)) }
+
+// literal is path as a glob that matches itself alone.
+func literal(path string) string {
 	var b strings.Builder
 	for _, c := range path {
 		switch c {
@@ -94,7 +97,7 @@ func file(path string) string {
 			b.WriteRune(c)
 		}
 	}
-	return quote(b.String())
+	return b.String()
 }
 
 // list is paths as a SQL list of string literals.

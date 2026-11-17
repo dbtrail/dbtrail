@@ -39,9 +39,21 @@ import (
 // A pair that is not whole (one file of the two, a gap in the sequence, a
 // folder that cannot be listed) gives a view that refuses when it is read:
 // the table cannot be said, and the file alone would say it wrong.
+//
+// Where the folder cannot be looked at from here (a view that follows later
+// snapshots, a file in S3, a relative path for a folder that is not this
+// one), a table known to be a PostgreSQL one reads its file alone behind a
+// guard: when the view is read, the engine is asked whether a delta sits
+// beside the file, and the view refuses if one does (pgPairGuardedBody).
 func pgPairStateBody(in Input, t BaselineTable) (body string, ok bool) {
-	if t.SchemaKnown || t.Delta || in.Follow.follows() ||
-		strings.Contains(t.Path, "://") || !strings.HasSuffix(t.Path, ".parquet") {
+	if t.SchemaKnown || t.Delta || !strings.HasSuffix(t.Path, ".parquet") {
+		return "", false
+	}
+	knownPG := len(t.PGCasts) > 0 || t.PGRelation != nil
+	if in.Follow.follows() || strings.Contains(t.Path, "://") {
+		if knownPG {
+			return pgPairGuardedBody(in, t), true
+		}
 		return "", false
 	}
 	// Where the file is, for looking beside it. The view names it as t.Path
@@ -55,6 +67,11 @@ func pgPairStateBody(in Input, t BaselineTable) (body string, ok bool) {
 		return "", false
 	}
 	if pgPairFileMissing(dead) && pgPairFileMissing(rows) {
+		// Looked, and none is there. Unless the file itself is not here:
+		// then nothing was looked at.
+		if knownPG && pgPairFileMissing(at) {
+			return pgPairGuardedBody(in, t), true
+		}
 		return "", false
 	}
 	dir := filepath.Dir(t.Path)
@@ -132,4 +149,40 @@ func pgPairRefusal(t BaselineTable, cause error) string {
 	file := sqlString(fileGlob(t.Path))
 	return fmt.Sprintf("SELECT bintrail_t.* FROM (SELECT CASE WHEN count(*) >= 0 THEN error(%s) ELSE true END AS bintrail_refused FROM glob(%s)) AS bintrail_r "+
 		"LEFT JOIN read_parquet(%s) AS bintrail_t ON bintrail_r.bintrail_refused", sqlString(msg), file, file)
+}
+
+// pgPairGuardedBody is a PostgreSQL table's file read alone, as
+// writeStateBody would write it for the view's mode, behind a guard that
+// refuses when the engine finds a table delta beside the file: the body for
+// a view whose folder could not be looked at when it was written.
+//
+// The guard is a filter over the file's rows, as the one a following view of
+// a MySQL table carries (deltaAppearedGuard): over a file that holds no row
+// it is never run.
+func pgPairGuardedBody(in Input, t BaselineTable) string {
+	msg := fmt.Sprintf("bintrail views: %s.%s has a PostgreSQL table delta beside its file, and this view reads the file alone "+
+		"(it follows later snapshots, or names its files in S3 or by a relative path), so it would show the table as it was "+
+		"when it was last written in full. Read the table through DBTrail (the SQL page, the PostgreSQL port), "+
+		"or generate the views pinned to a snapshot in a local folder", t.Schema, t.Table)
+	guard := func(pattern string) string {
+		return fmt.Sprintf("\n  WHERE CASE WHEN (SELECT count(*) FROM glob(%s)) > 0 THEN error(%s) ELSE true END", pattern, sqlString(msg))
+	}
+	var read string
+	if in.Follow == FollowNewest {
+		// The file is named beside the session's variable, as
+		// writeNewestStateBody names it.
+		newest := in.sessionName(newestVar)
+		file := fmt.Sprintf("CASE WHEN getvariable('%s') IS NULL\n    THEN error(%s)\n    ELSE getvariable('%s') || %s END",
+			newest, sqlString(newestVarUnsetMsg), newest, sqlString(fileGlob(t.Rel)))
+		read = "read_parquet(" + file + ")" + guard(fmt.Sprintf("getvariable('%s') || %s", newest, sqlString(pgdelta.AnyNewGlob(t.Rel))))
+	} else {
+		read = "read_parquet(" + sqlString(fileGlob(t.Path)) + ")" + guard(sqlString(pgdelta.AnyNewGlob(t.Path)))
+	}
+	if list := selectList(t); list != "" {
+		return "SELECT " + list + "\n  FROM " + read
+	}
+	if replace := replaceClause(t); replace != "" {
+		return "SELECT * REPLACE (" + replace + ")\n  FROM " + read
+	}
+	return "SELECT * FROM " + read
 }

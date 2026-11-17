@@ -117,3 +117,15 @@ func TestChainOf(t *testing.T) {
 		}
 	}
 }
+
+func TestAnyNewGlob(t *testing.T) {
+	for base, want := range map[string]string{
+		"/snap/public/orders.parquet":         "/snap/public/orders.[0-9][0-9][0-9][0-9][0-9][0-9].pgnew",
+		"s3://b/p/public/or*ders.parquet":     "s3://b/p/public/or[*]ders.[0-9][0-9][0-9][0-9][0-9][0-9].pgnew",
+		"public/a[1]{x}?.parquet":             "public/a[[]1][{]x}[?].[0-9][0-9][0-9][0-9][0-9][0-9].pgnew",
+	} {
+		if got := AnyNewGlob(base); got != want {
+			t.Errorf("AnyNewGlob(%q) = %q, want %q", base, got, want)
+		}
+	}
+}
