@@ -485,6 +485,7 @@ func resolveBaselineViews(ctx context.Context, in *views.Input) error {
 	if err := views.MarkTableDeltas(ctx, in.Baselines); err != nil {
 		return err
 	}
+	views.MarkPGPairsListed(ctx, in.Baselines) // PostgreSQL table deltas (#2757), same moment
 	// Decimals BEFORE the rewrite, and the ordering is load-bearing in the
 	// opposite direction from how it first looked. Following only happens when
 	// the pointer names the snapshot just discovered, so both spellings resolve

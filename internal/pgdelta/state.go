@@ -85,6 +85,10 @@ func quote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'
 func file(path string) string { return quote(literal(path)) }
 
 // literal is path as a glob that matches itself alone.
+// GlobLiteral is path as a glob that matches it alone: for whoever builds a
+// glob of its own around a path (a folder, then a pattern).
+func GlobLiteral(path string) string { return literal(path) }
+
 func literal(path string) string {
 	var b strings.Builder
 	for _, c := range path {

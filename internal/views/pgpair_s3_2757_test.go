@@ -3,6 +3,7 @@ package views
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -198,5 +199,98 @@ func TestPGPairBeside(t *testing.T) {
 		if got := pgPairBeside(c[0], c[1]); got != c[2] {
 			t.Errorf("pgPairBeside(%q, %q) = %q, want %q", c[0], c[1], got, c[2])
 		}
+	}
+}
+
+// MarkPGPairsListed marks tables whose files are in S3 from one listing of
+// their snapshot, and leaves a MySQL table alone without asking the store.
+func TestMarkPGPairsListed(t *testing.T) {
+	const snap = "s3://bucket/copies/2026-04-30T03-00-00Z"
+	prev := pgPairListS3
+	t.Cleanup(func() { pgPairListS3 = prev })
+	var asked []string
+	list := func(byDir map[string][]string, err error) {
+		asked = nil
+		pgPairListS3 = func(_ context.Context, url string) (map[string][]string, error) {
+			asked = append(asked, url)
+			return byDir, err
+		}
+	}
+	tables := func() []BaselineTable {
+		return []BaselineTable{
+			pgPairTable(snap+"/public/orders.parquet", "orders"),
+			pgPairTable(snap+"/public/items.parquet", "items"),
+			pgPairTable(snap+"/public/half.parquet", "half"),
+			{Schema: "shop", Table: "legacy", Path: snap + "/shop/legacy.parquet", SchemaKnown: true},
+			{Schema: "shop", Table: "legacy2", Path: snap + "/shop/legacy2.parquet", Delta: true},
+		}
+	}
+
+	list(map[string][]string{
+		snap + "/public": {"orders.000000.pgdead", "orders.000000.pgnew", "half.000000.pgnew"},
+		snap + "/shop":   {"legacy.000000.pgdead", "legacy.000000.pgnew"},
+	}, nil)
+	ts := tables()
+	MarkPGPairsListed(context.Background(), ts)
+	if !reflect.DeepEqual(asked, []string{snap}) {
+		t.Fatalf("the store was asked %v; want once, for the snapshot", asked)
+	}
+	if m := ts[0].PGPair; m == nil || m.Err != nil || m.Unasked != nil || len(m.Pairs) != 1 {
+		t.Fatalf("the table with a delta: %+v", m)
+	}
+	if m := ts[1].PGPair; m == nil || m.Err != nil || m.Unasked != nil || len(m.Pairs) != 0 {
+		t.Fatalf("the table with none: %+v", m)
+	}
+	if m := ts[2].PGPair; m == nil || m.Err == nil {
+		t.Fatalf("the table with half a pair: %+v", m)
+	}
+	if ts[3].PGPair != nil || ts[4].PGPair != nil {
+		t.Fatalf("a MySQL table was marked: %+v, %+v", ts[3].PGPair, ts[4].PGPair)
+	}
+	in := Input{Baselines: ts}
+	if body, ok := pgPairStateBody(in, ts[0]); !ok || !strings.Contains(body, snap+"/public/orders.000000.pgnew") || strings.Contains(body, "glob(") {
+		t.Fatalf("the table with a delta: %q, %v", body, ok)
+	}
+	if body, ok := pgPairStateBody(in, ts[1]); ok {
+		t.Fatalf("the table with none was given a body: %s", body)
+	}
+	if body, ok := pgPairStateBody(in, ts[2]); !ok || !strings.Contains(body, "cannot be read whole") {
+		t.Fatalf("the table with half a pair: %q, %v", body, ok)
+	}
+
+	// Only MySQL tables: the store is not asked.
+	list(nil, errors.New("must not be asked"))
+	only := tables()[3:]
+	MarkPGPairsListed(context.Background(), only)
+	if len(asked) != 0 {
+		t.Fatalf("the store was asked for MySQL tables alone: %v", asked)
+	}
+
+	// The listing fails: a table known to be a PostgreSQL one refuses and
+	// says why, one that is not is written as before, and nothing fails.
+	list(nil, errors.New("AccessDenied"))
+	ts = tables()
+	unknown := BaselineTable{Schema: "public", Table: "who", Path: snap + "/public/who.parquet", Rel: "public/who.parquet"}
+	ts = append(ts, unknown)
+	MarkPGPairsListed(context.Background(), ts)
+	if len(asked) != 1 {
+		t.Fatalf("the store was asked %d times; want once", len(asked))
+	}
+	if body, ok := pgPairStateBody(Input{}, ts[0]); !ok || !strings.Contains(body, "could not be asked") || !strings.Contains(body, "AccessDenied") {
+		t.Fatalf("a PostgreSQL table, the listing failed: %q, %v", body, ok)
+	}
+	if body, ok := pgPairStateBody(Input{}, ts[len(ts)-1]); ok {
+		t.Fatalf("a table nothing says is PostgreSQL's, the listing failed: %s", body)
+	}
+
+	// A local file is looked beside, with no listing.
+	list(nil, errors.New("must not be asked"))
+	root := t.TempDir()
+	local := writePGPairBase(t, root, "orders", [2]string{"1", "one"})
+	writePGPair(t, local, map[string]string{"1": "ONE"})
+	lt := []BaselineTable{pgPairTable(local, "orders")}
+	MarkPGPairsListed(context.Background(), lt)
+	if m := lt[0].PGPair; len(asked) != 0 || m == nil || len(m.Pairs) != 1 {
+		t.Fatalf("a local file: asked %v, mark %+v", asked, m)
 	}
 }

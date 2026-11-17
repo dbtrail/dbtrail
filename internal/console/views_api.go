@@ -297,6 +297,7 @@ func (s *Server) buildViewsInputAll(ctx context.Context, b *bundle, req viewsReq
 			if err := views.MarkTableDeltas(ctx, in.Baselines); err != nil {
 				return views.Input{}, err
 			}
+			views.MarkPGPairsListed(ctx, in.Baselines) // PostgreSQL table deltas (#2757), same moment
 			// The chain already merged into one pair beside the snapshots
 			// (#2231), for the views of one statement only: a views file
 			// outlives that pair, which goes when its snapshot is no longer

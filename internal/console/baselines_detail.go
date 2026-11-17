@@ -537,6 +537,7 @@ func (s *Server) snapshotViewsRelative(ctx context.Context, ss *snapshotSource, 
 	in := views.SnapshotScopedInput(ts, tables)
 	in.BaselineSource = strings.TrimSuffix(src, "/")
 	s.resolveBaselineDecimals(ctx, &in)
+	views.MarkPGPairsListed(ctx, in.Baselines) // PostgreSQL table deltas (#2757), while the paths are the real ones
 	in.RespellBaselines(".")
 	return views.Generate(in)
 }

@@ -451,6 +451,9 @@ func TestBaselineDownload_viewsSQLReadsTheChain(t *testing.T) {
 		writeBaselineFile(t, dir, "d", base, detailSnapDir, "shop", n)
 	}
 	writeBaselineFile(t, dir, "cc", base, detailSnapDir, "shop", "plain.parquet")
+	for _, n := range []string{"pgt.parquet", "pgt.000000.pgdead", "pgt.000000.pgnew"} {
+		writeBaselineFile(t, dir, "p", base, detailSnapDir, "shop", n)
+	}
 	srv := newBaselineServer(t, dir, true)
 	rec, body := doServersReq(t, srv, "GET", "/api/baselines/download"+detailQuery(detailSnapAt), "")
 	if rec.Code != 200 {
@@ -479,6 +482,12 @@ func TestBaselineDownload_viewsSQLReadsTheChain(t *testing.T) {
 	}
 	if v := view("shop.plain"); strings.Contains(v, "upserts") || strings.Contains(v, "file_row_number") {
 		t.Errorf("plain view got a delta body:\n%s", v)
+	}
+	// A PostgreSQL table delta (#2757) beside another table's file: its view
+	// reads the three files by their names, relative like the rest.
+	if v := view("shop.pgt"); !strings.Contains(v, "./shop/pgt.000000.pgdead") || !strings.Contains(v, "./shop/pgt.000000.pgnew") ||
+		!strings.Contains(v, "./shop/pgt.parquet") || strings.Contains(v, "upserts") {
+		t.Errorf("pgt view does not read its PostgreSQL delta:\n%s", v)
 	}
 	for _, name := range []string{"shop/orders.000001.posdel", "shop/users.posdel"} {
 		if _, ok := got[detailSnapDir+"/"+name]; !ok {

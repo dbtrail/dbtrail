@@ -1,6 +1,8 @@
 package views
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -9,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/dbtrail/dbtrail/internal/pgdelta"
 )
 
@@ -81,8 +84,21 @@ func pgPairStateBody(in Input, t BaselineTable) (body string, ok bool) {
 			return "", false
 		}
 	}
+	if mark.Unasked != nil {
+		// Whether it has a delta could not be asked. A table known to be a
+		// PostgreSQL one refuses, since its file alone may not be the
+		// table; any other is written as before.
+		if knownPG {
+			return pgPairRefusal(t, fmt.Sprintf("whether %s.%s has a table delta beside its file could not be asked when these views were written (%v), "+
+				"and its file alone may show the table as it was when it was last written in full. Generate the views again",
+				t.Schema, t.Table, mark.Unasked)), true
+		}
+		return "", false
+	}
 	if mark.Err != nil {
-		return pgPairRefusal(t, mark.Err), true
+		return pgPairRefusal(t, fmt.Sprintf("%s.%s has a table delta beside its file that cannot be read whole (%v), "+
+			"and its file alone would show the table as it was when it was last written in full. "+
+			"A new full snapshot of this server replaces it", t.Schema, t.Table, mark.Err)), true
 	}
 	if len(mark.Pairs) == 0 {
 		return "", false
@@ -116,9 +132,13 @@ func pgPairStateBody(in Input, t BaselineTable) (body string, ok bool) {
 // PGPairMark is what was found beside a PostgreSQL table's file when the
 // folder was looked at: the pairs of its table delta, none when it has no
 // delta, or why the delta there cannot be read whole.
+//
+// Unasked is set instead when the folder could not be listed at all: nothing
+// is known about any table in it.
 type PGPairMark struct {
-	Pairs []pgdelta.Pair
-	Err   error
+	Pairs   []pgdelta.Pair
+	Err     error
+	Unasked error
 }
 
 // MarkPGPairs looks beside the file of every table that can have a
@@ -133,18 +153,124 @@ type PGPairMark struct {
 func (in *Input) MarkPGPairs() {
 	for i := range in.Baselines {
 		t := &in.Baselines[i]
-		if t.SchemaKnown || t.Delta || !strings.HasSuffix(t.Path, ".parquet") || strings.Contains(t.Path, "://") {
+		if !pgPairMarkable(*t) || strings.Contains(t.Path, "://") {
 			continue
 		}
 		t.PGPair = pgPairLook(t.Path)
-		if t.PGPair != nil && t.PGPair.Err != nil {
-			// The view of this table will refuse when it is read, which
-			// may be much later and somewhere else: say so here too.
-			slog.Warn("views: a table's delta cannot be read whole, so its view is written to refuse; "+
-				"a new full snapshot of this server replaces it",
-				"schema", t.Schema, "table", t.Table, "file", t.Path, "error", t.PGPair.Err)
+		pgPairWarn(*t)
+	}
+}
+
+// MarkPGPairsListed is MarkPGPairs for tables whose files may be in S3: a
+// local file is looked beside as there, and the files of a snapshot in S3
+// are listed once, by one glob over the snapshot. Call it while Path is the
+// real path and after MarkTableDeltas, whose mark tells a MySQL table apart.
+//
+// It returns nothing, on purpose: it is called for every source family, and
+// a listing that fails must not fail the views of a MySQL server. What was
+// not known is recorded (PGPairMark.Unasked) and refuses only for a table
+// that turns out to be a PostgreSQL one.
+func MarkPGPairsListed(ctx context.Context, tables []BaselineTable) {
+	type listing struct {
+		byDir map[string][]string
+		err   error
+	}
+	listed := map[string]*listing{}
+	for i := range tables {
+		t := &tables[i]
+		if !pgPairMarkable(*t) {
+			continue
+		}
+		if !strings.Contains(t.Path, "://") {
+			t.PGPair = pgPairLook(t.Path)
+			pgPairWarn(*t)
+			continue
+		}
+		if !strings.HasPrefix(t.Path, "s3://") {
+			continue
+		}
+		snap := snapshotDirOf(t.Path)
+		l := listed[snap]
+		if l == nil {
+			l = &listing{}
+			if l.byDir, l.err = pgPairListS3(ctx, snap); l.err != nil {
+				slog.Warn("views: the PostgreSQL table deltas of a snapshot could not be listed; "+
+					"the view of a PostgreSQL table in it is written to refuse",
+					"snapshot", snap, "error", l.err)
+			}
+			listed[snap] = l
+		}
+		if l.err != nil {
+			t.PGPair = &PGPairMark{Unasked: l.err}
+			continue
+		}
+		cut := strings.LastIndexByte(t.Path, '/')
+		chain, err := pgdelta.ChainOf(strings.TrimSuffix(t.Path[cut+1:], ".parquet"), l.byDir[t.Path[:cut]])
+		if err != nil {
+			t.PGPair = &PGPairMark{Err: err}
+		} else {
+			t.PGPair = &PGPairMark{Pairs: chain.Pairs}
+		}
+		pgPairWarn(*t)
+	}
+}
+
+// pgPairMarkable reports whether t can have a PostgreSQL table delta: not a
+// table whose definition is known or that has a MySQL delta, which is a
+// MySQL one.
+func pgPairMarkable(t BaselineTable) bool {
+	return !t.SchemaKnown && !t.Delta && strings.HasSuffix(t.Path, ".parquet")
+}
+
+// pgPairWarn says, when the views are written, that a table's view will
+// refuse: that is read much later and maybe somewhere else.
+func pgPairWarn(t BaselineTable) {
+	if t.PGPair == nil || t.PGPair.Err == nil {
+		return
+	}
+	slog.Warn("views: a table's delta cannot be read whole, so its view is written to refuse; "+
+		"a new full snapshot of this server replaces it",
+		"schema", t.Schema, "table", t.Table, "file", t.Path, "error", t.PGPair.Err)
+}
+
+// pgPairListS3 lists the delta files of the snapshot at an s3:// URL, by the
+// folder they are in: one glob, over every schema's folder. A variable, for
+// a test to stand in for the store.
+var pgPairListS3 = func(ctx context.Context, snapshotURL string) (map[string][]string, error) {
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		return nil, fmt.Errorf("open duckdb: %w", err)
+	}
+	defer db.Close()
+	if err := duckdbutil.LoadHTTPFS(ctx, db); err != nil {
+		return nil, fmt.Errorf("load httpfs extension: %w", err)
+	}
+	if err := duckdbutil.EnableS3CredentialChainFor(ctx, db, "", snapshotURL); err != nil {
+		return nil, err
+	}
+	pattern := pgdelta.GlobLiteral(strings.TrimRight(snapshotURL, "/")) + "/*/*.pg*"
+	rows, err := db.QueryContext(ctx, "SELECT file FROM glob("+sqlString(pattern)+")")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]string{}
+	for rows.Next() {
+		var f string
+		if err := rows.Scan(&f); err != nil {
+			return nil, err
+		}
+		cut := strings.LastIndexByte(f, '/')
+		if cut < 0 {
+			continue
+		}
+		// Only a delta's own names: ChainOf takes any ".pgdead"/".pgnew"
+		// name for a half of something.
+		if _, ok := pgdelta.ParseName(f[cut+1:]); ok {
+			out[f[:cut]] = append(out[f[:cut]], f[cut+1:])
 		}
 	}
+	return out, rows.Err()
 }
 
 // pgPairLook looks beside the table file at path, a local one. nil when
@@ -226,10 +352,8 @@ func pgPairChain(dir, table string) (pgdelta.Chain, error) {
 // read of the view; the count is of a glob, which is not known before the
 // read, so it is not raised while the view is bound. The file is joined to
 // it only for the view to have the table's columns.
-func pgPairRefusal(t BaselineTable, cause error) string {
-	msg := fmt.Sprintf("bintrail views: %s.%s has a table delta beside its file that cannot be read whole (%v), "+
-		"and its file alone would show the table as it was when it was last written in full. "+
-		"A new full snapshot of this server replaces it", t.Schema, t.Table, cause)
+func pgPairRefusal(t BaselineTable, why string) string {
+	msg := "bintrail views: " + why
 	file := sqlString(fileGlob(t.Path))
 	return fmt.Sprintf("SELECT bintrail_t.* FROM (SELECT CASE WHEN count(*) >= 0 THEN error(%s) ELSE true END AS bintrail_refused FROM glob(%s)) AS bintrail_r "+
 		"LEFT JOIN read_parquet(%s) AS bintrail_t ON bintrail_r.bintrail_refused", sqlString(msg), file, file)
