@@ -773,13 +773,14 @@ listener, its own workers, its own memory.
     the copy has no index. With a forwarding user such a statement can be
     answered by the source (see
     [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port)).
-  - **How many statements it answers** is set by `--workers`, which is 2
-    out of the box, with 16 clients connected at most
+  - **How many statements it answers** is set by `--workers`, which is 4
+    out of the box, with 256 clients connected at most
     (`--max-connections`); in the compose `.env`, `PG_ROUTER_WORKERS` and
-    `PG_ROUTER_MAX_CONNECTIONS`. Raise both for more than a few clients.
+    `PG_ROUTER_MAX_CONNECTIONS`. The measurement above ran 8 at once.
   - **Switching a server from fresh to fast** makes the connections already
     open read the snapshot from their next statement on: an answer older
-    than the one before it on the same connection.
+    than the one before it on the same connection, which is told once by a
+    NOTICE.
   What fresh mode does not cover yet, where the answer comes from the
   snapshot alone. The client is told only by a NOTICE that comes with the
   answer (drivers that drop notices, or `client_min_messages` above
