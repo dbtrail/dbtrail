@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -115,6 +117,20 @@ func TestIntegrationPGRouterFreshMode_2756(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.User, cfg.Password, cfg.Database = "anyone", "tok", "pg-fresh"
+	var noticeMu sync.Mutex
+	var notices []string
+	cfg.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) {
+		noticeMu.Lock()
+		notices = append(notices, n.Message)
+		noticeMu.Unlock()
+	}
+	takeNotices := func() []string {
+		noticeMu.Lock()
+		defer noticeMu.Unlock()
+		out := notices
+		notices = nil
+		return out
+	}
 	port, err := pgconn.ConnectConfig(ctx, cfg)
 	if err != nil {
 		t.Fatalf("connect to the port: %v", err)
@@ -173,11 +189,25 @@ func TestIntegrationPGRouterFreshMode_2756(t *testing.T) {
 	}
 	says("fresh", "saved")
 
-	// Back to fast: the snapshot again, at once.
+	// Back to fast: the snapshot again, at once, and this connection, which
+	// was just shown the newer rows, is told so once.
+	takeNotices()
 	mode(false)
 	says("fast", "saved")
 	if got := read(); got != snapshot {
 		t.Fatalf("fast mode again: %s, want the snapshot %s", got, snapshot)
+	}
+	if n := takeNotices(); len(n) != 1 || !strings.Contains(n[0], "can be older than an earlier answer of the copy on this connection") {
+		t.Fatalf("notices after the switch to fast: %q, want the one that says the answer can be older", n)
+	}
+	if got := read(); got != snapshot {
+		t.Fatalf("fast mode, the next statement: %s", got)
+	}
+	if _, _, err := pgText(t, port, "SELECT 1"); err != nil {
+		t.Fatal(err)
+	}
+	if n := takeNotices(); len(n) != 0 {
+		t.Fatalf("notices on the next statements: %q, want none (told once, and SELECT 1 reads no table)", n)
 	}
 
 	// Fresh saved, and BINTRAIL_SQL_TAILS=off where the router runs: fast.
