@@ -759,6 +759,27 @@ listener, its own workers, its own memory.
   `--workers` is not lowered for them.
   They are also kept as small files in the temporary directory, which the
   MySQL router on the same machine can share: neither removes the other's.
+  What it gives and what it costs, as measured on 2026-11-17 (a table of 2
+  and of 10 million rows of about 100 bytes, 400 transactions a second at the
+  source, a snapshot update every 5 minutes, 8 statements at once):
+  - **How far behind an answer is:** about 1.2 seconds at the median and
+    never more than 3.2, at both sizes, with 10, 50 and 200 clients, and
+    while a snapshot update ran.
+  - **What a statement costs:** 2 to 3 times what it costs in fast mode. The
+    size of the table counts for more than the mode: a statement on the
+    10-million-row table took 0.4 to 0.6 seconds in fresh mode (0.13 to 0.35
+    in fast), and 0.12 to 0.17 on the 2-million-row one (0.03 to 0.09).
+  - **A statement that reads one row by its key reads the whole table too**:
+    the copy has no index. With a forwarding user such a statement can be
+    answered by the source (see
+    [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port)).
+  - **How many statements it answers** is set by `--workers`, which is 2
+    out of the box, with 16 clients connected at most
+    (`--max-connections`); in the compose `.env`, `PG_ROUTER_WORKERS` and
+    `PG_ROUTER_MAX_CONNECTIONS`. Raise both for more than a few clients.
+  - **Switching a server from fresh to fast** makes the connections already
+    open read the snapshot from their next statement on: an answer older
+    than the one before it on the same connection.
   What fresh mode does not cover yet, where the answer comes from the
   snapshot alone. The client is told only by a NOTICE that comes with the
   answer (drivers that drop notices, or `client_min_messages` above
