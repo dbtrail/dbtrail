@@ -45,11 +45,13 @@ import (
 // table's at every read, and for one with relative paths whose file is not
 // here (the views of a folder that is moved).
 //
-// A view pinned to a snapshot in S3 is written as before, with no guard: it
-// names its files by their exact keys and lists nothing, and a guard would
-// make every read list the store, which a reader allowed only to get objects
-// cannot do. Such a view reads the file alone also when a delta is beside
-// it: whoever writes it has the snapshot's folder and can say so then.
+// A view pinned to a snapshot in S3 names its files by their exact keys and
+// lists nothing, and a guard would make every read list the store, which a
+// reader allowed only to get objects cannot do. So what is beside the file
+// has to be known when the view is written: whoever writes it from the
+// snapshot's own folder says so first (Input.MarkPGPairs), and the view then
+// names the delta's files by their exact keys too. Unmarked, such a view is
+// written as before and reads the file alone.
 func pgPairStateBody(in Input, t BaselineTable) (body string, ok bool) {
 	if t.SchemaKnown || t.Delta || !strings.HasSuffix(t.Path, ".parquet") {
 		return "", false
@@ -61,44 +63,35 @@ func pgPairStateBody(in Input, t BaselineTable) (body string, ok bool) {
 		}
 		return "", false
 	}
-	if strings.Contains(t.Path, "://") {
-		return "", false
-	}
-	// Where the file is, for looking beside it. The view names it as t.Path
-	// spells it, like every other body.
-	at, err := filepath.Abs(t.Path)
-	if err != nil {
-		return "", false
-	}
-	dead, rows, err := pgdelta.Paths(at, 0)
-	if err != nil {
-		return "", false
-	}
-	if pgPairFileMissing(dead) && pgPairFileMissing(rows) {
-		// Looked, and none is there. Unless the path is relative and the
-		// file is not here: it is for another folder, and nothing was
-		// looked at.
-		if knownPG && !filepath.IsAbs(t.Path) && pgPairFileMissing(at) {
-			return pgPairGuardedBody(in, t), true
+	mark := t.PGPair
+	if mark == nil {
+		if strings.Contains(t.Path, "://") {
+			return "", false
 		}
+		if mark = pgPairLook(t.Path); mark == nil {
+			// Nothing was looked at. A relative path whose file is not
+			// here is for another folder.
+			if knownPG && !filepath.IsAbs(t.Path) {
+				return pgPairGuardedBody(in, t), true
+			}
+			return "", false
+		}
+	}
+	if mark.Err != nil {
+		return pgPairRefusal(t, mark.Err), true
+	}
+	if len(mark.Pairs) == 0 {
 		return "", false
 	}
-	dir := filepath.Dir(t.Path)
-	chain, err := pgPairChain(filepath.Dir(at), strings.TrimSuffix(filepath.Base(t.Path), ".parquet"))
-	if err == nil && len(chain.Pairs) == 0 {
-		err = errors.New("a file of its table delta is there and could not be read")
-	}
-	if err != nil {
-		return pgPairRefusal(t, err), true
-	}
-	// The paths as they are: StateSQL names each file so that it matches
-	// itself alone, as fileGlob does for every other file a view names
-	// (#2235: read_parquet takes a path as a glob).
-	deadFiles := make([]string, len(chain.Pairs))
-	newFiles := make([]string, len(chain.Pairs))
-	for i, p := range chain.Pairs {
-		deadFiles[i] = filepath.Join(dir, p.Dead)
-		newFiles[i] = filepath.Join(dir, p.New)
+	// The delta's files are named beside the table's, as t.Path spells it:
+	// StateSQL names each file so that it matches itself alone, as fileGlob
+	// does for every other file a view names (#2235: read_parquet takes a
+	// path as a glob).
+	deadFiles := make([]string, len(mark.Pairs))
+	newFiles := make([]string, len(mark.Pairs))
+	for i, p := range mark.Pairs {
+		deadFiles[i] = pgPairBeside(t.Path, p.Dead)
+		newFiles[i] = pgPairBeside(t.Path, p.New)
 	}
 	state := pgdelta.StateSQL(t.Path, deadFiles, newFiles)
 	return ordered(t, func(replace string) string {
@@ -114,6 +107,70 @@ func pgPairStateBody(in Input, t BaselineTable) (body string, ok bool) {
 		}
 		return "SELECT * REPLACE (" + replace + ") FROM (" + state + ")"
 	}), true
+}
+
+// PGPairMark is what was found beside a PostgreSQL table's file when the
+// folder was looked at: the pairs of its table delta, none when it has no
+// delta, or why the delta there cannot be read whole.
+type PGPairMark struct {
+	Pairs []pgdelta.Pair
+	Err   error
+}
+
+// MarkPGPairs looks beside the file of every table that can have a
+// PostgreSQL table delta and records what is there (BaselineTable.PGPair).
+// For whoever writes a views file from a snapshot's own folder and then
+// names its files somewhere else (RespellBaselines): after that the folder
+// cannot be looked at, and before it this is the one moment it can.
+//
+// A table whose definition is known, or that has a MySQL delta, is a MySQL
+// one and is not looked at. Nor is a path that is not a local file, or one
+// whose file is not there: those stay unmarked, and are written as before.
+func (in *Input) MarkPGPairs() {
+	for i := range in.Baselines {
+		t := &in.Baselines[i]
+		if t.SchemaKnown || t.Delta || !strings.HasSuffix(t.Path, ".parquet") || strings.Contains(t.Path, "://") {
+			continue
+		}
+		t.PGPair = pgPairLook(t.Path)
+	}
+}
+
+// pgPairLook looks beside the table file at path, a local one. nil when
+// nothing could be looked at: the file is not there and no delta is.
+func pgPairLook(path string) *PGPairMark {
+	at, err := filepath.Abs(path)
+	if err != nil {
+		return nil
+	}
+	dead, rows, err := pgdelta.Paths(at, 0)
+	if err != nil {
+		return nil
+	}
+	if pgPairFileMissing(dead) && pgPairFileMissing(rows) {
+		if pgPairFileMissing(at) {
+			return nil
+		}
+		return &PGPairMark{}
+	}
+	chain, err := pgPairChain(filepath.Dir(at), strings.TrimSuffix(filepath.Base(at), ".parquet"))
+	if err == nil && len(chain.Pairs) == 0 {
+		err = errors.New("a file of its table delta is there and could not be read")
+	}
+	if err != nil {
+		return &PGPairMark{Err: err}
+	}
+	return &PGPairMark{Pairs: chain.Pairs}
+}
+
+// pgPairBeside names the file called name beside the table file at path, in
+// path's own spelling: a local path, a relative one, or a URL, which
+// filepath.Join would not leave as it is.
+func pgPairBeside(path, name string) string {
+	if i := strings.LastIndexByte(path, '/'); i >= 0 {
+		return path[:i+1] + name
+	}
+	return filepath.Join(filepath.Dir(path), name)
 }
 
 // pgPairFileMissing reports that path is known not to be there. A file that
