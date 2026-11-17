@@ -9,10 +9,13 @@ import (
 // parenthesis and still be one whose answer the connection's collation
 // cannot change (CollationFree): keywords that open a list or a group, and
 // functions that return a number or a date, or that return their column
-// argument with its own collation (MIN and MAX). A function that returns
-// text from something other than a column (CONCAT, DATE_FORMAT, CAST, LOWER,
-// IFNULL and the rest) is left out: MySQL gives that text the connection's
-// collation, and comparing, sorting or grouping it follows that collation.
+// argument with its own collation (MIN and MAX), and the length functions,
+// which return a number counted from their argument and compare nothing
+// (#2918; whether the copy counts a column as MySQL does is LengthVeto's).
+// A function that returns text from something other than a column (CONCAT,
+// DATE_FORMAT, CAST, LOWER, IFNULL and the rest) is left out: MySQL gives
+// that text the connection's collation, and comparing, sorting or grouping
+// it follows that collation.
 var collationFreeCalls = map[string]bool{
 	"in": true, "and": true, "or": true, "not": true, "exists": true, "from": true, "join": true, "on": true,
 	"using": true, "where": true, "select": true, "over": true, "distinct": true, "by": true, "when": true,
@@ -23,6 +26,7 @@ var collationFreeCalls = map[string]bool{
 	"hour": true, "minute": true, "second": true,
 	"now": true, "curdate": true, "utc_timestamp": true, "utc_date": true,
 	"unix_timestamp": true, "datediff": true, "timestampdiff": true,
+	"length": true, "octet_length": true, "bit_length": true, "char_length": true, "character_length": true,
 }
 
 var (

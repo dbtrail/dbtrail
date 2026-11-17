@@ -184,6 +184,10 @@ type BaselineTable struct {
 	// whose DISTINCT values the copy counts as MySQL does and the rest
 	// (baseline.TableFooter.DistinctSafe, #2532). Set with SchemaKnown.
 	DistinctSafe, DistinctOther []string
+	// LengthSafe and LengthOther split them into those whose LENGTH and
+	// CHAR_LENGTH family the copy counts as MySQL does and the rest
+	// (baseline.TableFooter.LengthSafe, #2918). Set with SchemaKnown.
+	LengthSafe, LengthOther []string
 	// Text are the table's text columns, each with how MySQL compares it
 	// against the copy (baseline.TableFooter.Text, #2533). Set with
 	// SchemaKnown.

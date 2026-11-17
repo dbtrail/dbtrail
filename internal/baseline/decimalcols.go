@@ -79,6 +79,12 @@ type TableFooter struct {
 	// DistinctOther every other column (DistinctColumns). Read routing lets
 	// the copy answer COUNT(DISTINCT col) only over the first (#2532).
 	DistinctSafe, DistinctOther []string
+	// LengthSafe are the table's columns whose LENGTH, OCTET_LENGTH, BIT_LENGTH,
+	// CHAR_LENGTH and CHARACTER_LENGTH the copy counts as MySQL does, text in
+	// utf8mb4, utf8mb3 or ascii, and LengthOther every other column
+	// (LengthColumns). Read routing lets the copy answer those calls only over
+	// the first (#2918).
+	LengthSafe, LengthOther []string
 	// Text are the table's text columns, each with how MySQL compares it
 	// against the copy (TextColumns, #2533). Read routing holds a statement
 	// that names one to what the copy compares as MySQL does.
@@ -648,6 +654,7 @@ func collectDecimalRows(rows *sql.Rows, st *footerScan) {
 			NotHeld: notHeld, NotHeldUnread: notHeldUnread, Temporal: TemporalColumns(cols)}
 		f := st.footers[file]
 		f.DistinctSafe, f.DistinctOther = DistinctColumns(cols)
+		f.LengthSafe, f.LengthOther = LengthColumns(string(createSQL), cols)
 		f.UnixTimeSafe, f.UnixTimeOther = UnixTimeColumns(cols)
 		f.WholeSafe, f.WholeOther = WholeNumberColumns(cols)
 		f.Text = TextColumns(string(createSQL), cols)

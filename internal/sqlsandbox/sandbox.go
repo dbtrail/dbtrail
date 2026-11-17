@@ -391,6 +391,11 @@ type Session struct {
 // (#2848): unsigned are the UNSIGNED TINYINT to BIGINT columns, star says the
 // statement holds a star (Refs), and the answer is why the copy must not
 // answer a statement that does arithmetic on one, or "".
+//
+// LengthVeto is about LENGTH, OCTET_LENGTH, BIT_LENGTH, CHAR_LENGTH and
+// CHARACTER_LENGTH under routing (#2918): safe are the text columns in
+// utf8mb4, utf8mb3 or ascii, other the rest, and the answer is why a call
+// must not be answered by the copy, or "".
 type ColumnTypes interface {
 	ColumnVeto(dates, whole []string, star bool) string
 	NameVeto(names []string) string
@@ -405,6 +410,7 @@ type ColumnTypes interface {
 	FloatVeto(floats []string, star bool) string
 	UnsignedVeto(unsigned []string, star bool) string
 	AvgVeto(whole, other []string) string
+	LengthVeto(safe, other []string) string
 }
 
 // Column is one result column with DuckDB's type name (INTEGER, VARCHAR,

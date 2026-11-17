@@ -1724,6 +1724,9 @@ func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, stateme
 	if msg := sqlRoundRefusalFor(narrowed, statement, types); msg != "" {
 		return msg
 	}
+	if msg := sqlLengthRefusalFor(narrowed, statement, types); msg != "" {
+		return msg
+	}
 	if msg := sqlFloatRefusalFor(narrowed, refs, types); msg != "" {
 		return msg
 	}
@@ -1820,6 +1823,118 @@ func sqlRoundRefusalFor(narrowed views.Input, statement string, types sqlsandbox
 			safe = nil
 		}
 		why = types.RoundVeto(safe, other)
+	}
+	if why == "" {
+		return ""
+	}
+	return "the copy does not answer this statement: " + why
+}
+
+// lengthWord is a call of one of the length functions anywhere in a
+// statement's Shape (each name ends with LENGTH), for a statement that could
+// not be read (sqlLengthRefusalFor). It is matched against the Shape and not
+// the raw text: there comments are blanked, so LENGTH/**/(c) and a name
+// split from its parenthesis by a -- or # comment are the calls the rewriter
+// takes them for. A string is blanked too, which only spares a refusal.
+var lengthWord = regexp.MustCompile(`(?i)length[\s\v"` + "`" + `]*\(`)
+
+// blankCommentsAndStrings is the statement with every comment (/* */, -- and
+// #) and every single-quoted string replaced by spaces, for the one search
+// that has no reading of the statement (sqlLengthRefusalFor). The console
+// cannot import the routing package (its read layer must not link a capture
+// library), so this is the small part of its Shape the search needs. A name
+// quoted with a backtick or a double quote is kept as written. An
+// unterminated comment or string blanks to the end: over-blanking can only
+// hide a call that MySQL does not run either.
+func blankCommentsAndStrings(s string) string {
+	b := []byte(s)
+	blank := func(from, to int) {
+		for i := from; i < to && i < len(b); i++ {
+			if b[i] != '\n' {
+				b[i] = ' '
+			}
+		}
+	}
+	for i := 0; i < len(b); {
+		switch {
+		case b[i] == '/' && i+1 < len(b) && b[i+1] == '*':
+			end := strings.Index(string(b[i+2:]), "*/")
+			to := len(b)
+			if end >= 0 {
+				to = i + 2 + end + 2
+			}
+			blank(i, to)
+			i = to
+		case b[i] == '#' || b[i] == '-' && i+1 < len(b) && b[i+1] == '-' && (i+2 >= len(b) || b[i+2] == ' ' || b[i+2] == '\t' || b[i+2] == '\n' || b[i+2] == '\r'):
+			to := i
+			for to < len(b) && b[to] != '\n' {
+				to++
+			}
+			blank(i, to)
+			i = to
+		case b[i] == '\'':
+			to := i + 1
+			for to < len(b) {
+				if b[to] == '\\' {
+					to += 2
+					continue
+				}
+				if b[to] == '\'' {
+					if to+1 < len(b) && b[to+1] == '\'' {
+						to += 2
+						continue
+					}
+					to++
+					break
+				}
+				to++
+			}
+			if to > len(b) {
+				to = len(b)
+			}
+			blank(i, to)
+			i = to
+		case b[i] == '`' || b[i] == '"':
+			q := b[i]
+			i++
+			for i < len(b) && b[i] != q {
+				i++
+			}
+			i++
+		default:
+			i++
+		}
+	}
+	return string(b)
+}
+
+// sqlLengthRefusalFor says why the copy must not answer a statement because of
+// a LENGTH, OCTET_LENGTH, BIT_LENGTH, CHAR_LENGTH or CHARACTER_LENGTH call, or
+// "" when it can (#2918). MySQL counts the bytes of a text in its column's
+// character set, the copy those of the UTF-8 it holds: over a latin1 column
+// 'é' is 1 on MySQL and 2 on the copy. The rule is the routing layer's
+// (readrouter.LengthVeto, asked through types), over every table's columns
+// split by character set from its snapshot's table definition. A table whose
+// column types are not known can hold any text under any name: no column is
+// safe then. With no reading of the statement (types is nil) the copy does
+// not answer a statement with such a call: not known is never "nothing to
+// find".
+func sqlLengthRefusalFor(narrowed views.Input, statement string, types sqlsandbox.ColumnTypes) string {
+	why := ""
+	switch {
+	case types == nil && lengthWord.MatchString(blankCommentsAndStrings(statement)):
+		why = "the statement could not be searched for its LENGTH and CHAR_LENGTH calls"
+	case types != nil:
+		var safe, other []string
+		unknown := false
+		for _, t := range narrowed.SelectedBaselines() {
+			unknown = unknown || !t.SchemaKnown
+			safe, other = append(safe, t.LengthSafe...), append(other, t.LengthOther...)
+		}
+		if unknown {
+			safe = nil
+		}
+		why = types.LengthVeto(safe, other)
 	}
 	if why == "" {
 		return ""

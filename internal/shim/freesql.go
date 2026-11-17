@@ -423,7 +423,11 @@ func (h *Handler) copyOpts() readrouter.CopyOptions {
 	// copy's exact average of whole numbers, defined there too (#2920); the
 	// console keeps on MySQL an AVG of anything else, or one used other than
 	// as a column of the select list (readrouter.AvgVeto).
-	return readrouter.CopyOptions{LikeIgnoresCase: h.routerCfg.LikeIgnoresCase, MySQLClockKeywords: true, MySQLDateFunctions: true, MySQLDateSub: true, MySQLDateAdd: true, MySQLTimestampDiff: true, MySQLAvg: true}
+	// MySQLLength: LENGTH and OCTET_LENGTH as the copy's strlen, a count of
+	// bytes as MySQL's (#2918); the console keeps on MySQL a call whose
+	// argument is not a text column in utf8mb4, utf8mb3 or ascii
+	// (readrouter.LengthVeto).
+	return readrouter.CopyOptions{LikeIgnoresCase: h.routerCfg.LikeIgnoresCase, MySQLClockKeywords: true, MySQLDateFunctions: true, MySQLDateSub: true, MySQLDateAdd: true, MySQLTimestampDiff: true, MySQLAvg: true, MySQLLength: true}
 }
 
 // Close releases what a connection holds: the router's upstream connection,

@@ -32,12 +32,14 @@ var visitRows = [][2]string{
 }
 
 const visitsCreate = "CREATE TABLE `visits` (\n  `id` int NOT NULL,\n  `side` varchar(8) DEFAULT NULL,\n  `code` char(6) DEFAULT NULL,\n" +
-	"  `seen_at` datetime DEFAULT NULL,\n  `stamped` timestamp NULL DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n"
+	"  `seen_at` datetime DEFAULT NULL,\n  `stamped` timestamp NULL DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n"
 
 // writeVisitsBaseline writes the copy of <schema>.visits with the same times
 // as the source and `side` in every row, the CREATE TABLE in the footer (the
 // way `bintrail baseline` writes one), so the copy can tell the DATETIME
-// from the TIMESTAMP.
+// from the TIMESTAMP. The table ends with its character set, as a real
+// SHOW CREATE TABLE does: the scan counts LENGTH(code), which the copy answers
+// only over a column whose character set the definition names (#2918).
 func writeVisitsBaseline(t *testing.T, dir, schema, side string) {
 	t.Helper()
 	cols, err := baseline.ParseSchemaText(visitsCreate)
@@ -98,6 +100,10 @@ func directConn(t *testing.T, dsn string) *sql.Conn {
 // CHAR column with a mark after it, which is where PAD_CHAR_TO_FULL_LENGTH
 // shows.
 const visitsScan = "SELECT side, seen_at, stamped, LENGTH(code), count(*) FROM visits GROUP BY side, seen_at, stamped, code ORDER BY seen_at"
+
+// visitsScanLiteral is visitsScan with a string literal, which takes the
+// connection's collation.
+const visitsScanLiteral = "SELECT side, seen_at, stamped, LENGTH(code), count(*) FROM visits WHERE side <> 'zz' GROUP BY side, seen_at, stamped, code ORDER BY seen_at"
 
 // The same three rows as primary-key lookups, which MySQL always answers.
 func visitsByLookup(t *testing.T, c *sql.Conn) [][]string {
@@ -470,7 +476,13 @@ func TestIntegrationFlashbackRoutedSessionSettings(t *testing.T) {
 		} {
 			c := rig.conn(t, "")
 			must(t, c, set)
-			if got := connStrings(t, c, visitsScan); sidesOf(got) == "copy" {
+			// The plain scan has no string literal, so a collation alone does
+			// not move it (LENGTH is a number, #2918); with one it does.
+			scan := visitsScan
+			if strings.Contains(set, "COLLATE") {
+				scan = visitsScanLiteral
+			}
+			if got := connStrings(t, c, scan); sidesOf(got) == "copy" {
 				t.Errorf("after %s the copy answered", set)
 			}
 		}
@@ -782,7 +794,15 @@ func TestIntegrationFlashbackRoutedSessionMariaDB(t *testing.T) {
 		if got := connStrings(t, d, "SELECT @@collation_connection")[0][0]; got != "utf8mb4_general_ci" {
 			t.Errorf("after the client's SET NAMES the session is in %s", got)
 		}
-		rig.scan(t, d, "live")
+		// The full scan has no string literal and no call that returns text:
+		// LENGTH is a number the collation cannot change (#2918), so the
+		// copy still answers it, and its answer is MySQL's (scan checks).
+		rig.scan(t, d, "copy")
+		// With a string literal, which takes the connection's collation,
+		// MySQL answers.
+		if got := connStrings(t, d, visitsScanLiteral); sidesOf(got) != "live" {
+			t.Errorf("a statement with a string literal under utf8mb4_general_ci was answered by %q, want live", sidesOf(got))
+		}
 	}
 	c := rig.conn(t, "")
 	must(c, "SET time_zone = 'Europe/Madrid'")

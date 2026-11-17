@@ -141,6 +141,16 @@ type CopyOptions struct {
 	// list (AvgVeto). Off, AVG is sent as written: the copy's own avg, a
 	// DOUBLE.
 	MySQLAvg bool
+	// MySQLLength writes MySQL's LENGTH and OCTET_LENGTH as the copy's strlen,
+	// its count of a text's bytes (#2918): the copy's own length counts
+	// characters (length('é') is 1 there and LENGTH('é') 2 on MySQL), and its
+	// octet_length takes no text. Only a call is rewritten, and not one after
+	// a dot. Only the routing port sets it, and the caller keeps on MySQL a
+	// call whose argument is not a text column in utf8mb4, utf8mb3 or ascii
+	// (LengthVeto). BIT_LENGTH, CHAR_LENGTH and CHARACTER_LENGTH need no
+	// rewrite: the copy's own functions already count the bits and the
+	// characters of the UTF-8.
+	MySQLLength bool
 }
 
 // ForCopy returns the statement the copy is sent: every backtick-quoted name
@@ -582,7 +592,11 @@ func wordByte(c byte) bool {
 
 // rewrittenKeywords are the words copyText may rewrite, lowercase.
 var rewrittenKeywords = []string{"straight_join", "like", "limit", "date_format", "datediff", "date_sub", "subdate", "date_add", "adddate", "timestampdiff",
-	"current_timestamp", "current_date", "localtime", "localtimestamp", "avg"}
+	"current_timestamp", "current_date", "localtime", "localtimestamp", "avg", "length", "octet_length"}
+
+// lengthCallOpen is what follows LENGTH or OCTET_LENGTH, in the blanked text,
+// when the word is a call and not a column of that name.
+var lengthCallOpen = regexp.MustCompile(`^` + callOpen)
 
 // keywordAt is where one of rewrittenKeywords starts in the text sent to the
 // copy (cp) and in the blanked text (bl).
@@ -604,9 +618,10 @@ type keywordAt struct {
 // SUBDATE mysqlDateSubCall reads as the copy's macro, with o.MySQLDateAdd each
 // DATE_ADD and ADDDATE mysqlDateAddCall reads as the other macro, and with o.MySQLClockKeywords each
 // CURRENT_TIMESTAMP, LOCALTIME, LOCALTIMESTAMP and CURRENT_DATE the call it
-// means (clockCall). The keywords are taken from the last one
-// back, so a call inside another one's arguments is rewritten first, and the
-// outer one reads its arguments from the text already rewritten.
+// means (clockCall), and with o.MySQLLength each LENGTH and OCTET_LENGTH call
+// strlen. The keywords are taken from the last one back, so a call inside
+// another one's arguments is rewritten first, and the outer one reads its
+// arguments from the text already rewritten.
 //
 // Which of the two joins is read from the blanked text, where comments are
 // gone and string literals are ”, so an ON inside either is not seen. A
@@ -693,6 +708,11 @@ func (sc scanned) copyText(o CopyOptions) string {
 			}
 			cp = cp[:j.cp] + "LIMIT " + count + " OFFSET " + offset + cp[j.cp+kw+n:]
 			continue
+		case j.word == "length" || j.word == "octet_length":
+			if !o.MySQLLength || !lengthCallOpen.MatchString(bl[j.bl+kw:]) {
+				continue
+			}
+			repl = "strlen"
 		case j.word == "like":
 			if !o.LikeIgnoresCase {
 				continue

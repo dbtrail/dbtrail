@@ -1140,7 +1140,7 @@ The decision, in order, for every statement:
    | `sql_big_selects` | `1` | `0` (MySQL refuses large reads; with `max_join_size` at its default it is 1) |
    | `character_set_results` | `utf8mb4`; `NULL` or `binary` (no conversion: each column comes in its own character set and says so, as from the copy); `utf8mb3` (also spelled `utf8`), since #2917, except an answer with a character utf8mb3 does not have (below) | `latin1` and the rest: MySQL converts, the copy answers in utf8mb4 |
    | `character_set_connection` | `utf8mb4`; `utf8mb3` (also spelled `utf8`), since #2917, except a statement with a character utf8mb3 does not have (below) | `latin1` and the rest: MySQL converts a literal to it, and one outside it becomes `?` there and stays itself on the copy |
-   | the connection's collation (`SET NAMES ... COLLATE`, `collation_connection`), which decides comparisons between two literals (a column carries its own) | one that compares like `utf8mb4_0900_ai_ci`: no case, no accents, `ß` equal to `ss`, a full-width letter equal to the plain one. The copy itself folds case only: accents, `ß` and full-width letters stay a documented difference under every one of these (see "The copy itself compares text"). Measured: `utf8mb4_0900_ai_ci`, `utf8mb4_unicode_ci`, `utf8mb4_unicode_520_ci`, MariaDB's `utf8mb4_uca1400_ai_ci` and the `_nopad_` variants of those. Under the ones that pad (`unicode_ci`, `unicode_520_ci`, `uca1400_ai_ci`, MariaDB's default) one difference stays: `'a' = 'a '` is true on MySQL and false on the copy, as for a column under a PAD SPACE collation | `utf8mb4_general_ci` and `utf8mb4_general_nopad_ci` (`ß` equals `s`, a full-width letter is another letter), `_bin`, `_cs`, `_as_cs`: since #2836, only for a statement with a string literal (or a double-quoted string, a hex or bit number, a placeholder) or a call other than `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, the number and date functions (`ROUND`, `YEAR`, `NOW()`, `DATEDIFF` and a few more) and the keywords that open a list. A statement with neither has no text that takes the connection's collation (a column carries its own, and wins against a literal), and the copy answers it under any collation |
+   | the connection's collation (`SET NAMES ... COLLATE`, `collation_connection`), which decides comparisons between two literals (a column carries its own) | one that compares like `utf8mb4_0900_ai_ci`: no case, no accents, `ß` equal to `ss`, a full-width letter equal to the plain one. The copy itself folds case only: accents, `ß` and full-width letters stay a documented difference under every one of these (see "The copy itself compares text"). Measured: `utf8mb4_0900_ai_ci`, `utf8mb4_unicode_ci`, `utf8mb4_unicode_520_ci`, MariaDB's `utf8mb4_uca1400_ai_ci` and the `_nopad_` variants of those. Under the ones that pad (`unicode_ci`, `unicode_520_ci`, `uca1400_ai_ci`, MariaDB's default) one difference stays: `'a' = 'a '` is true on MySQL and false on the copy, as for a column under a PAD SPACE collation | `utf8mb4_general_ci` and `utf8mb4_general_nopad_ci` (`ß` equals `s`, a full-width letter is another letter), `_bin`, `_cs`, `_as_cs`: since #2836, only for a statement with a string literal (or a double-quoted string, a hex or bit number, a placeholder) or a call other than `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, the number and date functions (`ROUND`, `YEAR`, `NOW()`, `DATEDIFF` and a few more), the length functions (`LENGTH`, `OCTET_LENGTH`, `BIT_LENGTH`, `CHAR_LENGTH`, `CHARACTER_LENGTH`, since #2918) and the keywords that open a list. A statement with neither has no text that takes the connection's collation (a column carries its own, and wins against a literal), and the copy answers it under any collation |
 
    These are session settings whose value MySQL reads when it answers a
    `SELECT` the vetoes of step 3 let through. `group_concat_max_len` and
@@ -2229,6 +2229,22 @@ What this is and is not:
     significant digits on the copy. It stays this way because nothing is
     rewritten for the copy and a double carries no scale to print by.
     Division and modulo by zero are `NULL` on both.
+  - **`LENGTH` and `OCTET_LENGTH` count characters** on the copy (on the
+    port without routing and in the console), where MySQL counts the bytes
+    of the text in the column's character set: `LENGTH('é')` is `1` there
+    and `2` on MySQL, and `OCTET_LENGTH` of a text is an error there. Under
+    Engine Routing (#2918) the port sends both as the copy's `strlen`, which
+    counts bytes, and the copy answers them, `BIT_LENGTH`, `CHAR_LENGTH` and
+    `CHARACTER_LENGTH` only when each call's one argument is a `CHAR`,
+    `VARCHAR` or `TEXT` column in `utf8mb4`, `utf8mb3` or `ascii`, whose
+    bytes are the copy's. Then the numbers are MySQL's, four-byte characters
+    and combining accents included, and a `CHAR` counts without its trailing
+    spaces on both (`PAD_CHAR_TO_FULL_LENGTH` keeps the session on MySQL).
+    Everything else stays on MySQL, counted as `copy_columns_differ`: a
+    `latin1` column (`é` is one byte there and two on the copy), a binary,
+    `JSON`, `ENUM` or `SET` column, a number or a date, an expression, a
+    string or a placeholder, a call after `GROUP BY`, `HAVING` or `ORDER BY`,
+    and a statement with a subquery or a `WITH`.
   - **`CASE` and `IF` over a `DECIMAL` and an integer.** A `DECIMAL`
     prints as on MySQL, with its scale and trailing zeros
     (`ROUND(SUM(amount), 2)` is `117329550.00` on both), with one
