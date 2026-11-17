@@ -259,6 +259,10 @@ type copyAnswer struct {
 	// tailThroughID is the least id of the index's event the tails it read
 	// hold every event through (#2556), 0 when unknown or none.
 	tailThroughID uint64
+	// readCopy says it read at least one table of the copy (sqlOutcome.
+	// ReadCopyTables): with files unknown, it tells an answer whose data
+	// cannot be placed from one that read no table.
+	readCopy bool
 	// shape is the statement's row in the router's per-statement table
 	// (#2360), "" when the table is off: the answer's lag is kept for that
 	// row too.

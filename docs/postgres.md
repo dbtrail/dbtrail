@@ -1178,12 +1178,17 @@ is listed with its mode, whether or not a statement reached it yet. The
 document also says `fresh` (true when `BINTRAIL_SQL_TAILS` puts every server in
 fresh mode) and `sql_mode_forced` (`fresh` or `fast` when that setting decides
 for every server), as the MySQL router's does. How old the data of a server's
-last answer was is `data_as_of` (the commit time on the source of the newest
-captured change it read) and `data_age_seconds` (how long before the answer
-that was, by this machine's clock), with `data_age_max_seconds` the worst
-since the process started. An answer from the snapshot alone has no age, and
-`data_age_unknown_reason` says so. On a source with no write since, the age
-grows though nothing is missing. With
+last answer was is `data_as_of` (every change capture had recorded up to
+this instant, a commit time on the source, was in what it read) and
+`data_age_seconds` (how long before the answer that was, by this machine's
+clock), with `data_age_max_seconds` the worst since the process started. Only
+an answer the client got counts, never a statement the source answered or one
+that ended in an error. An answer that read a table without its newest
+changes (fast mode, among others) has no age: `data_age_unknown` counts them,
+so with any the worst is a floor, and `data_age_unknown_reason` says why the
+last one has none. On a source with no write since, the age grows though
+nothing is missing; this machine's clock ahead of the source's makes it
+larger, and behind it smaller, down to 0. With
 `--status-statements` each server also carries `statements`: a row per
 statement shape and side, values blanked and table and column names kept. That
 address asks for no password: whoever reaches it reads the counts, and with

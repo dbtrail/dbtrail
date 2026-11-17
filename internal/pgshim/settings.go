@@ -644,7 +644,7 @@ func (s *session) copyHasSchema(schema string) *pgErr {
 	ctx, done := s.statementContext()
 	defer done()
 	res, err := s.bound.Run(ctx, "SELECT count(*) AS n FROM information_schema.schemata WHERE catalog_name = current_database() AND schema_name <> 'main' AND schema_name = '"+
-		strings.ReplaceAll(schema, "'", "''")+"'", RunOptions{Schema: s.defaultSchema})
+		strings.ReplaceAll(schema, "'", "''")+"'", RunOptions{Schema: s.defaultSchema, Probe: true})
 	if res.Spool != nil {
 		_ = res.Spool.Close()
 	}
@@ -1025,7 +1025,7 @@ func (s *session) zoneOnCopy(z zoneSetting, atStatement bool) *pgErr {
 	}
 	ctx, done := s.statementContext()
 	defer done()
-	res, err := s.bound.Run(ctx, "SELECT "+strings.Join(sel, ", "), RunOptions{Schema: s.defaultSchema, TimeZone: z.duck})
+	res, err := s.bound.Run(ctx, "SELECT "+strings.Join(sel, ", "), RunOptions{Schema: s.defaultSchema, TimeZone: z.duck, Probe: true})
 	if res.Spool != nil {
 		_ = res.Spool.Close()
 	}

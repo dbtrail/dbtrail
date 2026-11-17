@@ -193,7 +193,7 @@ func TestIntegrationPGRouterFreshMode_2756(t *testing.T) {
 	// The copy's age (#2756): the fresh answer read changes committed a
 	// moment ago, by this machine's clock; the test's own source and
 	// DBTrail share it.
-	if n := ages.doc("").Servers[e.ID]; n.DataAsOf == "" || n.DataAgeSeconds == nil || *n.DataAgeSeconds > 600 || n.DataAgeUnknownReason != "" || n.DataAgeMaxSeconds == nil {
+	if n := ages.doc("").Servers[e.ID]; n.DataAsOf == "" || n.DataAgeSeconds == nil || *n.DataAgeSeconds > 60 || n.DataAgeUnknownReason != "" || n.DataAgeMaxSeconds == nil {
 		t.Fatalf("the age after a fresh answer: as_of=%q age=%v max=%v why=%q", n.DataAsOf, n.DataAgeSeconds, n.DataAgeMaxSeconds, n.DataAgeUnknownReason)
 	}
 
@@ -205,7 +205,7 @@ func TestIntegrationPGRouterFreshMode_2756(t *testing.T) {
 	if got := read(); got != snapshot {
 		t.Fatalf("fast mode again: %s, want the snapshot %s", got, snapshot)
 	}
-	if n := ages.doc("").Servers[e.ID]; n.DataAgeUnknownReason == "" || n.DataAgeSeconds != nil || n.DataAgeMaxSeconds == nil {
+	if n := ages.doc("").Servers[e.ID]; n.DataAgeUnknownReason == "" || n.DataAgeSeconds != nil || n.DataAgeMaxSeconds == nil || n.DataAgeUnknown == 0 {
 		t.Fatalf("the age after a fast answer: age=%v max=%v why=%q", n.DataAgeSeconds, n.DataAgeMaxSeconds, n.DataAgeUnknownReason)
 	}
 	if n := takeNotices(); len(n) != 1 || !strings.Contains(n[0], "can be older than an earlier answer of the copy on this connection") {
