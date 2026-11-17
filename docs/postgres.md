@@ -1177,7 +1177,13 @@ mode: `sql_mode` (`fresh` or `fast`) and where that comes from,
 is listed with its mode, whether or not a statement reached it yet. The
 document also says `fresh` (true when `BINTRAIL_SQL_TAILS` puts every server in
 fresh mode) and `sql_mode_forced` (`fresh` or `fast` when that setting decides
-for every server), as the MySQL router's does. With
+for every server), as the MySQL router's does. How old the data of a server's
+last answer was is `data_as_of` (the commit time on the source of the newest
+captured change it read) and `data_age_seconds` (how long before the answer
+that was, by this machine's clock), with `data_age_max_seconds` the worst
+since the process started. An answer from the snapshot alone has no age, and
+`data_age_unknown_reason` says so. On a source with no write since, the age
+grows though nothing is missing. With
 `--status-statements` each server also carries `statements`: a row per
 statement shape and side, values blanked and table and column names kept. That
 address asks for no password: whoever reaches it reads the counts, and with

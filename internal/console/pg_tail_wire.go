@@ -97,3 +97,41 @@ func (s *Server) PostgresServerIDs() []string {
 	slices.Sort(out)
 	return out
 }
+
+// CopyRunAge is how old the data of the statement the copy last ran on a
+// connection was, as the PostgreSQL router reports it: the port does not
+// say which side answered (NoteRoute), so the router reads the run itself,
+// right after it succeeded.
+type CopyRunAge struct {
+	// Ran is when it finished.
+	Ran time.Time
+	// Through is the commit time on the source of the newest captured change
+	// it read, set when every table it read had its recent changes laid over
+	// it (Tailed).
+	Through time.Time
+	Tailed  bool
+	// Snapshot says it read the snapshot alone (fast mode, or a table with
+	// no recent changes of its own): how far that snapshot reaches is not
+	// recorded for a PostgreSQL source.
+	Snapshot bool
+}
+
+// LastRunAge is CopyRunAge of the copy's last successful run on this
+// connection; zero when it read no table of the copy.
+func (q *SQLOnCopy) LastRunAge() CopyRunAge {
+	if q == nil {
+		return CopyRunAge{}
+	}
+	q.last.mu.Lock()
+	p := q.last.pending
+	q.last.mu.Unlock()
+	switch {
+	case p == nil:
+		return CopyRunAge{}
+	case p.allTailed && !p.tailThrough.IsZero():
+		return CopyRunAge{Ran: p.ranAt, Through: p.tailThrough, Tailed: true}
+	case p.ok && len(p.files) > 0:
+		return CopyRunAge{Ran: p.ranAt, Snapshot: true}
+	}
+	return CopyRunAge{}
+}

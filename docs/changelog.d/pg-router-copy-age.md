@@ -1,0 +1,3 @@
+### Added
+
+- **The PostgreSQL port's status says how old each server's answers were** (#2756). `/status` of `pg-router` now gives, per server, `data_as_of` (the commit time on the source of the newest captured change its last answer read), `data_age_seconds` (how long before the answer that was), and `data_age_max_seconds` (the worst since the process started), the MySQL router's fields. An answer from the snapshot alone (fast mode) has no age: `data_age_unknown_reason` says so, since how far a PostgreSQL snapshot reaches is not recorded yet. On a source with no write since, the age grows though nothing is missing.

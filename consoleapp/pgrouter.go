@@ -860,7 +860,12 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 				schema = pgPortSchema
 			}
 			sess := sqlsandbox.Session{PostgresRules: true, PostgresNames: true, TimeZone: opts.TimeZone}
-			return copySQL.Run(ctx, statement, schema, sess)
+			res, err := copySQL.Run(ctx, statement, schema, sess)
+			if err == nil {
+				// How old what it read was, for /status (#2756).
+				routes.age(tgt.ID, copySQL.LastRunAge())
+			}
+			return res, err
 		}
 		// The system catalog's statements are answered from the copy's own
 		// tables (#2769), read in UTC and in the port's schema: what the
