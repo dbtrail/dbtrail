@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func pgServer(name string) map[string]any {
@@ -67,7 +69,8 @@ func TestPortOnAndStatusWithPostgresServers(t *testing.T) {
 			}
 			text := out.String()
 			for _, s := range []string{"The port for SQL clients is on.", `psql "host=10.0.0.5 port=5433 dbname=shop user=app sslmode=require"`,
-				"The database is the server's name", "goes to your PostgreSQL as the server's forwarding user"} {
+				"The database is the server's name", "goes to your PostgreSQL as the server's forwarding user",
+				"fresh lays the changes captured since the last snapshot over it", "port mode <server> [fresh|fast]"} {
 				if !strings.Contains(text, s) {
 					t.Errorf("output lacks %q:\n%s", s, text)
 				}
@@ -124,6 +127,61 @@ func TestPortOnWithMySQLServersIsAsBefore(t *testing.T) {
 	}
 }
 
+// #2756: a PostgreSQL server has fresh and fast mode on the PostgreSQL port,
+// so `port mode` says and saves its choice. It never reads GET /api/router,
+// the MySQL router's status, which says nothing of the PostgreSQL port's.
+func TestPortModeOfAPostgresServer(t *testing.T) {
+	for _, tc := range []struct {
+		name, want   string
+		fresh, saved bool
+		put          map[string]any
+		says         []string
+	}{
+		{"a look, nothing saved", "", true, false, nil,
+			[]string{`Nothing is saved for "shop": it is fresh, the default.`, pgPortModeNote}},
+		{"fast saved", "fast", true, false, map[string]any{"fresh": false, "fresh_saved": true},
+			[]string{`Saved for "shop": fast.`, pgPortModeNote}},
+		{"fresh saved", "fresh", false, true, map[string]any{"fresh": true, "fresh_saved": true},
+			[]string{`Saved for "shop": fresh.`, pgPortModeNote}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, c := newFakeDaemon(t)
+			srv := pgServer("shop")
+			srv["sql_fresh"], srv["sql_fresh_saved"] = tc.fresh, tc.saved
+			d.on("GET /api/servers", 200, map[string]any{"servers": []map[string]any{srv}})
+			if tc.put != nil {
+				d.on("PUT /api/servers/id-shop/sql-mode", 200, tc.put)
+			}
+			var out bytes.Buffer
+			if err := runPortMode(context.Background(), c, "shop", tc.want, time.Second, &out); err != nil {
+				t.Fatalf("err = %v\n%s", err, out.String())
+			}
+			t.Logf("port mode shop %s:\n%s", tc.want, out.String())
+			for _, s := range tc.says {
+				if !strings.Contains(out.String(), s) {
+					t.Errorf("output lacks %q:\n%s", s, out.String())
+				}
+			}
+			for _, s := range []string{"no fresh mode", "is a PostgreSQL", "The router answers it", "MySQL"} {
+				if strings.Contains(out.String(), s) {
+					t.Errorf("output says %q:\n%s", s, out.String())
+				}
+			}
+			if slices.Contains(d.calls, "GET /api/router") {
+				t.Errorf("the MySQL router's status was read: %v", d.calls)
+			}
+			if saved := slices.Contains(d.calls, "PUT /api/servers/id-shop/sql-mode"); saved != (tc.want != "") {
+				t.Errorf("saved = %v for mode %q: %v", saved, tc.want, d.calls)
+			}
+			if tc.want != "" {
+				if b := d.bodies["PUT /api/servers/id-shop/sql-mode"]; len(b) != 1 || b["fresh"] != (tc.want == "fresh") {
+					t.Errorf("body = %v", b)
+				}
+			}
+		})
+	}
+}
+
 // What only a MySQL or MariaDB source has is refused for PostgreSQL before
 // anything is changed.
 func TestPortSettingsOfTheMySQLPortRefusePostgres(t *testing.T) {
@@ -132,7 +190,7 @@ func TestPortSettingsOfTheMySQLPortRefusePostgres(t *testing.T) {
 		d, c := newFakeDaemon(t)
 		d.on("GET /api/servers", 200, servers)
 		err := runPortRouting(context.Background(), c, true, io.Discard)
-		if err == nil || !strings.Contains(err.Error(), "The servers here are PostgreSQL") {
+		if err == nil || !strings.Contains(err.Error(), "The servers here are PostgreSQL") || strings.Contains(err.Error(), "fresh mode") {
 			t.Fatalf("err = %v", err)
 		}
 		for _, call := range d.calls {
@@ -148,26 +206,13 @@ func TestPortSettingsOfTheMySQLPortRefusePostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	t.Run("mode", func(t *testing.T) {
-		d, c := newFakeDaemon(t)
-		d.on("GET /api/servers", 200, servers)
-		for _, want := range []string{"", "fresh", "fast"} {
-			err := runPortMode(context.Background(), c, "shop", want, 0, io.Discard)
-			if err == nil || !strings.Contains(err.Error(), `"shop" is a PostgreSQL`) {
-				t.Fatalf("mode %q: err = %v", want, err)
-			}
-		}
-		if len(d.calls) != 3 {
-			t.Errorf("calls = %v, want the three reads of the list and nothing saved", d.calls)
-		}
-	})
 	t.Run("max-behind", func(t *testing.T) {
 		d, c := newFakeDaemon(t)
 		d.on("GET /api/servers", 200, servers)
 		five := int64(300)
 		for _, want := range []*int64{nil, &five} {
 			err := runPortMaxBehind(context.Background(), c, "shop", want, io.Discard)
-			if err == nil || !strings.Contains(err.Error(), `"shop" is a PostgreSQL`) {
+			if err == nil || !strings.Contains(err.Error(), `"shop" is a PostgreSQL`) || strings.Contains(err.Error(), "fresh mode") {
 				t.Fatalf("err = %v", err)
 			}
 		}

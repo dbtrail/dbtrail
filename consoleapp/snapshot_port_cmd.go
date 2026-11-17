@@ -149,8 +149,8 @@ recorded, without reading the database again. --off stops the updates.`,
 	}
 	mode := &cobra.Command{
 		Use:   "mode <server> [fresh|fast]",
-		Short: "Say or choose how current a server's answers on the MySQL port are: fresh or fast",
-		Long: `Say or choose how current a server's answers on the MySQL port are.
+		Short: "Say or choose how current a server's answers on the SQL port are: fresh or fast",
+		Long: `Say or choose how current a server's answers on the SQL port are.
 
   bintrail-console port mode shop          what is saved, and what the router applies
   bintrail-console port mode shop fast     answer from the last snapshot alone
@@ -161,7 +161,11 @@ usually seconds, and keeps those changes in the router's memory. Fast answers
 as of the copy's last update, and leaves that memory to the statements.
 
 BINTRAIL_SQL_TAILS (SQL_FRESH in the compose .env), when it says on or off,
-decides for every server: a choice saved here then applies once it is removed.`,
+decides for every server: a choice saved here then applies once it is removed.
+
+A PostgreSQL server's choice is the PostgreSQL port's (5433): the same two
+modes, read by the PostgreSQL router within a few seconds. For one, this
+command says what is saved, not what that router applies.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) < 1 || len(args) > 2 {
 				return errors.New("name one server, and fresh or fast to choose: port mode <server> [fresh|fast]")
@@ -469,7 +473,11 @@ func postgresInstall(servers []ctlServer, err error) bool {
 
 // postgresOnlyRefusal is why a setting of the MySQL port has nothing to act
 // on for a PostgreSQL server.
-const postgresOnlyRefusal = "its port decides statement by statement whether the copy or the source answers, when the server has a forwarding user (bintrail-console server forward-user); it has no fresh mode, and no lag limit is set for it from here yet"
+const postgresOnlyRefusal = "its port decides statement by statement whether the copy or the source answers, when the server has a forwarding user (bintrail-console server forward-user), and no lag limit is set for it from here yet"
+
+// pgPortModeNote is what `port mode` says of a PostgreSQL server after what
+// is saved: who applies it, and what this command cannot see.
+const pgPortModeNote = "The PostgreSQL port (5433) answers it in that mode once its router reads the choice, within a few seconds; BINTRAIL_SQL_TAILS=on or =off where that router starts (SQL_FRESH in the compose .env) decides for every server instead. This command does not read what that router applies."
 
 // printPortPG is printPort for an installation of PostgreSQL servers
 // (#2773): the setting and its password are the same, what answers is the
@@ -490,6 +498,7 @@ func printPortPG(out io.Writer, p ctlPort, db string) {
 	}
 	fmt.Fprintf(out, "The port for SQL clients is on. PostgreSQL clients connect to the PostgreSQL port (5433, unless the PostgreSQL router was given another). %s, and the user can be anything:\n\n  psql \"host=%s port=5433 dbname=%s user=app sslmode=require\"\n\n", who, host, db)
 	fmt.Fprintln(out, "The copy answers what it is known to answer as PostgreSQL does. Every other statement, and a transaction block a client opens, goes to your PostgreSQL as the server's forwarding user, read-only, when one is set (bintrail-console server forward-user); without one, the copy answers alone.")
+	fmt.Fprintln(out, "The copy's answers are fresh unless fast is chosen for the server: fresh lays the changes captured since the last snapshot over it, fast reads the last snapshot alone (bintrail-console port mode <server> [fresh|fast]).")
 	if p.Notice != "" {
 		fmt.Fprintf(out, "\n%s\n", p.Notice)
 	}
@@ -692,9 +701,8 @@ func runPortMode(ctx context.Context, c *ctlClient, name, want string, wait time
 		return fmt.Errorf("%q was given where DBTrail starts and has no choice of its own: it answers in fast mode unless SQL_FRESH=on (BINTRAIL_SQL_TAILS=on) says fresh for every server. Add it as a server (dbtrail server add) to choose", s.Name)
 	case !s.HasSource:
 		return fmt.Errorf("%q has no source database, so the MySQL port does not answer for it", s.Name)
-	case s.Flavor == console.FlavorPostgres:
-		return fmt.Errorf("%q is a PostgreSQL: %s", s.Name, postgresOnlyRefusal)
 	}
+	pg := s.Flavor == console.FlavorPostgres
 	if want != "" {
 		var saved struct {
 			Fresh      bool `json:"fresh"`
@@ -713,6 +721,13 @@ func runPortMode(ctx context.Context, c *ctlClient, name, want string, wait time
 		fmt.Fprintf(out, "Saved for %q: %s.\n", s.Name, savedMode)
 	} else {
 		fmt.Fprintf(out, "Nothing is saved for %q: it is %s, the default.\n", s.Name, savedMode)
+	}
+	if pg {
+		// GET /api/router is the MySQL router's status, which says nothing
+		// about the PostgreSQL port's: what that router applies is not read
+		// here, and is not guessed.
+		fmt.Fprintln(out, pgPortModeNote)
+		return nil
 	}
 	// What the router applies: read until it agrees with what was just
 	// saved, for a little while, since it reads the choice every few

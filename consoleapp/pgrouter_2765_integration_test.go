@@ -121,9 +121,10 @@ func TestIntegrationPGRouter(t *testing.T) {
 
 	// The port as the command runs it: the servers and the port's password
 	// read from the daemon's files by a console that cannot write them
-	// (newRouterConsole), with no tails, behind the port's own loop.
-	t.Setenv("BINTRAIL_SQL_TAILS", "")
-	pgRouterNoTails()
+	// (newRouterConsole), in fast mode, behind the port's own loop.
+	// Fast mode for every server: what is tested here is the copy as of
+	// its snapshot, not the tails laid over it.
+	t.Setenv("BINTRAIL_SQL_TAILS", "off")
 	f := newRouterFiles(t)
 	hour := time.Now().UTC().Truncate(time.Hour)
 	dsn := seedFlashbackIndex(t, "alice", hour)

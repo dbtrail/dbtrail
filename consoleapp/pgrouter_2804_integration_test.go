@@ -24,8 +24,9 @@ import (
 // from the port's loop to a connection.
 func TestIntegrationPGRouter_answersAreCountedInThePortsResultBudget(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
-	t.Setenv("BINTRAIL_SQL_TAILS", "")
-	pgRouterNoTails()
+	// Fast mode for every server: what is tested here is the copy as of
+	// its snapshot, not the tails laid over it.
+	t.Setenv("BINTRAIL_SQL_TAILS", "off")
 	f := newRouterFiles(t)
 	hour := time.Now().UTC().Truncate(time.Hour)
 	dsn := seedFlashbackIndex(t, "alice", hour)

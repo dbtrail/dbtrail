@@ -131,8 +131,9 @@ func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx
 		t.Fatalf("pgbaseline.Run: %v", err)
 	}
 
-	t.Setenv("BINTRAIL_SQL_TAILS", "")
-	pgRouterNoTails()
+	// Fast mode for every server: what is tested here is the copy as of
+	// its snapshot, not the tails laid over it.
+	t.Setenv("BINTRAIL_SQL_TAILS", "off")
 	f := newRouterFiles(t)
 	hour := time.Now().UTC().Truncate(time.Hour)
 	dsn := seedFlashbackIndex(t, "alice", hour)
