@@ -851,6 +851,14 @@ services:
       BINTRAIL_PG_ROUTER_WORKERS: ${PG_ROUTER_WORKERS:-}
       BINTRAIL_PG_ROUTER_THREADS: ${PG_ROUTER_THREADS:-}
       BINTRAIL_PG_ROUTER_MAX_CONNECTIONS: ${PG_ROUTER_MAX_CONNECTIONS:-}
+      # Fresh or fast, the same SQL_FRESH as the router's above: unset, each
+      # server answers in its own mode, fresh unless fast is saved for it on
+      # its Snapshots page. Fresh lays each table's newest captured changes
+      # over its snapshot and holds them in memory, up to a fifth of this
+      # service's (of PG_ROUTER_MEMORY when that is set) for each server in
+      # fresh mode, besides the statements' own: with several servers fresh,
+      # give the service the memory for all of them. SQL_FRESH=off: the snapshot alone, for every server.
+      BINTRAIL_SQL_TAILS: ${SQL_FRESH:-}
       # How long a statement waits for its turn when every worker is busy,
       # e.g. PG_ROUTER_MAX_WAIT=30s in .env; past it the client gets an error.
       BINTRAIL_PG_ROUTER_MAX_WAIT: ${PG_ROUTER_MAX_WAIT:-}

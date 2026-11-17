@@ -81,6 +81,21 @@ func (s *Server) FreshServerNames() []string {
 	return out
 }
 
+// FreshPostgresServerNames is FreshServerNames for the PostgreSQL servers
+// alone, for the PostgreSQL router's startup lines: it answers no other, so
+// a MySQL server listed fresh (an installation from before one family per
+// installation) is not named there.
+func (s *Server) FreshPostgresServerNames() []string {
+	var out []string
+	for _, id := range s.fresh.ids() {
+		if s.SourceIsPostgres(id) {
+			out = append(out, s.serverName(id))
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
 // SQLModeWarming reports whether server id is in fresh mode and still in
 // its warm-up: no answer of the copy since fresh mode applied read every
 // table it asked for with its tail. Tails are built after the first

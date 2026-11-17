@@ -331,7 +331,7 @@ func pgRouterStartupLines(st pgRouterSettings, memory, memoryFrom string, memory
 		b.WriteString(" (the access token is accepted too)")
 	}
 	b.WriteString(".\n")
-	b.WriteString("PostgreSQL router: it serves PostgreSQL servers only. The copy answers reads, as of its last snapshot update.\n")
+	b.WriteString("PostgreSQL router: it serves PostgreSQL servers only. The copy answers reads, in each server's mode (fresh or fast, said below).\n")
 	fmt.Fprintf(&b, "PostgreSQL router: with a server's forwarding user (bintrail-console server forward-user), each statement is answered by the copy only when the copy is known to answer it as PostgreSQL does, and by the server's own PostgreSQL otherwise, as well as a transaction block a client opens; read-only, at most %d connections there at once (--max-source-connections). A server without a forwarding user is answered from the copy alone.\n", st.MaxSourceConns)
 	switch {
 	case st.StatusAddr != "" && st.StatusStatements:
@@ -357,16 +357,53 @@ func pgRouterStartupLines(st pgRouterSettings, memory, memoryFrom string, memory
 	return b.String()
 }
 
+// pgRouterFreshLines says, at start-up, how fresh this port's answers are
+// and who decides: BINTRAIL_SQL_TAILS for every server, or each server's own
+// choice, fresh when nothing is saved for it. forced and read are
+// console.SQLModeSetting's; fresh names the PostgreSQL servers in fresh mode
+// by their choice. This process runs --workers statements at once in either
+// mode: unlike the MySQL router's, its count is never lowered for the tails.
+func pgRouterFreshLines(forced, read string, fresh []string) string {
+	const (
+		freshIs = "each table's newest captured changes are laid over its snapshot, so answers are about as far behind as capture. " +
+			"Those changes are held in memory, besides the statements' own: up to a fifth of the memory this process may use for each server in fresh mode, or what BINTRAIL_SQL_TAIL_MAX_BYTES says per server"
+		fastIs = "answers come from each table's last snapshot, as old as its last update"
+		envIs  = "SQL_FRESH in the compose .env, then docker compose up -d pg-router; BINTRAIL_SQL_TAILS elsewhere"
+	)
+	var b strings.Builder
+	switch forced {
+	case console.SQLModeForcedFresh:
+		fmt.Fprintf(&b, "PostgreSQL router: fresh mode for every server (BINTRAIL_SQL_TAILS=%s): %s. Unset it (%s) to choose each server's mode on its %s page.\n", read, freshIs, envIs, console.PageSnapshots)
+	case console.SQLModeForcedFast:
+		fmt.Fprintf(&b, "PostgreSQL router: fast mode for every server (BINTRAIL_SQL_TAILS=%s): %s, whatever is saved for a server. Unset it (%s) to choose each server's mode on its %s page.\n", read, fastIs, envIs, console.PageSnapshots)
+	default:
+		unknown := ""
+		if read != "" {
+			unknown = fmt.Sprintf(" (BINTRAIL_SQL_TAILS=%q is not on or off, and decides nothing)", read)
+		}
+		fmt.Fprintf(&b, "PostgreSQL router: each server answers in its own mode, fresh unless fast was saved for it%s. Fresh: %s. Fast: %s. Choose for a server on its %s page in the web interface (or bintrail-console port mode <server> fresh), or for every server with BINTRAIL_SQL_TAILS=on or =off (%s).\n",
+			unknown, freshIs, fastIs, console.PageSnapshots, envIs)
+	}
+	switch len(fresh) {
+	case 0:
+	case 1:
+		fmt.Fprintf(&b, "PostgreSQL router: 1 server is in fresh mode: %s.\n", fresh[0])
+	default:
+		fmt.Fprintf(&b, "PostgreSQL router: %d servers are in fresh mode: %s.\n", len(fresh), strings.Join(fresh, ", "))
+	}
+	return b.String()
+}
+
 func runPGRouter(cmd *cobra.Command, _ []string) error {
 	cli.LoadEnvFile()
 	st, err := pgRouterSettingsFrom(cmd)
 	if err != nil {
 		return err
 	}
-	pgRouterNoTails()
 	// The MySQL router's own start-up pieces, called as they are (router.go
 	// is not edited for this command): the saved SQL memory, and the console
-	// that follows the daemon's files with a pool of the size given.
+	// that follows the daemon's files with a pool of the size given, with
+	// the tails of PostgreSQL servers on (newPGRouterConsole).
 	shared := routerSettings{
 		Token: st.Token, ServersFile: st.ServersFile, AuthFile: st.AuthFile, MCPTokenFile: st.MCPTokenFile,
 		SQLMemory: st.SQLMemory, SQLPortMaxRows: st.SQLPortMaxRows, MaxWait: st.MaxWait,
@@ -376,7 +413,7 @@ func runPGRouter(cmd *cobra.Command, _ []string) error {
 	if memory == "" {
 		memory = sqlsandbox.DefaultLimits().MemoryLimit
 	}
-	srv, runner, err := newRouterConsole(shared, console.SQLPool{Workers: st.Workers, Threads: st.Threads})
+	srv, runner, err := newPGRouterConsole(shared, console.SQLPool{Workers: st.Workers, Threads: st.Threads})
 	if err != nil {
 		return err
 	}
@@ -390,8 +427,13 @@ func runPGRouter(cmd *cobra.Command, _ []string) error {
 	srv.RefreshFollowedFiles()
 	go srv.FollowFiles(ctx, 0)
 	// What each answer's lag is measured against is placed here, on a clock,
-	// never by a statement, so what waits on it does not pile up.
-	go resolveCopyAgesEvery(ctx, srv.ResolveCopyAges, routerCopySnapshotEvery)
+	// never by a statement, so what waits on it does not pile up. The tails'
+	// housekeeping rides the same clock, as in the MySQL router: a server
+	// removed loses its tails, and idle ones are let go.
+	go resolveCopyAgesEvery(ctx, func(ctx context.Context) {
+		srv.ResolveCopyAges(ctx)
+		srv.TidyTails()
+	}, routerCopySnapshotEvery)
 
 	served := st.TLS
 	if served == nil {
@@ -401,6 +443,8 @@ func runPGRouter(cmd *cobra.Command, _ []string) error {
 	}
 	_, statErr := os.Stat(st.ServersFile)
 	fmt.Fprint(os.Stderr, pgRouterStartupLines(st, memory, memoryFrom, memoryErr, srv.ServerCount(), statErr == nil))
+	forced, read := console.SQLModeSetting()
+	fmt.Fprint(os.Stderr, pgRouterFreshLines(forced, read, srv.FreshPostgresServerNames()))
 	if p := st.TLS.ValidityProblemFor(time.Now(), pgVerifying); p != "" {
 		// In the log as well: the startup lines are plain text on stderr.
 		slog.Warn("PostgreSQL router: " + p)
@@ -420,20 +464,26 @@ func runPGRouter(cmd *cobra.Command, _ []string) error {
 	return port.serve(ctx)
 }
 
-// pgRouterNoTails turns fresh mode off for this process, whatever each
-// server's entry or the environment says.
+// newPGRouterConsole is newRouterConsole for the PostgreSQL router: the same
+// console, in a process that gives PostgreSQL servers tails (#2756), so a
+// server in fresh mode answers with the changes captured since its last
+// snapshot laid over its copy. Each server's mode and BINTRAIL_SQL_TAILS
+// decide as they do on the MySQL port.
 //
-// Fresh mode keeps files of recent changes ("tails") in the temporary
-// directory, and the first one a process makes sweeps that directory for
-// tails an earlier process left behind, by age. Two processes that share a
-// machine share that directory, so a tail this one made could be swept by the
-// MySQL router's start, and the MySQL router's by this one's: a statement
-// failing for a reason neither process can see. A PostgreSQL table has no
-// tail to read in any case (the copy of a PostgreSQL server is as old as its
-// last snapshot update), so this process makes none, sweeps nothing, and
-// leaves the directory to the MySQL router.
-func pgRouterNoTails() {
-	_ = os.Setenv("BINTRAIL_SQL_TAILS", "off")
+// Only this process may ask for them. A PostgreSQL table's key is text, and
+// a tail is laid over the copy by comparing keys: exact where text compares
+// by its bytes, as it does under PostgreSQL's rules, which every statement
+// this port runs on a copy carries (sqlsandbox.Session.PostgresRules, in
+// pgPortLogin), and wrong where it compares without case, as in a MySQL
+// session. The MySQL router never calls this.
+//
+// The tails' files are in the temporary directory, which the MySQL router
+// on the same machine shares. Each process sweeps there only what no live
+// process holds (sweepTailDirs skips a directory whose lock is held), so
+// neither removes the other's.
+func newPGRouterConsole(st routerSettings, pool console.SQLPool) (*console.Server, *sqlsandbox.Runner, error) {
+	console.EnablePostgresTails(true)
+	return newRouterConsole(st, pool)
 }
 
 // pgRouterPort is the listener over time: open while a password that could

@@ -1,0 +1,181 @@
+//go:build integration
+
+package consoleapp
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"io"
+	"net"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/testutil"
+)
+
+const (
+	pgFreshTable = "pgfresh_orders"
+	pgFreshSlot  = "bintrail_pgfresh_slot"
+	pgFreshPub   = "bintrail_pgfresh_pub"
+)
+
+// #2756 on the PostgreSQL port, end to end on a real PostgreSQL and a real
+// MySQL index: the router's console (newPGRouterConsole, as the command
+// builds it) answers a server in fresh mode with the changes captured after
+// its snapshot, without a new snapshot, and in fast mode with the snapshot
+// alone. BINTRAIL_SQL_TAILS=off puts it in fast mode whatever is saved.
+// Nothing is stubbed: capture is the daemon's, the snapshot the daemon's
+// full read, and the answers come over the port.
+func TestIntegrationPGRouterFreshMode_2756(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
+	t.Setenv("BINTRAIL_SQL_TAILS", "")
+	// The switch is the process's: set back for the tests after this one.
+	t.Cleanup(func() { console.EnablePostgresTails(false) })
+
+	baseDSN, source, exec1 := pgTestSource(t, ctx, pgFreshTable, pgFreshSlot, pgFreshPub, "id text PRIMARY KEY, status text")
+	// Two keys that differ only in case: under PostgreSQL's rules they are
+	// two rows, and a change of one must leave the other. A tail laid over
+	// the copy by a comparison without case would take one for the other.
+	exec1("INSERT INTO " + pgFreshTable + " VALUES ('abc', 'new'), ('ABC', 'paid')")
+
+	mon, bootDSN := pgTestMonitor(t, ctx, 200*time.Millisecond)
+	_, _, sup := newScheduleFixture(t, true)
+	f := newRouterFiles(t)
+	snapshots := t.TempDir()
+	e, err := f.owner.Add(console.ServerEntry{
+		Name: "pg-fresh", Flavor: console.FlavorPostgres,
+		SourceDSN: baseDSN, SourceSlot: pgFreshSlot, SourcePublication: pgFreshPub,
+		Schemas: "public", BaselineDir: snapshots,
+	})
+	if err != nil {
+		t.Fatalf("add the server: %v", err)
+	}
+	if e.DSN, err = mon.DeriveIndexDSN(e.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.owner.Update(e); err != nil {
+		t.Fatal(err)
+	}
+	pgTestStart(t, ctx, mon, bootDSN, source, e)
+
+	if err := sup.Trigger(console.BaselineRequestFor(e)); err != nil {
+		t.Fatalf("start the full read: %v", err)
+	}
+	pgTestWait(t, "the snapshot", 2*time.Minute, func() (bool, string) {
+		st := sup.Status(e.ID)
+		if st.State == "failed" {
+			t.Fatalf("the full read failed: %s", st.LastError)
+		}
+		return st.State == "succeeded", st.State
+	})
+
+	// Written in PostgreSQL after the snapshot, and indexed with the
+	// capture's position saved past them: nothing but a tail shows them.
+	exec1("UPDATE " + pgFreshTable + " SET status = 'shipped' WHERE id = 'abc'")
+	exec1("INSERT INTO " + pgFreshTable + " VALUES ('x3', 'after the snapshot')")
+	idx, err := sql.Open("mysql", e.DSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = idx.Close() })
+	pgTestWait(t, "the changes indexed and checkpointed", 90*time.Second, func() (bool, string) {
+		var events, covered int
+		err := idx.QueryRowContext(ctx, `SELECT
+			(SELECT COUNT(*) FROM binlog_events WHERE table_name = ?),
+			COALESCE((SELECT binlog_position FROM stream_state WHERE id = 1) >= (SELECT MAX(end_pos) FROM binlog_events), 0)`,
+			pgFreshTable).Scan(&events, &covered)
+		if err != nil {
+			return false, err.Error()
+		}
+		return events >= 2 && covered == 1, fmt.Sprintf("events=%d covered=%d", events, covered)
+	})
+
+	f.savePortFile(t, true, "tok")
+	srv, runner, err := newPGRouterConsole(f.settings(""), console.SQLPool{Workers: 2, Threads: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runner.Close)
+	srv.RefreshFollowedFiles()
+	router := &pgRouterPort{srv: srv, addr: freeAddr(t), maxConns: 8, poll: 20 * time.Millisecond, out: io.Discard}
+	portCtx, stopPort := context.WithCancel(context.Background())
+	served := make(chan struct{})
+	go func() { _ = router.serve(portCtx); close(served) }()
+	defer func() { stopPort(); <-served }()
+	waitUntil(t, "the port to open", func() bool { return router.listening() != "" })
+	host, portNum, _ := net.SplitHostPort(router.listening())
+	cfg, err := pgconn.ParseConfig(fmt.Sprintf("host=%s port=%s sslmode=disable", host, portNum))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.User, cfg.Password, cfg.Database = "anyone", "tok", "pg-fresh"
+	port, err := pgconn.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("connect to the port: %v", err)
+	}
+	defer port.Close(context.Background())
+
+	read := func() string {
+		t.Helper()
+		_, rows, err := pgText(t, port, "SELECT id, status FROM "+pgFreshTable+" ORDER BY id")
+		if err != nil {
+			t.Fatalf("port: %v", err)
+		}
+		return fmt.Sprint(rows)
+	}
+	const (
+		snapshot = "[[ABC paid] [abc new]]"
+		current  = "[[ABC paid] [abc shipped] [x3 after the snapshot]]"
+	)
+	mode := func(fresh bool) {
+		t.Helper()
+		if _, err := f.owner.SetSQLMode(e.ID, &fresh, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		srv.RefreshFollowedFiles()
+	}
+
+	// Fast mode: the snapshot alone. It is also what proves the snapshot
+	// was taken before the changes.
+	mode(false)
+	if got := read(); got != snapshot {
+		t.Fatalf("fast mode: %s, want the snapshot %s", got, snapshot)
+	}
+
+	// Fresh mode: the changes show without a new snapshot. The first
+	// statement starts the table's tail, so an answer or two may still be
+	// the snapshot's.
+	mode(true)
+	var last string
+	pgTestWait(t, "the changes after the snapshot in fresh mode", 90*time.Second, func() (bool, string) {
+		last = read()
+		return last == current, last
+	})
+	if snaps := pgUpdSnapshots(t, snapshots); len(snaps) != 1 {
+		t.Fatalf("snapshots = %v: the answer must come from the tail, not a new snapshot", snaps)
+	}
+
+	// Back to fast: the snapshot again, at once.
+	mode(false)
+	if got := read(); got != snapshot {
+		t.Fatalf("fast mode again: %s, want the snapshot %s", got, snapshot)
+	}
+
+	// Fresh saved, and BINTRAIL_SQL_TAILS=off where the router runs: fast.
+	mode(true)
+	pgTestWait(t, "fresh mode again", 90*time.Second, func() (bool, string) {
+		last = read()
+		return last == current, last
+	})
+	t.Setenv("BINTRAIL_SQL_TAILS", "off")
+	srv.RefreshFollowedFiles()
+	if got := read(); got != snapshot {
+		t.Fatalf("BINTRAIL_SQL_TAILS=off with fresh saved: %s, want the snapshot %s", got, snapshot)
+	}
+}

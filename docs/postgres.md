@@ -742,9 +742,43 @@ listener, its own workers, its own memory.
   does not disconnect anyone here.
 - **PostgreSQL servers only.** A MySQL or MariaDB server is refused with an
   error that names it; its copy is read through the MySQL port.
-- **As of the last snapshot update.** Fresh mode does not apply to a
-  PostgreSQL server, so an answer is as old as the copy's last update, and
-  this process keeps no files of recent changes.
+- **Fresh or fast, per server, as on the MySQL port.** In fresh mode, the
+  default, each table's newest changes captured from PostgreSQL are laid over
+  its snapshot, so a row written a moment ago shows without waiting for the
+  next snapshot update: answers are about as far behind as capture. In fast
+  mode an answer is as old as the copy's last snapshot update. Choose a
+  server's mode on its Snapshots page or with
+  `bintrail-console port mode <server> fresh|fast`; `BINTRAIL_SQL_TAILS=on`
+  or `=off` where the PostgreSQL router starts (`SQL_FRESH` in the compose
+  `.env`) decides for every server instead. `port mode` says what is saved
+  for a PostgreSQL server; it cannot see what the PostgreSQL router applies.
+  The recent changes are held in this process's memory, on top of each
+  statement's own: up to a fifth of what it may use for each server in fresh
+  mode (`BINTRAIL_SQL_TAIL_MAX_BYTES` sets another bound per server), so with
+  several servers in fresh mode give the process the memory for all of them;
+  `--workers` is not lowered for them.
+  They are also kept as small files in the temporary directory, which the
+  MySQL router on the same machine can share: neither removes the other's.
+  What fresh mode does not cover yet, where the answer comes from the
+  snapshot alone. The client is told only by a NOTICE that comes with the
+  answer (drivers that drop notices, or `client_min_messages` above
+  `notice`, hide it), and the statement is not sent to the source for it:
+  - **Right after a snapshot update**, each table's recent changes are
+    gathered again from the new snapshot on, which takes a few seconds; until
+    then statements on that table are answered from the snapshot.
+  - **The first statement on a table** after the router starts, or after the
+    server turns to fresh mode, starts gathering that table's changes: it,
+    and any statement in the next moments, may still answer from the
+    snapshot.
+  - **A table with no write since capture started** has no recent changes to
+    lay over it, which is the right answer for that table alone. But a
+    statement answers fresh only when every table it reads does, so a join
+    with such a table is answered from the snapshot for all of its tables.
+  - **Tables updated with `BINTRAIL_PG_TABLE_DELTAS`** get no recent changes
+    laid over them, and neither does a statement that reads one.
+  - **Waiting for the source** (`BINTRAIL_SQL_FRESH_WAIT`) does not apply to
+    PostgreSQL yet: a statement does not wait for the newest changes to
+    arrive before it reads.
 - **The copy answers what it answers as PostgreSQL does.** With the server's
   forwarding user, each statement is decided on its own: the copy answers it
   when everything in it is known to give PostgreSQL's answer there, and the

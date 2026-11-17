@@ -283,8 +283,9 @@ func TestPGRouter_login(t *testing.T) {
 // on or off leaves every PostgreSQL client connected (this port routes
 // nothing); a replaced password puts them out.
 func TestPGRouterPort_routingSwitchKeepsClientsAReplacedPasswordDoesNot(t *testing.T) {
-	t.Setenv("BINTRAIL_SQL_TAILS", "")
-	pgRouterNoTails()
+	// Fast mode for every server: what is tested here is the copy as of
+	// its snapshot, not the tails laid over it.
+	t.Setenv("BINTRAIL_SQL_TAILS", "off")
 	f := newRouterFiles(t)
 	prod, err := f.owner.Add(console.ServerEntry{Name: "prod", Flavor: console.FlavorPostgres, DSN: "u:p@tcp(127.0.0.1:1)/idx_prod"})
 	if err != nil {
@@ -297,7 +298,7 @@ func TestPGRouterPort_routingSwitchKeepsClientsAReplacedPasswordDoesNot(t *testi
 	}
 	t.Cleanup(runner.Close)
 	srv.RefreshFollowedFiles()
-	// No tails in this process: a PostgreSQL server, fresh by its entry's
+	// BINTRAIL_SQL_TAILS=off: a PostgreSQL server, fresh by its entry's
 	// default, is in fast mode here, so no tail directory is made or swept.
 	if mode, from := srv.SQLModeOf(prod.ID); mode != "fast" || from != console.SQLModeFromEnvironment {
 		t.Fatalf("server mode %q from %q, want fast from the environment", mode, from)
