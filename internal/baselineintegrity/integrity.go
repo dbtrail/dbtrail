@@ -90,8 +90,14 @@ func CRC32CFile(path string) (string, error) {
 // spelled out here because baseline imports this package). A delta is folded
 // into a rewritten table at compaction, so an unverified one would be the one
 // route by which corrupt bytes reach a freshly certified file.
+//
+// And both files of a PostgreSQL table delta (#2757, pgdelta.DeadSuffix /
+// NewSuffix, spelled out for the same reason): a table is its file and that
+// delta, so a snapshot that certified the file alone would certify half of
+// what a reader takes for the table.
 func manifested(name string) bool {
-	return strings.HasSuffix(name, ".parquet") || strings.HasSuffix(name, ".posdel") || strings.HasSuffix(name, ".upserts")
+	return strings.HasSuffix(name, ".parquet") || strings.HasSuffix(name, ".posdel") || strings.HasSuffix(name, ".upserts") ||
+		strings.HasSuffix(name, ".pgdead") || strings.HasSuffix(name, ".pgnew")
 }
 
 // WriteManifest hashes every manifested file (.parquet, .posdel, .upserts)
