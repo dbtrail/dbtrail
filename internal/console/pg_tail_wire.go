@@ -97,3 +97,53 @@ func (s *Server) PostgresServerIDs() []string {
 	slices.Sort(out)
 	return out
 }
+
+// CopyRunAge is how old the data of the statement the copy last ran on a
+// connection was, as the PostgreSQL router reports it (#2756). The router
+// reads it right after the run succeeded and keeps it only once the port
+// says the copy's answer is the one the client got.
+type CopyRunAge struct {
+	// Ran is when it finished.
+	Ran time.Time
+	// Through, when Tailed (every table it read had its recent changes laid
+	// over it): every change capture had recorded up to this instant, on
+	// any table of the server, was in what it read. It is a commit time on
+	// the source.
+	Through time.Time
+	Tailed  bool
+	// Snapshot: it read a table without its recent changes (fast mode, a
+	// table with none, a statement on the change log, an earlier copy, a
+	// wait for the changes that ran out). How far a PostgreSQL snapshot
+	// reaches is not recorded.
+	Snapshot bool
+	// Unknown: it read the copy, and which snapshot files cannot be told.
+	Unknown bool
+}
+
+// Read says the run read a table of the copy, so it has an age to report or
+// a reason why not.
+func (a CopyRunAge) Read() bool { return a.Tailed || a.Snapshot || a.Unknown }
+
+// LastRunAge is CopyRunAge of the copy's last successful run on this
+// connection; zero when it read no table of the copy.
+func (q *SQLOnCopy) LastRunAge() CopyRunAge {
+	if q == nil {
+		return CopyRunAge{}
+	}
+	q.last.mu.Lock()
+	var p copyAnswer
+	ok := q.last.pending != nil
+	if ok {
+		p = *q.last.pending
+	}
+	q.last.mu.Unlock()
+	switch {
+	case !ok || !p.readCopy:
+		return CopyRunAge{}
+	case p.allTailed && !p.tailThrough.IsZero():
+		return CopyRunAge{Ran: p.ranAt, Through: p.tailThrough, Tailed: true}
+	case p.ok && len(p.files) > 0:
+		return CopyRunAge{Ran: p.ranAt, Snapshot: true}
+	}
+	return CopyRunAge{Ran: p.ranAt, Unknown: true}
+}

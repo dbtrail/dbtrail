@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"maps"
+	"math"
 	"net/http"
 	"slices"
 	"sync"
@@ -77,7 +78,29 @@ type pgRouterServerNumbers struct {
 	// said: this process does not record which answers read every tail.
 	SQLMode     string `json:"sql_mode,omitempty"`
 	SQLModeFrom string `json:"sql_mode_from,omitempty"`
+	// How old the data of the copy's last answer was (#2756), in the MySQL
+	// router's fields. DataAsOf: every change capture had recorded up to
+	// this instant, a commit time on the source, was in what it read (RFC
+	// 3339 UTC); DataAgeSeconds how long before the answer that was, by
+	// this machine's clock, rounded up; DataAgeMaxSeconds the worst since
+	// CountingSince. A source with no write since makes it grow though
+	// nothing is missing; this machine's clock ahead of the source's makes
+	// it larger, behind it smaller, down to 0. Absent until a fresh answer.
+	DataAsOf          string `json:"data_as_of,omitempty"`
+	DataAgeSeconds    *int64 `json:"data_age_seconds,omitempty"`
+	DataAgeMaxSeconds *int64 `json:"data_age_max_seconds,omitempty"`
+	// DataAgeUnknown counts the copy's answers with no age, which
+	// DataAgeMaxSeconds cannot include: with any, the max is a floor.
+	// DataAgeUnknownReason is why the last answer has none.
+	DataAgeUnknown       uint64 `json:"data_age_unknown,omitempty"`
+	DataAgeUnknownReason string `json:"data_age_unknown_reason,omitempty"`
 }
+
+// Why the copy's last answer has no age.
+const (
+	pgAgeSnapshotAlone = "the last answer read a table without its newest captured changes (fast mode, a table with none, a statement on the change log, an earlier copy, or a wait for them that ran out), and how far a PostgreSQL snapshot reaches is not recorded: it is as old as the snapshot it read"
+	pgAgeUnplaced      = "which snapshot files the last answer read could not be told"
+)
 
 // pgModes is what the status asks the console about each server's mode.
 type pgModes interface {
@@ -102,6 +125,14 @@ type pgRouteTally struct {
 	rows                  map[pgShapeKey]*pgShapeRow
 	notCounted            uint64
 	barred                string
+	// The copy's last answer's age (#2756): when it ran, its through, or
+	// ageWhy when it has none; worst is the oldest known since the start
+	// and unknown the count of answers with none.
+	ageRan, ageThrough time.Time
+	ageWhy             string
+	worst              time.Duration
+	anyAge             bool
+	unknown            uint64
 }
 
 type pgRouteAnswers struct {
@@ -145,6 +176,46 @@ func pgShape(stmt string) string {
 		cut--
 	}
 	return shape[:cut] + "…"
+}
+
+// age records how old the data of an answer of the copy for server id was.
+// The last is the one that ran last, whichever connection says it first.
+func (r *pgRouteStats) age(id string, a console.CopyRunAge) {
+	if r == nil || !a.Read() {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t := r.perServer[id]
+	if t == nil {
+		t = &pgRouteTally{reasons: map[string]uint64{}, answers: map[string]*pgRouteAnswers{}}
+		r.perServer[id] = t
+	}
+	latest := !a.Ran.Before(t.ageRan)
+	if !a.Tailed {
+		t.unknown++
+		if latest {
+			t.ageRan, t.ageThrough, t.ageWhy = a.Ran, time.Time{}, pgAgeSnapshotAlone
+			if a.Unknown {
+				t.ageWhy = pgAgeUnplaced
+			}
+		}
+		return
+	}
+	d := max(a.Ran.Sub(a.Through), 0)
+	if !t.anyAge || d > t.worst {
+		t.worst, t.anyAge = d, true
+	}
+	if latest {
+		t.ageRan, t.ageThrough, t.ageWhy = a.Ran, a.Through, ""
+	}
+}
+
+// pgAgeSeconds is d in whole seconds, rounded up: a lag is never said
+// smaller than it was.
+func pgAgeSeconds(d time.Duration) *int64 {
+	v := int64(math.Ceil(d.Seconds()))
+	return &v
 }
 
 // note tallies one statement of server id.
@@ -222,6 +293,53 @@ func (r *pgRouteStats) forServer(id string) func(pgshim.RouteNote) {
 	return func(n pgshim.RouteNote) { r.note(id, n) }
 }
 
+// pgConnAges is one connection's age of its copy's last run (#2756), held
+// until the port says which side answered the statement: a run whose result
+// the port threw away (the source answered after all, the client got an
+// error) is not an answer of the copy.
+type pgConnAges struct {
+	r       *pgRouteStats
+	id      string
+	mu      sync.Mutex
+	pending console.CopyRunAge
+}
+
+// agesFor is a connection's pgConnAges for server id; nil when r is.
+func (r *pgRouteStats) agesFor(id string) *pgConnAges {
+	if r == nil {
+		return nil
+	}
+	return &pgConnAges{r: r, id: id}
+}
+
+// stash keeps a run's age until the statement's side is known.
+func (c *pgConnAges) stash(a console.CopyRunAge) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.pending = a
+	c.mu.Unlock()
+}
+
+// routed is the connection's Binding.Routed: the tally, and the stashed
+// age when the copy's answer is what the client got. Nil when c is.
+func (c *pgConnAges) routed() func(pgshim.RouteNote) {
+	if c == nil {
+		return nil
+	}
+	return func(n pgshim.RouteNote) {
+		c.r.note(c.id, n)
+		c.mu.Lock()
+		a := c.pending
+		c.pending = console.CopyRunAge{}
+		c.mu.Unlock()
+		if n.Side == pgshim.RouteCopy && !n.Failed {
+			c.r.age(c.id, a)
+		}
+	}
+}
+
 // doc is the status document now: the counts, then each server's mode,
 // asked of the console outside the tally's lock, which every statement takes.
 func (r *pgRouteStats) doc(listen string) pgRouterStatusDoc {
@@ -258,6 +376,17 @@ func (r *pgRouteStats) counts(listen string) pgRouterStatusDoc {
 	for id, t := range r.perServer {
 		n := pgRouterServerNumbers{Copy: t.copy, Source: t.source, Refused: t.refused,
 			Reasons: maps.Clone(t.reasons), Answers: map[string]console.RouteAnswers{}, ForwardingOff: t.barred}
+		switch {
+		case t.ageWhy != "":
+			n.DataAgeUnknownReason = t.ageWhy
+		case !t.ageRan.IsZero():
+			n.DataAsOf = t.ageThrough.UTC().Format(time.RFC3339)
+			n.DataAgeSeconds = pgAgeSeconds(max(t.ageRan.Sub(t.ageThrough), 0))
+		}
+		if t.anyAge {
+			n.DataAgeMaxSeconds = pgAgeSeconds(t.worst)
+		}
+		n.DataAgeUnknown = t.unknown
 		for side, a := range t.answers {
 			n.Answers[side] = a.dto()
 		}

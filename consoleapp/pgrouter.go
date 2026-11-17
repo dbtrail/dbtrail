@@ -784,7 +784,8 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			return nil, &pgshim.Error{Code: "0A000", Message: fmt.Sprintf(
 				"server %q is not a PostgreSQL server, and this port serves PostgreSQL servers only; the copy of a MySQL or MariaDB server is read with a MySQL client on the MySQL port", tgt.ID)}
 		}
-		bound := &pgshim.Binding{Actor: "server:" + tgt.ID, Schema: pgPortSchema, Routed: routes.forServer(tgt.ID)}
+		ages := routes.agesFor(tgt.ID)
+		bound := &pgshim.Binding{Actor: "server:" + tgt.ID, Schema: pgPortSchema, Routed: ages.routed()}
 		// Time travel, by the engine the MySQL port binds per connection
 		// (flashbackShimConfig, called as it is): the server's index and its
 		// snapshots. The server's own gate goes with it: a server that hides
@@ -860,7 +861,13 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 				schema = pgPortSchema
 			}
 			sess := sqlsandbox.Session{PostgresRules: true, PostgresNames: true, TimeZone: opts.TimeZone}
-			return copySQL.Run(ctx, statement, schema, sess)
+			res, err := copySQL.Run(ctx, statement, schema, sess)
+			if err == nil && !opts.Probe {
+				// How old what it read was, for /status (#2756), kept once
+				// the port says the client got it (bound.Routed).
+				ages.stash(copySQL.LastRunAge())
+			}
+			return res, err
 		}
 		// The system catalog's statements are answered from the copy's own
 		// tables (#2769), read in UTC and in the port's schema: what the

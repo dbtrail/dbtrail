@@ -111,6 +111,10 @@ type RunOptions struct {
 	// TimeZone is the session time zone as the copy's engine names it
 	// (sqlsandbox.Session.TimeZone), "" for UTC.
 	TimeZone string
+	// Probe says the port runs it for itself (a schema or time zone check
+	// of a SET), not as an answer to the client: the host must not count it
+	// as one.
+	Probe bool
 }
 
 // runOptions are the options the connection's next statement runs in.

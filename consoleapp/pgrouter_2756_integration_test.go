@@ -105,7 +105,8 @@ func TestIntegrationPGRouterFreshMode_2756(t *testing.T) {
 	}
 	t.Cleanup(runner.Close)
 	srv.RefreshFollowedFiles()
-	router := &pgRouterPort{srv: srv, addr: freeAddr(t), maxConns: 8, poll: 20 * time.Millisecond, out: io.Discard}
+	ages := newPGRouteStats(time.Now(), false)
+	router := &pgRouterPort{srv: srv, addr: freeAddr(t), maxConns: 8, poll: 20 * time.Millisecond, out: io.Discard, routes: ages}
 	portCtx, stopPort := context.WithCancel(context.Background())
 	served := make(chan struct{})
 	go func() { _ = router.serve(portCtx); close(served) }()
@@ -189,6 +190,13 @@ func TestIntegrationPGRouterFreshMode_2756(t *testing.T) {
 	}
 	says("fresh", "saved")
 
+	// The copy's age (#2756): the fresh answer read changes committed a
+	// moment ago, by this machine's clock; the test's own source and
+	// DBTrail share it.
+	if n := ages.doc("").Servers[e.ID]; n.DataAsOf == "" || n.DataAgeSeconds == nil || *n.DataAgeSeconds > 60 || n.DataAgeUnknownReason != "" || n.DataAgeMaxSeconds == nil {
+		t.Fatalf("the age after a fresh answer: as_of=%q age=%v max=%v why=%q", n.DataAsOf, n.DataAgeSeconds, n.DataAgeMaxSeconds, n.DataAgeUnknownReason)
+	}
+
 	// Back to fast: the snapshot again, at once, and this connection, which
 	// was just shown the newer rows, is told so once.
 	takeNotices()
@@ -196,6 +204,9 @@ func TestIntegrationPGRouterFreshMode_2756(t *testing.T) {
 	says("fast", "saved")
 	if got := read(); got != snapshot {
 		t.Fatalf("fast mode again: %s, want the snapshot %s", got, snapshot)
+	}
+	if n := ages.doc("").Servers[e.ID]; n.DataAgeUnknownReason == "" || n.DataAgeSeconds != nil || n.DataAgeMaxSeconds == nil || n.DataAgeUnknown == 0 {
+		t.Fatalf("the age after a fast answer: age=%v max=%v why=%q", n.DataAgeSeconds, n.DataAgeMaxSeconds, n.DataAgeUnknownReason)
 	}
 	if n := takeNotices(); len(n) != 1 || !strings.Contains(n[0], "can be older than an earlier answer of the copy on this connection") {
 		t.Fatalf("notices after the switch to fast: %q, want the one that says the answer can be older", n)
