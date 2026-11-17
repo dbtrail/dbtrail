@@ -127,6 +127,9 @@ var (
 	upRouterURL string
 	// upRouterURLError is why --router-url could not be used, if so.
 	upRouterURLError string
+	// upPGRouterURL is --pg-router-url, resolved the same way;
+	// upPGRouterURLError is why it could not be used.
+	upPGRouterURL, upPGRouterURLError string
 	// upRouteMaxCopyAge turns read routing on the port on (#2038): MySQL
 	// answers by default, the copy takes expensive SELECTs while its snapshot
 	// is at most this old, and past that the ones over tables unchanged since
@@ -301,6 +304,7 @@ func init() {
 	watchCmd.Flags().IntVar(&upSQLMaxInFlight, "sql-max-in-flight", sqlsandbox.DefaultMaxInFlight, "How many SQL-on-the-copy statements run at once, on the SQL card of the web interface (the MySQL port is served by the router, which sizes its own); one more waits up to 30 s for a free slot, then is refused. Each runs as its own process with 2 threads and up to --sql-memory, on the host that captures, and every result is held in this process while it is sent, so raise it only with cores and memory to spare. Env BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT.")
 	watchCmd.Flags().IntVar(&upSQLPortMaxRows, "sql-port-max-rows", console.DefaultSQLPortMaxRows, "No longer acts in this process: the MySQL port is served by the router (bintrail-console router), which takes its own --sql-port-max-rows, or BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS. Given on this command line, it only prints a warning at startup. The SQL page of the web interface shows 1,000 rows whatever this is.")
 	watchCmd.Flags().StringVar(&upRouterURL, "router-url", "", "Address a router (bintrail-console router) serves its metrics on, e.g. http://127.0.0.1:9091. Given it, the web interface shows the router's numbers on its "+console.PageMySQLClients+" page: who answered each server's statements, the copy's age, the pool. This process asks the router; the router never asks this one. Empty = the page shows nothing about a router. Env BINTRAIL_CONSOLE_ROUTER_URL.")
+	watchCmd.Flags().StringVar(&upPGRouterURL, "pg-router-url", "", "Address the PostgreSQL router (bintrail-console pg-router) serves its status on (its --status-addr), e.g. http://127.0.0.1:9092. Given it, a PostgreSQL server's Snapshots page says which mode, fresh or fast, that router answers it in. Empty = the page says it cannot be shown. Env BINTRAIL_CONSOLE_PG_ROUTER_URL.")
 	watchCmd.Flags().StringVar(&upSQLMemory, "sql-memory", "", "Memory each SQL-on-the-copy statement may use (the SQL card; the MySQL port is served by the router, which takes its own --sql-memory), e.g. 4GB; default 2GB, at least 512MB. It runs on the host that captures, times --sql-max-in-flight at once. A table with more changes not yet merged than this memory can merge (384 MB at 2 GB, in proportion) is answered from an earlier copy, or refused with a pointer to your own DuckDB when none fits. Past its memory a statement spills to a temporary folder, up to four times it. Env BINTRAIL_CONSOLE_SQL_MEMORY. Unset, the web interface can set it (Settings, MySQL clients); set, it wins there.")
 	watchCmd.Flags().StringVar(&upConsoleFlashbackListen, "flashback-listen", "", "No longer opens a port in this process: the MySQL port is served by the router (bintrail-console router, port 3309 unless set) and is turned on and off in the web interface (Settings, MySQL clients, Connect a SQL client). Given, it has one effect, once: a port that has no saved setting yet is saved as on, so an installation that opened it with this setting keeps it. Remove it. Env BINTRAIL_CONSOLE_FLASHBACK_LISTEN.")
 	watchCmd.Flags().DurationVar(&upRouteMaxCopyAge, "route-max-copy-age", 0, "No longer turns Engine Routing on: Engine Routing is a switch in the web interface (Settings, MySQL clients, Connect a SQL client), off until turned on there, and it sets no maximum copy age any more (a server can have a lag limit of its own: max_behind_source_seconds). Given, it only prints a warning at startup. Remove it. Env BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE.")
@@ -362,6 +366,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return configRefusal(err, strconv.Itoa(upSQLMaxInFlight), os.Getenv("BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT"))
 	}
 	resolveRouterURL(cmd, os.Stderr)
+	resolvePGRouterURL(cmd, os.Stderr)
 	// The port's flags, checked here, before the first connection: a
 	// read-only flag that cannot apply, or an environment value that does
 	// not parse, must not wait for the index to answer.
@@ -2423,6 +2428,9 @@ type consoleOpts struct {
 	// RouterURL is the resolved --router-url (#2318), "" when none;
 	// RouterURLError is why a value given could not be used.
 	RouterURL, RouterURLError string
+	// PGRouterURL is the resolved --pg-router-url, "" when none;
+	// PGRouterURLError is why a value given could not be used.
+	PGRouterURL, PGRouterURLError string
 	// FillsCopyMirrors is console.Config.FillsCopyMirrors.
 	FillsCopyMirrors bool
 	// CopyMirror is console.Config.CopyMirror.
@@ -2454,6 +2462,8 @@ func upConsoleOpts() consoleOpts {
 		SQLPortNotice:    sqlPortOldComposeNotice(os.Getenv("BINTRAIL_COMPOSE_VERSION")),
 		RouterURL:        upRouterURL,
 		RouterURLError:   upRouterURLError,
+		PGRouterURL:      upPGRouterURL,
+		PGRouterURLError: upPGRouterURLError,
 	}
 }
 
@@ -2570,11 +2580,13 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		KillSourceThreads: killSourceThreads,
 		SQLMaxInFlight:    opts.SQLMaxInFlight,
 		// --sql-memory (#2210); "" keeps the sandbox default.
-		SQLLimits:       sqlsandbox.Limits{MemoryLimit: opts.SQLMemoryLimit},
-		SQLPortMaxRows:  opts.SQLPortMaxRows,
-		FlashbackNotice: opts.SQLPortNotice,
-		RouterURL:       opts.RouterURL,
-		RouterURLError:  opts.RouterURLError,
+		SQLLimits:        sqlsandbox.Limits{MemoryLimit: opts.SQLMemoryLimit},
+		SQLPortMaxRows:   opts.SQLPortMaxRows,
+		FlashbackNotice:  opts.SQLPortNotice,
+		RouterURL:        opts.RouterURL,
+		RouterURLError:   opts.RouterURLError,
+		PGRouterURL:      opts.PGRouterURL,
+		PGRouterURLError: opts.PGRouterURLError,
 		// The daemon's --rotate-* defaults, so GET /api/rotation can report the
 		// effective policy (and the console panel prefill it) before the
 		// operator saves an override.
@@ -3008,6 +3020,22 @@ func resolveRouterURL(cmd *cobra.Command, warn io.Writer) {
 	if err != nil {
 		upRouterURLError = from + ": " + err.Error()
 		fmt.Fprintf(warn, "WARNING: %s. The web interface will show no numbers of the router until this is corrected; everything else starts as usual.\n", upRouterURLError)
+	}
+}
+
+// resolvePGRouterURL is resolveRouterURL for --pg-router-url: an address
+// that cannot be used is warned about and kept in upPGRouterURLError, which
+// the PostgreSQL servers' Snapshots page shows in place of their mode.
+func resolvePGRouterURL(cmd *cobra.Command, warn io.Writer) {
+	raw, from := upPGRouterURL, "--pg-router-url"
+	if !cmd.Flags().Changed("pg-router-url") {
+		raw, from = os.Getenv("BINTRAIL_CONSOLE_PG_ROUTER_URL"), "BINTRAIL_CONSOLE_PG_ROUTER_URL"
+	}
+	resolved, err := console.ParseRouterURL(raw)
+	upPGRouterURL, upPGRouterURLError = resolved, ""
+	if err != nil {
+		upPGRouterURLError = from + ": " + err.Error()
+		fmt.Fprintf(warn, "WARNING: %s. The web interface will not show which mode the PostgreSQL router answers each server in until this is corrected; everything else starts as usual.\n", upPGRouterURLError)
 	}
 }
 

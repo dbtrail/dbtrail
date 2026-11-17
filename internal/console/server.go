@@ -240,6 +240,11 @@ type Config struct {
 	// empty, the page shows nothing about a router. Only the operator sets
 	// it, at startup: this process then makes requests to that address.
 	RouterURL string
+	// PGRouterURL is where the PostgreSQL router (bintrail-console
+	// pg-router --status-addr) serves its status, as ParseRouterURL resolved
+	// it; PGRouterURLError is why a value given could not be used. Set, GET
+	// /api/pg-router reads each PostgreSQL server's mode from it.
+	PGRouterURL, PGRouterURLError string
 	// StatementShape turns the per-statement table on (#2360): the shape a
 	// statement is counted under (readrouter.Fingerprint, which the router
 	// passes: this package must not link the MySQL protocol library that
@@ -628,6 +633,8 @@ type Server struct {
 	routerURL    string
 	routerURLErr string
 	routerClient *http.Client
+	// pgRouterURL is Config.PGRouterURL, asked with routerClient.
+	pgRouterURL, pgRouterURLErr string
 	// sqlMem is the SQL memory setting (#2210): MemoryLimit above is the
 	// startup value or the default, and sqlMemoryNow says which applies.
 	sqlMem sqlMemoryState
@@ -957,6 +964,7 @@ func New(cfg Config) (*Server, error) {
 	s.sqlPortMaxRows = cfg.SQLPortMaxRows
 	s.flashbackNotice = cfg.FlashbackNotice
 	s.routerURL, s.routerURLErr, s.routerClient = cfg.RouterURL, cfg.RouterURLError, newRouterClient(routerStatusTimeout)
+	s.pgRouterURL, s.pgRouterURLErr = cfg.PGRouterURL, cfg.PGRouterURLError
 	// Standby (#2236): after a statement, a worker per free slot waits with
 	// its DuckDB open, so a short statement does not pay the start. They stop
 	// on their own after a few minutes with no statement, and with this
@@ -1219,6 +1227,7 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("PUT /api/sql-settings", s.recordAction("sql-settings", s.handleSQLSettingsPut))
 	api.HandleFunc("GET /api/flashback", s.handleFlashbackGet)
 	api.HandleFunc("GET /api/router", s.handleRouterGet)
+	api.HandleFunc("GET /api/pg-router", s.handlePGRouterGet)
 	api.HandleFunc("PUT /api/flashback", s.handleFlashbackPut)
 	api.HandleFunc("POST /api/flashback/password", s.handleFlashbackPassword)
 	api.HandleFunc("PUT /api/flashback/monitor-login", s.handleFlashbackMonitorLogin)

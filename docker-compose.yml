@@ -447,6 +447,11 @@ services:
       # if you stop the router for good or turn its metrics off, or the page
       # goes on saying the router does not answer.
       BINTRAIL_CONSOLE_ROUTER_URL: ${ROUTER_URL-http://router:9091}
+      # The same for the pg-router service below: a PostgreSQL server's
+      # Snapshots page reads from there which mode, fresh or fast, it is
+      # answered in. PG_ROUTER_URL= (empty) in .env: the page says it cannot
+      # be shown.
+      BINTRAIL_CONSOLE_PG_ROUTER_URL: ${PG_ROUTER_URL-http://pg-router:9092}
       # Memory each SQL statement on the copy may use (#2210). Empty = the
       # value saved in the web interface (Settings, MySQL clients), else 2GB;
       # set here, it wins and that panel only shows it.
@@ -862,6 +867,12 @@ services:
       # How long a statement waits for its turn when every worker is busy,
       # e.g. PG_ROUTER_MAX_WAIT=30s in .env; past it the client gets an error.
       BINTRAIL_PG_ROUTER_MAX_WAIT: ${PG_ROUTER_MAX_WAIT:-}
+      # Its status, per server: which side answered and why, and each
+      # server's mode, read by the web interface (PG_ROUTER_URL above). On
+      # the compose network only (pg-router:9092), not published on the
+      # host; it asks for no password. PG_ROUTER_STATUS_ADDR= (empty) turns
+      # it off.
+      BINTRAIL_PG_ROUTER_STATUS_ADDR: ${PG_ROUTER_STATUS_ADDR-:9092}
       # A certificate clients can verify: the two paths INSIDE this container
       # of a certificate and its key that you mount into it.
       BINTRAIL_PG_ROUTER_TLS_CERT: ${PG_ROUTER_TLS_CERT:-}
