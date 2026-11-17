@@ -3,6 +3,7 @@ package views
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,8 +51,11 @@ import (
 // reader allowed only to get objects cannot do. So what is beside the file
 // has to be known when the view is written: whoever writes it from the
 // snapshot's own folder says so first (Input.MarkPGPairs), and the view then
-// names the delta's files by their exact keys too. Unmarked, such a view is
-// written as before and reads the file alone.
+// names the delta's files by their exact keys too. (A delta that is not
+// whole is the one case that asks the store for a name: the refusal's own
+// glob, of the table file's exact key.) Unmarked, such a view is written as
+// before and reads the file alone: the views the console and the CLI write
+// for a snapshot in S3, which have no folder to look at.
 func pgPairStateBody(in Input, t BaselineTable) (body string, ok bool) {
 	if t.SchemaKnown || t.Delta || !strings.HasSuffix(t.Path, ".parquet") {
 		return "", false
@@ -133,6 +137,13 @@ func (in *Input) MarkPGPairs() {
 			continue
 		}
 		t.PGPair = pgPairLook(t.Path)
+		if t.PGPair != nil && t.PGPair.Err != nil {
+			// The view of this table will refuse when it is read, which
+			// may be much later and somewhere else: say so here too.
+			slog.Warn("views: a table's delta cannot be read whole, so its view is written to refuse; "+
+				"a new full snapshot of this server replaces it",
+				"schema", t.Schema, "table", t.Table, "file", t.Path, "error", t.PGPair.Err)
+		}
 	}
 }
 
@@ -152,6 +163,13 @@ func pgPairLook(path string) *PGPairMark {
 			return nil
 		}
 		return &PGPairMark{}
+	}
+	// A file that cannot be asked about is not known to be missing, and
+	// that is the cause to give: the listing below may not show it.
+	for _, f := range []string{dead, rows} {
+		if _, lerr := os.Lstat(f); lerr != nil && !errors.Is(lerr, os.ErrNotExist) {
+			return &PGPairMark{Err: fmt.Errorf("whether it has a table delta cannot be asked: %w", lerr)}
+		}
 	}
 	chain, err := pgPairChain(filepath.Dir(at), strings.TrimSuffix(filepath.Base(at), ".parquet"))
 	if err == nil && len(chain.Pairs) == 0 {

@@ -124,6 +124,20 @@ func TestGenerateSnapshotViews_pgPairNotWhole(t *testing.T) {
 	if got := linesWith(text, "cannot be read whole"); len(got) != 1 || !strings.Contains(got[0], "public.orders") {
 		t.Fatalf("refusals %v; want one, for orders:\n%s", got, text)
 	}
+	// The same refusal, where it can be run: it is raised when the table is
+	// read and not when the views are made, and the other table answers.
+	relText, ok, err := GenerateSnapshotViews(context.Background(), snap, ".")
+	if err != nil || !ok {
+		t.Fatalf("GenerateSnapshotViews, relative: %v, %v", ok, err)
+	}
+	t.Chdir(snap)
+	db := execViews(t, relText)
+	if got, err := plainRows(t, db, "items"); err != nil || !reflect.DeepEqual(got, []string{"5=five"}) {
+		t.Fatalf("items: %v, %v", got, err)
+	}
+	if got, err := plainRows(t, db, "orders"); err == nil || !strings.Contains(err.Error(), "cannot be read whole") {
+		t.Fatalf("orders: %v, %v; want the refusal", got, err)
+	}
 }
 
 // What is marked and what is left: a MySQL table is never looked at, nor a
@@ -167,7 +181,7 @@ func TestMarkPGPairs(t *testing.T) {
 	if body, ok := pgPairStateBody(in, in.Baselines[0]); !ok || !strings.Contains(body, "s3://bucket/copies/2026-04-30T03-00-00Z/public/orders.000000.pgnew") {
 		t.Fatalf("the marked table, in S3: %q, %v", body, ok)
 	}
-	for _, i := range []int{1, 2, 3, 5} {
+	for _, i := range []int{1, 2, 3, 4, 5} {
 		if body, ok := pgPairStateBody(in, in.Baselines[i]); ok {
 			t.Errorf("%s was given a body: %s", in.Baselines[i].Table, body)
 		}
