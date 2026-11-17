@@ -168,6 +168,7 @@ func GenerateSnapshotViews(ctx context.Context, snapshotDir, root string) (strin
 	} else {
 		in.ApplyFooters(decimals)
 	}
+	in.MarkPGPairs() // PostgreSQL table deltas (#2757), while the paths are the local files
 	in.RespellBaselines(root)
 	return Generate(in), true, nil
 }

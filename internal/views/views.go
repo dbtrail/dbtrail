@@ -228,6 +228,11 @@ type BaselineTable struct {
 	// the PostgreSQL-protocol port's catalog reads it (#2769); the views do
 	// not.
 	PGRelation *baseline.PGRelation
+	// PGPair is what was found beside a PostgreSQL table's file when it was
+	// looked at (Input.MarkPGPairs, #2757); nil when it was not, and for
+	// any other table. Set while the path is the local file, for a views
+	// file that will name the files somewhere they cannot be looked at.
+	PGPair *PGPairMark
 
 	// SchemaKnown records whether the table's embedded CREATE TABLE was read at
 	// all. It separates "this table has no decimal columns" from "we could not
