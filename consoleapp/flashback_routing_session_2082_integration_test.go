@@ -784,7 +784,16 @@ func TestIntegrationFlashbackRoutedSessionMariaDB(t *testing.T) {
 		if got := connStrings(t, d, "SELECT @@collation_connection")[0][0]; got != "utf8mb4_general_ci" {
 			t.Errorf("after the client's SET NAMES the session is in %s", got)
 		}
-		rig.scan(t, d, "live")
+		// The full scan has no string literal and no call that returns text:
+		// LENGTH is a number the collation cannot change (#2918), so the
+		// copy still answers it, and its answer is MySQL's (scan checks).
+		rig.scan(t, d, "copy")
+		// With a string literal, which takes the connection's collation,
+		// MySQL answers.
+		lit := "SELECT side, seen_at, stamped, LENGTH(code), count(*) FROM visits WHERE side <> 'zz' GROUP BY side, seen_at, stamped, code ORDER BY seen_at"
+		if got := connStrings(t, d, lit); sidesOf(got) != "live" {
+			t.Errorf("a statement with a string literal under utf8mb4_general_ci was answered by %q, want live", sidesOf(got))
+		}
 	}
 	c := rig.conn(t, "")
 	must(c, "SET time_zone = 'Europe/Madrid'")
