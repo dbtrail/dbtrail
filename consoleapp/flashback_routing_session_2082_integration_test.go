@@ -101,6 +101,10 @@ func directConn(t *testing.T, dsn string) *sql.Conn {
 // shows.
 const visitsScan = "SELECT side, seen_at, stamped, LENGTH(code), count(*) FROM visits GROUP BY side, seen_at, stamped, code ORDER BY seen_at"
 
+// visitsScanLiteral is visitsScan with a string literal, which takes the
+// connection's collation.
+const visitsScanLiteral = "SELECT side, seen_at, stamped, LENGTH(code), count(*) FROM visits WHERE side <> 'zz' GROUP BY side, seen_at, stamped, code ORDER BY seen_at"
+
 // The same three rows as primary-key lookups, which MySQL always answers.
 func visitsByLookup(t *testing.T, c *sql.Conn) [][]string {
 	t.Helper()
@@ -472,7 +476,13 @@ func TestIntegrationFlashbackRoutedSessionSettings(t *testing.T) {
 		} {
 			c := rig.conn(t, "")
 			must(t, c, set)
-			if got := connStrings(t, c, visitsScan); sidesOf(got) == "copy" {
+			// The plain scan has no string literal, so a collation alone does
+			// not move it (LENGTH is a number, #2918); with one it does.
+			scan := visitsScan
+			if strings.Contains(set, "COLLATE") {
+				scan = visitsScanLiteral
+			}
+			if got := connStrings(t, c, scan); sidesOf(got) == "copy" {
 				t.Errorf("after %s the copy answered", set)
 			}
 		}
@@ -790,8 +800,7 @@ func TestIntegrationFlashbackRoutedSessionMariaDB(t *testing.T) {
 		rig.scan(t, d, "copy")
 		// With a string literal, which takes the connection's collation,
 		// MySQL answers.
-		lit := "SELECT side, seen_at, stamped, LENGTH(code), count(*) FROM visits WHERE side <> 'zz' GROUP BY side, seen_at, stamped, code ORDER BY seen_at"
-		if got := connStrings(t, d, lit); sidesOf(got) != "live" {
+		if got := connStrings(t, d, visitsScanLiteral); sidesOf(got) != "live" {
 			t.Errorf("a statement with a string literal under utf8mb4_general_ci was answered by %q, want live", sidesOf(got))
 		}
 	}
