@@ -85,9 +85,17 @@ func writePGPair(t *testing.T, base string, changes map[string]string) {
 func pgPairTable(path, table string) BaselineTable {
 	t := BaselineTable{Schema: "public", Table: table, Path: path, Rel: "public/" + table + ".parquet"}
 	in := Input{Baselines: []BaselineTable{t}}
+	// The footer of a PostgreSQL table file gives its casts and the shape
+	// they come from together. A view that follows later snapshots drops the
+	// casts and keeps the shape, which is then all that says the table is a
+	// PostgreSQL one.
 	in.ApplyFooters(map[string]baseline.TableFooter{path: {
 		Columns: pgPairCols,
 		PG:      []baseline.PGCast{{Name: "id", As: "BIGINT"}, {Name: "status", As: baseline.PGAsText}},
+		PGRelation: &baseline.PGRelation{OID: 16500, Columns: []baseline.PGColumn{
+			{Name: "id", TypeOID: 20, TypeMod: -1, Type: "bigint", NotNull: true, Ordinal: 1},
+			{Name: "status", TypeOID: 25, TypeMod: -1, Type: "text", Ordinal: 2},
+		}, PrimaryKey: []string{"id"}},
 	}})
 	return in.Baselines[0]
 }
@@ -248,11 +256,11 @@ func TestPGPairStateBody_leavesTheOthersAlone(t *testing.T) {
 		in Input
 		t  BaselineTable
 	}{
-		"a table whose definition is known":             {Input{}, mysql},
-		"a table whose definition is known, following":  {Input{Follow: FollowPointer}, mysql},
-		"a table with a MySQL delta":                    {Input{}, mysqlDelta},
+		"a table whose definition is known":              {Input{}, mysql},
+		"a table whose definition is known, following":   {Input{Follow: FollowPointer}, mysql},
+		"a table with a MySQL delta":                     {Input{}, mysqlDelta},
 		"a file in S3 that nothing says is PostgreSQL's": {Input{}, unknown},
-		"the same, following the newest":                {Input{Follow: FollowNewest}, unknown},
+		"the same, following the newest":                 {Input{Follow: FollowNewest}, unknown},
 	} {
 		if body, ok := pgPairStateBody(c.in, c.t); ok {
 			t.Errorf("%s: the pair's body was written: %s", name, body)
