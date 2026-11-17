@@ -1,6 +1,8 @@
 package consoleapp
 
 import (
+	"bytes"
+	"context"
 	"strings"
 	"testing"
 
@@ -18,5 +20,20 @@ func TestSnapshotDoneTextNamesThePort(t *testing.T) {
 	my := snapshotDoneText("shop", false, b)
 	if !strings.Contains(my, "The MySQL port:  bintrail-console port status") || strings.Contains(my, "PostgreSQL") {
 		t.Fatalf("MySQL server:\n%s", my)
+	}
+}
+
+// port mode's refusal of a server with no source database names the port
+// that server would be answered on.
+func TestPortModeNoSourceNamesThePort(t *testing.T) {
+	for flavor, want := range map[string]string{"postgres": "the PostgreSQL port does not answer for it", "mysql": "the MySQL port does not answer for it"} {
+		d, c := newFakeDaemon(t)
+		d.on("GET /api/servers", 200, map[string]any{"servers": []map[string]any{
+			{"id": "id9", "name": "nosrc", "kind": "registry", "has_source": false, "flavor": flavor},
+		}})
+		err := runPortMode(context.Background(), c, "nosrc", "fast", 0, &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: err = %v, want %q", flavor, err, want)
+		}
 	}
 }

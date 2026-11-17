@@ -902,7 +902,8 @@ renewed one.
 
 **Size.** The service is sized to fit beside capture without asking: four
 statements at once, two threads each, 256 clients. Each statement may take the
-SQL memory (2GB unless set), so four at once can take 8GB: on a machine with
+SQL memory (2GB unless set), so four at once can take 8GB, plus the recent
+changes fresh mode holds for each server in fresh mode: on a machine with
 16GB, set `PG_ROUTER_WORKERS=2` or `PG_ROUTER_MEMORY`.
 
 | `.env` | What it sets | Unset |
