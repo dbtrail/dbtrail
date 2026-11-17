@@ -222,8 +222,34 @@ func (r *pgRouteStats) forServer(id string) func(pgshim.RouteNote) {
 	return func(n pgshim.RouteNote) { r.note(id, n) }
 }
 
-// doc is the status document now.
+// doc is the status document now: the counts, then each server's mode,
+// asked of the console outside the tally's lock, which every statement takes.
 func (r *pgRouteStats) doc(listen string) pgRouterStatusDoc {
+	d := r.counts(listen)
+	if r.modes != nil {
+		forced, _ := console.SQLModeSetting()
+		fresh := forced == console.SQLModeForcedFresh
+		d.Fresh, d.SQLModeForced, d.FreshByDefault, d.PerServerMode = &fresh, forced, true, true
+		ids := r.modes.PostgresServerIDs()
+		for id := range d.Servers {
+			if !slices.Contains(ids, id) {
+				ids = append(ids, id)
+			}
+		}
+		for _, id := range ids {
+			n, ok := d.Servers[id]
+			if !ok {
+				n = pgRouterServerNumbers{Reasons: map[string]uint64{}, Answers: map[string]console.RouteAnswers{}}
+			}
+			n.SQLMode, n.SQLModeFrom = r.modes.SQLModeOf(id)
+			d.Servers[id] = n
+		}
+	}
+	return d
+}
+
+// counts is the document's counts, under the tally's lock.
+func (r *pgRouteStats) counts(listen string) pgRouterStatusDoc {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	d := pgRouterStatusDoc{Version: pgRouterStatusVersion, Listen: listen, ReadOnly: true,
@@ -247,25 +273,6 @@ func (r *pgRouteStats) doc(listen string) pgRouterStatusDoc {
 			n.Statements = tab
 		}
 		d.Servers[id] = n
-	}
-	if r.modes != nil {
-		forced, _ := console.SQLModeSetting()
-		fresh := forced == console.SQLModeForcedFresh
-		d.Fresh, d.SQLModeForced, d.FreshByDefault, d.PerServerMode = &fresh, forced, true, true
-		ids := r.modes.PostgresServerIDs()
-		for id := range d.Servers {
-			if !slices.Contains(ids, id) {
-				ids = append(ids, id)
-			}
-		}
-		for _, id := range ids {
-			n, ok := d.Servers[id]
-			if !ok {
-				n = pgRouterServerNumbers{Reasons: map[string]uint64{}, Answers: map[string]console.RouteAnswers{}}
-			}
-			n.SQLMode, n.SQLModeFrom = r.modes.SQLModeOf(id)
-			d.Servers[id] = n
-		}
 	}
 	return d
 }
