@@ -20,6 +20,9 @@ Wants=network-online.target
 Type=simple
 User=bintrail
 Group=bintrail
+# Its status, on this machine only, for the web interface
+# (bintrail-console.service). A line in the settings file wins.
+Environment=BINTRAIL_PG_ROUTER_STATUS_ADDR=127.0.0.1:9092
 # The same file the capture service reads, so both use the same servers file.
 EnvironmentFile=/etc/bintrail/bintrail-console.env
 ExecStart=/usr/bin/bintrail-console pg-router

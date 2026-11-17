@@ -8009,7 +8009,7 @@ async function renderSnapshots() {
   // the DRAWING below, where `part` keeps one throwing section from taking
   // the other two with it.
   const asErr = (err) => ({ error: (err && err.message) || String(err) });
-  const [serversRes, baselines, coverage, settings, storage, routerRes, pgRouterRes] = await Promise.all([
+  const [serversRes, baselines, coverage, settings, storage, routerRes] = await Promise.all([
     api("/api/servers").catch(asErr),
     api("/api/baselines").catch((err) => Object.assign(asErr(err), { sql_mirror: (err && err.body && err.body.sql_mirror) || undefined })),
     // The hero colours the copy's age by the capture's state (a young copy
@@ -8032,9 +8032,6 @@ async function renderSnapshots() {
     // (#2546). undefined: this session may not read it, or this DBTrail has
     // no such route; any other failure is the router's, said on the card.
     sessionMay("settings:read") ? api("/api/router").catch((err) => (err && (err.status === 403 || err.status === 404) ? undefined : { configured: true, error: (err && err.message) || String(err) })) : Promise.resolve(undefined),
-    // The same for a PostgreSQL server, from the PostgreSQL router, which
-    // applies those servers' modes: the MySQL router does not serve them.
-    sessionMay("settings:read") ? api("/api/pg-router").catch((err) => (err && (err.status === 403 || err.status === 404) ? undefined : { configured: true, error: (err && err.message) || String(err) })) : Promise.resolve(undefined),
   ]);
   if (gen !== serverGen || vgen !== viewGen) return;
   snapStorage = storage;
@@ -8044,7 +8041,8 @@ async function renderSnapshots() {
   // Run states for the selected server: only the endpoints this daemon
   // actually serves (each 403s when its feature is off).
   const selId = currentServer || defaultServerId;
-  const [dumpSt, restoreSt, sqlSt, jobsRes] = await Promise.all([
+  const selPG = !!snapRegistry.find((s) => s.id === selId && s.flavor === "postgres");
+  const [dumpSt, restoreSt, sqlSt, jobsRes, pgRouterRes] = await Promise.all([
     (capsCache.baseline_trigger && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/baseline").catch(() => null) : null,
     (capsCache.baseline_restore && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/baseline/restore").catch(() => null) : null,
     // asErr, not a swallow: the .sql build's outcome appears in exactly one
@@ -8054,6 +8052,9 @@ async function renderSnapshots() {
     // The daemon keeps the job history, so a standalone serve has none to
     // read. A failed read is kept as one: the list still draws without it.
     (capsCache.monitor && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/copy-jobs").catch((err) => Object.assign(asErr(err), { status: err && err.status })) : null,
+    // A PostgreSQL server's mode is the PostgreSQL router's (the MySQL
+    // router does not serve those servers): asked only for one.
+    (selPG && sessionMay("settings:read")) ? api("/api/pg-router").catch((err) => (err && (err.status === 403 || err.status === 404) ? undefined : { configured: true, error: (err && err.message) || String(err) })) : Promise.resolve(undefined),
   ]);
   if (gen !== serverGen || vgen !== viewGen) return;
   try {
@@ -12235,8 +12236,8 @@ function sqlModeModel(cur, rt, mayWrite) {
 
 // What each mode gives and costs, said beside its pill.
 const SQL_MODE_COSTS = {
-  fast: "Answers come from this server's last snapshot, so they are as old as its last refresh. The router's memory goes to statements.",
-  fresh: "Answers include what capture recorded since this server's last snapshot, so they are about as far behind as capture. The router keeps those changes in memory and looks for new ones every second, and fewer statements may run at once.",
+  fast: "Answers come from this server's last snapshot, so they are as old as its last refresh. The port's memory goes to statements.",
+  fresh: "Answers include what capture recorded since this server's last snapshot, so they are about as far behind as capture. The port keeps those changes in memory and looks for new ones every second, and fewer statements may run at once.",
 };
 
 // sqlModeCard (#2546): the per-server choice between fast and fresh answers
@@ -12264,12 +12265,12 @@ function sqlModeCard(cur, rt) {
     if (!sessionMay("servers:write")) card.append(el("p", { class: "form-hint", text: "Changing it needs permission to change servers." }));
     return card;
   }
-  save.onclick = () => saveSQLMode(cur.id, pills.value === "fresh", save, msg);
+  save.onclick = () => saveSQLMode(cur.id, pills.value === "fresh", save, msg, cur.flavor === "postgres");
   card.append(pills, cost, el("div", { class: "bk-restore-row" }, save), msg);
   return card;
 }
 
-async function saveSQLMode(id, fresh, btn, msgEl) {
+async function saveSQLMode(id, fresh, btn, msgEl, pg) {
   msgEl.hidden = true;
   btn.disabled = true;
   try {
@@ -12281,7 +12282,7 @@ async function saveSQLMode(id, fresh, btn, msgEl) {
     return;
   }
   btn.disabled = false;
-  toast((fresh ? "Fresh" : "Fast") + " mode saved. The router applies it within a few seconds.");
+  toast((fresh ? "Fresh" : "Fast") + " mode saved. The " + (pg ? "PostgreSQL router" : "router") + " applies it within a few seconds.");
   if (backupsOnScreen()) renderSnapshots();
   // Once more after the router had time to read it, so the card can say it
   // is applied instead of leaving the reader to guess.
