@@ -1171,7 +1171,13 @@ curl -s http://127.0.0.1:9092/status
 
 `/status` is JSON: per server (by its id), how many statements each side
 answered (`copy`, `source`, `refused`), why (`reasons`), and per side how many
-finished, how many got an error and how long they took (`answers`). With
+finished, how many got an error and how long they took (`answers`), and its
+mode: `sql_mode` (`fresh` or `fast`) and where that comes from,
+`sql_mode_from` (`environment`, `saved` or `default`). Every PostgreSQL server
+is listed with its mode, whether or not a statement reached it yet. The
+document also says `fresh` (true when `BINTRAIL_SQL_TAILS` puts every server in
+fresh mode) and `sql_mode_forced` (`fresh` or `fast` when that setting decides
+for every server), as the MySQL router's does. With
 `--status-statements` each server also carries `statements`: a row per
 statement shape and side, values blanked and table and column names kept. That
 address asks for no password: whoever reaches it reads the counts, and with
