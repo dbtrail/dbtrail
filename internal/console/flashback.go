@@ -127,40 +127,27 @@ type SQLOnCopy struct {
 	// event through, on this connection: no later answer of the copy may
 	// hold less (seenFloor).
 	seen atomic.Uint64
+	// toldSnapshotAlone says the connection was told snapshotAloneNote since
+	// its last answer that read tails.
+	toldSnapshotAlone atomic.Bool
 }
 
-// The notes of an answer from the snapshot alone that may be behind an
-// earlier answer of the copy on the same connection.
-const (
-	snapshotOlderNote      = "Answered from the snapshot alone: its captured changes are older than an earlier answer of the copy on this connection."
-	snapshotMaybeOlderNote = "Answered from the snapshot alone, which may hold captured changes older than an earlier answer of the copy on this connection."
-)
+// snapshotAloneNote is what a connection is told when an answer of the copy
+// read the snapshot without tails after an earlier answer that read them:
+// the server was changed to fast mode while it was open, or the tails were
+// not read this time. The snapshot alone can be behind what the connection
+// was shown. Said whatever the snapshot is: how far a snapshot reaches is
+// not recorded for every source (a PostgreSQL snapshot keeps no event of
+// the index), and "can be" stays true when it is not behind.
+const snapshotAloneNote = "Answered from the snapshot alone, which can be older than an earlier answer of the copy on this connection: the server may have been changed to fast mode."
 
-// snapshotOlderThanSeen decides, for an answer read from the snapshot without
-// tails on a connection whose earlier answers held every event through the
-// index event id was (not 0), what the client is told and the connection's
-// new floor. cut is how far the snapshot read holds every event, asked only
-// when the answer read one. A snapshot at or past the floor says nothing; one
-// before it says so and lowers the floor to it, so the next answers from the
-// same snapshot do not say it again; one that cannot be placed says it may be
-// older, and the floor is dropped, since nothing it is compared with later
-// would be what the connection was last shown.
-func snapshotOlderThanSeen(was uint64, readFrom map[string][]string, readFromOK bool, cut func() (uint64, string)) (note string, seen uint64) {
-	if readFromOK && len(readFrom) == 0 {
-		// No table of the snapshot was read (a probe, the change log).
-		return "", was
-	}
-	if !readFromOK {
-		return snapshotMaybeOlderNote, 0
-	}
-	id, why := cut()
-	switch {
-	case why != "" || id == 0:
-		return snapshotMaybeOlderNote, 0
-	case id >= was:
-		return "", was
-	}
-	return snapshotOlderNote, id
+// tellSnapshotAlone decides whether an answer is told snapshotAloneNote:
+// the connection had an answer that read tails (seen, its floor, not 0), it
+// was not told since (told), and this answer read the copy's tables (read)
+// with no tails step (tailsRan false). A statement that reads no table (a
+// probe, a catalog listing, SELECT 1) says nothing and changes nothing.
+func tellSnapshotAlone(seen uint64, told, read, tailsRan bool) bool {
+	return seen != 0 && !told && read && !tailsRan
 }
 
 // Run runs one statement; schema is where unqualified names resolve (the
@@ -242,21 +229,17 @@ func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string, sess sqls
 				break
 			}
 		}
-	} else if was := q.seen.Load(); was != 0 {
-		// Answered without tails after an answer with them: the server was
-		// changed to fast mode while the connection was open, or the tails
-		// were not read this time. Fresh mode's own check (seenFloor) only
-		// looks at tails, so the snapshot alone could go back in time on
-		// this connection with nothing said.
-		note, seen := snapshotOlderThanSeen(was, out.ReadFrom, out.ReadFromOK, func() (uint64, string) {
-			_, id, why := q.s.snapshotCutFor(ctx, q.b, q.id, out.ReadFrom)
-			return id, why
-		})
-		if seen != was {
-			q.seen.CompareAndSwap(was, seen)
-		}
+		// Reading tails again: a later answer from the snapshot alone is
+		// told again.
+		q.toldSnapshotAlone.Store(false)
+	} else if tellSnapshotAlone(q.seen.Load(), q.toldSnapshotAlone.Load(), out.ReadCopyTables, out.Phases.TailsRan) {
+		// Fresh mode's own check (seenFloor) only looks at tails, so the
+		// snapshot alone could go back in time on this connection with
+		// nothing said. Told once; the floor stays, so the check of tails
+		// still holds if fresh mode comes back.
+		q.toldSnapshotAlone.Store(true)
 		if out.OlderCopyNote == "" {
-			out.OlderCopyNote = note
+			out.OlderCopyNote = snapshotAloneNote
 		}
 	}
 	out.Result.Note = out.OlderCopyNote
