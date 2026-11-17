@@ -13,27 +13,27 @@ import (
 func TestUploadable_pgDelta(t *testing.T) {
 	const dir = "/b/2026-05-01T12-00-00Z/public/"
 	for name, want := range map[string]bool{
-		"orders.000000.pgdead":            true,
-		"orders.000000.pgnew":             true,
-		"orders.000017.pgnew":             true,
-		"or.ders.000000.pgdead":           true, // a dot in the table's name
-		"orders.000000.pgnew.tmp-4821":    false,
-		"orders.000000.pgdead.tmp-4821":   false,
-		"orders.pgnew":                    false,
-		"orders.00000.pgnew":              false,
-		"orders.0000000.pgnew":            false,
-		"orders.00000a.pgdead":            false,
-		"orders.000000.PGNEW":             false,
-		".000000.pgnew":                   false,
-		"orders.000000.pgnewer":           false,
-		"orders.000000.pgnew.bak":         false,
-		"orders.000000.pgnew.parquet":     true, // a table file by its name
-		"orders.parquet":                  true,
-		"orders.000000.upserts":           true,
-		"orders.000000-000003.upserts":    true,
-		"orders.000000.posdel":            true,
-		"orders.000000.posdel.tmp":        false,
-		"_SUCCESS":                        false,
+		"orders.000000.pgdead":         true,
+		"orders.000000.pgnew":          true,
+		"orders.000017.pgnew":          true,
+		"or.ders.000000.pgdead":        true, // a dot in the table's name
+		"orders.000000.pgnew.tmp-4821": false,
+		"orders.000000.pgdead.tmp-4821":false,
+		"orders.pgnew":                 false,
+		"orders.00000.pgnew":           false,
+		"orders.0000000.pgnew":         false,
+		"orders.00000a.pgdead":         false,
+		"orders.000000.PGNEW":          false,
+		".000000.pgnew":                false,
+		"orders.000000.pgnewer":        false,
+		"orders.000000.pgnew.bak":      false,
+		"orders.000000.pgnew.parquet":  true, // a table file by its name
+		"orders.parquet":               true,
+		"orders.000000.upserts":        true,
+		"orders.000000-000003.upserts": true,
+		"orders.000000.posdel":         true,
+		"orders.000000.posdel.tmp":     false,
+		"_SUCCESS":                     false,
 	} {
 		if got := uploadable(dir + name); got != want {
 			t.Errorf("uploadable(%q) = %v, want %v", name, got, want)
