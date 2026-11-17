@@ -234,11 +234,12 @@ func (x *pgTailSource) cut(t views.BaselineTable) pgCut {
 		return refuse("the snapshot of %s does not record an LSN to continue from", name)
 	}
 	// A table delta of PostgreSQL's own (#2757): the table is its file and
-	// the pair, and the views read the file alone.
+	// the pair. The views read both and can lay a tail over them; no
+	// statement has been run that way yet, so none is.
 	if dead, rows, perr := pgdelta.Paths(t.Path, 0); perr == nil {
 		for _, f := range []string{dead, rows} {
 			if _, serr := os.Lstat(f); serr == nil || !errors.Is(serr, os.ErrNotExist) {
-				return refuse("the copy of %s has a table delta beside its file, which SQL on the copy does not read yet", name)
+				return refuse("the copy of %s has a table delta beside its file, and a tail is not laid over one yet", name)
 			}
 		}
 	}

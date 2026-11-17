@@ -22,12 +22,15 @@ import (
 // file was written. The file alone is then the table as it was at an
 // earlier update, and a view that read it alone would answer with that.
 //
-// It answers only for a view pinned to one snapshot whose file is named by
-// an absolute local path, which is what every statement on the copy reads
-// through (the SQL page, the ports, the AI connection): only there can the
-// folder be looked at when the view is written. A view that follows later
-// snapshots, or names its files in S3 or relative to a folder it will be
-// moved with, is written as before.
+// It answers only for a view pinned to one snapshot whose file is on this
+// machine, which is what every statement on the copy reads through (the SQL
+// page, the ports, the AI connection): only there can the folder be looked
+// at when the view is written. A path that is not absolute is looked for
+// from where this process runs, as the engine will read it (a snapshot
+// folder given as a relative path). A view that follows later snapshots, or
+// names its files in S3, is written as before; so is one whose relative
+// paths are for a folder the file will be moved with, where nothing is found
+// from here.
 //
 // A table whose definition is known is a MySQL one and is never looked at:
 // no file of its folder is asked for. For the others, two names are asked
@@ -38,10 +41,16 @@ import (
 // the table cannot be said, and the file alone would say it wrong.
 func pgPairStateBody(in Input, t BaselineTable) (body string, ok bool) {
 	if t.SchemaKnown || t.Delta || in.Follow.follows() ||
-		strings.Contains(t.Path, "://") || !filepath.IsAbs(t.Path) || !strings.HasSuffix(t.Path, ".parquet") {
+		strings.Contains(t.Path, "://") || !strings.HasSuffix(t.Path, ".parquet") {
 		return "", false
 	}
-	dead, rows, err := pgdelta.Paths(t.Path, 0)
+	// Where the file is, for looking beside it. The view names it as t.Path
+	// spells it, like every other body.
+	at, err := filepath.Abs(t.Path)
+	if err != nil {
+		return "", false
+	}
+	dead, rows, err := pgdelta.Paths(at, 0)
 	if err != nil {
 		return "", false
 	}
@@ -49,7 +58,7 @@ func pgPairStateBody(in Input, t BaselineTable) (body string, ok bool) {
 		return "", false
 	}
 	dir := filepath.Dir(t.Path)
-	chain, err := pgPairChain(dir, strings.TrimSuffix(filepath.Base(t.Path), ".parquet"))
+	chain, err := pgPairChain(filepath.Dir(at), strings.TrimSuffix(filepath.Base(t.Path), ".parquet"))
 	if err == nil && len(chain.Pairs) == 0 {
 		err = errors.New("a file of its table delta is there and could not be read")
 	}
@@ -108,13 +117,19 @@ func pgPairChain(dir, table string) (pgdelta.Chain, error) {
 
 // pgPairRefusal is a body that refuses when the view is read, and not when
 // it is created: one table's broken delta must not keep the other tables'
-// views from being made. The count of a glob is not known before the read,
-// so the error is not raised while the view is bound.
+// views from being made.
+//
+// The refusal does not hang on the file's rows: a filter over a file that
+// holds none is never run, and the view would answer with an empty table. A
+// count with no GROUP BY is always one row, so the error is raised by any
+// read of the view; the count is of a glob, which is not known before the
+// read, so it is not raised while the view is bound. The file is joined to
+// it only for the view to have the table's columns.
 func pgPairRefusal(t BaselineTable, cause error) string {
 	msg := fmt.Sprintf("bintrail views: %s.%s has a table delta beside its file that cannot be read whole (%v), "+
 		"and its file alone would show the table as it was when it was last written in full. "+
 		"A new full snapshot of this server replaces it", t.Schema, t.Table, cause)
 	file := sqlString(fileGlob(t.Path))
-	return fmt.Sprintf("SELECT * FROM read_parquet(%s) WHERE CASE WHEN (SELECT count(*) FROM glob(%s)) >= 0 THEN error(%s) ELSE true END",
-		file, file, sqlString(msg))
+	return fmt.Sprintf("SELECT bintrail_t.* FROM (SELECT CASE WHEN count(*) >= 0 THEN error(%s) ELSE true END AS bintrail_refused FROM glob(%s)) AS bintrail_r "+
+		"LEFT JOIN read_parquet(%s) AS bintrail_t ON bintrail_r.bintrail_refused", sqlString(msg), file, file)
 }

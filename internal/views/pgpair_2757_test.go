@@ -241,8 +241,9 @@ func TestPGPairStateBody_leavesTheOthersAlone(t *testing.T) {
 	pg := pgPairTable(base, "orders")
 
 	mysql := BaselineTable{Schema: "public", Table: "orders", Path: base, Rel: "public/orders.parquet", SchemaKnown: true, Columns: pgPairCols}
+	mysqlDelta := BaselineTable{Schema: "public", Table: "orders", Path: base, Rel: "public/orders.parquet", Delta: true}
 	relative := pg
-	relative.Path = "./public/orders.parquet"
+	relative.Path = "./public/orders.parquet" // for a folder the file is moved with: nothing is there from here
 	s3 := pg
 	s3.Path = "s3://bucket/2026-04-30T03-00-00Z/public/orders.parquet"
 	for name, c := range map[string]struct {
@@ -250,9 +251,10 @@ func TestPGPairStateBody_leavesTheOthersAlone(t *testing.T) {
 		t  BaselineTable
 	}{
 		"a table whose definition is known": {Input{}, mysql},
+		"a table with a MySQL delta":        {Input{}, mysqlDelta},
 		"a view that follows the pointer":   {Input{Follow: FollowPointer}, pg},
 		"a view that follows the newest":    {Input{Follow: FollowNewest}, pg},
-		"a relative path":                   {Input{}, relative},
+		"a relative path with nothing there": {Input{}, relative},
 		"a file in S3":                      {Input{}, s3},
 	} {
 		if body, ok := pgPairStateBody(c.in, c.t); ok {
@@ -270,5 +272,76 @@ func TestPGPairStateBody_leavesTheOthersAlone(t *testing.T) {
 	without := pgPairGenerate(root, FollowNone, mysql)
 	if strings.ReplaceAll(withFiles, base, "X") != strings.ReplaceAll(without, bare, "X") {
 		t.Fatalf("a MySQL table's view changed with PostgreSQL delta files beside its file:\n%s\n--- without ---\n%s", withFiles, without)
+	}
+}
+
+// A snapshot folder given as a relative path: the file is looked for from
+// where the process runs, and the view names it as it was given.
+func TestPGPairStateView_relativeFolder(t *testing.T) {
+	root := t.TempDir()
+	base := writePGPairBase(t, root, "orders", [2]string{"1", "one"}, [2]string{"2", "two"})
+	writePGPair(t, base, map[string]string{"1": "ONE", "2": ""})
+	t.Chdir(root)
+	rel, err := filepath.Rel(root, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlText := pgPairGenerate(".", FollowNone, pgPairTable(rel, "orders"))
+	if strings.Contains(sqlText, root) {
+		t.Fatalf("the view names the file by another path than it was given:\n%s", sqlText)
+	}
+	if got, err := pgPairRows(t, execViews(t, sqlText), "orders"); err != nil || !reflect.DeepEqual(got, []string{"1=ONE"}) {
+		t.Fatalf("with its delta, from a relative folder: %v, %v\n%s", got, err, sqlText)
+	}
+}
+
+// The refusal of a pair that is not whole does not depend on the file
+// holding rows, nor on what the statement asks of the view.
+func TestPGPairStateView_refusalOverAnEmptyFile(t *testing.T) {
+	root := t.TempDir()
+	empty := writePGPairBase(t, root, "orders")
+	_, rows, err := pgdelta.Paths(empty, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rows, []byte("not a pair"), 0o644); err != nil { // half a pair, by its name
+		t.Fatal(err)
+	}
+	db := execViews(t, pgPairGenerate(root, FollowNone, pgPairTable(empty, "orders")))
+	for _, q := range []string{
+		`SELECT * FROM public.orders`,
+		`SELECT count(*) FROM public.orders`,
+		`SELECT id FROM public.orders WHERE id = 1`,
+		`SELECT 1 FROM public.orders LIMIT 1`,
+	} {
+		rs, err := db.Query(q)
+		if err == nil {
+			for rs.Next() {
+			}
+			err = rs.Err()
+			rs.Close()
+		}
+		if err == nil || !strings.Contains(err.Error(), "cannot be read whole") {
+			t.Errorf("%s: %v, want the refusal", q, err)
+		}
+	}
+}
+
+// Every character the engine reads as a pattern, in a table's name.
+func TestPGPairStateView_patternCharactersInTheName(t *testing.T) {
+	for _, name := range []string{"or[d]ers", "or?ers", "or{d,x}ers", "or**ers"} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			base := writePGPairBase(t, root, name, [2]string{"1", "one"}, [2]string{"2", "two"})
+			other := writePGPairBase(t, root, "orders", [2]string{"1", "plain"})
+			writePGPair(t, base, map[string]string{"1": "ONE", "2": ""})
+			db := execViews(t, pgPairGenerate(root, FollowNone, pgPairTable(base, name), pgPairTable(other, "orders")))
+			if got, err := pgPairRows(t, db, name); err != nil || !reflect.DeepEqual(got, []string{"1=ONE"}) {
+				t.Fatalf("%s: %v, %v", name, got, err)
+			}
+			if got, err := pgPairRows(t, db, "orders"); err != nil || !reflect.DeepEqual(got, []string{"1=plain"}) {
+				t.Fatalf("the other table: %v, %v", got, err)
+			}
+		})
 	}
 }
