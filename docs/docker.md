@@ -900,14 +900,16 @@ The key must be readable by the container's user and not encrypted. The
 certificate is read when the service starts: restart `pg-router` to serve a
 renewed one.
 
-**Size.** The service is small on purpose, so it fits beside capture without
-asking: two statements at once, two threads each, sixteen clients.
+**Size.** The service is sized to fit beside capture without asking: four
+statements at once, two threads each, 256 clients. Each statement may take the
+SQL memory (2GB unless set), so four at once can take 8GB: on a machine with
+16GB, set `PG_ROUTER_WORKERS=2` or `PG_ROUTER_MEMORY`.
 
 | `.env` | What it sets | Unset |
 |---|---|---|
-| `PG_ROUTER_WORKERS` | statements that run on the copy at once (1 to 16) | 2 |
+| `PG_ROUTER_WORKERS` | statements that run on the copy at once (1 to 16) | 4 |
 | `PG_ROUTER_THREADS` | threads each statement may use (1 to 16) | 2 |
-| `PG_ROUTER_MAX_CONNECTIONS` | clients connected at once; one more is refused | 16 |
+| `PG_ROUTER_MAX_CONNECTIONS` | clients connected at once; one more is refused | 256 |
 | `PG_ROUTER_MAX_WAIT` | how long a statement waits for its turn, e.g. `30s` | no limit of its own |
 | `PG_ROUTER_MEMORY`, `PG_ROUTER_CPUS` | ceilings for the whole service, e.g. `8g` and `4` | none |
 | `SQL_MEMORY` | memory each statement may use (shared with the other services) | 2GB |
