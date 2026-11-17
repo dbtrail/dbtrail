@@ -161,8 +161,21 @@ func TestIntegrationPGRouterFreshMode_2756(t *testing.T) {
 		t.Fatalf("snapshots = %v: the answer must come from the tail, not a new snapshot", snaps)
 	}
 
+	// The status says what the port does, from the console of this process.
+	status := newPGRouteStats(time.Now(), false)
+	status.modes = srv
+	says := func(mode, from string) {
+		t.Helper()
+		n, ok := status.doc("").Servers[e.ID]
+		if !ok || n.SQLMode != mode || n.SQLModeFrom != from {
+			t.Fatalf("status: listed=%v mode=%q from=%q, want %s from %s", ok, n.SQLMode, n.SQLModeFrom, mode, from)
+		}
+	}
+	says("fresh", "saved")
+
 	// Back to fast: the snapshot again, at once.
 	mode(false)
+	says("fast", "saved")
 	if got := read(); got != snapshot {
 		t.Fatalf("fast mode again: %s, want the snapshot %s", got, snapshot)
 	}
@@ -178,4 +191,5 @@ func TestIntegrationPGRouterFreshMode_2756(t *testing.T) {
 	if got := read(); got != snapshot {
 		t.Fatalf("BINTRAIL_SQL_TAILS=off with fresh saved: %s, want the snapshot %s", got, snapshot)
 	}
+	says("fast", "environment")
 }
