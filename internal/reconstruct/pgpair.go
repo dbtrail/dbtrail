@@ -243,6 +243,14 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		Positions: positions, Changes: changes,
 		Metadata: snapshotFileMetadata(in),
 	})
+	if errors.Is(err, pgdelta.ErrPairExists) {
+		// Never the full merge here: it would write the table's file beside
+		// a pair written for another one, and whatever reads the pair would
+		// take that file's rows away by the other's row numbers. The folder
+		// is this run's own and was empty, so a pair in it is not one this
+		// run can explain.
+		return false, fmt.Errorf("%s.%s: a table delta is already in this snapshot's folder: %w", in.Schema, in.Table, err)
+	}
 	if err != nil {
 		return full("the delta could not be written", err)
 	}

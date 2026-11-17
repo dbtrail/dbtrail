@@ -8,9 +8,10 @@ import (
 )
 
 // StateSQL is a SELECT of a table's rows as its base file and the chain
-// beside it leave them: the base's rows whose row number no .pgdead file
-// names, plus the newest version of every key in the .pgnew files that is
-// not a deletion. base, dead and rows are file paths (or s3:// URLs); the
+// beside it leave them. Each path names one file, whatever characters it
+// holds (file): give them as they are, not made into globs. It is the
+// base's rows whose row number no .pgdead file names, plus the newest
+// version of every key in the .pgnew files that is not a deletion. base, dead and rows are file paths (or s3:// URLs); the
 // two lists are the chain's, one entry per pair. With no pair it is the
 // base's rows.
 //
@@ -31,10 +32,10 @@ import (
 func StateSQL(base string, dead, rows []string) string {
 	dead, rows = unique(dead), unique(rows)
 	if len(dead) == 0 && len(rows) == 0 {
-		return "SELECT * FROM read_parquet(" + quote(base) + noHive + ")"
+		return "SELECT * FROM read_parquet(" + file(base) + noHive + ")"
 	}
 	var b strings.Builder
-	b.WriteString("SELECT bintrail_b.* EXCLUDE (file_row_number) FROM read_parquet(" + quote(base) + ", file_row_number=true" + noHive + ") AS bintrail_b")
+	b.WriteString("SELECT bintrail_b.* EXCLUDE (file_row_number) FROM read_parquet(" + file(base) + ", file_row_number=true" + noHive + ") AS bintrail_b")
 	if len(dead) > 0 {
 		b.WriteString(" WHERE NOT EXISTS (SELECT 1 FROM read_parquet(" + list(dead) + noHive + ") AS bintrail_d" +
 			` WHERE bintrail_d."` + baseline.TableDeltaPosColumn + `" = bintrail_b.file_row_number)`)
@@ -75,11 +76,32 @@ func unique(paths []string) []string {
 // quote is s as a SQL string literal.
 func quote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
+// file is path as the engine is handed a file to read: a SQL string literal
+// of the path made to match itself and nothing else. The engine takes every
+// path as a glob, so a table named "or*ders" would be read with the file of
+// "orders" beside it, and the row numbers of one file taken for the other's.
+// Each pattern character is wrapped in a class of its own, which is how the
+// engine takes one literally (a backslash does not escape).
+func file(path string) string {
+	var b strings.Builder
+	for _, c := range path {
+		switch c {
+		case '[', '*', '?', '{':
+			b.WriteByte('[')
+			b.WriteRune(c)
+			b.WriteByte(']')
+		default:
+			b.WriteRune(c)
+		}
+	}
+	return quote(b.String())
+}
+
 // list is paths as a SQL list of string literals.
 func list(paths []string) string {
 	q := make([]string, len(paths))
 	for i, p := range paths {
-		q[i] = quote(p)
+		q[i] = file(p)
 	}
 	return "[" + strings.Join(q, ", ") + "]"
 }

@@ -759,3 +759,36 @@ func TestStateOfALongChain(t *testing.T) {
 	// Up to the tenth pair only: pair 9's row, not pair 10's or 11's.
 	want(t, "the first ten pairs", state(t, db, base, dead[:10], rows[:10], cols...), "[1] [v9]", "[2] [base]", "[3] [new]")
 }
+
+// A table whose name is a glob is read as its own file: the engine takes a
+// path as a pattern, and "or*ders" would be read with "orders" beside it,
+// one file's row numbers taken for the other's.
+func TestGlobInAFileName(t *testing.T) {
+	db := duck(t)
+	dir := t.TempDir()
+	cols := []string{"id", "status"}
+	star := filepath.Join(dir, "or*ders.parquet")
+	plain := filepath.Join(dir, "orders.parquet")
+	// The other table holds the same keys, at other rows.
+	writeBase(t, star, cols, []cell{v("1"), v("one")}, []cell{v("2"), v("two")})
+	writeBase(t, plain, cols, []cell{v("9"), v("nine")}, []cell{v("2"), v("other two")}, []cell{v("1"), v("other one")})
+
+	at, err := BasePositions(context.Background(), db, star, []string{"id"}, func(string) bool { return true })
+	if err != nil || len(at) != 2 || at["1"] != 0 || at["2"] != 1 {
+		t.Fatalf("BasePositions of the table named with a star: %v, %v", at, err)
+	}
+	if n, err := BaseRows(context.Background(), db, star); err != nil || n != 2 {
+		t.Fatalf("BaseRows = %d, %v; want its own 2", n, err)
+	}
+	dead, rows := pair(t, db, star, 0, cols, []string{"id"}, change{key: "2", row: []cell{v("2"), v("TWO")}})
+	if md, err := Footer(context.Background(), db, rows); err != nil || md[MetaKeyBase] == "" {
+		t.Fatalf("Footer of its pair: %v, %v", md, err)
+	}
+	if got, want := state(t, db, star, []string{dead}, []string{rows}, cols...), []string{"[1] [one]", "[2] [TWO]"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("state %v, want %v", got, want)
+	}
+	// And the other table is as it was.
+	if got, want := state(t, db, plain, nil, nil, cols...), []string{"[1] [other one]", "[2] [other two]", "[9] [nine]"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the other table: %v, want %v", got, want)
+	}
+}
