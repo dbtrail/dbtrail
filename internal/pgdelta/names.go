@@ -35,6 +35,17 @@ func Paths(basePath string, seq int) (dead, rows string, err error) {
 	return stem + DeadSuffix, stem + NewSuffix, nil
 }
 
+// AnyNewGlob is a glob that matches the .pgnew file of every pair beside the
+// table file at basePath (a path or URL, or the end of one), and no other
+// table's: the file's own name taken literally, a sequence of digits, the
+// suffix. For whoever cannot list the folder and has to ask the engine
+// whether a table has a delta. A chain starts at pair 0, so one match means
+// the table has one.
+func AnyNewGlob(basePath string) string {
+	stem := strings.TrimSuffix(basePath, baseSuffix)
+	return literal(stem) + "." + strings.Repeat("[0-9]", seqWidth) + NewSuffix
+}
+
 // Name is what a file name beside a table file says: the table it belongs
 // to, its sequence, and which of the pair's two files it is.
 type Name struct {

@@ -85,9 +85,17 @@ func writePGPair(t *testing.T, base string, changes map[string]string) {
 func pgPairTable(path, table string) BaselineTable {
 	t := BaselineTable{Schema: "public", Table: table, Path: path, Rel: "public/" + table + ".parquet"}
 	in := Input{Baselines: []BaselineTable{t}}
+	// The footer of a PostgreSQL table file gives its casts and the shape
+	// they come from together. A view that follows later snapshots drops the
+	// casts and keeps the shape, which is then all that says the table is a
+	// PostgreSQL one.
 	in.ApplyFooters(map[string]baseline.TableFooter{path: {
 		Columns: pgPairCols,
 		PG:      []baseline.PGCast{{Name: "id", As: "BIGINT"}, {Name: "status", As: baseline.PGAsText}},
+		PGRelation: &baseline.PGRelation{OID: 16500, Columns: []baseline.PGColumn{
+			{Name: "id", TypeOID: 20, TypeMod: -1, Type: "bigint", NotNull: true, Ordinal: 1},
+			{Name: "status", TypeOID: 25, TypeMod: -1, Type: "text", Ordinal: 2},
+		}, PrimaryKey: []string{"id"}},
 	}})
 	return in.Baselines[0]
 }
@@ -232,8 +240,9 @@ func TestPGPairStateView_globInTheName(t *testing.T) {
 }
 
 // What the pair's body is not written for is written as it was: a MySQL
-// table (its definition is known) with such files beside it, a view that
-// follows later snapshots, and a file named in S3 or by a relative path.
+// table (its definition is known, or it has MySQL's delta) with such files
+// beside it, and a table nothing says is a PostgreSQL one where the folder
+// cannot be looked at.
 func TestPGPairStateBody_leavesTheOthersAlone(t *testing.T) {
 	root := t.TempDir()
 	base := writePGPairBase(t, root, "orders", [2]string{"1", "one"})
@@ -242,20 +251,16 @@ func TestPGPairStateBody_leavesTheOthersAlone(t *testing.T) {
 
 	mysql := BaselineTable{Schema: "public", Table: "orders", Path: base, Rel: "public/orders.parquet", SchemaKnown: true, Columns: pgPairCols}
 	mysqlDelta := BaselineTable{Schema: "public", Table: "orders", Path: base, Rel: "public/orders.parquet", Delta: true}
-	relative := pg
-	relative.Path = "./public/orders.parquet" // for a folder the file is moved with: nothing is there from here
-	s3 := pg
-	s3.Path = "s3://bucket/2026-04-30T03-00-00Z/public/orders.parquet"
+	unknown := BaselineTable{Schema: "public", Table: "orders", Path: "s3://bucket/2026-04-30T03-00-00Z/public/orders.parquet", Rel: "public/orders.parquet"}
 	for name, c := range map[string]struct {
 		in Input
 		t  BaselineTable
 	}{
-		"a table whose definition is known":  {Input{}, mysql},
-		"a table with a MySQL delta":         {Input{}, mysqlDelta},
-		"a view that follows the pointer":    {Input{Follow: FollowPointer}, pg},
-		"a view that follows the newest":     {Input{Follow: FollowNewest}, pg},
-		"a relative path with nothing there": {Input{}, relative},
-		"a file in S3":                       {Input{}, s3},
+		"a table whose definition is known":              {Input{}, mysql},
+		"a table whose definition is known, following":   {Input{Follow: FollowPointer}, mysql},
+		"a table with a MySQL delta":                     {Input{}, mysqlDelta},
+		"a file in S3 that nothing says is PostgreSQL's": {Input{}, unknown},
+		"the same, following the newest":                 {Input{Follow: FollowNewest}, unknown},
 	} {
 		if body, ok := pgPairStateBody(c.in, c.t); ok {
 			t.Errorf("%s: the pair's body was written: %s", name, body)
@@ -273,6 +278,117 @@ func TestPGPairStateBody_leavesTheOthersAlone(t *testing.T) {
 	if strings.ReplaceAll(withFiles, base, "X") != strings.ReplaceAll(without, bare, "X") {
 		t.Fatalf("a MySQL table's view changed with PostgreSQL delta files beside its file:\n%s\n--- without ---\n%s", withFiles, without)
 	}
+}
+
+// Where the folder cannot be looked at when the view is written, a
+// PostgreSQL table reads its file alone behind a guard: the view answers
+// while the file has no delta beside it, and refuses once it has one.
+//
+// Three such views: one that follows the folder's pointer, one that follows
+// the newest snapshot, and one whose paths are relative to a folder the file
+// is moved with.
+func TestPGPairGuard(t *testing.T) {
+	const stamp = "2026-04-30T03-00-00Z"
+	rowsOf := func(t *testing.T, sqlText, table string) ([]string, error) {
+		t.Helper()
+		db, err := loadViews(t, sqlText)
+		if err != nil {
+			t.Fatalf("DuckDB rejected the generated views:\n%v\n\n%s", err, sqlText)
+		}
+		rs, err := db.Query(`SELECT id || '=' || status FROM public."` + table + `" ORDER BY id`)
+		if err != nil {
+			return nil, err
+		}
+		defer rs.Close()
+		var out []string
+		for rs.Next() {
+			var s string
+			if err := rs.Scan(&s); err != nil {
+				return nil, err
+			}
+			out = append(out, s)
+		}
+		return out, rs.Err()
+	}
+	check := func(t *testing.T, sqlText string) {
+		t.Helper()
+		if got, err := rowsOf(t, sqlText, "items"); err != nil || !reflect.DeepEqual(got, []string{"5=five"}) {
+			t.Fatalf("the table with no delta: %v, %v\n%s", got, err, sqlText)
+		}
+		got, err := rowsOf(t, sqlText, "orders")
+		if err == nil || !strings.Contains(err.Error(), "PostgreSQL table delta beside its file") {
+			t.Fatalf("the table with a delta: %v, %v; want the refusal\n%s", got, err, sqlText)
+		}
+	}
+	// fixture: orders has a pair, items has none, the snapshot is marked.
+	fixture := func(t *testing.T) (root, orders, items string) {
+		t.Helper()
+		root = t.TempDir()
+		orders = writePGPairBase(t, root, "orders", [2]string{"1", "one"}, [2]string{"2", "two"})
+		items = writePGPairBase(t, root, "items", [2]string{"5", "five"})
+		writePGPair(t, orders, map[string]string{"1": "ONE"})
+		if err := os.WriteFile(filepath.Join(root, stamp, baseline.SuccessMarker), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return root, orders, items
+	}
+
+	t.Run("following the pointer", func(t *testing.T) {
+		root, _, _ := fixture(t)
+		if err := os.Symlink(stamp, filepath.Join(root, baseline.CurrentLinkName)); err != nil {
+			t.Fatal(err)
+		}
+		through := func(table string) BaselineTable {
+			return pgPairTable(filepath.Join(root, baseline.CurrentLinkName, "public", table+".parquet"), table)
+		}
+		check(t, pgPairGenerate(root, FollowPointer, through("orders"), through("items")))
+	})
+
+	t.Run("following the newest snapshot", func(t *testing.T) {
+		root, orders, items := fixture(t)
+		check(t, pgPairGenerate(root, FollowNewest, pgPairTable(orders, "orders"), pgPairTable(items, "items")))
+	})
+
+	t.Run("relative paths, read from the folder they are for", func(t *testing.T) {
+		root, _, _ := fixture(t)
+		// Written somewhere the files are not; read from the snapshot's
+		// own folder.
+		t.Chdir(t.TempDir())
+		sqlText := pgPairGenerate(".", FollowNone, pgPairTable("./public/orders.parquet", "orders"), pgPairTable("./public/items.parquet", "items"))
+		if !strings.Contains(sqlText, ".pgnew") {
+			t.Fatalf("the view of a file that is not here carries no guard:\n%s", sqlText)
+		}
+		t.Chdir(filepath.Join(root, stamp))
+		check(t, sqlText)
+	})
+
+	// A view pinned to a snapshot in S3 names exact keys and lists nothing:
+	// it is written as before, with no guard. One that follows over S3
+	// already lists, and carries the guard, with the file named as it was.
+	t.Run("in S3: pinned is left as it was, following is guarded", func(t *testing.T) {
+		s3 := pgPairTable("s3://bucket/"+stamp+"/public/orders.parquet", "orders")
+		if body, ok := pgPairStateBody(Input{}, s3); ok {
+			t.Fatalf("a pinned view of a file in S3 was given a body: %s", body)
+		}
+		pinned := pgPairGenerate("s3://bucket", FollowNone, s3)
+		if strings.Contains(pinned, ".pgnew") || strings.Contains(pinned, "glob(") {
+			t.Fatalf("a pinned view of a file in S3 lists the store:\n%s", pinned)
+		}
+		body, ok := pgPairStateBody(Input{Follow: FollowNewest, BaselineSource: "s3://bucket"}, s3)
+		if !ok || !strings.Contains(body, "public/orders.[0-9][0-9][0-9][0-9][0-9][0-9].pgnew") {
+			t.Fatalf("a following view of a file in S3: %q, %v", body, ok)
+		}
+	})
+
+	// An absolute path whose file is not there is not a folder that was
+	// moved: written as before.
+	t.Run("an absolute path with no file there is left as it was", func(t *testing.T) {
+		gone := pgPairTable(filepath.Join(t.TempDir(), stamp, "public", "orders.parquet"), "orders")
+		if body, ok := pgPairStateBody(Input{}, gone); ok {
+			t.Fatalf("body %s", body)
+		}
+	})
+
 }
 
 // A snapshot folder given as a relative path: the file is looked for from
