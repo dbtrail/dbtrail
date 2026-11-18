@@ -420,14 +420,22 @@ func (x *pgTailSource) Fill(ctx context.Context, t views.BaselineTable, upTo uin
 	if !ok {
 		return "", fmt.Errorf("the index no longer holds event %d, which the tail of %s was to be read up to", upTo, name)
 	}
-	opts := c.windowOptions(t)
-	opts.Limit = x.pageSize
+	// By time alone, from the snapshot's own bound, and the floor applied to
+	// the rows here. A fetch that is given the position too reads from up to
+	// two hours before the bound (query.CoarseSinceFloor: the engine does
+	// not take a time for exact under a position) and drops, row by row,
+	// every change of the table in those hours: millions on a busy table,
+	// seconds each time, and a statement waits three for its tail. The bound
+	// is exact here (cut refuses a snapshot that does not prove it): no
+	// change at or after the floor committed before it.
+	since := c.since
+	opts := query.Options{Schema: t.Schema, Table: t.Table, Since: &since, Limit: x.pageSize}
 	for {
 		rows, err := x.b.engine.Fetch(ctx, opts)
 		if err != nil {
 			return "", fmt.Errorf("read the changes of %s: %w", name, err)
 		}
-		kept, bad := pgTailPage(rows, upTo, through, 0)
+		kept, bad := pgTailPage(rows, upTo, through, c.floor)
 		if len(bad) > 0 {
 			return fmt.Sprintf("event %d of %s has no LSN, so its order against the others cannot be told", bad[0].EventID, name), nil
 		}

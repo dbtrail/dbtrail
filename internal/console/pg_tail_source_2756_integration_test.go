@@ -434,6 +434,46 @@ func TestIntegrationPGTailSource(t *testing.T) {
 		}
 	})
 
+	// Where the read of the index starts: at the snapshot's own bound of
+	// time, not before it. Read with the floor as well, the engine starts up
+	// to two hours earlier and drops by its position every change of the
+	// table in between: 2,000,000 of them took 8 s to drop where the 500 of
+	// the window take 10 ms, and a statement waits 3 s for its tail.
+	//
+	// The marker is a row no capture writes: before the bound by its time,
+	// past the floor by its position. The bound says there is none such, so
+	// a read that returns it started before the bound.
+	t.Run("the index is read from the snapshot's bound of time, not before", func(t *testing.T) {
+		tbl := r.table(nil, [2]string{"1", "one"})
+		// The bound is a minute before the snapshot (10 minutes into the
+		// hour): 5 minutes in is before it, and inside the two hours.
+		r.change(tbl.Table, event.EventUpdate, "1", "marker", 0x910, 5*time.Minute)
+		r.change(tbl.Table, event.EventInsert, "2", "two", 0x920, 24*time.Minute)
+		r.checkpoint(0x920)
+		// The keeper's cursor goes past both before this table is first
+		// asked for, so its tail is built by the read of the window (Fill)
+		// and not handed the rows as they arrive, by their ids.
+		other := r.table(nil, [2]string{"7", "seven"})
+		r.state(ctx, other)
+		if got, want := r.state(ctx, tbl), []string{"1=one", "2=two"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("state %v, want %v: the read started before the snapshot's bound", got, want)
+		}
+	})
+
+	// And the floor still holds within the bound: a change after the bound
+	// by its time and below the floor by its position is in the snapshot.
+	t.Run("a change after the bound and below the floor is not in the tail", func(t *testing.T) {
+		tbl := r.table(nil, [2]string{"1", "one"})
+		r.change(tbl.Table, event.EventUpdate, "1", "in the snapshot", pgTailFloor-1, 9*time.Minute+30*time.Second)
+		r.change(tbl.Table, event.EventInsert, "2", "two", 0x930, 24*time.Minute)
+		r.checkpoint(0x930)
+		other := r.table(nil, [2]string{"7", "seven"})
+		r.state(ctx, other)
+		if got, want := r.state(ctx, tbl), []string{"1=one", "2=two"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("state %v, want %v", got, want)
+		}
+	})
+
 	t.Run("a table delta beside the file: the tail starts at the delta's cut", func(t *testing.T) {
 		tbl := r.table(nil, [2]string{"1", "one"}, [2]string{"2", "two"})
 		// A snapshot update published the file with what changed since it
