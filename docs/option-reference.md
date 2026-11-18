@@ -3,7 +3,7 @@
 <!-- Generated from internal/settings (docs.go). Do not edit by hand: change docs.go, then run
      go test ./internal/settings -run TestGeneratedFilesAreCurrent -update -->
 
-Every setting DBTrail reads, as a line of [`/etc/dbtrail/dbtrail.cnf`](option-file.md) writes it. The same setting can be given as an environment variable, named under each option. A command-line flag comes first, then the environment, then `.bintrail.env` or `~/.config/bintrail/config.env`, then the file. `dbtrail config show` lists what is in effect and where each value comes from.
+Every setting DBTrail reads, as a line of [`/etc/dbtrail/dbtrail.cnf`](option-file.md) writes it. The same setting can be given as an environment variable, named under each option. A command-line flag comes first, then the environment, then `.bintrail.env` or `~/.config/bintrail/config.env`, then the file; for index rotation and the backup settings, a value saved in the web interface comes before all of these. `dbtrail config show` lists what is in effect and where each value comes from.
 
 `bintrail-mcp` does not read the file: an option it alone reads is set in the environment the AI client starts it with.
 

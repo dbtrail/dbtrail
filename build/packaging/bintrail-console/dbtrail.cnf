@@ -10,13 +10,15 @@
 # What comes first, when a setting is given in several places: a command-line
 # flag, then the environment (BINTRAIL_ and the option's name in capitals,
 # with _ for -), then .bintrail.env or ~/.config/bintrail/config.env, then
-# this file. Some settings can also be saved in the web interface; where they
-# can, the web interface says which value it is using and where it comes from.
+# this file. For index rotation and the backup settings, a value saved in the
+# web interface comes before all of these, and the web interface says which
+# value it is using instead of what, and where that is set.
 #
-# Write a value in single quotes when it has a # or a ; in it, which would
-# otherwise start a comment. This file can hold passwords: keep it readable by
-# DBTrail only (chmod 640, owned by root and DBTrail's group). A file every
-# user can change is not used at all.
+# Write a value in single quotes when it has a # in it, which would otherwise
+# start a comment. A file every user can change is not used at all. Once you
+# put a password in it, make it readable by DBTrail only: with the packages,
+# chmod 640 and chgrp bintrail; with Docker, whose services read it as user
+# 999, chown 999 and chmod 600.
 #
 # Generated from DBTrail's list of settings (internal/settings);
 # docs/option-reference.md has the same, as a page.
