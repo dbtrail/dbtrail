@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.135.1] - 2026-11-18
+
+- **PostgreSQL: fresh mode keeps up after a snapshot update on an index that has been written for hours** (#2756). After each snapshot update a table's recent changes are read again from the index. That read started one to two hours before the snapshot and dropped everything older row by row: on a busy table, seconds each time (8 s over 2,000,000 older changes). A statement waits 3 s for them, so after every update some answers came from the snapshot alone, a few seconds older than an earlier answer on the same connection, with the port's notice that the newest changes were not ready. The read now starts at the snapshot's own bound (10 ms on the same index). Not seen on a new index, which is why the first measurement of this mode missed it.
+- **PostgreSQL: with table deltas on, fresh mode no longer falls behind without saying so** (part of #2757). With `BINTRAIL_PG_TABLE_DELTAS=1` (off by default), the recent changes laid over a table with a delta were read from when its file was last written in full. They grew until they passed their limit 15 minutes later and stopped, and were read again from nothing at every snapshot update; meanwhile statements read the snapshot alone, with no notice. They are now read from the delta's own cut. Found by a bench that also measured the switch to save nothing at 10M rows (an update took 38 s on average with it, 34 s without): it stays off.
+
 ## [0.135.0] - 2026-11-18
 
 - **PostgreSQL: a views file that follows later snapshots refuses a table it cannot read whole, and no longer reads its file alone** (part of #2757). A views file that follows later snapshots, or carries relative paths for a folder that is moved, cannot look beside a table's file when it is written. For a PostgreSQL table published as its previous file and a delta (`BINTRAIL_PG_TABLE_DELTAS`, off by default), it read the file alone: the table as it was at an earlier update. Such a view now asks, when it is read, whether a delta sits beside the file, and refuses with what to do if one does. With the switch off no delta exists and these views answer as before. A views file pinned to a snapshot in S3 is unchanged, and still reads the file alone; MySQL and MariaDB views are unchanged.
