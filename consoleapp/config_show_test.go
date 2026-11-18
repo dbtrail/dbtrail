@@ -72,22 +72,22 @@ func TestConfigShow_allAndNotes(t *testing.T) {
 // printed; one that only looks a little like it is.
 func TestConfigShow_aLoginInAnotherSetting(t *testing.T) {
 	for v, hidden := range map[string]bool{
-		"https://admin:s3cret@catalog.internal/api": true,
-		"root:pw@tcp(10.0.0.5:3306)/dbtrail":        true,
-		"root:@tcp(10.0.0.5:3306)/dbtrail":          true,
-		"https://:TOKEN@s3.internal":                true,
-		"https://ghp_abc123@git.internal/x":          true,
-		"http://host:8090/?token=abc123":             true,
-		"https://h/x?a=1&access_token=abc":           true,
-		"https://h/x?password=pw":                    true,
+		"https://admin:s3cret@catalog.internal/api":                          true,
+		"root:pw@tcp(10.0.0.5:3306)/dbtrail":                                 true,
+		"root:@tcp(10.0.0.5:3306)/dbtrail":                                   true,
+		"https://:TOKEN@s3.internal":                                         true,
+		"https://ghp_abc123@git.internal/x":                                  true,
+		"http://host:8090/?token=abc123":                                     true,
+		"https://h/x?a=1&access_token=abc":                                   true,
+		"https://h/x?password=pw":                                            true,
 		"https://b.s3.amazonaws.com/k?X-Amz-Signature=ab&X-Amz-Credential=c": true,
 		"https://acct.blob.core.windows.net/c?sv=1&sig=abc":                  true,
-		"https://h/x?page=2":                         false,
-		"s3://bucket/prefix":                        false,
-		"https://catalog.internal:8181/api":         false,
-		"user@example.com":                          false,
-		"10.0.0.5:3306":                             false,
-		"0.0.0.0:3309":                              false,
+		"https://h/x?page=2":                                                 false,
+		"s3://bucket/prefix":                                                 false,
+		"https://catalog.internal:8181/api":                                  false,
+		"user@example.com":                                                   false,
+		"10.0.0.5:3306":                                                      false,
+		"0.0.0.0:3309":                                                       false,
 	} {
 		got := showText(cli.SettingsReport{Set: []cli.SettingInEffect{{Env: "BINTRAIL_X", Option: "x", Value: v, Source: cli.FromEnvironment}}}, false)
 		if hidden != strings.Contains(got, "(not shown: it looks like it carries a login or a token)") || hidden == strings.Contains(got, v) {
