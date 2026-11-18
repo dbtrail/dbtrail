@@ -1,11 +1,11 @@
 package consoleapp
 
 import (
-	"log/slog"
-	"io/fs"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"log/slog"
 	"os"
 	"regexp"
 	"strconv"
