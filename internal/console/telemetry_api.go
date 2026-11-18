@@ -82,14 +82,14 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter 
 // already writes, so exposing an opt-out here does not cross the console's
 // read-only-over-data boundary.
 type telemetryStateDTO struct {
-	Reporting   bool   `json:"reporting"`    // actually sending right now
-	Consent     bool   `json:"consent"`      // the resolved on/off decision
-	DecidedBy   string `json:"decided_by"`   // which control decided it
+	Reporting bool   `json:"reporting"`  // actually sending right now
+	Consent   bool   `json:"consent"`    // the resolved on/off decision
+	DecidedBy string `json:"decided_by"` // which control decided it
 	// DecidedWhere says where BINTRAIL_TELEMETRY was set when it decided:
 	// a line of the option file, an env file, the environment (#2671).
 	DecidedWhere string `json:"decided_where,omitempty"`
-	EndpointSet bool   `json:"endpoint_set"` // this build can send at all
-	CIDetected  bool   `json:"ci_detected"`
+	EndpointSet  bool   `json:"endpoint_set"` // this build can send at all
+	CIDetected   bool   `json:"ci_detected"`
 	// Overridden is true when a higher-precedence control (DO_NOT_TRACK, the
 	// --telemetry flag, or BINTRAIL_TELEMETRY) decides the outcome, so writing
 	// the config file from here would not change what happens. The UI disables
@@ -136,11 +136,11 @@ func (s *Server) telemetryState() telemetryStateDTO {
 	}
 	return telemetryStateDTO{
 		DecidedWhere: where,
-		Reporting:   reporting,
-		Consent:     dec.Enabled,
-		DecidedBy:   string(dec.Source),
-		EndpointSet: ep != "",
-		CIDetected:  ci,
+		Reporting:    reporting,
+		Consent:      dec.Enabled,
+		DecidedBy:    string(dec.Source),
+		EndpointSet:  ep != "",
+		CIDetected:   ci,
 		Overridden: dec.Source == telemetry.SourceDoNotTrack ||
 			dec.Source == telemetry.SourceEnv ||
 			dec.Source == telemetry.SourceFlag,

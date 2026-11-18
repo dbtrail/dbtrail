@@ -49,12 +49,12 @@ type pgRouterStatusDoc struct {
 	// SQLModeForced is "fresh" or "fast" when it decides for every server.
 	// PerServerMode and FreshByDefault are true from this version on: every
 	// PostgreSQL server is listed with its sql_mode.
-	Fresh          *bool  `json:"fresh,omitempty"`
-	SQLModeForced  string `json:"sql_mode_forced,omitempty"`
+	Fresh         *bool  `json:"fresh,omitempty"`
+	SQLModeForced string `json:"sql_mode_forced,omitempty"`
 	// SQLModeForcedFrom: the MySQL router's field of that name (#2671).
 	SQLModeForcedFrom string `json:"sql_mode_forced_from,omitempty"`
-	FreshByDefault bool   `json:"fresh_by_default,omitempty"`
-	PerServerMode  bool   `json:"per_server_mode,omitempty"`
+	FreshByDefault    bool   `json:"fresh_by_default,omitempty"`
+	PerServerMode     bool   `json:"per_server_mode,omitempty"`
 }
 
 // pgRouterServerNumbers is one server's decisions.

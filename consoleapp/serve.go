@@ -251,7 +251,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		// unrecorded, per TELEMETRY.md.
 		Telemetry:     serveTelemetry{},
 		TelemetryFrom: cli.Origin("BINTRAIL_TELEMETRY"),
-		SQLLimits: sqlsandbox.Limits{MemoryLimit: sqlMemory},
+		SQLLimits:     sqlsandbox.Limits{MemoryLimit: sqlMemory},
 		// Settable in the web interface too when not given here (#2210).
 		SQLSettingsPath: sqlSettingsFilePath(serversPath),
 		SQLMemoryFrom:   sqlMemoryOrigin(cmd),
