@@ -298,6 +298,7 @@ func savedOverrides(r cli.OptionReport, serversPath string) savedComparison {
 		c.Notes = append(c.Notes, fmt.Sprintf("the server list (%s) could not be read, so the lines for settings the web interface can save were not compared with what it saved: %v", serversPath, err))
 		return c
 	}
+	c.Notes = append(c.Notes, fmt.Sprintf("the lines for settings the web interface can save were compared with what it saved in %s. If the service keeps another list, name it with --servers-file.", serversPath))
 	for _, a := range r.Applied {
 		for _, w := range savedInTheWeb {
 			if w.env != a.Env {

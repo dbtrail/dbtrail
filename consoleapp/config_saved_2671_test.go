@@ -60,7 +60,8 @@ func TestConfigCheck_aValueSavedInTheWebComesFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	c = savedOverrides(applied, servers)
-	if c.Skipped || len(c.Notes) != 0 || len(c.Problems) != 2 {
+	compared := "the lines for settings the web interface can save were compared with what it saved in " + servers + ". If the service keeps another list, name it with --servers-file."
+	if c.Skipped || len(c.Notes) != 1 || c.Notes[0] != compared || len(c.Problems) != 2 {
 		t.Fatalf("got %+v", c)
 	}
 	if c.Problems[0] != "line 2: rotate-retain is not used by the capture and web service (watch), because a rotation policy saved in the web interface (Settings, Retention, Edit rotation) comes first. Change it there, or remove this line." ||
@@ -84,7 +85,7 @@ func TestConfigCheck_aValueSavedInTheWebComesFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	c = savedOverrides(applied, servers)
-	if len(c.Problems) != 0 || len(c.Notes) != 2 || c.Notes[0] != "line 2: rotate-retain is also saved in the web interface, with the same value." {
+	if len(c.Problems) != 0 || len(c.Notes) != 3 || c.Notes[1] != "line 2: rotate-retain is also saved in the web interface, with the same value." {
 		t.Fatalf("same: %+v", c)
 	}
 
@@ -92,7 +93,7 @@ func TestConfigCheck_aValueSavedInTheWebComesFirst(t *testing.T) {
 	if err := reg.SetRotation(console.RotationConfig{Retain: "off", Interval: "1h", AddFuture: 3}); err != nil {
 		t.Fatal(err)
 	}
-	if c := savedOverrides(applied, servers); len(c.Problems) != 0 || len(c.Notes) != 1 {
+	if c := savedOverrides(applied, servers); len(c.Problems) != 0 || len(c.Notes) != 2 {
 		t.Fatalf("a refused policy: %+v", c)
 	}
 
