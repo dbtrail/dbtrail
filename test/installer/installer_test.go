@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"slices"
 	"go.yaml.in/yaml/v2"
 	"os"
 	"os/exec"
@@ -509,8 +510,10 @@ func TestCompose_pgRouterService(t *testing.T) {
 			t.Errorf("%s = %q, want the router's %q", k, svc.Environment[k], doc.Services["router"].Environment[k])
 		}
 	}
-	if len(svc.Volumes) != 1 || svc.Volumes[0] != "bintrail-state:/var/lib/bintrail:ro" {
-		t.Errorf("volumes = %v, want the state volume read-only", svc.Volumes)
+	// The state volume read-only, and the option file's folder (#2671).
+	if len(svc.Volumes) != 2 || !slices.Contains(svc.Volumes, "bintrail-state:/var/lib/bintrail:ro") ||
+		!slices.Contains(svc.Volumes, "./dbtrail-config:/etc/dbtrail-config:ro") {
+		t.Errorf("volumes = %v, want the state volume read-only and the option file's folder", svc.Volumes)
 	}
 }
 
