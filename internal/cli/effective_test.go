@@ -208,3 +208,44 @@ func TestSettingsInEffect_sorted(t *testing.T) {
 		t.Fatal("not sorted")
 	}
 }
+
+func TestOrigin(t *testing.T) {
+	unset(t, "BINTRAIL_ROTATE_RETAIN")
+	if got := Origin("BINTRAIL_ROTATE_RETAIN"); got != "" {
+		t.Fatalf("unset: %q", got)
+	}
+	t.Setenv("BINTRAIL_ROTATE_RETAIN", "")
+	if got := Origin("BINTRAIL_ROTATE_RETAIN"); got != "" {
+		t.Fatalf("empty: %q", got)
+	}
+	t.Setenv("BINTRAIL_ROTATE_RETAIN", "3d")
+	if got := Origin("BINTRAIL_ROTATE_RETAIN"); got != "the environment variable BINTRAIL_ROTATE_RETAIN" {
+		t.Fatalf("environment: %q", got)
+	}
+	unset(t, "BINTRAIL_ROTATE_RETAIN")
+	undo := ApplyEnvFileForTest("BINTRAIL_ROTATE_RETAIN=4d\n")
+	if got := Origin("BINTRAIL_ROTATE_RETAIN"); got != "the env file "+TestEnvFilePath+" (BINTRAIL_ROTATE_RETAIN)" {
+		t.Fatalf("env file: %q", got)
+	}
+	undo()
+	p := filepath.Join(t.TempDir(), "dbtrail.cnf")
+	if err := os.WriteFile(p, []byte("[dbtrail]\n\n\nrotate-retain = 5d\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	defer LoadOptionFileForTest(p)()
+	if got := Origin("BINTRAIL_ROTATE_RETAIN"); got != "line 4 of "+p+" (rotate-retain)" {
+		t.Fatalf("option file: %q", got)
+	}
+}
+
+func TestPreciseOrigin(t *testing.T) {
+	t.Setenv("BINTRAIL_ROTATE_RETAIN", "3d")
+	if got := PreciseOrigin("BINTRAIL_ROTATE_RETAIN"); got != "" {
+		t.Fatalf("environment: %q", got)
+	}
+	unset(t, "BINTRAIL_ROTATE_RETAIN")
+	defer ApplyEnvFileForTest("BINTRAIL_ROTATE_RETAIN=4d\n")()
+	if got := PreciseOrigin("BINTRAIL_ROTATE_RETAIN"); got != "the env file "+TestEnvFilePath+" (BINTRAIL_ROTATE_RETAIN)" {
+		t.Fatalf("env file: %q", got)
+	}
+}

@@ -401,6 +401,10 @@ type RouterStatusDoc struct {
 	// does not send it and lists a server with no saved choice as fast is
 	// older than fresh being the default.
 	SQLModeForced string `json:"sql_mode_forced,omitempty"`
+	// SQLModeForcedFrom says where BINTRAIL_SQL_TAILS came from when it
+	// decides, as cli.Origin words it: a line of the option file, an env
+	// file, the environment (#2671).
+	SQLModeForcedFrom string `json:"sql_mode_forced_from,omitempty"`
 	// FreshByDefault says a server with no saved choice is fresh on this
 	// router. Absent from an older one, where it is fast.
 	FreshByDefault bool `json:"fresh_by_default,omitempty"`

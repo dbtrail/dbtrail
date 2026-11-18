@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 
@@ -149,4 +150,46 @@ func SettingsInEffect(environ []string, lookup func(string) (string, bool)) Sett
 	slices.Sort(r.Unknown)
 	slices.Sort(r.Retired)
 	return r
+}
+
+// Origin says where key's value came from in this process, in words for a
+// sentence: "line 4 of /etc/dbtrail/dbtrail.cnf (console-sql-memory)", "the
+// env file /srv/dbtrail/.bintrail.env (BINTRAIL_CONSOLE_SQL_MEMORY)", or "the
+// environment variable BINTRAIL_CONSOLE_SQL_MEMORY". "" when key is not set
+// to anything. The env file and the option file must have been loaded
+// (LoadEnvFile). A web interface that shows a setting as locked by where
+// DBTrail starts names the place with it (#2671).
+func Origin(key string) string {
+	if v, ok := os.LookupEnv(key); !ok || v == "" {
+		return ""
+	}
+	option := key
+	if e, ok := settings.Lookup(key); ok {
+		option = e.Option()
+	}
+	if line, ok := FromOptionFile(key); ok {
+		return fmt.Sprintf("line %d of %s (%s)", line, optionFilePath, option)
+	}
+	if FromEnvFile(key) {
+		if p := EnvFileUsed(); p != "" {
+			return fmt.Sprintf("the env file %s (%s)", p, key)
+		}
+		return fmt.Sprintf("an env file (%s)", key)
+	}
+	return OriginEnvPrefix + key
+}
+
+// OriginEnvPrefix starts what Origin says for a value set in the
+// environment the program was started with, where nothing more precise is
+// known.
+const OriginEnvPrefix = "the environment variable "
+
+// PreciseOrigin is Origin when it names more than the environment: a line
+// of the option file or an env file. "" otherwise, so a page that already
+// says "the environment variable" in its own words keeps them.
+func PreciseOrigin(key string) string {
+	if from := Origin(key); !strings.HasPrefix(from, OriginEnvPrefix) {
+		return from
+	}
+	return ""
 }

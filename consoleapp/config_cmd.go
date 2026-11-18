@@ -1,8 +1,11 @@
 package consoleapp
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"log/slog"
 	"os"
 	"regexp"
 	"strconv"
@@ -13,6 +16,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dbtrail/dbtrail/internal/cli"
+	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/rotation"
 )
 
 // `config check` reads /etc/dbtrail/dbtrail.cnf the way DBTrail reads it when
@@ -32,7 +37,9 @@ var configCheckCmd = &cobra.Command{
 	Short: "Say which lines of /etc/dbtrail/dbtrail.cnf are not used, and why",
 	Long: `Reads /etc/dbtrail/dbtrail.cnf as DBTrail does when it starts, and lists every
 line that is not used: an option DBTrail does not have (with the nearest one),
-an option with no value, an option the environment already sets, an include.
+an option with no value, an option the environment already sets, an option
+for a setting a value saved in the web interface overrides (index rotation,
+the snapshot settings), an include.
 It never prints a value.
 
 Exits 1 when it finds one, so a deploy can stop on it. A program that starts
@@ -45,7 +52,18 @@ the one of your shell.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		cli.LoadEnvFile()
-		return reportOptionFile(cmd.OutOrStdout(), cli.CheckOptionFile())
+		r := cli.CheckOptionFile()
+		path := configCheckServers
+		if path == "" {
+			path = os.Getenv("BINTRAIL_CONSOLE_SERVERS")
+		}
+		if path == "" {
+			path = console.DefaultRegistryPath()
+		}
+		c := savedOverrides(r, path)
+		r.Problems = append(r.Problems, c.Problems...)
+		r.Notes = append(r.Notes, c.Notes...)
+		return reportOptionFileCompared(cmd.OutOrStdout(), r, c.Skipped)
 	},
 }
 
@@ -74,7 +92,11 @@ service's environment is not the one of your shell.`,
 	},
 }
 
+// configCheckServers is config check's --servers-file.
+var configCheckServers string
+
 func init() {
+	configCheckCmd.Flags().StringVar(&configCheckServers, "servers-file", "", "The server list the web interface saves to, to compare its saved values with the file (default BINTRAIL_CONSOLE_SERVERS, else ~/.config/bintrail/console-servers.yaml; a package install keeps it at /var/lib/bintrail/console-servers.yaml)")
 	configShowCmd.Flags().BoolVar(&configShowAll, "all", false, "also list the settings with no value")
 	configCmd.AddCommand(configCheckCmd, configShowCmd)
 	rootCmd.AddCommand(configCmd)
@@ -177,6 +199,13 @@ func reportSettings(w io.Writer, r cli.SettingsReport, all bool) {
 }
 
 func reportOptionFile(w io.Writer, r cli.OptionReport) error {
+	return reportOptionFileCompared(w, r, false)
+}
+
+// reportOptionFileCompared is reportOptionFile, told whether the lines for
+// settings the web interface can save were left uncompared (a note says
+// why): then no line is said to be "used" outright.
+func reportOptionFileCompared(w io.Writer, r cli.OptionReport, skipped bool) error {
 	if !r.Found {
 		fmt.Fprintf(w, "There is no %s, so there is nothing to check. DBTrail uses its defaults and the environment.\n", r.Path)
 		return nil
@@ -193,6 +222,10 @@ func reportOptionFile(w io.Writer, r cli.OptionReport) error {
 		fmt.Fprintf(w, "Note: %s\n", n)
 	}
 	if len(r.Problems) == 0 {
+		if skipped {
+			fmt.Fprintln(w, "Every line is used, as far as this file goes. The lines for settings the web interface can save were not compared with it: see the note above.")
+			return nil
+		}
 		fmt.Fprintln(w, "Every line is used.")
 		return nil
 	}
@@ -201,4 +234,113 @@ func reportOptionFile(w io.Writer, r cli.OptionReport) error {
 		fmt.Fprintf(w, "  %s\n", p)
 	}
 	return fmt.Errorf("%s has %s", r.Path, plural(len(r.Problems), "problem"))
+}
+
+// savedInTheWeb are the settings the web interface can also save, where the
+// saved value comes before the environment, and so before the option file,
+// which reaches the programs through it (#2671): index rotation and the
+// daemon's backup settings. A line of the file for one of them is not used
+// by the capture and web service while a value is saved there. key is the
+// backup setting's name; empty for rotation, whose policy is saved as one.
+// BINTRAIL_ROTATE_INTERVAL is not here: the interval watch starts with also
+// sets how often old snapshots are pruned, saved policy or not, so its line
+// is used either way.
+var savedInTheWeb = []struct {
+	env, key, where string
+}{
+	{"BINTRAIL_ROTATE_RETAIN", "", "a rotation policy saved in the web interface (Settings, Retention, Edit rotation)"},
+	{"BINTRAIL_ROTATE_ADD_FUTURE", "", "a rotation policy saved in the web interface (Settings, Retention, Edit rotation)"},
+	{"BINTRAIL_CONSOLE_BASELINE_RETAIN", console.BackupSettingBaselineRetain, "a value saved in the web interface (Snapshots, settings)"},
+	{"BINTRAIL_CONSOLE_BASELINE_LOCK_MODE", console.BackupSettingLockMode, "a value saved in the web interface"},
+	{"BINTRAIL_CONSOLE_BASELINE_STAGING", console.BackupSettingStagingDir, "a value saved in the web interface"},
+	{"BINTRAIL_CONSOLE_VERIFY_TABLES", console.BackupSettingVerifyTables, "a value saved in the web interface"},
+}
+
+// savedComparison is what comparing the option file with the values saved in
+// the web interface found.
+type savedComparison struct {
+	Problems []string
+	Notes    []string
+	// Skipped: there were lines to compare and the server list could not be
+	// read, or was not there; Notes says which.
+	Skipped bool
+}
+
+// savedOverrides says which lines the option file applies are not used
+// because the web interface saved another value for their setting, reading
+// the server list at serversPath, where those values are kept. The same value
+// saved in both places is a note, not a problem. No value is printed.
+func savedOverrides(r cli.OptionReport, serversPath string) savedComparison {
+	var c savedComparison
+	relevant := false
+	for _, a := range r.Applied {
+		for _, w := range savedInTheWeb {
+			relevant = relevant || w.env == a.Env
+		}
+	}
+	if !relevant {
+		return c
+	}
+	if _, err := os.Stat(serversPath); errors.Is(err, fs.ErrNotExist) {
+		c.Skipped = true
+		c.Notes = append(c.Notes, fmt.Sprintf("there is no server list at %s, so the lines for settings the web interface can save were not compared with what it saved. Name the list the service uses with --servers-file.", serversPath))
+		return c
+	}
+	// The registry says what it finds odd on its own (SSL modes, families):
+	// not this command's business, and not on its output.
+	before := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	reg, err := console.LoadRegistry(serversPath)
+	slog.SetDefault(before)
+	if err != nil {
+		c.Skipped = true
+		c.Notes = append(c.Notes, fmt.Sprintf("the server list (%s) could not be read, so the lines for settings the web interface can save were not compared with what it saved: %v", serversPath, err))
+		return c
+	}
+	c.Notes = append(c.Notes, fmt.Sprintf("the lines for settings the web interface can save were compared with what it saved in %s. If the service keeps another list, name it with --servers-file.", serversPath))
+	for _, a := range r.Applied {
+		for _, w := range savedInTheWeb {
+			if w.env != a.Env {
+				continue
+			}
+			fileValue, _ := r.ValueOf(a.Env)
+			saved, same := false, false
+			if w.key == "" {
+				// The policy the rotation loop runs: one it would refuse is
+				// not in force, and the startup values are (effectiveRotation).
+				if rc, ok := reg.Rotation(); ok {
+					st, err := rotation.ParseSettings(rc.Retain, rc.Interval, rc.AddFuture, true)
+					saved = err == nil && st.Enabled
+					switch a.Env {
+					case "BINTRAIL_ROTATE_RETAIN":
+						same = strings.TrimSpace(fileValue) == strings.TrimSpace(rc.Retain)
+					case "BINTRAIL_ROTATE_ADD_FUTURE":
+						n, err := strconv.Atoi(strings.TrimSpace(fileValue))
+						same = err == nil && n == rc.AddFuture
+					}
+				}
+			} else if v, ok := reg.BackupSettings().Get(w.key); ok {
+				saved = true
+				switch w.key {
+				case console.BackupSettingStagingDir:
+					// A working folder saved empty hands it back to the variable.
+					saved = v != ""
+				case console.BackupSettingLockMode:
+					// A saved lock mode that does not read is not used: the
+					// one the process started with is (effectiveLockMode).
+					if v != "" {
+						saved = savedLockModeReads(v)
+					}
+				}
+				same = strings.TrimSpace(v) == strings.TrimSpace(fileValue)
+			}
+			switch {
+			case saved && same:
+				c.Notes = append(c.Notes, fmt.Sprintf("line %d: %s is also saved in the web interface, with the same value.", a.Line, a.Option))
+			case saved:
+				c.Problems = append(c.Problems, fmt.Sprintf("line %d: %s is not used by the capture and web service (watch), because %s comes first. Change it there, or remove this line.", a.Line, a.Option, w.where))
+			}
+		}
+	}
+	return c
 }
