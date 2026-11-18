@@ -92,7 +92,7 @@ function load() {
     DOMParser: function () { this.parseFromString = () => ({ documentElement: new FakeEl("svg") }); },
     requestAnimationFrame: () => 0, MutationObserver: function () { this.observe = () => {}; },
     ResizeObserver: function () { this.observe = () => {}; }, IntersectionObserver: function () { this.observe = () => {}; },
-    getComputedStyle: () => ({}), CSS: { supports: () => false }, performance: { now: () => 0 }, EventSource: function () {},
+    crypto: globalThis.crypto, getComputedStyle: () => ({}), CSS: { supports: () => false }, performance: { now: () => 0 }, EventSource: function () {},
   };
   ctx.window = ctx; ctx.globalThis = ctx; ctx.self = ctx;
   vm.createContext(ctx);
