@@ -474,6 +474,29 @@ func TestIntegrationPGTailSource(t *testing.T) {
 		}
 	})
 
+	// A table nothing has written to since capture began has no shape in
+	// the index. It has a tail all the same, an empty one, from the shape
+	// its file records: without it every statement that joins it would be
+	// answered from the snapshot alone.
+	t.Run("a table with no shape in the index has an empty tail, not none", func(t *testing.T) {
+		tbl := r.table(nil, [2]string{"1", "one"}, [2]string{"2", "two"})
+		testutil.MustExec(t, r.db, "DELETE FROM schema_snapshots WHERE table_name = '"+tbl.Table+"'")
+		other := r.table(nil, [2]string{"7", "seven"})
+		r.change(other.Table, event.EventUpdate, "7", "SEVEN", 0x940, 24*time.Minute)
+		r.checkpoint(0x940)
+		if got, want := r.state(ctx, tbl), []string{"1=one", "2=two"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("state %v, want %v (the file's rows under an empty tail)", got, want)
+		}
+		// And when a change of it arrives, with the shape the stream gives
+		// it then, the tail takes it.
+		r.shape(tbl.Table, 0x950)
+		r.change(tbl.Table, event.EventUpdate, "1", "ONE", 0x960, 25*time.Minute)
+		r.checkpoint(0x960)
+		if got, want := r.state(ctx, tbl), []string{"1=ONE", "2=two"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("after its first change: state %v, want %v", got, want)
+		}
+	})
+
 	t.Run("a table delta beside the file: the tail starts at the delta's cut", func(t *testing.T) {
 		tbl := r.table(nil, [2]string{"1", "one"}, [2]string{"2", "two"})
 		// A snapshot update published the file with what changed since it

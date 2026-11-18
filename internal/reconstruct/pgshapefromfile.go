@@ -7,7 +7,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/metadata"
 )
 
-// pgShapeFromFile is a PostgreSQL table's shape as its snapshot file records
+// PGShapeFromFile is a PostgreSQL table's shape as its snapshot file records
 // it (the footer's relation: baseline.PGRelation), in the form the index's
 // resolver gives one the stream recorded (metadata.WritePGSnapshot): the
 // columns in the file's order, numbered from 1, the primary key's marked.
@@ -22,7 +22,7 @@ import (
 //
 // A column the source computes (GENERATED ... STORED) is not in the file and
 // not in rel.Columns, as it is not in a stream's description either.
-func pgShapeFromFile(schema, table string, rel baseline.PGRelation) *metadata.TableMeta {
+func PGShapeFromFile(schema, table string, rel baseline.PGRelation) *metadata.TableMeta {
 	if len(rel.Columns) == 0 || len(rel.PrimaryKey) == 0 {
 		return nil
 	}

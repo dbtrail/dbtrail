@@ -364,12 +364,28 @@ func (x *pgTailSource) Start(ctx context.Context, t views.BaselineTable) (tailTa
 	if err != nil {
 		return nil, "", err
 	}
-	if resolver == nil {
-		return nil, "the index has no schema snapshot to read " + name + "'s key from", nil
+	// The index's shape of the table, or, when it has none, the one the
+	// file records. The stream describes a table when it first carries a
+	// change of it, so a table nothing has written to since capture began (a
+	// lookup table) has no shape in the index and never gets one. Its tail
+	// is then empty, which is right, and it must HAVE one: a statement
+	// answers fresh only when every table it reads does, and such a table is
+	// in most joins. A change of it brings its shape with it, and Broken
+	// holds the tail to that shape from then on.
+	var tm *metadata.TableMeta
+	why := "the index has no schema snapshot to read " + name + "'s key from"
+	if resolver != nil {
+		if tm, err = resolver.Resolve(t.Schema, t.Table); err != nil {
+			tm, why = nil, fmt.Sprintf("%s could not be found in the index's schema snapshots: %v", name, err)
+		}
 	}
-	tm, err := resolver.Resolve(t.Schema, t.Table)
-	if err != nil {
-		return nil, fmt.Sprintf("%s could not be found in the index's schema snapshots: %v", name, err), nil
+	if tm == nil {
+		if rel, ok, perr := baseline.ParsePGRelation(c.md.PGRelation); perr == nil && ok {
+			tm = reconstruct.PGShapeFromFile(t.Schema, t.Table, rel)
+		}
+		if tm == nil {
+			return nil, why, nil
+		}
 	}
 	var generated []string
 	for _, col := range tm.Columns {

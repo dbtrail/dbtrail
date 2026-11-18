@@ -100,12 +100,12 @@ func reconstructPGTable(ctx context.Context, cfg FullTableConfig, p pgTableInput
 	// one when it first carries a change of the table, so a table nothing
 	// has written to since capture began (a lookup table, a table of
 	// settings) has none, however long capture has run. Its shape is then
-	// the one its own file records (pgShapeFromFile), for as long as the
+	// the one its own file records (PGShapeFromFile), for as long as the
 	// window holds no change of it: checked after the fold, below.
 	var noShape error
 	if err != nil {
 		noShape = fmt.Errorf("resolve schema for %s.%s: %w", schema, table, err)
-		if tm = pgShapeFromFile(schema, table, rel); tm == nil {
+		if tm = PGShapeFromFile(schema, table, rel); tm == nil {
 			return nil, noShape
 		}
 	}
