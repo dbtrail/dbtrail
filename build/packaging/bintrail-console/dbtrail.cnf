@@ -38,6 +38,7 @@
 # query, recover, recover-cascade, reconstruct, status, rotate, archive
 # reconcile, restore-index, drill, shim), bintrail-pg (stream, flashback,
 # reset, and the same shared query/recover/rotate commands), bintrail-mcp.
+# bintrail-mcp takes it from its own environment, never from this file.
 # It holds a secret: keep this file readable by DBTrail only.
 #index-dsn = dbtrail:password@tcp(127.0.0.1:3306)/binlog_index
 
@@ -49,6 +50,7 @@
 # Read by: watch, bintrail (stream, up, index, snapshot, doctor, dump, dump
 # wait-quiet, agent, init-shim, proxysql-config), bintrail-console
 # sql-compare, bintrail-mcp (only for extension tools that open the source).
+# bintrail-mcp takes it from its own environment, never from this file.
 # It holds a secret: keep this file readable by DBTrail only.
 #source-dsn = repl:password@tcp(db1.internal:3306)/
 
@@ -86,6 +88,7 @@
 # snapshot; bintrail-mcp finds archives from the index instead.
 # Read by: bintrail (query, rotate, baseline), bintrail-pg (baseline, and the
 # shared query and rotate), bintrail-mcp (together with BINTRAIL_ARCHIVE_S3).
+# bintrail-mcp takes it from its own environment, never from this file.
 #id = 6f1c2e4a-9b3d-4c8e-a1f0-2d7e5b9c3a10
 
 # The replica ID DBTrail uses when it connects to the source to read its
@@ -144,14 +147,16 @@
 # and the index connection.
 # Default: preferred.
 # Read by: watch (main server), bintrail (stream, and up through stream),
-# bintrail-mcp (only for extension tools that open the source).
+# bintrail-mcp (only for extension tools that open the source). bintrail-mcp
+# takes it from its own environment, never from this file.
 #ssl-mode = verify-identity
 
 # Path to the CA certificate file used to check the source server's TLS
 # certificate.
 # Default: empty: the system's trusted CAs.
 # Read by: watch (main server), bintrail (stream, up), bintrail-mcp (extension
-# tools only).
+# tools only). bintrail-mcp takes it from its own environment, never from this
+# file.
 #ssl-ca = /etc/dbtrail/tls/ca.pem
 
 # Path to the client certificate DBTrail presents to the source when the
@@ -159,14 +164,16 @@
 # with ssl-key.
 # Default: empty: no client certificate.
 # Read by: watch (main server), bintrail (stream, up), bintrail-mcp (extension
-# tools only).
+# tools only). bintrail-mcp takes it from its own environment, never from this
+# file.
 #ssl-cert = /etc/dbtrail/tls/client-cert.pem
 
 # Path to the private key that goes with ssl-cert, for mutual TLS to the
 # source.
 # Default: empty: no client key.
 # Read by: watch (main server), bintrail (stream, up), bintrail-mcp (extension
-# tools only).
+# tools only). bintrail-mcp takes it from its own environment, never from this
+# file.
 #ssl-key = /etc/dbtrail/tls/client-key.pem
 
 # The address where capture publishes Prometheus metrics (a /metrics page a
@@ -229,7 +236,8 @@
 # Default: none: archives stay local, and readers use archive locations
 # recorded in the index.
 # Read by: bintrail (rotate, query, archive reconcile, restore-index, doctor,
-# agent), bintrail-pg (same shared commands), bintrail-mcp.
+# agent), bintrail-pg (same shared commands), bintrail-mcp. bintrail-mcp takes
+# it from its own environment, never from this file.
 #archive-s3 = s3://acme-dbtrail/archives/
 
 # The AWS region of the archive-s3 bucket.
@@ -338,7 +346,8 @@
 # Default: AWS S3 (or the AWS SDK's own AWS_ENDPOINT_URL_S3 / AWS_ENDPOINT_URL
 # when set).
 # Read by: every program that reads or writes S3: watch, serve, router,
-# bintrail, bintrail-pg, bintrail-mcp.
+# bintrail, bintrail-pg, bintrail-mcp. bintrail-mcp takes it from its own
+# environment, never from this file.
 #s3-endpoint = http://minio.internal:9000
 
 # Whether S3 addresses put the bucket in the path (http://host/bucket/key)
@@ -347,7 +356,8 @@
 # Default: on when s3-endpoint is set; otherwise the AWS SDK's default (bucket
 # in the host name).
 # Read by: every program that reads or writes S3: watch, serve, router,
-# bintrail, bintrail-pg, bintrail-mcp.
+# bintrail, bintrail-pg, bintrail-mcp. bintrail-mcp takes it from its own
+# environment, never from this file.
 #s3-path-style = false
 
 # Only for bintrail export iceberg: the local folder the Iceberg tables are
@@ -420,7 +430,8 @@
 # read for minutes. A custom S3 endpoint is still applied.
 # Default: off (the AWS extension is loaded when an S3 read needs it).
 # Read by: every program that reads S3 through DuckDB: watch, serve, router,
-# pg-router, bintrail, bintrail-pg, bintrail-mcp.
+# pg-router, bintrail, bintrail-pg, bintrail-mcp. bintrail-mcp takes it from
+# its own environment, never from this file.
 #duckdb-no-aws-ext = 1
 
 # The recover command refuses to write a reversal (undo) SQL script whose

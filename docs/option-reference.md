@@ -16,7 +16,7 @@ Where the index lives: the connection string (DSN) of the MySQL database that DB
 - Default: none: watch, bintrail stream and most bintrail commands refuse to start without it; serve can start without it if its server list has entries; bintrail-mcp then needs index_dsn on each tool call.
 - Example: `index-dsn = dbtrail:password@tcp(127.0.0.1:3306)/binlog_index`
 - Environment variable: `BINTRAIL_INDEX_DSN`
-- Read by: watch, serve, bintrail (stream, up, index, init, snapshot, doctor, agent, access, flag, profile, upload, baseline refresh, export iceberg, query, recover, recover-cascade, reconstruct, status, rotate, archive reconcile, restore-index, drill, shim), bintrail-pg (stream, flashback, reset, and the same shared query/recover/rotate commands), bintrail-mcp.
+- Read by: watch, serve, bintrail (stream, up, index, init, snapshot, doctor, agent, access, flag, profile, upload, baseline refresh, export iceberg, query, recover, recover-cascade, reconstruct, status, rotate, archive reconcile, restore-index, drill, shim), bintrail-pg (stream, flashback, reset, and the same shared query/recover/rotate commands), bintrail-mcp. `bintrail-mcp` takes it from its own environment, never from the file.
 - Holds a secret: `dbtrail config show` never prints it, and a file every user can read that sets it gets a warning.
 
 ### `source-dsn`
@@ -26,7 +26,7 @@ The connection string of the source MySQL or MariaDB server whose changes are re
 - Default: none: watch starts with no main server; bintrail stream, up, snapshot, doctor and dump refuse to start without it.
 - Example: `source-dsn = repl:password@tcp(db1.internal:3306)/`
 - Environment variable: `BINTRAIL_SOURCE_DSN`
-- Read by: watch, bintrail (stream, up, index, snapshot, doctor, dump, dump wait-quiet, agent, init-shim, proxysql-config), bintrail-console sql-compare, bintrail-mcp (only for extension tools that open the source).
+- Read by: watch, bintrail (stream, up, index, snapshot, doctor, dump, dump wait-quiet, agent, init-shim, proxysql-config), bintrail-console sql-compare, bintrail-mcp (only for extension tools that open the source). `bintrail-mcp` takes it from its own environment, never from the file.
 - Holds a secret: `dbtrail config show` never prints it, and a file every user can read that sets it gets a warning.
 
 ### `source-flavor`
@@ -63,7 +63,7 @@ The installation's identity, a UUID. It names the folder its archives go in (bin
 - Default: none: rotate uses the identity saved in the index; query needs it only when an archive location is given; baseline writes an unsigned snapshot; bintrail-mcp finds archives from the index instead.
 - Example: `id = 6f1c2e4a-9b3d-4c8e-a1f0-2d7e5b9c3a10`
 - Environment variable: `BINTRAIL_ID`
-- Read by: bintrail (query, rotate, baseline), bintrail-pg (baseline, and the shared query and rotate), bintrail-mcp (together with BINTRAIL_ARCHIVE_S3).
+- Read by: bintrail (query, rotate, baseline), bintrail-pg (baseline, and the shared query and rotate), bintrail-mcp (together with BINTRAIL_ARCHIVE_S3). `bintrail-mcp` takes it from its own environment, never from the file.
 
 ### `server-id`
 
@@ -126,7 +126,7 @@ Whether connections use TLS (encryption) and how strictly the server's certifica
 - Default: preferred.
 - Example: `ssl-mode = verify-identity`
 - Environment variable: `BINTRAIL_SSL_MODE`
-- Read by: watch (main server), bintrail (stream, and up through stream), bintrail-mcp (only for extension tools that open the source).
+- Read by: watch (main server), bintrail (stream, and up through stream), bintrail-mcp (only for extension tools that open the source). `bintrail-mcp` takes it from its own environment, never from the file.
 
 ### `ssl-ca`
 
@@ -135,7 +135,7 @@ Path to the CA certificate file used to check the source server's TLS certificat
 - Default: empty: the system's trusted CAs.
 - Example: `ssl-ca = /etc/dbtrail/tls/ca.pem`
 - Environment variable: `BINTRAIL_SSL_CA`
-- Read by: watch (main server), bintrail (stream, up), bintrail-mcp (extension tools only).
+- Read by: watch (main server), bintrail (stream, up), bintrail-mcp (extension tools only). `bintrail-mcp` takes it from its own environment, never from the file.
 
 ### `ssl-cert`
 
@@ -144,7 +144,7 @@ Path to the client certificate DBTrail presents to the source when the server re
 - Default: empty: no client certificate.
 - Example: `ssl-cert = /etc/dbtrail/tls/client-cert.pem`
 - Environment variable: `BINTRAIL_SSL_CERT`
-- Read by: watch (main server), bintrail (stream, up), bintrail-mcp (extension tools only).
+- Read by: watch (main server), bintrail (stream, up), bintrail-mcp (extension tools only). `bintrail-mcp` takes it from its own environment, never from the file.
 
 ### `ssl-key`
 
@@ -153,7 +153,7 @@ Path to the private key that goes with BINTRAIL_SSL_CERT, for mutual TLS to the 
 - Default: empty: no client key.
 - Example: `ssl-key = /etc/dbtrail/tls/client-key.pem`
 - Environment variable: `BINTRAIL_SSL_KEY`
-- Read by: watch (main server), bintrail (stream, up), bintrail-mcp (extension tools only).
+- Read by: watch (main server), bintrail (stream, up), bintrail-mcp (extension tools only). `bintrail-mcp` takes it from its own environment, never from the file.
 
 ### `metrics-addr`
 
@@ -227,7 +227,7 @@ An S3 location (s3://bucket/prefix/) for Parquet archives: bintrail rotate uploa
 - Default: none: archives stay local, and readers use archive locations recorded in the index.
 - Example: `archive-s3 = s3://acme-dbtrail/archives/`
 - Environment variable: `BINTRAIL_ARCHIVE_S3`
-- Read by: bintrail (rotate, query, archive reconcile, restore-index, doctor, agent), bintrail-pg (same shared commands), bintrail-mcp.
+- Read by: bintrail (rotate, query, archive reconcile, restore-index, doctor, agent), bintrail-pg (same shared commands), bintrail-mcp. `bintrail-mcp` takes it from its own environment, never from the file.
 
 ### `archive-s3-region`
 
@@ -245,7 +245,7 @@ Only for bintrail-mcp: a local folder of snapshots (baselines) that the reconstr
 - Default: none: those tools then need baseline_dir or baseline_s3 in the call.
 - Example: `baseline-dir = /var/lib/dbtrail/baselines`
 - Environment variable: `BINTRAIL_BASELINE_DIR`
-- Read by: bintrail-mcp.
+- Read by: bintrail-mcp. `bintrail-mcp` takes it from its own environment, never from the file.
 
 ### `baseline-s3`
 
@@ -254,7 +254,7 @@ Only for bintrail-mcp: an S3 location of snapshots (baselines) for the reconstru
 - Default: none.
 - Example: `baseline-s3 = s3://acme-dbtrail/baselines/`
 - Environment variable: `BINTRAIL_BASELINE_S3`
-- Read by: bintrail-mcp.
+- Read by: bintrail-mcp. `bintrail-mcp` takes it from its own environment, never from the file.
 
 ### `baseline-retain`
 
@@ -353,7 +353,7 @@ Sends every S3 read and write to an S3-compatible store (MinIO, Wasabi, LocalSta
 - Default: AWS S3 (or the AWS SDK's own AWS_ENDPOINT_URL_S3 / AWS_ENDPOINT_URL when set).
 - Example: `s3-endpoint = http://minio.internal:9000`
 - Environment variable: `BINTRAIL_S3_ENDPOINT`
-- Read by: every program that reads or writes S3: watch, serve, router, bintrail, bintrail-pg, bintrail-mcp.
+- Read by: every program that reads or writes S3: watch, serve, router, bintrail, bintrail-pg, bintrail-mcp. `bintrail-mcp` takes it from its own environment, never from the file.
 
 ### `s3-path-style`
 
@@ -362,7 +362,7 @@ Whether S3 addresses put the bucket in the path (http://host/bucket/key) instead
 - Default: on when BINTRAIL_S3_ENDPOINT is set; otherwise the AWS SDK's default (bucket in the host name).
 - Example: `s3-path-style = false`
 - Environment variable: `BINTRAIL_S3_PATH_STYLE`
-- Read by: every program that reads or writes S3: watch, serve, router, bintrail, bintrail-pg, bintrail-mcp.
+- Read by: every program that reads or writes S3: watch, serve, router, bintrail, bintrail-pg, bintrail-mcp. `bintrail-mcp` takes it from its own environment, never from the file.
 
 ### `iceberg-warehouse`
 
@@ -438,7 +438,7 @@ Any non-empty value stops DuckDB from downloading and loading its AWS extension 
 - Default: off (the AWS extension is loaded when an S3 read needs it).
 - Example: `duckdb-no-aws-ext = 1`
 - Environment variable: `BINTRAIL_DUCKDB_NO_AWS_EXT`
-- Read by: every program that reads S3 through DuckDB: watch, serve, router, pg-router, bintrail, bintrail-pg, bintrail-mcp.
+- Read by: every program that reads S3 through DuckDB: watch, serve, router, pg-router, bintrail, bintrail-pg, bintrail-mcp. `bintrail-mcp` takes it from its own environment, never from the file.
 
 ### `recover-max-bytes`
 
@@ -474,7 +474,7 @@ The most rows the query tool of the standalone MCP server (the program an AI ass
 - Default: 1000000.
 - Example: `mcp-query-max-limit = 100000`
 - Environment variable: `BINTRAIL_MCP_QUERY_MAX_LIMIT`
-- Read by: bintrail-mcp.
+- Read by: bintrail-mcp. `bintrail-mcp` takes it from its own environment, never from the file.
 
 ## The agent and its buffer
 
