@@ -55,6 +55,7 @@ class FakeEl {
   // "#id", "tag#id" and "tag[attr]" are what the Connect code asks for.
   querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
   querySelectorAll(sel) {
+    if (sel.startsWith(".")) return this.all().filter((n) => (" " + n.className + " ").includes(" " + sel.slice(1) + " "));
     const m = /^([a-z]*)(?:#([\w-]+))?(?:\[([\w-]+)(?:=(\w+))?\])?$/.exec(sel);
     if (!m) return [];
     return this.all().filter((n) => (!m[1] || n.tag === m[1]) && (!m[2] || n.id === m[2] || n.attrs.id === m[2])
