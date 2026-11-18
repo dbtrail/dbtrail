@@ -537,9 +537,10 @@ services:
       # read. Not :ro, on purpose: a file mounted at /etc/dbtrail/dbtrail.cnf
       # by an override (how the docs said to add it before) lands inside
       # this folder, and a read-only one leaves Docker no room for it, so the
-      # container would not start. The services cannot write it anyway: they
-      # run as user 999 and the folder is root's. Every DBTrail service below
-      # mounts the same folder.
+      # container would not start. These services cannot write it anyway:
+      # they run as user 999 and the folder is root's. The two that run as
+      # root (baseline-quiet, iceberg-export) mount it read-only. Every DBTrail
+      # service below mounts the same folder.
       - ./dbtrail-config:/etc/dbtrail-config
       - bintrail-state:/var/lib/bintrail
       - bintrail-index-secret:/run/secret:ro
@@ -1090,7 +1091,7 @@ services:
       BINTRAIL_MYDUMPER_SESSION_FILE: /dump/mydumper-session.cnf
     command: ["dump", "wait-quiet", "--lock-mode", "${BASELINE_LOCK_MODE:-ftwrl}"]
     volumes:
-      - ./dbtrail-config:/etc/dbtrail-config   # the option file (#2671), see the bintrail service
+      - ./dbtrail-config:/etc/dbtrail-config:ro   # runs as root, so read-only; the option file (#2671), see the bintrail service
       - bintrail-dump:/dump
 
   baseline-dump:
@@ -1357,7 +1358,7 @@ services:
       BINTRAIL_S3_ENDPOINT: ${BINTRAIL_S3_ENDPOINT:-}
       BINTRAIL_S3_PATH_STYLE: ${BINTRAIL_S3_PATH_STYLE:-}
     volumes:
-      - ./dbtrail-config:/etc/dbtrail-config   # the option file (#2671), see the bintrail service
+      - ./dbtrail-config:/etc/dbtrail-config:ro   # runs as root, so read-only; the option file (#2671), see the bintrail service
       # Read-only: this reads baselines and writes nowhere but the warehouse.
       - bintrail-state:/var/lib/bintrail:ro
       - bintrail-iceberg:/var/lib/bintrail-iceberg
