@@ -130,7 +130,7 @@ func TestIntegrationPGStatementReadsTheTailOverATableDelta(t *testing.T) {
 	r.change(tbl.Table, event.EventUpdate, "1", "ONE", 0x610, 20*time.Minute)
 	r.change(tbl.Table, event.EventDelete, "2", "two", 0x620, 20*time.Minute)
 	r.change(tbl.Table, event.EventInsert, "9", "nine", 0x630, 20*time.Minute)
-	r.pair(tbl, map[string]string{"1": "ONE", "2": "", "9": "nine"})
+	r.pair(tbl, map[string]string{"1": "ONE", "2": "", "9": "nine"}, 0x631, nil)
 	// After it: row 9 changes again, row 3 is deleted, row 4 arrives.
 	r.update(tbl.Table, "9", "nine", "NINE", 0x700, 22*time.Minute)
 	r.change(tbl.Table, event.EventDelete, "3", "three", 0x710, 22*time.Minute)
