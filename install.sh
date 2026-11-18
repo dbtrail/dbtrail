@@ -465,9 +465,13 @@ fi
 # /etc/dbtrail. Only when there is none: a file here is the operator's. Never
 # a failure: DBTrail runs on its defaults without it, and a release older than
 # the file has none to download.
-if [ ! -e dbtrail-config/dbtrail.cnf ]; then
+# A compose file kept from before (version 10 or older) does not mount the
+# folder, so a sample there would be read by nothing.
+if [ ! -e dbtrail-config/dbtrail.cnf ] && grep -q '\./dbtrail-config:' docker-compose.yml; then
   CNF_URL="${RAW_URL}/${REF}/build/packaging/bintrail-console/dbtrail.cnf"
-  mkdir -p dbtrail-config
+  # The services read it as user 999: the folder must let them in, whatever
+  # the umask of the shell that runs this.
+  mkdir -p dbtrail-config && chmod 0755 dbtrail-config
   if fetch "$CNF_URL" dbtrail-config/dbtrail.cnf.tmp 2>/dev/null \
       && grep -q '^\[dbtrail\]' dbtrail-config/dbtrail.cnf.tmp; then
     chmod 0644 dbtrail-config/dbtrail.cnf.tmp

@@ -250,16 +250,16 @@ func TestPackaging_postinstallPlacesTheSettingsFileOnlyWhenThereIsNone(t *testin
 }
 
 // The option file (#2671) is placed the way the settings file is: from the
-// shipped copy, only when there is none, readable by the service's group and
-// nobody else (it can hold passwords).
+// shipped copy, only when there is none. Readable by every user: it holds
+// nothing yet, and every user's commands read it.
 func TestPackaging_postinstallPlacesTheOptionFileOnlyWhenThereIsNone(t *testing.T) {
 	if _, err := os.Lstat("/etc/dbtrail/dbtrail.cnf"); err == nil {
 		t.Skip("this host has a real option file, which the script must leave alone")
 	}
 	calls, _ := runScript(t, "postinstall.sh", "", "configure")
-	want := "install -m 0640 -o root -g bintrail /usr/share/bintrail-console/dbtrail.cnf /etc/dbtrail/dbtrail.cnf\n"
+	want := "install -m 0644 /usr/share/bintrail-console/dbtrail.cnf /etc/dbtrail/dbtrail.cnf\n"
 	if !strings.Contains(calls, want) {
-		t.Errorf("want the shipped option file placed with mode 0640, got:\n%s", calls)
+		t.Errorf("want the shipped option file placed with mode 0644, got:\n%s", calls)
 	}
 	post := read(t, filepath.Join(pkgDir, "postinstall.sh"))
 	if !strings.Contains(post, `if [ ! -e "$options" ] && [ ! -L "$options" ]; then`) {

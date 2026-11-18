@@ -15,9 +15,16 @@ restart`. A compose file from before this
 (version 10 or older) does not mount the folder; `docker compose logs bintrail`
 says so.
 
-With the `.deb` and `.rpm` packages the file is installed at
-`/etc/dbtrail/dbtrail.cnf`, every option commented out, readable by the
-`bintrail` group only, and never replaced by an upgrade.
+If you mounted a file yourself before (`./dbtrail.cnf:/etc/dbtrail/dbtrail.cnf:ro`,
+which this page said to add), move it to `dbtrail-config/dbtrail.cnf` and take
+that line out of your compose file when you upgrade it.
+
+The `bintrail-console` package (`.deb` and `.rpm`) installs the file at
+`/etc/dbtrail/dbtrail.cnf`, every option commented out, and an upgrade never
+replaces it. It is readable by every user, since it holds nothing yet: once it
+holds a password, `chgrp bintrail` and `chmod 640` it, which keeps it readable
+by the service. With Docker, the services read it as user 999: `chown 999` and
+`chmod 600` it.
 
 ```ini
 [dbtrail]
