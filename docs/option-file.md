@@ -6,14 +6,26 @@ It is written the way MySQL writes `my.cnf`: options under a `[dbtrail]`
 group, one per line.
 
 With the Docker install, DBTrail runs inside a container and reads the file
-there. The compose file does not mount one yet: add it to the `bintrail`
-service yourself, and create the file first (a mount of a missing file makes
-a directory, which DBTrail reports and does not read):
+there. Put it in `dbtrail-config/dbtrail.cnf`, in the folder that holds
+`docker-compose.yml`: the compose file mounts that folder in every DBTrail
+service, and the images read `/etc/dbtrail/dbtrail.cnf` from it. The installer
+leaves a copy there with every option explained and commented out. A file
+added or changed is read when each service starts again: `docker compose
+restart`. A compose file from before this
+(version 10 or older) does not mount the folder; `docker compose logs bintrail`
+says so.
 
-```yaml
-    volumes:
-      - ./dbtrail.cnf:/etc/dbtrail/dbtrail.cnf:ro
-```
+If you mounted a file yourself before (`./dbtrail.cnf:/etc/dbtrail/dbtrail.cnf:ro`,
+in the compose file or in a `docker-compose.override.yml`, as these docs said
+to), it keeps being read. Move it to `dbtrail-config/dbtrail.cnf` and take that
+line out when you can, so there is one place to look.
+
+The `bintrail-console` package (`.deb` and `.rpm`) installs the file at
+`/etc/dbtrail/dbtrail.cnf`, every option commented out, and an upgrade never
+replaces it. It is readable by every user, since it holds nothing yet: once it
+holds a password, `chgrp bintrail` and `chmod 640` it, which keeps it readable
+by the service. With Docker, the services read it as user 999: `chown 999` and
+`chmod 600` it.
 
 ```ini
 [dbtrail]

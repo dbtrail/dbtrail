@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -82,8 +83,11 @@ func TestComposeRouter_agreesWithTheCaptureService(t *testing.T) {
 			captureTarget = rest
 		}
 	}
-	if captureTarget == "" || len(router.Volumes) != 1 || router.Volumes[0] != composeVolume+":"+captureTarget+":ro" {
-		t.Errorf("the router's volumes are %v, want only %s:%s:ro", router.Volumes, composeVolume, captureTarget)
+	// Beside it, the option file's folder (#2671), like every DBTrail
+	// service's (TestCompose_everyServiceMountsTheOptionFile).
+	if captureTarget == "" || len(router.Volumes) != 2 || !slices.Contains(router.Volumes, composeVolume+":"+captureTarget+":ro") ||
+		!slices.Contains(router.Volumes, composeOptionFileMount) {
+		t.Errorf("the router's volumes are %v, want only %s:%s:ro and %s", router.Volumes, composeVolume, captureTarget, composeOptionFileMount)
 	}
 	// It listens where the file publishes, on the host's loopback: the MySQL
 	// port, 3309, which only this service serves (#2341). Two services
