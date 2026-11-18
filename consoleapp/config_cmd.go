@@ -13,6 +13,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dbtrail/dbtrail/internal/cli"
+	"github.com/dbtrail/dbtrail/internal/rotation"
+	"github.com/dbtrail/dbtrail/internal/console"
 )
 
 // `config check` reads /etc/dbtrail/dbtrail.cnf the way DBTrail reads it when
@@ -32,7 +34,9 @@ var configCheckCmd = &cobra.Command{
 	Short: "Say which lines of /etc/dbtrail/dbtrail.cnf are not used, and why",
 	Long: `Reads /etc/dbtrail/dbtrail.cnf as DBTrail does when it starts, and lists every
 line that is not used: an option DBTrail does not have (with the nearest one),
-an option with no value, an option the environment already sets, an include.
+an option with no value, an option the environment already sets, an option
+for a setting a value saved in the web interface overrides (index rotation,
+the backup settings), an include.
 It never prints a value.
 
 Exits 1 when it finds one, so a deploy can stop on it. A program that starts
@@ -45,7 +49,17 @@ the one of your shell.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		cli.LoadEnvFile()
-		return reportOptionFile(cmd.OutOrStdout(), cli.CheckOptionFile())
+		r := cli.CheckOptionFile()
+		path := os.Getenv("BINTRAIL_CONSOLE_SERVERS")
+		if path == "" {
+			path = console.DefaultRegistryPath()
+		}
+		problems, note := savedOverrides(r, path)
+		r.Problems = append(r.Problems, problems...)
+		if note != "" {
+			r.Notes = append(r.Notes, note)
+		}
+		return reportOptionFile(cmd.OutOrStdout(), r)
 	},
 }
 
@@ -201,4 +215,72 @@ func reportOptionFile(w io.Writer, r cli.OptionReport) error {
 		fmt.Fprintf(w, "  %s\n", p)
 	}
 	return fmt.Errorf("%s has %s", r.Path, plural(len(r.Problems), "problem"))
+}
+
+
+// savedInTheWeb are the settings the web interface can also save, where the
+// saved value comes before the environment, and so before the option file,
+// which reaches the programs through it (#2671): index rotation and the
+// daemon's backup settings. A line of the file for one of them is not used
+// while a value is saved there. key is the backup setting's name; empty for
+// rotation, whose policy is saved as one.
+var savedInTheWeb = []struct {
+	env, key, where string
+}{
+	{"BINTRAIL_ROTATE_RETAIN", "", "a rotation policy saved in the web interface (Settings, Retention, Edit rotation)"},
+	{"BINTRAIL_ROTATE_INTERVAL", "", "a rotation policy saved in the web interface (Settings, Retention, Edit rotation)"},
+	{"BINTRAIL_ROTATE_ADD_FUTURE", "", "a rotation policy saved in the web interface (Settings, Retention, Edit rotation)"},
+	{"BINTRAIL_CONSOLE_BASELINE_RETAIN", console.BackupSettingBaselineRetain, "a value saved in the web interface (Snapshots, settings)"},
+	{"BINTRAIL_CONSOLE_BASELINE_LOCK_MODE", console.BackupSettingLockMode, "a value saved in the web interface"},
+	{"BINTRAIL_CONSOLE_BASELINE_STAGING", console.BackupSettingStagingDir, "a value saved in the web interface"},
+	{"BINTRAIL_CONSOLE_VERIFY_TABLES", console.BackupSettingVerifyTables, "a value saved in the web interface"},
+}
+
+// savedOverrides says which lines the option file applies are not used
+// because the web interface saved a value for their setting, reading the
+// server list at serversPath, where those values are kept. note, when not
+// empty, says the list could not be read, so nothing was compared. No value
+// is printed.
+func savedOverrides(r cli.OptionReport, serversPath string) (problems []string, note string) {
+	if len(r.Applied) == 0 {
+		return nil, ""
+	}
+	var reg *console.Registry
+	load := func() bool {
+		if reg != nil {
+			return true
+		}
+		var err error
+		if reg, err = console.LoadRegistry(serversPath); err != nil {
+			note = fmt.Sprintf("the server list (%s) could not be read, so the lines were not compared with what the web interface saved: %v", serversPath, err)
+			return false
+		}
+		return true
+	}
+	for _, a := range r.Applied {
+		for _, w := range savedInTheWeb {
+			if w.env != a.Env {
+				continue
+			}
+			if !load() {
+				return problems, note
+			}
+			saved := false
+			if w.key == "" {
+				// The policy the rotation loop runs: one it would refuse is
+				// not in force, and the startup values are (effectiveRotation).
+				if rc, ok := reg.Rotation(); ok {
+					st, err := rotation.ParseSettings(rc.Retain, rc.Interval, rc.AddFuture, true)
+					saved = err == nil && st.Enabled
+				}
+			} else if v, ok := reg.BackupSettings().Get(w.key); ok {
+				// A working folder saved empty hands it back to the variable.
+				saved = v != "" || w.key != console.BackupSettingStagingDir
+			}
+			if saved {
+				problems = append(problems, fmt.Sprintf("line %d: %s is not used by the capture and web service (watch), because %s comes first. Change it there, or remove this line.", a.Line, a.Option, w.where))
+			}
+		}
+	}
+	return problems, note
 }

@@ -445,6 +445,12 @@ type RotationDefaults struct {
 	// daemon's "default" — and projected over the per-index record while the
 	// loop rotated on the configured window (#2315).
 	Explicit bool
+	// From says where each value came from when it was given (#2671), keyed
+	// "retain", "interval", "add_future": --rotate-retain, or a line of the
+	// option file, an env file, the environment (cli.Origin). A field with
+	// no entry is the built-in default. The panel names it beside a saved
+	// policy that overrides it.
+	From map[string]string
 }
 
 // BaselineRefreshDefaults is the daemon-side baseline-refresh configuration,

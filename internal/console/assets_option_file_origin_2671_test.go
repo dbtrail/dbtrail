@@ -102,3 +102,62 @@ func TestTelemetryDecidedWhere_2671(t *testing.T) {
 		t.Fatalf("not decided by the variable: %+v", got)
 	}
 }
+
+// A saved rotation policy says what it is used instead of, and where that is
+// set; the dialog says what is in use when nothing is saved.
+func TestRotationStartupWords_2671(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		if os.Getenv(requireNodeEnv) != "" {
+			t.Fatalf("%s is set and node is not on PATH", requireNodeEnv)
+		}
+		t.Skip("node is not installed")
+	}
+	appJS, err := filepath.Abs("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := renderHarnessJS + `
+const words = vm.runInContext("rotationStartupWords", ctx);
+const line = vm.runInContext("rotationOverriddenLine", ctx);
+const from = { retain: "line 3 of /etc/dbtrail/dbtrail.cnf (rotate-retain)", add_future: "--rotate-add-future" };
+const startup = { retain: "6h", add_future: "5" };
+console.log(JSON.stringify({
+  words: words({ startup_from: from, startup }),
+  override: line({ source: "override", startup_from: from, startup }),
+  overrideNothingGiven: line({ source: "override" }),
+  notSaved: line({ source: "default", startup_from: from, startup }),
+}));
+`
+	path := filepath.Join(t.TempDir(), "rot.js")
+	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := exec.Command(node, path, appJS).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, raw)
+	}
+	var got map[string]string
+	s := strings.TrimSpace(string(raw))
+	if err := json.Unmarshal([]byte(s[strings.LastIndex(s, "\n")+1:]), &got); err != nil {
+		t.Fatalf("%v\n%s", err, raw)
+	}
+	w := "retention 6h, by line 3 of /etc/dbtrail/dbtrail.cnf (rotate-retain); future partitions 5, by --rotate-add-future"
+	if got["words"] != w || got["override"] != w+". The policy saved here is used instead of these." ||
+		got["overrideNothingGiven"] != "" || got["notSaved"] != "" {
+		t.Fatalf("%+v", got)
+	}
+}
+
+// The rotation answer carries where each given startup value came from, and
+// that value.
+func TestRotationWithOrigins_2671(t *testing.T) {
+	d := RotationDefaults{Retain: "6h", Interval: "1h", AddFuture: 3, From: map[string]string{"retain": "--rotate-retain"}}
+	got := d.withOrigins(rotationDTO{Retain: "7d", Source: "override"})
+	if got.Retain != "7d" || got.StartupFrom["retain"] != "--rotate-retain" || got.Startup["retain"] != "6h" || len(got.StartupFrom) != 1 {
+		t.Fatalf("%+v", got)
+	}
+	if got := (RotationDefaults{Retain: "48h"}).withOrigins(rotationDTO{}); got.StartupFrom != nil || got.Startup != nil {
+		t.Fatalf("nothing given: %+v", got)
+	}
+}

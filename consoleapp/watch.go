@@ -2604,12 +2604,14 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 			// is what every index rotates on, so the capacity projection
 			// and the rotation panel must report it, not the index record.
 			Explicit: upRotationCfg.Explicit,
+			From:     upStartupFrom,
 		},
 		// The Snapshots page's read-only rows (#1582):
 		// what this daemon was told, verbatim, each under the exact flag or
 		// env name the page shows beside it. Values, not re-derivations — the
 		// page's whole job is saying where the effective value came from.
 		BackupSettingsDefaults: console.BackupSettingsDefaults{
+			From:           upStartupFrom,
 			BaselineRetain: upConsoleBaselineRetain,
 			RefreshEvery:   upBaselineRefreshEvery,
 			LockMode:       bootLockModeReport(),
@@ -2937,11 +2939,56 @@ func resolveSQLMemory(cmd *cobra.Command) error {
 	}
 	upSQLMemoryLimit = limit
 	upSQLMemoryOrigin = sqlMemoryOrigin(cmd)
+	upStartupFrom = startupOrigins(cmd)
 	return nil
 }
 
 // upSQLMemoryOrigin is sqlMemoryOrigin for watch, set by resolveSQLMemory.
 var upSQLMemoryOrigin string
+
+// upStartupFrom says, per setting the web interface can also save (index
+// rotation and the daemon's backup settings), where the value watch started
+// with came from (#2671): the web interface names it beside a saved value
+// that overrides it, and where it shows the value in force. Keyed by the
+// console's names: the rotation's "retain", "interval", "add_future", and the
+// console.BackupSetting* keys. Set by resolveSQLMemory, with the flags.
+var upStartupFrom map[string]string
+
+// flagOrigin is where a flag's value came from: the flag on the command
+// line, or where its variable was set (cli.Origin). "" when neither: the
+// built-in default. A flag given the same value as its variable is said to
+// come from the variable, which is where it can be changed either way.
+func flagOrigin(cmd *cobra.Command, flag, env string) string {
+	if env != "" {
+		if from := cli.Origin(env); from != "" {
+			if f := cmd.Flags().Lookup(flag); f == nil || !f.Changed || f.Value.String() == os.Getenv(env) {
+				return from
+			}
+		}
+	}
+	if f := cmd.Flags().Lookup(flag); f != nil && f.Changed {
+		return "--" + flag
+	}
+	return ""
+}
+
+// startupOrigins is upStartupFrom for cmd.
+func startupOrigins(cmd *cobra.Command) map[string]string {
+	out := map[string]string{}
+	add := func(key, from string) {
+		if from != "" {
+			out[key] = from
+		}
+	}
+	add("retain", flagOrigin(cmd, "rotate-retain", "BINTRAIL_ROTATE_RETAIN"))
+	add("interval", flagOrigin(cmd, "rotate-interval", "BINTRAIL_ROTATE_INTERVAL"))
+	add("add_future", flagOrigin(cmd, "rotate-add-future", "BINTRAIL_ROTATE_ADD_FUTURE"))
+	add(console.BackupSettingBaselineRetain, flagOrigin(cmd, "baseline-retain", "BINTRAIL_CONSOLE_BASELINE_RETAIN"))
+	add(console.BackupSettingLockMode, cli.Origin("BINTRAIL_CONSOLE_BASELINE_LOCK_MODE"))
+	add(console.BackupSettingStagingDir, cli.Origin("BINTRAIL_CONSOLE_BASELINE_STAGING"))
+	add(console.BackupSettingVerifyTables, flagOrigin(cmd, "verify-tables", "BINTRAIL_CONSOLE_VERIFY_TABLES"))
+	return out
+}
 
 // sqlMemoryOrigin says where sqlMemoryFrom took the memory from, for the
 // web interface's lock (#2671): the flag, or where its variable came from

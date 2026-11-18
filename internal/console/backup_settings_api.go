@@ -35,6 +35,10 @@ import (
 // the standalone serve, whose page hides the daemon card (no monitor
 // capability); the per-server half of the page renders there regardless.
 type BackupSettingsDefaults struct {
+	// From says, per key (BackupSetting*), where the startup value came from
+	// when it was given (#2671): its flag, or a line of the option file, an
+	// env file, the environment (cli.Origin).
+	From           map[string]string
 	BaselineRetain string // --baseline-retain
 	RefreshEvery   string // --baseline-refresh-interval
 	LockMode       string // BINTRAIL_CONSOLE_BASELINE_LOCK_MODE
@@ -92,6 +96,9 @@ type backupSettingRow struct {
 	// can offer "use the startup value" without a second request. Empty when
 	// nothing is saved (the value IS the startup one).
 	Startup string `json:"startup,omitempty"`
+	// StartupFrom says where the startup value came from when it was given
+	// (#2671), as BackupSettingsDefaults.From has it: the page names it.
+	StartupFrom string `json:"startup_from,omitempty"`
 	// Err is a per-row rejection: the configured value was refused and the
 	// shown Value is NOT in force (today: an invalid lock mode, which
 	// disables MySQL dumps while the daemon keeps running). Without it this
@@ -722,6 +729,7 @@ func (s *Server) backupSettingRow(key, startup, cli string) backupSettingRow {
 		Editable:     s.cm.reg != nil && !s.cm.reg.ReadOnly(),
 		Source:       backupSettingStartup,
 		NeedsRestart: !s.backupSettingsDefaults.live(key),
+		StartupFrom:  s.backupSettingsDefaults.From[key],
 	}
 	if s.cm.reg == nil {
 		return row

@@ -1,6 +1,7 @@
 package console
 
 import (
+	"strconv"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -18,6 +19,13 @@ type rotationDTO struct {
 	// Source is "override" when the values come from a console-saved policy,
 	// "default" when they are the daemon's --rotate-* flags/env.
 	Source string `json:"source"`
+	// StartupFrom says, for each value watch was started with that was
+	// given (keys "retain", "interval", "add_future"), where it came from
+	// (#2671): --rotate-retain, or a line of the option file, an env file,
+	// the environment. Startup holds those values: with a saved policy in
+	// force they are what it overrides. A key absent is the built-in default.
+	StartupFrom map[string]string `json:"startup_from,omitempty"`
+	Startup     map[string]string `json:"startup,omitempty"`
 	// IndexRetain is the window the SELECTED server's index actually rotates
 	// on while no override is saved: each index records the retention it was
 	// created under (#1709), so the daemon's default above describes new
@@ -101,6 +109,12 @@ func (s *Server) handleRotationGet(w http.ResponseWriter, r *http.Request) {
 // projection and the panel must say the defaults too — projecting over the
 // saved retain alone was the #2315 shape from the other side (#2315 review).
 func (s *Server) effectiveRotation() rotationDTO {
+	return s.rotationDefaults.withOrigins(s.effectiveRotationValues())
+}
+
+// effectiveRotationValues is effectiveRotation without where the startup
+// values came from.
+func (s *Server) effectiveRotationValues() rotationDTO {
 	d := s.rotationDefaults
 	if rc, ok := s.cm.reg.Rotation(); ok {
 		if st, err := rotation.ParseSettings(rc.Retain, rc.Interval, rc.AddFuture, true); err != nil || !st.Enabled {
@@ -178,4 +192,20 @@ func (s *Server) handleRotationUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.effectiveRotation())
+}
+
+// withOrigins adds to dto where each startup value came from, and those
+// values (#2671).
+func (d RotationDefaults) withOrigins(dto rotationDTO) rotationDTO {
+	for _, kv := range [][2]string{{"retain", d.Retain}, {"interval", d.Interval}, {"add_future", strconv.Itoa(d.AddFuture)}} {
+		from := d.From[kv[0]]
+		if from == "" {
+			continue
+		}
+		if dto.StartupFrom == nil {
+			dto.StartupFrom, dto.Startup = map[string]string{}, map[string]string{}
+		}
+		dto.StartupFrom[kv[0]], dto.Startup[kv[0]] = from, kv[1]
+	}
+	return dto
 }

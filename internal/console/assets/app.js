@@ -8351,11 +8351,35 @@ function rotationCard(rot, archived) {
   kvRow(card, "future partitions", rot.add_future);
   kvRow(card, "policy", rot.source === "override"
     ? ("set in the web interface" + (rot.enabled ? " (live)" : ""))
-    : (configured ? "set when DBTrail was started (--rotate-retain / BINTRAIL_ROTATE_RETAIN)" : "DBTrail's defaults"), true);
+    : (rot.startup_from && rot.startup_from.retain ? "set when DBTrail was started, by " + rot.startup_from.retain
+      : configured ? "set when DBTrail was started (--rotate-retain / BINTRAIL_ROTATE_RETAIN)" : "DBTrail's defaults"), true);
+  // #2671: what a saved policy is used instead of, and where that is set.
+  const overridden = rotationOverriddenLine(rot);
+  if (overridden) kvRow(card, "instead of", overridden, true);
   if (!rot.enabled) card.append(el("p", { class: "form-hint", text: "Rotation is turned off. Changes saved with Edit rotation take effect only after DBTrail restarts." }));
   card.append(el("div", { class: "stg-cardfoot" },
     el("button", { class: "btn btn-sm", type: "button", text: "Edit rotation…", onclick: showRotationDialog })));
   return card;
+}
+
+// rotationStartupWords names each rotation value DBTrail was started with
+// and where it is set (#2671): "retention 6h, by line 3 of
+// /etc/dbtrail/dbtrail.cnf (rotate-retain)". Pure, for node.
+function rotationStartupWords(rot) {
+  const from = (rot && rot.startup_from) || {};
+  const val = (rot && rot.startup) || {};
+  const label = { retain: "retention", interval: "interval", add_future: "future partitions" };
+  return ["retain", "interval", "add_future"].filter((k) => from[k])
+    .map((k) => label[k] + " " + val[k] + ", by " + from[k]).join("; ");
+}
+
+// rotationOverriddenLine is what a saved policy is used instead of: the
+// values DBTrail was started with and where they are set. "" when nothing
+// is saved, or nothing was given at startup.
+function rotationOverriddenLine(rot) {
+  if (!rot || rot.source !== "override") return "";
+  const w = rotationStartupWords(rot);
+  return w ? w + ". The policy saved here is used instead of these." : "";
 }
 
 // docsMore is one plain link into the docs site for a compact block: the
@@ -9006,8 +9030,8 @@ function backupDaemonEditRow(row, locked) {
   }
   // Provenance, in one line: what is winning, and what it is winning over.
   wrap.append(el("p", { class: "form-hint", text: row.source === "saved"
-    ? "Saved in the web interface. The command line says " + (row.startup || "nothing") + "."
-    : "From the command line or the environment (" + row.cli + ")." }));
+    ? "Saved in the web interface. The command line says " + (row.startup || "nothing") + (row.startup_from ? ", set by " + row.startup_from : "") + "."
+    : row.startup_from ? "Set where DBTrail starts, by " + row.startup_from + "." : "From the command line or the environment (" + row.cli + ")." }));
   if (row.err) {
     wrap.append(el("p", { class: "form-msg err", text:
       "The value you set was refused and is not in force: " + row.err }));
@@ -17860,6 +17884,7 @@ async function showRotationDialog() {
 
   const note = el("p", { class: "form-hint", style: "margin-top:10px" });
   if (!cur.enabled) note.textContent = "Rotation is turned off. Your changes will be saved but won't take effect until DBTrail restarts.";
+  else if (cur.source === "default" && cur.startup_from && Object.keys(cur.startup_from).length) note.textContent = "Currently using what DBTrail was started with (" + rotationStartupWords(cur) + "). Saving creates a custom setting that takes effect immediately and is used instead.";
   else if (cur.source === "default") note.textContent = "Currently using DBTrail's built-in defaults. Saving creates a custom setting that takes effect immediately.";
   else note.textContent = "A custom setting is active and takes effect immediately.";
   form.append(note);
