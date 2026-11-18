@@ -14982,6 +14982,9 @@ async function renderMySQLClients() {
     const r = await api("/api/servers");
     servers = r.servers || [];
     rememberHiddenRules(servers);
+    // The sidebar, the palette and the notes are named after this list too,
+    // so the page and the sidebar never say two different families (#2773).
+    nameSQLClientsNav(servers);
   } catch (err) { serversFailed = err.status !== 403 && err.status !== 404; }
   // Time-travel port status (#1446): on/off plus its address, never the token.
   // null on failure — the SQL client panel says it could not check.
@@ -15005,7 +15008,9 @@ async function renderMySQLClients() {
   try {
     buildMySQLClients(servers, fbStatus, sqlMem, rtView, serversFailed);
   } catch (err) {
-    const v = VIEW(); clear(v); v.append(pageHead("MySQL clients", null)); renderError(v, err);
+    const v = VIEW(); clear(v);
+    v.append((serversFailed ? sqlClientsPG : postgresInstall(servers)) ? pgClientsHead("") : pageHead("MySQL clients", null));
+    renderError(v, err);
   }
 }
 
@@ -15075,6 +15080,7 @@ function buildConnect(servers, tokStatus, minted) {
 const PG_CLIENTS_TITLE = "PostgreSQL clients";
 const PG_CLIENTS_SUB = "Read your copy from a PostgreSQL client, on the PostgreSQL port.";
 const PG_CLIENTS_DOCS = "guides/query-with-a-postgres-client";
+const PG_MEMORY_RESTART = "That is SQL in this console. The PostgreSQL port takes this setting when the PostgreSQL router starts: after a change, restart it to apply it there. One started with its own memory (--sql-memory) keeps that one.";
 
 // sqlClientsNavName is what the sidebar and the command palette call the
 // SQL clients page: PostgreSQL clients when postgresInstall says the servers
@@ -15098,21 +15104,35 @@ function nameSQLClientsNav(servers) {
   if (label) label.textContent = sqlClientsNavName(sqlClientsPG);
 }
 
+// pgClientsHead is the PostgreSQL clients page's head, with its Docs link on
+// the PostgreSQL guide (the route's own link is the MySQL one).
+function pgClientsHead(sub) {
+  const head = pageHead(PG_CLIENTS_TITLE, sub ? el("p", { class: "page-sub" }, sub) : null);
+  const docs = head.querySelector ? head.querySelector(".page-docs") : null;
+  if (docs) docs.setAttribute("href", DOCS_BASE + PG_CLIENTS_DOCS + "/");
+  return head;
+}
+
 function buildMySQLClients(servers, fbStatus, sqlMem, rtView, serversFailed) {
   const v = VIEW(); clear(v);
   // PostgreSQL servers (#2773): the page names the PostgreSQL port, its
   // Docs link opens the PostgreSQL guide, and the MySQL router's numbers
   // (rtView, GET /api/router) are not handed to the panels: they are about
   // the MySQL port, not about the router that answers these servers.
-  const pg = postgresInstall(servers);
+  // A list that could not be read is empty here, which postgresInstall reads
+  // as MySQL: the answer from the last list read (sqlClientsPG, the one the
+  // sidebar shows) decides then, so the page and the sidebar say one thing.
+  const pg = serversFailed ? sqlClientsPG : postgresInstall(servers);
   if (pg) {
-    const head = pageHead(PG_CLIENTS_TITLE, el("p", { class: "page-sub" }, PG_CLIENTS_SUB));
-    const docs = head.querySelector ? head.querySelector(".page-docs") : null;
-    if (docs) docs.setAttribute("href", DOCS_BASE + PG_CLIENTS_DOCS + "/");
-    v.append(head);
+    v.append(pgClientsHead(PG_CLIENTS_SUB));
     if (serversFailed) {
+      // The port panel decides its family from the list itself, so without
+      // one it would draw the MySQL port's line. Nothing is drawn rather
+      // than a line for the wrong port.
       v.append(el("p", { class: "form-msg err cn-servers-err", text:
-        "Could not read the list of servers, so the commands below do not name yours. Reload the page to try again." }));
+        "Could not read the list of servers, so this page cannot show how to connect to them. Reload the page to try again." }));
+      viewEnter();
+      return;
     }
     v.append(sqlClientPanel(servers, fbStatus, "", null, null, true));
     if (sqlMem !== undefined) {
@@ -15120,6 +15140,11 @@ function buildMySQLClients(servers, fbStatus, sqlMem, rtView, serversFailed) {
       const mem = sqlMemoryPanel(sqlMem, null, null);
       mem.className += " sqlc";
       v.append(mem);
+      // The PostgreSQL router reads the saved memory once, when it starts
+      // (runPGRouter calls routerMemory and follows nothing), so a change
+      // saved here reaches the PostgreSQL port only after it restarts. Its
+      // own line, outside the panel, which a save redraws.
+      v.append(el("p", { class: "form-hint pg-mem-restart", text: PG_MEMORY_RESTART }));
     }
     const cur = servers.find((s) => s.id === (currentServer || defaultServerId));
     if (cur && sessionMay("servers:read")) {

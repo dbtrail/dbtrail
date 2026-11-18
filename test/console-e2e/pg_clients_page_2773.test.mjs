@@ -101,8 +101,10 @@ const tidy = (s) => s.replace(/\s+/g, " ").trim();
 
 // draw runs the real buildMySQLClients over servers and reads the page. The
 // panels it mounts are wrapped, so what each one was handed is kept.
-function draw(servers, { failed = false } = {}) {
+function draw(servers, { failed = false, lastRead } = {}) {
   const { ctx, run, view } = load();
+  // lastRead: the list the sidebar was last named after (loadServers).
+  if (lastRead) { ctx.__last = lastRead; run("nameSQLClientsNav(__last)"); }
   ctx.__servers = servers;
   ctx.__rt = { configured: true, status: { pool: { memory_each: "512 MiB" }, servers: {} } };
   ctx.__mem = { memory: "1GB", memory_bytes: 1073741824 };
@@ -168,20 +170,49 @@ test("the page for PostgreSQL servers", () => {
   assert.equal(got.seen.memRT, null);
   assert.equal(got.seen.hidden, "shop");
   for (const want of ["port=5433 dbname=shop", "Applies to the copy", "Memory for SQL on the copy",
+    "That is SQL in this console. The PostgreSQL port takes this setting when the PostgreSQL router starts: after a change, restart it to apply it there.",
     "SQL on the copy, the PostgreSQL port and the AI connector's SQL tool do not show"]) {
     assert.ok(got.text.includes(want), "lacks " + JSON.stringify(want) + ":\n" + got.text);
   }
   // Nothing that sends this reader to the MySQL port: not its line, not its
   // router's memory. (The one line that says Engine Routing is the MySQL
   // port's is #2897's on purpose, and stays.)
+  // The MySQL router's memory and its restart line are about the MySQL port.
   for (const not of ["the MySQL port and", "one MySQL port", "mysql -h", "3309", "Two ways to use", "Applies to both", "512 MiB", "restart the router"]) {
     assert.ok(!got.text.includes(not), "says " + JSON.stringify(not) + ":\n" + got.text);
   }
 });
 
-test("the page for PostgreSQL servers says a list it could not read", () => {
-  const got = draw([pg("shop")], { failed: true });
-  assert.ok(got.text.includes("Could not read the list of servers"), got.text);
+// A list that could not be read reaches the page empty (renderMySQLClients).
+// The family the sidebar was last named after decides, and no port line is
+// drawn rather than the MySQL one.
+test("a list that could not be read, on PostgreSQL servers", () => {
+  const got = draw([], { failed: true, lastRead: [pg("shop")] });
+  assert.equal(got.title, "PostgreSQL clients");
+  assert.equal(got.docs, "https://dbtrail.com/docs/guides/query-with-a-postgres-client/");
+  assert.ok(got.text.includes("Could not read the list of servers, so this page cannot show how to connect to them."), got.text);
+  for (const not of ["mysql -h", "3309", "MySQL", "Engine Routing"]) {
+    assert.ok(!got.text.includes(not), "says " + JSON.stringify(not) + ":\n" + got.text);
+  }
+});
+
+test("a list that could not be read, on MySQL servers or before any list: as it always was", () => {
+  for (const lastRead of [[my("shop")], undefined]) {
+    const got = draw([], { failed: true, lastRead });
+    assert.equal(got.title, "MySQL clients");
+    assert.ok(got.text.includes("Could not read the list of servers, so the commands below do not name yours."), got.text);
+  }
+});
+
+// The page reads the list itself; the sidebar is named after that same read.
+test("opening the page names the sidebar after the list it read", async () => {
+  const { ctx, run, navLabel } = load();
+  for (const [servers, want] of [[[pg("shop")], "PostgreSQL clients"], [[my("shop")], "MySQL clients"]]) {
+    ctx.__s = servers;
+    run('api = (p) => p === "/api/servers" ? Promise.resolve({ servers: __s }) : Promise.reject({ status: 404 });');
+    await run("renderMySQLClients()");
+    assert.equal(navLabel.textContent, want);
+  }
 });
 
 test("the page for MySQL servers, and for every list that is not PostgreSQL, as it always was", () => {
@@ -194,6 +225,7 @@ test("the page for MySQL servers, and for every list that is not PostgreSQL, as 
     assert.equal(got.seen.memRT, got.rt, what + ": the memory panel is handed the router's numbers");
     assert.ok(got.text.includes("Applies to both"), what);
     assert.ok(!got.text.includes("PostgreSQL clients"), what);
+    assert.ok(!got.text.includes("The PostgreSQL port takes this setting"), what);
     if (servers.length) {
       assert.ok(got.text.includes("SQL on the copy, the MySQL port and the AI connector's SQL tool do not show"), what);
     }
