@@ -13,8 +13,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dbtrail/dbtrail/internal/cli"
-	"github.com/dbtrail/dbtrail/internal/rotation"
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/rotation"
 )
 
 // `config check` reads /etc/dbtrail/dbtrail.cnf the way DBTrail reads it when
@@ -216,7 +216,6 @@ func reportOptionFile(w io.Writer, r cli.OptionReport) error {
 	}
 	return fmt.Errorf("%s has %s", r.Path, plural(len(r.Problems), "problem"))
 }
-
 
 // savedInTheWeb are the settings the web interface can also save, where the
 // saved value comes before the environment, and so before the option file,
