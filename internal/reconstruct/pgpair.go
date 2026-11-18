@@ -49,8 +49,9 @@ var pgTableDeltaSwitch = sync.OnceValue(func() bool {
 		slog.Warn(warning)
 	}
 	if on {
-		slog.Info("PostgreSQL table deltas enabled by "+PGTableDeltaEnv+": a snapshot update publishes a changed table as its previous file and a pair of delta files beside it; "+
-			"SQL on the copy does not read the pair yet", "env", PGTableDeltaEnv)
+		slog.Info("PostgreSQL table deltas enabled by "+PGTableDeltaEnv+": a snapshot update publishes a changed table as its previous file and a pair of delta files beside it. "+
+			"Measured on 2026-11-18 it saved nothing: the delta grows with every update and the rewrite that ends it costs more than a rewrite at every update",
+			"env", PGTableDeltaEnv)
 	}
 	return on
 })
