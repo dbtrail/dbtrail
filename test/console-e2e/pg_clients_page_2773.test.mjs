@@ -171,8 +171,10 @@ test("the page for PostgreSQL servers", () => {
     "SQL on the copy, the PostgreSQL port and the AI connector's SQL tool do not show"]) {
     assert.ok(got.text.includes(want), "lacks " + JSON.stringify(want) + ":\n" + got.text);
   }
-  // Not one word about the MySQL port: not its name, not its router's memory.
-  for (const not of ["MySQL port", "mysql -h", "3309", "Two ways to use", "Applies to both", "512 MiB", "restart the router"]) {
+  // Nothing that sends this reader to the MySQL port: not its line, not its
+  // router's memory. (The one line that says Engine Routing is the MySQL
+  // port's is #2897's on purpose, and stays.)
+  for (const not of ["the MySQL port and", "one MySQL port", "mysql -h", "3309", "Two ways to use", "Applies to both", "512 MiB", "restart the router"]) {
     assert.ok(!got.text.includes(not), "says " + JSON.stringify(not) + ":\n" + got.text);
   }
 });
