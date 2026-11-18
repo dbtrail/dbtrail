@@ -12,7 +12,7 @@ import (
 // composeOptionFileMount is how docker-compose.yml mounts the install
 // folder's ./dbtrail-config, where the images find /etc/dbtrail/dbtrail.cnf
 // (#2671).
-const composeOptionFileMount = "./dbtrail-config:/etc/dbtrail-config:ro"
+const composeOptionFileMount = "./dbtrail-config:/etc/dbtrail-config"
 
 // Every service that runs a DBTrail program reads the option file, so every
 // one mounts its folder. index-init runs only a shell over the index's
@@ -35,6 +35,12 @@ func TestCompose_everyServiceMountsTheOptionFile(t *testing.T) {
 		if !slices.Contains(svc.Volumes, composeOptionFileMount) {
 			t.Errorf("service %s runs a DBTrail program and does not mount %s", name, composeOptionFileMount)
 		}
+	}
+	// Not read-only: a file an older override mounts at
+	// /etc/dbtrail/dbtrail.cnf lands inside the folder through the link, and
+	// a read-only folder makes that container fail to start.
+	if strings.Contains(string(data), "./dbtrail-config:/etc/dbtrail-config:ro") {
+		t.Error("the option file's folder is mounted read-only: an older override's file mount inside it would stop the container")
 	}
 	if seen < 6 {
 		t.Fatalf("found %d DBTrail services; the file's shape changed under this test", seen)

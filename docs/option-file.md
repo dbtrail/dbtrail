@@ -16,8 +16,9 @@ restart`. A compose file from before this
 says so.
 
 If you mounted a file yourself before (`./dbtrail.cnf:/etc/dbtrail/dbtrail.cnf:ro`,
-which this page said to add), move it to `dbtrail-config/dbtrail.cnf` and take
-that line out of your compose file when you upgrade it.
+in the compose file or in a `docker-compose.override.yml`, as these docs said
+to), it keeps being read. Move it to `dbtrail-config/dbtrail.cnf` and take that
+line out when you can, so there is one place to look.
 
 The `bintrail-console` package (`.deb` and `.rpm`) installs the file at
 `/etc/dbtrail/dbtrail.cnf`, every option commented out, and an upgrade never

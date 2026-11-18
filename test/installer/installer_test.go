@@ -512,7 +512,7 @@ func TestCompose_pgRouterService(t *testing.T) {
 	}
 	// The state volume read-only, and the option file's folder (#2671).
 	if len(svc.Volumes) != 2 || !slices.Contains(svc.Volumes, "bintrail-state:/var/lib/bintrail:ro") ||
-		!slices.Contains(svc.Volumes, "./dbtrail-config:/etc/dbtrail-config:ro") {
+		!slices.Contains(svc.Volumes, "./dbtrail-config:/etc/dbtrail-config") {
 		t.Errorf("volumes = %v, want the state volume read-only and the option file's folder", svc.Volumes)
 	}
 }
