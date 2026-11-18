@@ -1,11 +1,11 @@
 package installer
 
 import (
-	"slices"
 	"go.yaml.in/yaml/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )

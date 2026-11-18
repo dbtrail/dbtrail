@@ -1,9 +1,9 @@
 package consoleapp
 
 import (
-	"slices"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
