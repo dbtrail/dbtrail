@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+
+	"github.com/dbtrail/dbtrail/internal/settings"
 )
 
 // effective runs SettingsInEffect over the process environment plus extra
@@ -159,8 +161,16 @@ func TestSettingsInEffect_emptyUnsetUnknownRetired(t *testing.T) {
 	if !slices.Contains(r.Unset, "rotate-interval") {
 		t.Errorf("unset: %v", r.Unset)
 	}
-	if !slices.Equal(r.Unknown, []string{"BINTRAIL_ROTATE_RETIAN"}) {
+	// Only names no program reads, each once. The environment the tests run
+	// in may carry names of its own (CI sets BINTRAIL_REQUIRE_*), so the
+	// one this test adds is looked for, not the whole list.
+	if !slices.Contains(r.Unknown, "BINTRAIL_ROTATE_RETIAN") {
 		t.Errorf("unknown: %v", r.Unknown)
+	}
+	for i, k := range r.Unknown {
+		if _, known := settings.Lookup(k); known || slices.Contains(r.Unknown[i+1:], k) {
+			t.Errorf("unknown lists %s, which is known or listed twice: %v", k, r.Unknown)
+		}
 	}
 	// The retired name is only in environ here; os.LookupEnv does not see
 	// it, so it is set for real.
