@@ -725,6 +725,7 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	// Wire the live telemetry client so the console's opt-out toggle stops this
 	// running daemon's beacons immediately, not just on the next start.
 	cfg.Telemetry = tel.Client()
+	cfg.TelemetryFrom = cli.Origin("BINTRAIL_TELEMETRY")
 	srv, err := console.New(cfg)
 	if err != nil {
 		return err
@@ -1083,6 +1084,7 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	// Wire the live telemetry client so the console's opt-out toggle reaches
 	// this running daemon (see the other console.New site).
 	cfg.Telemetry = tel.Client()
+	cfg.TelemetryFrom = cli.Origin("BINTRAIL_TELEMETRY")
 	srv, err := console.New(cfg)
 	if err != nil {
 		return err
@@ -2568,6 +2570,7 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		// The SQL memory saved in the web interface (#2210), beside the
 		// servers file like the port's setting.
 		SQLSettingsPath: sqlSettingsFilePath(opts.ServersFile),
+		SQLMemoryFrom:   upSQLMemoryOrigin,
 		TLSCert:         opts.TLSCert,
 		TLSKey:          opts.TLSKey,
 		AllowedHosts:    opts.AllowedHosts,
@@ -2933,7 +2936,21 @@ func resolveSQLMemory(cmd *cobra.Command) error {
 		return err
 	}
 	upSQLMemoryLimit = limit
+	upSQLMemoryOrigin = sqlMemoryOrigin(cmd)
 	return nil
+}
+
+// upSQLMemoryOrigin is sqlMemoryOrigin for watch, set by resolveSQLMemory.
+var upSQLMemoryOrigin string
+
+// sqlMemoryOrigin says where sqlMemoryFrom took the memory from, for the
+// web interface's lock (#2671): the flag, or where its variable came from
+// (cli.Origin: a line of the option file, an env file, the environment).
+func sqlMemoryOrigin(cmd *cobra.Command) string {
+	if cmd.Flags().Changed("sql-memory") {
+		return "--sql-memory"
+	}
+	return cli.Origin("BINTRAIL_CONSOLE_SQL_MEMORY")
 }
 
 // sqlMemoryFrom is --sql-memory on cmd or, when not given,

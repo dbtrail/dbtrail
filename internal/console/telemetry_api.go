@@ -85,6 +85,9 @@ type telemetryStateDTO struct {
 	Reporting   bool   `json:"reporting"`    // actually sending right now
 	Consent     bool   `json:"consent"`      // the resolved on/off decision
 	DecidedBy   string `json:"decided_by"`   // which control decided it
+	// DecidedWhere says where BINTRAIL_TELEMETRY was set when it decided:
+	// a line of the option file, an env file, the environment (#2671).
+	DecidedWhere string `json:"decided_where,omitempty"`
 	EndpointSet bool   `json:"endpoint_set"` // this build can send at all
 	CIDetected  bool   `json:"ci_detected"`
 	// Overridden is true when a higher-precedence control (DO_NOT_TRACK, the
@@ -127,7 +130,12 @@ func (s *Server) telemetryState() telemetryStateDTO {
 		slog.Warn("console: could not render the telemetry sample event", "error", err)
 	}
 
+	where := ""
+	if dec.Source == telemetry.SourceEnv {
+		where = s.telemetryFrom
+	}
 	return telemetryStateDTO{
+		DecidedWhere: where,
 		Reporting:   reporting,
 		Consent:     dec.Enabled,
 		DecidedBy:   string(dec.Source),

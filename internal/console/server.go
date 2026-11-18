@@ -182,6 +182,9 @@ type Config struct {
 	// daemon's beacons immediately. nil on the read-only console (serve), where
 	// the toggle still persists the machine-wide choice to the consent file.
 	Telemetry TelemetryController
+	// TelemetryFrom says where BINTRAIL_TELEMETRY came from, as cli.Origin
+	// words it (#2671), for the card that says what decides telemetry.
+	TelemetryFrom string
 	// SQLLimits are the caps free SQL over the copy runs under (#1952):
 	// threads, memory, wall clock, rows. Zero fields take
 	// sqlsandbox.DefaultLimits (2 threads, 2 GB, 60 s, 1,000 rows).
@@ -264,6 +267,11 @@ type Config struct {
 	// server because that server's index is restarting. The web console
 	// leaves it unset: there a server that does not answer is said at once.
 	LazyIndex bool
+	// SQLMemoryFrom says where the startup memory (SQLLimits.MemoryLimit)
+	// came from, as cli.Origin words it, or "--sql-memory" (#2671): the web
+	// interface names it when it shows the setting as locked. Empty: said
+	// as "where DBTrail starts", as before.
+	SQLMemoryFrom string
 	// SQLSettingsPath is the file the web interface saves the SQL memory in
 	// (#2210), beside the servers file. Empty = this console keeps none, and
 	// the memory can only be set where DBTrail starts.
@@ -582,6 +590,8 @@ type Server struct {
 	// telemetry: non-nil only when a long-running console wired its live
 	// telemetry client (see Config.Telemetry), so the UI opt-out reaches it.
 	telemetry TelemetryController
+	// telemetryFrom is Config.TelemetryFrom.
+	telemetryFrom string
 	// rotationDefaults are the daemon's --rotate-* values, the fallback GET
 	// /api/rotation reports when no console override is saved.
 	rotationDefaults       RotationDefaults
@@ -917,6 +927,7 @@ func New(cfg Config) (*Server, error) {
 		baselineHistory:         cfg.BaselineHistory,
 		series:                  newSeriesStoreOrNil(cfg.SeriesGatherer),
 		telemetry:               cfg.Telemetry,
+		telemetryFrom:           cfg.TelemetryFrom,
 		rotationDefaults:        cfg.RotationDefaults,
 		backupSettingsDefaults:  cfg.BackupSettingsDefaults,
 		baselineRefreshDefaults: cfg.BaselineRefreshDefaults,
@@ -980,6 +991,7 @@ func New(cfg Config) (*Server, error) {
 	}
 	// Before resolveSQLLimits filled it, the memory was given or not.
 	s.initSQLMemory(cfg.SQLLimits.MemoryLimit != "", cfg.SQLSettingsPath)
+	s.sqlMem.from = cfg.SQLMemoryFrom
 	s.cm.lazyIndex = cfg.LazyIndex
 	s.cm.defaultBaselineDir = cfg.BaselineDir
 	s.cm.defaultBaselineS3 = cfg.BaselineS3

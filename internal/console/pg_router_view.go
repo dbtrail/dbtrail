@@ -32,6 +32,7 @@ type pgRouterModeDoc struct {
 	Version        int                           `json:"version"`
 	Fresh          *bool                         `json:"fresh,omitempty"`
 	SQLModeForced  string                        `json:"sql_mode_forced,omitempty"`
+	SQLModeForcedFrom string                     `json:"sql_mode_forced_from,omitempty"`
 	FreshByDefault bool                          `json:"fresh_by_default,omitempty"`
 	PerServerMode  bool                          `json:"per_server_mode,omitempty"`
 	Servers        map[string]pgRouterModeServer `json:"servers"`

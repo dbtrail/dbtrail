@@ -249,10 +249,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 		// the UI opt-out toggle must stop THIS running process and the state
 		// endpoint must report the live decision — while console actions stay
 		// unrecorded, per TELEMETRY.md.
-		Telemetry: serveTelemetry{},
+		Telemetry:     serveTelemetry{},
+		TelemetryFrom: cli.Origin("BINTRAIL_TELEMETRY"),
 		SQLLimits: sqlsandbox.Limits{MemoryLimit: sqlMemory},
 		// Settable in the web interface too when not given here (#2210).
 		SQLSettingsPath: sqlSettingsFilePath(serversPath),
+		SQLMemoryFrom:   sqlMemoryOrigin(cmd),
 		Registry:        registry,
 		Listen:          conListen,
 		Token:           conToken,

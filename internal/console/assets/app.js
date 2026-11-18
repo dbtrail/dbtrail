@@ -10045,7 +10045,7 @@ function telemetryCard(t) {
   kvRow(card, "status", (t.reporting ? "On" : "Off") + (t.ci_detected ? " (suppressed: CI detected)" : ""));
   if (t.overridden) {
     const by = t.decided_by === "DO_NOT_TRACK" ? "the DO_NOT_TRACK environment variable"
-      : t.decided_by === "BINTRAIL_TELEMETRY" ? "the BINTRAIL_TELEMETRY environment variable"
+      : t.decided_by === "BINTRAIL_TELEMETRY" ? (t.decided_where || "the BINTRAIL_TELEMETRY environment variable")
       : "the --telemetry flag";
     card.append(el("p", { class: "form-hint", text: "Set by " + by + " where DBTrail was started, which overrides this toggle. Change it there." }));
     card.append(telemetrySampleSection(t));
@@ -12163,6 +12163,25 @@ function choicePills(choices, value, label, onChange) {
 // what its entry asks for either way; cur.sql_fresh_saved says a choice was
 // saved). A router older than that default answers such a server in fast
 // mode, and the card says so instead of "applied".
+// sqlModeForcedPlace is where the router's own mode setting comes from, when
+// it is somewhere more precise than the environment (#2671): a line of the
+// option file or an env file, as the router words it
+// (sql_mode_forced_from: "line 4 of /etc/dbtrail/dbtrail.cnf (sql-tails)").
+// "" otherwise, and the compose .env's SQL_FRESH is what is named.
+function sqlModeForcedPlace(st) {
+  const f = st && st.sql_mode_forced_from;
+  return typeof f === "string" && f !== "" && !f.startsWith("the environment variable") ? f : "";
+}
+
+// routerModeWhere is the sentence that says where the router's own mode
+// setting is changed, for the router's numbers.
+function routerModeWhere(st) {
+  const place = sqlModeForcedPlace(st);
+  return place
+    ? " It is set where the router starts, by " + place + ": remove that line and restart the router to choose each server's mode on its Snapshots page."
+    : " It is set where the router starts: remove SQL_FRESH from the compose .env and run docker compose up -d router to choose each server's mode on its Snapshots page.";
+}
+
 function sqlModeModel(cur, rt, mayWrite) {
   // A PostgreSQL server's mode is applied by the PostgreSQL router (rt is
   // then GET /api/pg-router), a MySQL or MariaDB server's by the router.
@@ -12190,7 +12209,10 @@ function sqlModeModel(cur, rt, mayWrite) {
   if (st.fresh === true) {
     out.pick = "fresh";
     out.editable = false;
-    out.state = "Fresh mode, for every server: it is set where the " + R + " starts (SQL_FRESH=on in the compose .env, or BINTRAIL_SQL_TAILS=on). For this server alone: " + word(saved) + ", which applies once that setting is removed (then docker compose up -d " + svc + ").";
+    const place = sqlModeForcedPlace(st);
+    out.state = place
+      ? "Fresh mode, for every server: it is set where the " + R + " starts, by " + place + ". For this server alone: " + word(saved) + ", which applies once that line is removed and the " + R + " restarted."
+      : "Fresh mode, for every server: it is set where the " + R + " starts (SQL_FRESH=on in the compose .env, or BINTRAIL_SQL_TAILS=on). For this server alone: " + word(saved) + ", which applies once that setting is removed (then docker compose up -d " + svc + ").";
     const env = st.servers ? st.servers[cur.id] : null;
     if (env && env.sql_mode_warming) out.state += " This server has not answered with the newest changes yet, so its answers can still be as old as the snapshot.";
     return out;
@@ -12198,7 +12220,10 @@ function sqlModeModel(cur, rt, mayWrite) {
   if (st.sql_mode_forced === "fast") {
     out.pick = "fast";
     out.editable = false;
-    out.state = "Fast mode, for every server: it is set where the " + R + " starts (SQL_FRESH=off in the compose .env, or BINTRAIL_SQL_TAILS=off). For this server alone: " + word(saved) + ", which applies once that setting is removed (then docker compose up -d " + svc + ").";
+    const place = sqlModeForcedPlace(st);
+    out.state = place
+      ? "Fast mode, for every server: it is set where the " + R + " starts, by " + place + ". For this server alone: " + word(saved) + ", which applies once that line is removed and the " + R + " restarted."
+      : "Fast mode, for every server: it is set where the " + R + " starts (SQL_FRESH=off in the compose .env, or BINTRAIL_SQL_TAILS=off). For this server alone: " + word(saved) + ", which applies once that setting is removed (then docker compose up -d " + svc + ").";
     return out;
   }
   if (!st.per_server_mode) {
@@ -16822,8 +16847,8 @@ function routerLines(view, cur) {
   const how = mine && mine.sql_mode_from === "saved" ? ", chosen on its Snapshots page" : mine && mine.sql_mode_from === "default" ? ", the default" : "";
   if (st.fresh === true) out.push({ text: "Fresh mode, for every server: each table's newest captured changes are laid over its snapshot, so answers are about as far behind as capture." +
     (mine && mine.sql_mode_warming ? " " + (cur ? (cur.name || cur.id) : "This server") + " has not answered with the newest changes yet, so its answers can still be as old as the snapshot." : "") +
-    " It is set where the router starts: remove SQL_FRESH from the compose .env and run docker compose up -d router to choose each server's mode on its Snapshots page." });
-  else if (st.sql_mode_forced === "fast") out.push({ text: "Fast mode, for every server: answers come from each table's last snapshot, as old as its last refresh. It is set where the router starts: remove SQL_FRESH from the compose .env and run docker compose up -d router to choose each server's mode on its Snapshots page." });
+    routerModeWhere(st) });
+  else if (st.sql_mode_forced === "fast") out.push({ text: "Fast mode, for every server: answers come from each table's last snapshot, as old as its last refresh." + routerModeWhere(st) });
   else if (st.per_server_mode && mine && mine.sql_mode === "fresh" && mine.sql_mode_warming) out.push({ text: "Fresh mode" + whose + how + ". It has not answered with the newest changes yet: those of a table are gathered after the first statement that reads it, so until then answers can be as old as the snapshot." });
   else if (st.per_server_mode && mine && mine.sql_mode === "fresh") out.push({ text: "Fresh mode" + whose + how + ": each table's newest captured changes are laid over its snapshot, so answers are about as far behind as capture." });
   else if (st.per_server_mode) out.push({ text: "Fast mode" + whose + (mine && mine.sql_mode_from === "saved" ? ", chosen on its Snapshots page" : "") + ": answers come from each table's last snapshot, as old as its last refresh. For answers about as far behind as capture, choose Fresh on " + (cur ? "its" : "a server's") + " Snapshots page." });
