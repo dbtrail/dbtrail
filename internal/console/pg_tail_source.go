@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/pgdelta"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/snapshotdir"
@@ -231,12 +233,59 @@ func (x *pgTailSource) cut(t views.BaselineTable) pgCut {
 	case from == nil || !proven || md.LSN == 0:
 		return refuse("the snapshot of %s does not record an LSN to continue from", name)
 	}
-	// A table delta of PostgreSQL's own beside the file (#2757) changes
-	// nothing here: the tail starts at the FILE's floor, which does not move
-	// while deltas are written beside it, so it holds every change the delta
-	// holds and the ones after. The views lay it over the file and its
-	// delta, where it wins key by key.
+	// A table delta of PostgreSQL's own beside the file (#2757): the view
+	// reads the file and the delta, which holds every change up to its own
+	// cut. The tail starts THERE, not at the file's floor. From the file's
+	// floor it would be right too, and it was written that way first: but
+	// the file is not written again while it has a delta, so that tail grew
+	// with every update, was built again from nothing at each one (the same
+	// floor is not a later cut, so the old tail could not stand for it), and
+	// statements were answered without it meanwhile.
+	pair, why := x.pairCut(t, name, md, at)
+	if why != "" {
+		return refuse("%s", why)
+	}
+	if pair != nil {
+		return pgCut{md: md, floor: pair.floor, from: pair.from, since: pair.since}
+	}
 	return pgCut{md: md, floor: md.LSN, from: from, since: since}
+}
+
+// pairCut is the cut of the table delta beside t's file, nil when it has
+// none: where the delta's own window ends, read from the footer of its
+// .pgnew file, which is the footer a table file written by the same update
+// would carry. Whatever keeps it from being read is a refusal, never the
+// file's floor instead: a tail from there is the one this replaces.
+func (x *pgTailSource) pairCut(t views.BaselineTable, name string, file baseline.DumpMetadata, at time.Time) (*pgCut, string) {
+	dead, rows, err := pgdelta.Paths(t.Path, 0)
+	if err != nil {
+		return nil, ""
+	}
+	_, deadErr := os.Lstat(dead)
+	_, rowsErr := os.Lstat(rows)
+	if errors.Is(deadErr, os.ErrNotExist) && errors.Is(rowsErr, os.ErrNotExist) {
+		return nil, ""
+	}
+	if deadErr != nil || rowsErr != nil {
+		return nil, fmt.Sprintf("the table delta beside the copy of %s is not whole, or cannot be asked about", name)
+	}
+	md, err := x.s.copyCuts.footer(rows)
+	if err != nil {
+		return nil, fmt.Sprintf("the table delta beside the copy of %s could not be read: %v", name, err)
+	}
+	if md.CaptureGap != "" {
+		return nil, fmt.Sprintf("the table delta beside the copy of %s was published over a known loss of captured changes", name)
+	}
+	since, from, proven, err := reconstruct.PGDeltaWindow(md, at)
+	switch {
+	case err != nil:
+		return nil, fmt.Sprintf("the table delta beside the copy of %s: %v", name, err)
+	case from == nil || !proven || md.LSN == 0:
+		return nil, fmt.Sprintf("the table delta beside the copy of %s does not record an LSN to continue from", name)
+	case md.LSN < file.LSN:
+		return nil, fmt.Sprintf("the table delta beside the copy of %s ends before its file was written", name)
+	}
+	return &pgCut{floor: md.LSN, from: from, since: since}, ""
 }
 
 // Cut is where Fill starts t's window, as the keeper orders it. A PostgreSQL
