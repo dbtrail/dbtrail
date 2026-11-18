@@ -55,7 +55,8 @@ func wrap(text, prefix string, width int) []string {
 
 // optionValue is an example as a line of the option file writes it: in
 // single quotes when the value has a character the file would read as
-// something else (# or ; starts a comment, a quote, spaces at its ends), or
+// something else (# starts a comment, a quote, spaces at its ends), or a ;
+// (a comment at the start of a line, quoted to read the same anywhere), or
 // no value at all.
 func optionValue(v string) string {
 	if v == "" || strings.ContainsAny(v, "#;'\"") || strings.TrimSpace(v) != v {
@@ -94,8 +95,8 @@ func OptionFileSample() string {
 	for _, l := range []string{
 		"DBTrail's option file. Every DBTrail program reads it when it starts, except bintrail-mcp, which takes its settings from the AI client that starts it.",
 		"Every option below is commented out, so DBTrail uses its defaults. To set one, remove the # in front of it and write your value. A program reads the file when it starts: restart it after a change. A line DBTrail does not understand is ignored, with a warning; dbtrail config check lists them, and dbtrail config show lists what is in effect and where each value comes from.",
-		"What comes first, when a setting is given in several places: a command-line flag, then the environment (BINTRAIL_ and the option's name in capitals, with _ for -), then .bintrail.env or ~/.config/bintrail/config.env, then this file. Some settings can also be saved in the web interface; where they can, the web interface says which value it is using and where it comes from.",
-		"Write a value in single quotes when it has a # or a ; in it, which would otherwise start a comment. This file can hold passwords: keep it readable by DBTrail only (chmod 640, owned by root and DBTrail's group). A file every user can change is not used at all.",
+		"What comes first, when a setting is given in several places: a command-line flag, then the environment (BINTRAIL_ and the option's name in capitals, with _ for -), then .bintrail.env or ~/.config/bintrail/config.env, then this file. For index rotation and the backup settings, a value saved in the web interface comes before all of these, and the web interface says which value it is using instead of what, and where that is set.",
+		"Write a value in single quotes when it has a # in it, which would otherwise start a comment. A file every user can change is not used at all. Once you put a password in it, make it readable by DBTrail only: with the packages, chmod 640 and chgrp bintrail; with Docker, whose services read it as user 999, chown 999 and chmod 600.",
 		"Generated from DBTrail's list of settings (internal/settings); docs/option-reference.md has the same, as a page.",
 	} {
 		for _, w := range wrap(l, "# ", 78) {
@@ -155,7 +156,7 @@ func Reference() string {
 	p("<!-- Generated from internal/settings (docs.go). Do not edit by hand: change docs.go, then run")
 	p("     go test ./internal/settings -run TestGeneratedFilesAreCurrent -update -->")
 	p("")
-	p("Every setting DBTrail reads, as a line of [`/etc/dbtrail/dbtrail.cnf`](option-file.md) writes it. The same setting can be given as an environment variable, named under each option. A command-line flag comes first, then the environment, then `.bintrail.env` or `~/.config/bintrail/config.env`, then the file. `dbtrail config show` lists what is in effect and where each value comes from.")
+	p("Every setting DBTrail reads, as a line of [`/etc/dbtrail/dbtrail.cnf`](option-file.md) writes it. The same setting can be given as an environment variable, named under each option. A command-line flag comes first, then the environment, then `.bintrail.env` or `~/.config/bintrail/config.env`, then the file; for index rotation and the backup settings, a value saved in the web interface comes before all of these. `dbtrail config show` lists what is in effect and where each value comes from.")
 	p("")
 	p("`bintrail-mcp` does not read the file: an option it alone reads is set in the environment the AI client starts it with.")
 	for i, group := range operatorSettings() {
