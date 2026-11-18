@@ -29,7 +29,8 @@ class FakeEl {
   replaceChildren(...k) { this.children = k; }
   setAttribute(k, v) { this.attrs[k] = v; if (k === "id") this.id = v; }
   getAttribute(k) { return this.attrs[k]; }
-  addEventListener() {} removeEventListener() {}
+  // el() wires onclick through addEventListener: kept, so a test can press.
+  addEventListener(ev, fn) { if (ev === "click") this.onclick = fn; } removeEventListener() {}
   all() { const out = []; const walk = (n) => { if (!n || n.nodeType !== 1) return; out.push(n); n.children.forEach(walk); }; this.children.forEach(walk); return out; }
   // "#id", "tag#id" and "tag[attr]" are what the Connect code asks for.
   querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
