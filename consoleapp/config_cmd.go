@@ -15,7 +15,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/cli"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/rotation"
@@ -40,7 +39,7 @@ var configCheckCmd = &cobra.Command{
 line that is not used: an option DBTrail does not have (with the nearest one),
 an option with no value, an option the environment already sets, an option
 for a setting a value saved in the web interface overrides (index rotation,
-the backup settings), an include.
+the snapshot settings), an include.
 It never prints a value.
 
 Exits 1 when it finds one, so a deploy can stop on it. A program that starts
@@ -330,8 +329,7 @@ func savedOverrides(r cli.OptionReport, serversPath string) savedComparison {
 					// A saved lock mode that does not read is not used: the
 					// one the process started with is (effectiveLockMode).
 					if v != "" {
-						_, err := baseline.ParseLockMode(v)
-						saved = err == nil
+						saved = savedLockModeReads(v)
 					}
 				}
 				same = strings.TrimSpace(v) == strings.TrimSpace(fileValue)
