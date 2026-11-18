@@ -20,11 +20,11 @@ func TestBuildQuery_sinceUnderAPosition(t *testing.T) {
 		opts Options
 		want time.Time
 	}{
-		"PostgreSQL, proven":                 {Options{Schema: "public", Table: "t", Since: &since, SincePos: lsn}.SinceProven(), since},
-		"PostgreSQL, not proven":             {Options{Schema: "public", Table: "t", Since: &since, SincePos: lsn}, coarse},
-		"MySQL":                              {Options{Schema: "s", Table: "t", Since: &since, SincePos: binlog}, coarse},
-		"MySQL, settled by its caller":       {Options{Schema: "s", Table: "t", Since: &since, SincePos: binlog}.SearchesBelowItsOwnFloor(), coarse},
-		"MySQL, marked proven all the same":  {Options{Schema: "s", Table: "t", Since: &since, SincePos: binlog}.SinceProven(), coarse},
+		"PostgreSQL, proven":               {Options{Schema: "public", Table: "t", Since: &since, SincePos: lsn}.SinceProven(), since},
+		"PostgreSQL, not proven":           {Options{Schema: "public", Table: "t", Since: &since, SincePos: lsn}, coarse},
+		"MySQL":                            {Options{Schema: "s", Table: "t", Since: &since, SincePos: binlog}, coarse},
+		"MySQL, settled by its caller":     {Options{Schema: "s", Table: "t", Since: &since, SincePos: binlog}.SearchesBelowItsOwnFloor(), coarse},
+		"MySQL, marked proven all the same":{Options{Schema: "s", Table: "t", Since: &since, SincePos: binlog}.SinceProven(), coarse},
 	} {
 		_, args := buildQuery(c.opts)
 		var got []time.Time
