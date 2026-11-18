@@ -103,6 +103,33 @@ when it finds one, so a deploy can stop on it. With the Docker install the
 Under systemd, the service's environment is not your shell's, so a line the
 service's environment hides can read as used.
 
+## See what is in effect
+
+```sh
+dbtrail config show
+dbtrail config show --all
+```
+
+It lists every setting that has a value, with the value and where it comes
+from: the environment, an env file (`.bintrail.env` or `config.env`), or a line
+of this file. A setting that holds a password, a token or a key is listed
+without its value, and so is any value with a login in it (`user:password@`).
+`--all` also lists the settings with no value, which each program then decides
+by itself. It also says which `BINTRAIL_` variables are set and read by no
+DBTrail program (a typo, most likely), and which no longer do anything.
+
+```text
+2 settings with a value:
+  commit-within  2s                                    the environment, as BINTRAIL_COMMIT_WITHIN
+  index-dsn      (not shown: it can carry a password)  the environment, as BINTRAIL_INDEX_DSN
+127 more settings with no value. dbtrail config show --all lists them.
+Note: BINTRAIL_COMMIT_WITHN is set, and no DBTrail program reads it. Is the name right?
+Command-line flags given to a running program come before all of these and are not seen here.
+```
+
+Like `config check`, it shows what a program started now with the command's
+environment would read: run it where DBTrail runs.
+
 The file is read from `/etc/dbtrail/dbtrail.cnf` only, never from the current
 folder: the `dbtrail` commands that talk to a running DBTrail send a password,
 and a file in the folder you happen to be in must not decide where.

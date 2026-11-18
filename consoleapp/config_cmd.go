@@ -132,10 +132,17 @@ func reportSettings(w io.Writer, r cli.SettingsReport, all bool) {
 	}
 	if all {
 		if len(r.Unset) > 0 {
-			fmt.Fprintf(w, "No value, so each program decides by itself: %s.\n", strings.Join(r.Unset, ", "))
+			fmt.Fprintf(w, "%s with no value, which each program decides by itself:\n", plural(len(r.Unset), "setting"))
+			for _, o := range r.Unset {
+				fmt.Fprintf(w, "  %s\n", o)
+			}
 		}
 	} else if n := len(r.Unset) + len(r.Empty); n > 0 {
-		fmt.Fprintf(w, "%s with no value. dbtrail config show --all lists them.\n", plural(n, "more setting"))
+		word := "more setting"
+		if len(r.Set) == 0 {
+			word = "setting"
+		}
+		fmt.Fprintf(w, "%s with no value. dbtrail config show --all lists them.\n", plural(n, word))
 	}
 	for _, k := range r.Unknown {
 		fmt.Fprintf(w, "Note: %s is set, and no DBTrail program reads it. Is the name right?\n", k)

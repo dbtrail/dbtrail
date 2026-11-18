@@ -49,7 +49,7 @@ func TestConfigShow_allAndNotes(t *testing.T) {
 	}
 	got := showText(r, true)
 	want := "No setting has a value: every program decides each one by itself (its default).\n" +
-		"No value, so each program decides by itself: batch-size.\n" +
+		"1 setting with no value, which each program decides by itself:\n  batch-size\n" +
 		"Note: BINTRAIL_ROTATE_RETIAN is set, and no DBTrail program reads it. Is the name right?\n" +
 		"Note: BINTRAIL_CONSOLE_SQL_PANEL is set, and no longer does anything.\n" +
 		"Command-line flags given to a running program come before all of these and are not seen here.\n"
@@ -57,7 +57,12 @@ func TestConfigShow_allAndNotes(t *testing.T) {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
 	}
 	// One more, said as one.
-	if got := showText(cli.SettingsReport{Unset: []string{"batch-size"}}, false); !strings.Contains(got, "1 more setting with no value.") {
+	// Nothing listed above it: not "more".
+	if got := showText(cli.SettingsReport{Unset: []string{"batch-size", "tables"}}, false); !strings.Contains(got, "\n2 settings with no value. dbtrail config show --all lists them.\n") {
+		t.Fatalf("%q", got)
+	}
+	one := cli.SettingsReport{Set: []cli.SettingInEffect{{Env: "BINTRAIL_X", Option: "x", Value: "1"}}, Unset: []string{"batch-size"}}
+	if got := showText(one, false); !strings.Contains(got, "\n1 more setting with no value.") {
 		t.Fatalf("%q", got)
 	}
 }
