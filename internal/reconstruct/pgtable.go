@@ -96,8 +96,18 @@ func reconstructPGTable(ctx context.Context, cfg FullTableConfig, p pgTableInput
 		return nil, err
 	}
 	tm, err := p.resolver.Resolve(schema, table)
+	// noShape: the index records no shape of the table. The stream records
+	// one when it first carries a change of the table, so a table nothing
+	// has written to since capture began (a lookup table, a table of
+	// settings) has none, however long capture has run. Its shape is then
+	// the one its own file records (pgShapeFromFile), for as long as the
+	// window holds no change of it: checked after the fold, below.
+	var noShape error
 	if err != nil {
-		return nil, fmt.Errorf("resolve schema for %s.%s: %w", schema, table, err)
+		noShape = fmt.Errorf("resolve schema for %s.%s: %w", schema, table, err)
+		if tm = pgShapeFromFile(schema, table, rel); tm == nil {
+			return nil, noShape
+		}
 	}
 	pkCols := tm.PKColumnMetas()
 	if len(pkCols) == 0 {
@@ -162,6 +172,15 @@ func reconstructPGTable(ctx context.Context, cfg FullTableConfig, p pgTableInput
 		return nil, err
 	}
 	defer fold.close()
+	if noShape != nil {
+		// A change of a table the index has no shape of was captured under
+		// a shape this run cannot read: refused as it always was.
+		if fold.Total > 0 || fold.First != nil {
+			return nil, noShape
+		}
+		slog.Info("the index records no shape of this table and no change of it since its snapshot; its shape is read from its own file",
+			"schema", schema, "table", table, "baseline", p.baselinePath)
+	}
 	rep.EventsApplied = fold.Total
 	rep.FetchDuration, rep.FoldDuration = fold.FetchDuration, fold.FoldDuration
 	if fold.First != nil {
