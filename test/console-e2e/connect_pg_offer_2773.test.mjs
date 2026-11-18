@@ -18,7 +18,7 @@ const APP = readFileSync(path.join(HERE, "../../internal/console/assets/app.js")
 class FakeEl {
   constructor(tag) {
     this.tag = tag; this.children = []; this.className = ""; this._text = ""; this.attrs = {}; this.hidden = false;
-    this.nodeType = 1; this.value = ""; this.style = {}; this.dataset = {}; this.id = "";
+    this.nodeType = 1; this.style = {}; this.dataset = {}; this.id = ""; this.isConnected = true;
     const has = (c) => (" " + this.className + " ").includes(" " + c + " ");
     this.classList = { add: (c) => { if (!has(c)) this.className += " " + c; }, remove() {}, toggle: () => false, contains: has };
   }
@@ -27,7 +27,27 @@ class FakeEl {
   append(...k) { for (const x of k) if (x != null) this.children.push(x); }
   appendChild(x) { this.children.push(x); return x; }
   replaceChildren(...k) { this.children = k; }
-  setAttribute(k, v) { this.attrs[k] = v; if (k === "id") this.id = v; }
+  setAttribute(k, v) {
+    this.attrs[k] = v;
+    if (k === "id") this.id = v;
+    if (k === "value") this._value = String(v);
+    if (k.startsWith("data-")) this.dataset[k.slice(5).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = String(v);
+  }
+  // A select holds only one of its options' values, as a browser's does.
+  set value(v) {
+    if (this.tag === "select") { const o = this.all().find((n) => n.tag === "option" && n.attrs.value === String(v)); this._value = o ? String(v) : ""; }
+    else this._value = String(v);
+  }
+  get value() {
+    if (this.tag === "select" && this._value === undefined) { const o = this.all().find((n) => n.tag === "option"); return o ? o.attrs.value : ""; }
+    return this._value === undefined ? "" : this._value;
+  }
+  get elements() {
+    const out = {};
+    for (const n of this.all()) if (n.attrs.name && !(n.attrs.name in out)) out[n.attrs.name] = n;
+    return out;
+  }
+  focus() {} select() {} blur() {}
   getAttribute(k) { return this.attrs[k]; }
   // el() wires onclick through addEventListener: kept, so a test can press.
   addEventListener(ev, fn) { if (ev === "click") this.onclick = fn; } removeEventListener() {}
@@ -44,6 +64,7 @@ class FakeEl {
 }
 
 function load() {
+  const slots = { "server-add-wrap": new FakeEl("div"), "server-form-mount": new FakeEl("div"), "server-form-msg": new FakeEl("p") };
   const permissive = () => new Proxy(function () {}, {
     get: (t, p) => (p === Symbol.toPrimitive ? () => "" : p === "then" ? undefined : permissive()),
     apply: () => permissive(), construct: () => permissive(),
@@ -51,7 +72,13 @@ function load() {
   const document = {
     createElement: (t) => new FakeEl(t), createTextNode: (s) => ({ nodeType: 3, textContent: String(s) }),
     createElementNS: (n, t) => new FakeEl(t), addEventListener() {}, querySelector: () => null, querySelectorAll: () => [],
-    body: new FakeEl("body"), documentElement: new FakeEl("html"), getElementById: () => new FakeEl("div"),
+    body: new FakeEl("body"), documentElement: new FakeEl("html"),
+    // The servers modal's slots, and any element under them by id.
+    getElementById: (id) => {
+      if (slots[id]) return slots[id];
+      for (const root of Object.values(slots)) { const hit = root.all().find((n) => n.id === id); if (hit) return hit; }
+      return null;
+    },
     importNode: (n) => n, readyState: "loading",
   };
   const ctx = {
@@ -71,7 +98,7 @@ function load() {
   vm.runInContext(APP, ctx);
   const run = (s) => vm.runInContext(s, ctx);
   run("api = () => new Promise(() => {}); capsCache = { monitor: true, permissions: null };");
-  return { ctx, run };
+  return { ctx, run, slots };
 }
 
 // notFound draws step 1's answer id for host:port on an installation of the
@@ -80,10 +107,10 @@ function load() {
 function notFound(id, family, port = "5432") {
   const { ctx, run } = load();
   const form = new FakeEl("form");
-  const field = (name, value) => { const i = new FakeEl("input"); i.attrs.name = name; i.value = value; return i; };
+  const field = (name, value) => { const i = new FakeEl("input"); i.setAttribute("name", name); i.value = value; return i; };
   const elements = { source_host: field("source_host", "db.internal"), source_port: field("source_port", port),
     source_user: field("source_user", ""), source_password: field("source_password", ""), flavor: field("flavor", "mysql") };
-  form.elements = elements;
+  Object.defineProperty(form, "elements", { value: elements });
   const found = new FakeEl("div"); found.id = "connect-found";
   form.append(found);
   ctx.__form = form; ctx.__id = id; ctx.__opened = [];
@@ -137,4 +164,63 @@ test("the rule alone", () => {
   assert.equal(offer(silent, "mysql"), false);
   assert.equal(offer(null, ""), false);
   assert.equal(offer({ kind: "not_mysql", answer: "closed" }, ""), false);
+});
+
+// The real way to the full form, nothing stubbed but the requests: what the
+// person finds in it after pressing the button.
+async function pressed({ port = "5432", user = "", password = "", family = "", flavorAfter } = {}) {
+  const { ctx, run, slots } = load();
+  const connect = new FakeEl("form");
+  connect.setAttribute("data-connect", "1"); connect.setAttribute("id", "server-form");
+  const field = (name, value) => { const i = new FakeEl("input"); i.setAttribute("name", name); i.value = value; return i; };
+  const elements = { source_host: field("source_host", "db.internal"), source_port: field("source_port", port),
+    source_user: field("source_user", user), source_password: field("source_password", password), flavor: field("flavor", "mysql") };
+  Object.defineProperty(connect, "elements", { value: elements });
+  const found = new FakeEl("div"); found.id = "connect-found";
+  connect.append(found);
+  ctx.__form = connect; ctx.__id = silent;
+  run(`installFamily = { family: ${JSON.stringify(family)}, mixed: null }; showNotFound(__form, __id);`);
+  const btn = found.all().find((n) => n.tag === "button" && n.id === "connect-as-pg");
+  // flavorAfter: the family the installation turns out to serve by the time
+  // the full form is built.
+  if (flavorAfter !== undefined) run(`installFamily = { family: ${JSON.stringify(flavorAfter)}, mixed: null };`);
+  await run("openFullFormAsPG(__form)");
+  const full = slots["server-form-mount"].all().find((n) => n.tag === "form");
+  const e = full.elements;
+  return { flavor: e.flavor.value, port: e.source_port.value, user: e.source_user.value, password: e.source_password.value,
+    host: e.source_host.value, msg: slots["server-form-msg"].textContent, btn };
+}
+
+test("the full form it opens: PostgreSQL, the probed address, no MySQL account", async () => {
+  const got = await pressed();
+  assert.equal(got.flavor, "postgres");
+  assert.equal(got.host, "db.internal");
+  assert.equal(got.port, "5432");
+  // The MySQL grant block's account (dbtrail and a generated password) is
+  // not left in a PostgreSQL form.
+  assert.equal(got.user, "");
+  assert.equal(got.password, "");
+  assert.equal(got.msg, "");
+});
+
+test("the full form it opens: a blank Port is the 3306 that was probed", async () => {
+  const got = await pressed({ port: "" });
+  assert.equal(got.port, "3306");
+});
+
+test("the full form it opens: what was typed stays", async () => {
+  const got = await pressed({ user: "replicator", password: "s3cret" });
+  assert.equal(got.user, "replicator");
+  assert.equal(got.password, "s3cret");
+});
+
+test("the full form it opens: an installation found to serve MySQL meanwhile says so", async () => {
+  const got = await pressed({ flavorAfter: "mysql" });
+  assert.notEqual(got.flavor, "postgres");
+  assert.ok(got.msg.includes("This installation does not add PostgreSQL servers now."), got.msg);
+});
+
+test("nothing offered on an installation that holds both families", () => {
+  const { ctx } = load();
+  assert.equal(vm.runInContext("connectPGOffer({ kind: 'not_mysql', answer: 'silent' }, '', { mysql: ['a'], postgres: ['b'] })", ctx), false);
 });
