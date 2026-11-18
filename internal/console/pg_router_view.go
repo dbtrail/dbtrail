@@ -29,12 +29,13 @@ type pgRouterModeServer struct {
 // pgRouterModeDoc is the part of the PostgreSQL router's /status the card
 // reads. A router older than per_server_mode sends none of these fields.
 type pgRouterModeDoc struct {
-	Version        int                           `json:"version"`
-	Fresh          *bool                         `json:"fresh,omitempty"`
-	SQLModeForced  string                        `json:"sql_mode_forced,omitempty"`
-	FreshByDefault bool                          `json:"fresh_by_default,omitempty"`
-	PerServerMode  bool                          `json:"per_server_mode,omitempty"`
-	Servers        map[string]pgRouterModeServer `json:"servers"`
+	Version           int                           `json:"version"`
+	Fresh             *bool                         `json:"fresh,omitempty"`
+	SQLModeForced     string                        `json:"sql_mode_forced,omitempty"`
+	SQLModeForcedFrom string                        `json:"sql_mode_forced_from,omitempty"`
+	FreshByDefault    bool                          `json:"fresh_by_default,omitempty"`
+	PerServerMode     bool                          `json:"per_server_mode,omitempty"`
+	Servers           map[string]pgRouterModeServer `json:"servers"`
 }
 
 // pgRouterViewDTO is GET /api/pg-router: routerViewDTO's fields, with the

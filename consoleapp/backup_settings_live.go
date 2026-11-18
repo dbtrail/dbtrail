@@ -79,6 +79,14 @@ func effectiveLockMode(reg *console.Registry, bootMode baseline.LockMode, bootCh
 	return mode, lockModeSaved, nil
 }
 
+// savedLockModeReads says whether a lock mode saved in the web interface is
+// one effectiveLockMode uses; one it cannot read leaves the started one in
+// force (config check, #2671).
+func savedLockModeReads(raw string) bool {
+	_, err := baseline.ParseLockMode(raw)
+	return err == nil
+}
+
 // effectiveVerifyTables resolves the verification filter, per cycle.
 func effectiveVerifyTables(reg *console.Registry, boot string) []string {
 	if raw, ok := savedBackupSetting(reg, console.BackupSettingVerifyTables); ok {

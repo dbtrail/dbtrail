@@ -293,7 +293,7 @@ func init() {
 			"day old, or the chain's start comes close to the oldest events the index keeps. The generated DuckDB views read the chain; every other reader uses the table file and the index, as before. A snapshot written this way "+
 			"must not be read by a bintrail older than this one. Turning it off needs nothing else: the next refresh writes every table in full. A DuckDB view that follows the newest snapshot keeps working when a pair appears or goes away, except over a table whose schema it could not read, or when another table in the same schema is named after it plus a dot (orders and orders.old): the generated file names those, and they refuse once a pair appears, until the views are generated again.")
 	watchCmd.Flags().StringVar(&upBaselineRefreshEvery, "baseline-refresh-interval", "", "Periodically refresh each server's newest baseline snapshot from the index (Nm/Nh/Nd; default: off). Runs with the conservative DuckDB budget, folds at most 2 tables at a time, and never publishes over a known capture gap.")
-	watchCmd.Flags().StringVar(&upConsoleBaselineRetain, "baseline-retain", "", "The old way to bound local snapshots, still honored: prune those older than this (Nd/Nh) once a durable copy exists in S3 (never the only copy or the newest snapshot per table). Each server's own count, Keep by count"+console.OnPage(console.PageSnapshots)+", is the control now")
+	watchCmd.Flags().StringVar(&upConsoleBaselineRetain, snapshotRetainFlag, "", "The old way to bound local snapshots, still honored: prune those older than this (Nd/Nh) once a durable copy exists in S3 (never the only copy or the newest snapshot per table). Each server's own count, Keep by count"+console.OnPage(console.PageSnapshots)+", is the control now")
 	watchCmd.Flags().StringVar(&upConsoleServersFile, "console-servers-file", "", "Path to the server registry YAML managed by the web interface (default ~/.config/bintrail/console-servers.yaml)")
 	watchCmd.Flags().StringVar(&upConsoleAuthFile, "console-auth-file", "", "Path to the web interface auth file enabling password login (default ~/.config/bintrail/console-auth.yaml; created with `bintrail-console user set-password`)")
 	watchCmd.Flags().StringVar(&upConsoleMCPTokenFile, "console-mcp-token-file", "", "Path to the managed MCP token file written by Settings → MCP Server (default ~/.config/bintrail/console-mcp-token.yaml). Point it at persistent storage when the daemon runs in a container.")
@@ -725,6 +725,7 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	// Wire the live telemetry client so the console's opt-out toggle stops this
 	// running daemon's beacons immediately, not just on the next start.
 	cfg.Telemetry = tel.Client()
+	cfg.TelemetryFrom = cli.PreciseOrigin("BINTRAIL_TELEMETRY")
 	srv, err := console.New(cfg)
 	if err != nil {
 		return err
@@ -1083,6 +1084,7 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	// Wire the live telemetry client so the console's opt-out toggle reaches
 	// this running daemon (see the other console.New site).
 	cfg.Telemetry = tel.Client()
+	cfg.TelemetryFrom = cli.PreciseOrigin("BINTRAIL_TELEMETRY")
 	srv, err := console.New(cfg)
 	if err != nil {
 		return err
@@ -1312,7 +1314,7 @@ func resolveUpConsoleEnv(cmd *cobra.Command) error {
 			upConsoleBaselineS3 = v
 		}
 	}
-	if !cmd.Flags().Changed("baseline-retain") {
+	if !cmd.Flags().Changed(snapshotRetainFlag) {
 		if v := os.Getenv("BINTRAIL_CONSOLE_BASELINE_RETAIN"); v != "" {
 			upConsoleBaselineRetain = v
 		}
@@ -2568,6 +2570,7 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		// The SQL memory saved in the web interface (#2210), beside the
 		// servers file like the port's setting.
 		SQLSettingsPath: sqlSettingsFilePath(opts.ServersFile),
+		SQLMemoryFrom:   upSQLMemoryOrigin,
 		TLSCert:         opts.TLSCert,
 		TLSKey:          opts.TLSKey,
 		AllowedHosts:    opts.AllowedHosts,
@@ -2601,12 +2604,14 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 			// is what every index rotates on, so the capacity projection
 			// and the rotation panel must report it, not the index record.
 			Explicit: upRotationCfg.Explicit,
+			From:     upStartupFrom,
 		},
 		// The Snapshots page's read-only rows (#1582):
 		// what this daemon was told, verbatim, each under the exact flag or
 		// env name the page shows beside it. Values, not re-derivations — the
 		// page's whole job is saying where the effective value came from.
 		BackupSettingsDefaults: console.BackupSettingsDefaults{
+			From:           upStartupFrom,
 			BaselineRetain: upConsoleBaselineRetain,
 			RefreshEvery:   upBaselineRefreshEvery,
 			LockMode:       bootLockModeReport(),
@@ -2933,7 +2938,71 @@ func resolveSQLMemory(cmd *cobra.Command) error {
 		return err
 	}
 	upSQLMemoryLimit = limit
+	upSQLMemoryOrigin = sqlMemoryOrigin(cmd)
+	upStartupFrom = startupOrigins(cmd)
 	return nil
+}
+
+// upSQLMemoryOrigin is sqlMemoryOrigin for watch, set by resolveSQLMemory.
+var upSQLMemoryOrigin string
+
+// snapshotRetainFlag is watch's flag for how long local snapshots are kept,
+// named once for its definition, its env fallback and its origin.
+const snapshotRetainFlag = "baseline-retain"
+
+// upStartupFrom says, per setting the web interface can also save (index
+// rotation and the daemon's backup settings), where the value watch started
+// with came from (#2671): the web interface names it beside a saved value
+// that overrides it, and where it shows the value in force. Keyed by the
+// console's names: the rotation's "retain", "interval", "add_future", and the
+// console.BackupSetting* keys. Set by resolveSQLMemory, with the flags.
+var upStartupFrom map[string]string
+
+// flagOrigin is where a flag's value came from: the flag on the command
+// line, or where its variable was set (cli.Origin). "" when neither: the
+// built-in default. A flag given the same value as its variable is said to
+// come from the variable, which is where it can be changed either way.
+func flagOrigin(cmd *cobra.Command, flag, env string) string {
+	if env != "" {
+		if from := cli.Origin(env); from != "" {
+			if f := cmd.Flags().Lookup(flag); f == nil || !f.Changed || f.Value.String() == os.Getenv(env) {
+				return from
+			}
+		}
+	}
+	if f := cmd.Flags().Lookup(flag); f != nil && f.Changed {
+		return "--" + flag
+	}
+	return ""
+}
+
+// startupOrigins is upStartupFrom for cmd.
+func startupOrigins(cmd *cobra.Command) map[string]string {
+	out := map[string]string{}
+	add := func(key, from string) {
+		if from != "" {
+			out[key] = from
+		}
+	}
+	add("retain", flagOrigin(cmd, "rotate-retain", "BINTRAIL_ROTATE_RETAIN"))
+	add("interval", flagOrigin(cmd, "rotate-interval", "BINTRAIL_ROTATE_INTERVAL"))
+	add("add_future", flagOrigin(cmd, "rotate-add-future", "BINTRAIL_ROTATE_ADD_FUTURE"))
+	add(console.BackupSettingBaselineRetain, flagOrigin(cmd, snapshotRetainFlag, "BINTRAIL_CONSOLE_BASELINE_RETAIN"))
+	add(console.BackupSettingLockMode, cli.Origin("BINTRAIL_CONSOLE_BASELINE_LOCK_MODE"))
+	add(console.BackupSettingStagingDir, cli.Origin("BINTRAIL_CONSOLE_BASELINE_STAGING"))
+	add(console.BackupSettingVerifyTables, flagOrigin(cmd, "verify-tables", "BINTRAIL_CONSOLE_VERIFY_TABLES"))
+	return out
+}
+
+// sqlMemoryOrigin says where sqlMemoryFrom took the memory from, for the
+// web interface's lock (#2671), when that is a line of the option file or an
+// env file. "" for the flag and for the environment, which the lock already
+// names in its own words.
+func sqlMemoryOrigin(cmd *cobra.Command) string {
+	if cmd.Flags().Changed("sql-memory") {
+		return ""
+	}
+	return cli.PreciseOrigin("BINTRAIL_CONSOLE_SQL_MEMORY")
 }
 
 // sqlMemoryFrom is --sql-memory on cmd or, when not given,

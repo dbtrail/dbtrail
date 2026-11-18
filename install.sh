@@ -460,6 +460,29 @@ else
   fi
 fi
 
+# The option file (#2671): a sample with every option explained and commented
+# out, in ./dbtrail-config, the folder the compose file mounts as DBTrail's
+# /etc/dbtrail. Only when there is none: a file here is the operator's. Never
+# a failure: DBTrail runs on its defaults without it, and a release older than
+# the file has none to download.
+# A compose file kept from before (version 10 or older) does not mount the
+# folder, so a sample there would be read by nothing.
+if [ ! -e dbtrail-config/dbtrail.cnf ] && grep -q '\./dbtrail-config:' docker-compose.yml; then
+  CNF_URL="${RAW_URL}/${REF}/build/packaging/bintrail-console/dbtrail.cnf"
+  # The services read it as user 999: the folder must let them in, whatever
+  # the umask of the shell that runs this.
+  mkdir -p dbtrail-config && chmod 0755 dbtrail-config
+  if fetch "$CNF_URL" dbtrail-config/dbtrail.cnf.tmp 2>/dev/null \
+      && grep -q '^\[dbtrail\]' dbtrail-config/dbtrail.cnf.tmp; then
+    chmod 0644 dbtrail-config/dbtrail.cnf.tmp
+    mv dbtrail-config/dbtrail.cnf.tmp dbtrail-config/dbtrail.cnf
+    say "${DIM}    downloaded dbtrail-config/dbtrail.cnf, the option file, every option commented out${RST}"
+  else
+    rm -f dbtrail-config/dbtrail.cnf.tmp
+    say "${DIM}    no option file to download for this version, so dbtrail-config/ is left empty${RST}"
+  fi
+fi
+
 # Whether freshly downloaded or reused, make sure it's actually a compose file
 # before handing it to Docker: a captive portal / proxy can return HTTP 200 with
 # an HTML body, and a prior run interrupted mid-download leaves a truncated file.

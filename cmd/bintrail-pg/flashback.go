@@ -95,8 +95,10 @@ func init() {
 // front-end. The engine and data layer are index-only, so no live PostgreSQL
 // source is contacted here.
 func runFlashback(cmd *cobra.Command, args []string) error {
-	applyEnvFallback(&fbListen, "BINTRAIL_PG_FLASHBACK_LISTEN")
-	applyEnvFallback(&fbShimConfig, "BINTRAIL_PG_SHIM_CONFIG")
+	// These two flags have a default of their own, so "empty" cannot say the
+	// flag was not given: the variable applies unless the flag was typed.
+	applyEnvUnlessGiven(cmd, "listen", &fbListen, "BINTRAIL_PG_FLASHBACK_LISTEN")
+	applyEnvUnlessGiven(cmd, "shim-config", &fbShimConfig, "BINTRAIL_PG_SHIM_CONFIG")
 	applyEnvFallback(&fbBaselineDir, "BINTRAIL_PG_BASELINE_DIR")
 	applyEnvFallback(&fbBaselineS3, "BINTRAIL_PG_BASELINE_S3")
 	applyEnvFallback(&fbTLSCert, "BINTRAIL_PG_FLASHBACK_TLS_CERT")

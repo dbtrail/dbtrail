@@ -29,5 +29,13 @@ COPY bintrail-mcp /usr/local/bin/bintrail-mcp
 # context via the `dockers.*.extra_files` entries in build/.goreleaser.yaml.
 COPY LICENSE NOTICE build/THIRD-PARTY-NOTICES /usr/share/doc/bintrail/
 
+# The option file (#2671): /etc/dbtrail/dbtrail.cnf is a link into
+# /etc/dbtrail-config, where the compose file mounts the install folder's
+# ./dbtrail-config. A folder, not the file itself: a mount of a file that is
+# not there makes a directory in its place, and a read-only mount of all of
+# /etc/dbtrail would leave no room for a file mounted inside it (a license).
+# With nothing mounted, the link leads nowhere and nothing is read.
+RUN mkdir -p /etc/dbtrail /etc/dbtrail-config && ln -s /etc/dbtrail-config/dbtrail.cnf /etc/dbtrail/dbtrail.cnf
+
 USER bintrail
 ENTRYPOINT ["bintrail"]

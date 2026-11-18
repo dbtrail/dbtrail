@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/dbtrail/dbtrail/internal/cli"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/pgshim"
 )
@@ -48,10 +49,12 @@ type pgRouterStatusDoc struct {
 	// SQLModeForced is "fresh" or "fast" when it decides for every server.
 	// PerServerMode and FreshByDefault are true from this version on: every
 	// PostgreSQL server is listed with its sql_mode.
-	Fresh          *bool  `json:"fresh,omitempty"`
-	SQLModeForced  string `json:"sql_mode_forced,omitempty"`
-	FreshByDefault bool   `json:"fresh_by_default,omitempty"`
-	PerServerMode  bool   `json:"per_server_mode,omitempty"`
+	Fresh         *bool  `json:"fresh,omitempty"`
+	SQLModeForced string `json:"sql_mode_forced,omitempty"`
+	// SQLModeForcedFrom: the MySQL router's field of that name (#2671).
+	SQLModeForcedFrom string `json:"sql_mode_forced_from,omitempty"`
+	FreshByDefault    bool   `json:"fresh_by_default,omitempty"`
+	PerServerMode     bool   `json:"per_server_mode,omitempty"`
 }
 
 // pgRouterServerNumbers is one server's decisions.
@@ -348,6 +351,9 @@ func (r *pgRouteStats) doc(listen string) pgRouterStatusDoc {
 		forced, _ := console.SQLModeSetting()
 		fresh := forced == console.SQLModeForcedFresh
 		d.Fresh, d.SQLModeForced, d.FreshByDefault, d.PerServerMode = &fresh, forced, true, true
+		if forced != "" {
+			d.SQLModeForcedFrom = cli.PreciseOrigin("BINTRAIL_SQL_TAILS")
+		}
 		ids := r.modes.PostgresServerIDs()
 		for id := range d.Servers {
 			if !slices.Contains(ids, id) {

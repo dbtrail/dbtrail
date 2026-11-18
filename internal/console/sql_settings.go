@@ -269,6 +269,8 @@ type sqlMemoryState struct {
 	// startup: Config.SQLLimits.MemoryLimit was given (--sql-memory or its
 	// variable). It decides; the saved value is reported but not used.
 	startup bool
+	// from is where the startup value came from (Config.SQLMemoryFrom).
+	from string
 	// path is the saved setting's file; "" = this console keeps none.
 	path string
 	// savedMiB is the saved value, 0 = none.
@@ -321,6 +323,7 @@ func (s *Server) sqlMemoryNow() (limit, source string) {
 // reports comes from one moment.
 type sqlMemorySnap struct {
 	startup       bool
+	from          string
 	path, loadErr string
 	savedMiB      int64
 }
@@ -328,7 +331,7 @@ type sqlMemorySnap struct {
 func (m *sqlMemoryState) snapshot() sqlMemorySnap {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return sqlMemorySnap{startup: m.startup, path: m.path, loadErr: m.loadErr, savedMiB: m.savedMiB}
+	return sqlMemorySnap{startup: m.startup, from: m.from, path: m.path, loadErr: m.loadErr, savedMiB: m.savedMiB}
 }
 
 func (s *Server) sqlMemoryFrom(sn sqlMemorySnap) (limit, source string) {
@@ -379,6 +382,8 @@ func (s *Server) sqlMemoryLocked() string { return sqlMemoryLockedReason(s.sqlMe
 
 func sqlMemoryLockedReason(m sqlMemorySnap) string {
 	switch {
+	case m.startup && m.from != "":
+		return "It is set where DBTrail starts, by " + m.from + ", so it is changed there. Remove it there and restart DBTrail to change it here."
 	case m.startup:
 		return "It is set where DBTrail starts (CLI: --sql-memory, or the environment variable BINTRAIL_CONSOLE_SQL_MEMORY), so it is changed there. Remove that setting and restart DBTrail to change it here."
 	case m.path == "":

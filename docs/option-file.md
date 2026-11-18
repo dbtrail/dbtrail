@@ -6,14 +6,26 @@ It is written the way MySQL writes `my.cnf`: options under a `[dbtrail]`
 group, one per line.
 
 With the Docker install, DBTrail runs inside a container and reads the file
-there. The compose file does not mount one yet: add it to the `bintrail`
-service yourself, and create the file first (a mount of a missing file makes
-a directory, which DBTrail reports and does not read):
+there. Put it in `dbtrail-config/dbtrail.cnf`, in the folder that holds
+`docker-compose.yml`: the compose file mounts that folder in every DBTrail
+service, and the images read `/etc/dbtrail/dbtrail.cnf` from it. The installer
+leaves a copy there with every option explained and commented out. A file
+added or changed is read when each service starts again: `docker compose
+restart`. A compose file from before this
+(version 10 or older) does not mount the folder; `docker compose logs bintrail`
+says so.
 
-```yaml
-    volumes:
-      - ./dbtrail.cnf:/etc/dbtrail/dbtrail.cnf:ro
-```
+If you mounted a file yourself before (`./dbtrail.cnf:/etc/dbtrail/dbtrail.cnf:ro`,
+in the compose file or in a `docker-compose.override.yml`, as these docs said
+to), it keeps being read. Move it to `dbtrail-config/dbtrail.cnf` and take that
+line out when you can, so there is one place to look.
+
+The `bintrail-console` package (`.deb` and `.rpm`) installs the file at
+`/etc/dbtrail/dbtrail.cnf`, every option commented out, and an upgrade never
+replaces it. It is readable by every user, since it holds nothing yet: once it
+holds a password, `chgrp bintrail` and `chmod 640` it, which keeps it readable
+by the service. With Docker, the services read it as user 999: `chown 999` and
+`chmod 600` it.
 
 ```ini
 [dbtrail]
@@ -25,6 +37,10 @@ index-dsn     = 'dbtrail:secret@tcp(127.0.0.1:3306)/dbtrail_index'
 An option is the name of its environment variable without `BINTRAIL_`, in
 lower case, with dashes: `BINTRAIL_COMMIT_WITHIN` is `commit-within`.
 `commit_within` is read the same way, as MySQL does.
+
+[Every option](option-reference.md), with what it changes, its default and
+which programs read it, is on a page of its own. The packages install the
+same list as a file with every option commented out.
 
 ## What wins
 
@@ -102,6 +118,36 @@ when it finds one, so a deploy can stop on it. With the Docker install the
 `dbtrail` command runs it inside the container, with DBTrail's environment.
 Under systemd, the service's environment is not your shell's, so a line the
 service's environment hides can read as used.
+
+## See what is in effect
+
+```sh
+dbtrail config show
+dbtrail config show --all
+```
+
+It lists every setting that has a value, with the value and where it comes
+from: the environment, an env file (`.bintrail.env` or `config.env`), or a line
+of this file. A setting that holds a password, a token or a key is listed
+without its value, and so is any other value that looks like it carries a login
+or a token (`user:password@`, `?token=`).
+`--all` also lists the settings with no value, which each program then decides
+by itself. For where the running DBTrail is (`console-listen`, `console-token`,
+`console-auth`) given in an env file, it says what the `dbtrail` commands that
+talk to it use instead, since they ignore env files for these. It also says which `BINTRAIL_` variables are set and read by no
+DBTrail program (a typo, most likely), and which no longer do anything.
+
+```text
+2 settings with a value:
+  commit-within  2s                     the environment, as BINTRAIL_COMMIT_WITHIN
+  index-dsn      (not shown: a secret)  the environment, as BINTRAIL_INDEX_DSN
+127 more settings with no value. dbtrail config show --all lists them.
+Note: BINTRAIL_COMMIT_WITHN is set, and no DBTrail program reads it. Is the name right?
+Command-line flags given to a running program come before all of these and are not seen here.
+```
+
+Like `config check`, it shows what a program started now with the command's
+environment would read: run it where DBTrail runs.
 
 The file is read from `/etc/dbtrail/dbtrail.cnf` only, never from the current
 folder: the `dbtrail` commands that talk to a running DBTrail send a password,
