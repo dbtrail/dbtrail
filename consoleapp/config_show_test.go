@@ -62,6 +62,26 @@ func TestConfigShow_allAndNotes(t *testing.T) {
 	}
 }
 
+// A setting not listed as a secret that is given a login anyway is not
+// printed; one that only looks a little like it is.
+func TestConfigShow_aLoginInAnotherSetting(t *testing.T) {
+	for v, hidden := range map[string]bool{
+		"https://admin:s3cret@catalog.internal/api": true,
+		"root:pw@tcp(10.0.0.5:3306)/dbtrail":        true,
+		"root:@tcp(10.0.0.5:3306)/dbtrail":          true,
+		"s3://bucket/prefix":                        false,
+		"https://catalog.internal:8181/api":         false,
+		"user@example.com":                          false,
+		"10.0.0.5:3306":                             false,
+		"0.0.0.0:3309":                              false,
+	} {
+		got := showText(cli.SettingsReport{Set: []cli.SettingInEffect{{Env: "BINTRAIL_X", Option: "x", Value: v, Source: cli.FromEnvironment}}}, false)
+		if hidden != strings.Contains(got, "(not shown: it looks like it carries a login)") || hidden == strings.Contains(got, v) {
+			t.Errorf("%q: hidden=%v\n%s", v, hidden, got)
+		}
+	}
+}
+
 func TestConfigShow_values(t *testing.T) {
 	for in, want := range map[string]string{
 		"3d":          "3d",

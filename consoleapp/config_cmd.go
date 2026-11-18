@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -81,6 +82,14 @@ func init() {
 // hiddenValue is what config show prints for a secret's value.
 const hiddenValue = "(not shown: it can carry a password)"
 
+// hiddenLoginValue is what it prints for a value of another setting that
+// looks like it carries a login (user:password@, in a URL or a DSN).
+const hiddenLoginValue = "(not shown: it looks like it carries a login)"
+
+// carriesLogin matches user:password@ anywhere in a value: a URL's user
+// information (https://u:p@host) or a DSN (u:p@tcp(host:3306)/db).
+var carriesLogin = regexp.MustCompile(`[^\s/:@]+:[^\s@]*@`)
+
 // showValue is a value as config show prints it: as it is, unless it has a
 // character that would break the line or read as something else, which is
 // then quoted.
@@ -104,7 +113,13 @@ func reportSettings(w io.Writer, r cli.SettingsReport, all bool) {
 		tw := tabwriter.NewWriter(w, 2, 0, 2, ' ', 0)
 		for _, s := range r.Set {
 			v := hiddenValue
-			if !s.Secret {
+			switch {
+			case s.Secret:
+			case carriesLogin.MatchString(s.Value):
+				// A setting not listed as a secret can still be given a URL
+				// or a DSN with a login in it: not printed either.
+				v = hiddenLoginValue
+			default:
 				v = showValue(s.Value)
 			}
 			fmt.Fprintf(tw, "  %s\t%s\t%s\n", s.Option, v, s.Where())
