@@ -248,10 +248,23 @@ func runPGStream(cmd *cobra.Command, args []string) error {
 
 // applyEnvFallback sets *dst from the named env var when *dst is empty (i.e. the
 // flag was not given on the command line). A CLI-provided value always wins.
+// Only for a flag whose default is empty; see applyEnvUnlessGiven.
 func applyEnvFallback(dst *string, envVar string) {
 	if *dst == "" {
 		if v := os.Getenv(envVar); v != "" {
 			*dst = v
 		}
+	}
+}
+
+// applyEnvUnlessGiven sets *dst from the named env var when the flag was not
+// given on the command line, for a flag whose default is not empty, where
+// applyEnvFallback would never apply the variable.
+func applyEnvUnlessGiven(cmd *cobra.Command, flag string, dst *string, envVar string) {
+	if cmd.Flags().Changed(flag) {
+		return
+	}
+	if v := os.Getenv(envVar); v != "" {
+		*dst = v
 	}
 }
