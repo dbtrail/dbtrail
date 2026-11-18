@@ -26,6 +26,10 @@ An option is the name of its environment variable without `BINTRAIL_`, in
 lower case, with dashes: `BINTRAIL_COMMIT_WITHIN` is `commit-within`.
 `commit_within` is read the same way, as MySQL does.
 
+[Every option](option-reference.md), with what it changes, its default and
+which programs read it, is on a page of its own. The packages install the
+same list as a file with every option commented out.
+
 ## What wins
 
 1. A command-line flag.

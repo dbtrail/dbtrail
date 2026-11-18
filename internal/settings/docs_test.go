@@ -81,10 +81,10 @@ func TestGeneratedFilesAreCurrent(t *testing.T) {
 
 func TestAsOptions(t *testing.T) {
 	for in, want := range map[string]string{
-		"Needs BINTRAIL_SSL_CERT too.":                   "Needs ssl-cert too.",
-		"set BINTRAIL_COMPOSE_VERSION":                    "set BINTRAIL_COMPOSE_VERSION",
-		"BINTRAIL_NOT_A_THING and BINTRAIL_SSL_KEY.":      "BINTRAIL_NOT_A_THING and ssl-key.",
-		"no variable here":                                "no variable here",
+		"Needs BINTRAIL_SSL_CERT too.":               "Needs ssl-cert too.",
+		"set BINTRAIL_COMPOSE_VERSION":               "set BINTRAIL_COMPOSE_VERSION",
+		"BINTRAIL_NOT_A_THING and BINTRAIL_SSL_KEY.": "BINTRAIL_NOT_A_THING and ssl-key.",
+		"no variable here":                           "no variable here",
 	} {
 		if got := asOptions(in); got != want {
 			t.Errorf("asOptions(%q) = %q, want %q", in, got, want)
@@ -107,14 +107,14 @@ func TestWrap(t *testing.T) {
 
 func TestOptionValue(t *testing.T) {
 	for in, want := range map[string]string{
-		"2s":          "2s",
-		"a b":         "a b",
-		"a#b":         "'a#b'",
-		"a;b":         "'a;b'",
-		"it's":        `'it\'s'`,
-		" lead":       "' lead'",
-		"":            "''",
-		`say "hi"`:    `'say "hi"'`,
+		"2s":       "2s",
+		"a b":      "a b",
+		"a#b":      "'a#b'",
+		"a;b":      "'a;b'",
+		"it's":     `'it\'s'`,
+		" lead":    "' lead'",
+		"":         "''",
+		`say "hi"`: `'say "hi"'`,
 	} {
 		if got := optionValue(in); got != want {
 			t.Errorf("optionValue(%q) = %s, want %s", in, got, want)

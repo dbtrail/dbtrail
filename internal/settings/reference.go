@@ -122,6 +122,9 @@ func OptionFileSample() string {
 				p(w)
 			}
 			readBy := "Read by: " + d.ReadBy + "."
+			if strings.Contains(d.ReadBy, "bintrail-mcp") {
+				readBy += " bintrail-mcp takes it from its own environment, never from this file."
+			}
 			if readByMCPOnly(d) {
 				readBy = "Read by bintrail-mcp only, which does not read this file: set it as " + e.Env + " in the AI client's configuration."
 			}
@@ -171,7 +174,11 @@ func Reference() string {
 			p("- Default: %s.", mdText(d.Default))
 			p("- Example: `%s = %s`", e.Option(), optionValue(d.Example))
 			p("- Environment variable: `%s`", e.Env)
-			p("- Read by: %s.", mdText(d.ReadBy))
+			readBy := mdText(d.ReadBy) + "."
+			if strings.Contains(d.ReadBy, "bintrail-mcp") {
+				readBy += " `bintrail-mcp` takes it from its own environment, never from the file."
+			}
+			p("- Read by: %s", readBy)
 			if e.Secret {
 				p("- Holds a secret: `dbtrail config show` never prints it, and a file every user can read that sets it gets a warning.")
 			}
