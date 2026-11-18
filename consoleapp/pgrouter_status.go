@@ -352,7 +352,7 @@ func (r *pgRouteStats) doc(listen string) pgRouterStatusDoc {
 		fresh := forced == console.SQLModeForcedFresh
 		d.Fresh, d.SQLModeForced, d.FreshByDefault, d.PerServerMode = &fresh, forced, true, true
 		if forced != "" {
-			d.SQLModeForcedFrom = cli.Origin("BINTRAIL_SQL_TAILS")
+			d.SQLModeForcedFrom = cli.PreciseOrigin("BINTRAIL_SQL_TAILS")
 		}
 		ids := r.modes.PostgresServerIDs()
 		for id := range d.Servers {

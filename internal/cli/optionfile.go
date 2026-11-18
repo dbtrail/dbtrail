@@ -226,6 +226,14 @@ func kindRefusal(k settings.Kind) string {
 	return "cannot be set from a file"
 }
 
+// ValueOf is the value the file gave a setting it applied, for a caller that
+// compares it with another (config check, with what the web interface
+// saved). Never print it: it may be a password.
+func (r OptionReport) ValueOf(env string) (string, bool) {
+	v, ok := r.values[env]
+	return v, ok
+}
+
 // Lines is every problem and the reason the file was ignored, prefixed with
 // the file's path, for a program to print when it starts.
 func (r OptionReport) Lines() []string {

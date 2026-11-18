@@ -237,3 +237,15 @@ func TestOrigin(t *testing.T) {
 		t.Fatalf("option file: %q", got)
 	}
 }
+
+func TestPreciseOrigin(t *testing.T) {
+	t.Setenv("BINTRAIL_ROTATE_RETAIN", "3d")
+	if got := PreciseOrigin("BINTRAIL_ROTATE_RETAIN"); got != "" {
+		t.Fatalf("environment: %q", got)
+	}
+	unset(t, "BINTRAIL_ROTATE_RETAIN")
+	defer ApplyEnvFileForTest("BINTRAIL_ROTATE_RETAIN=4d\n")()
+	if got := PreciseOrigin("BINTRAIL_ROTATE_RETAIN"); got != "the env file "+TestEnvFilePath+" (BINTRAIL_ROTATE_RETAIN)" {
+		t.Fatalf("env file: %q", got)
+	}
+}

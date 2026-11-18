@@ -8379,7 +8379,11 @@ function rotationStartupWords(rot) {
 function rotationOverriddenLine(rot) {
   if (!rot || rot.source !== "override") return "";
   const w = rotationStartupWords(rot);
-  return w ? w + ". The policy saved here is used instead of these." : "";
+  if (!w) return "";
+  // The interval DBTrail starts with also sets how often old snapshots are
+  // pruned, saved policy or not.
+  return w + ". The policy saved here is used for rotation instead of these" +
+    (rot.startup_from.interval ? "; the interval still sets how often old snapshots are pruned." : ".");
 }
 
 // docsMore is one plain link into the docs site for a compact block: the
@@ -12190,11 +12194,12 @@ function choicePills(choices, value, label, onChange) {
 // sqlModeForcedPlace is where the router's own mode setting comes from, when
 // it is somewhere more precise than the environment (#2671): a line of the
 // option file or an env file, as the router words it
-// (sql_mode_forced_from: "line 4 of /etc/dbtrail/dbtrail.cnf (sql-tails)").
-// "" otherwise, and the compose .env's SQL_FRESH is what is named.
+// (sql_mode_forced_from: "line 4 of /etc/dbtrail/dbtrail.cnf (sql-tails)";
+// the router sends nothing for the environment). "" otherwise, and the
+// compose .env's SQL_FRESH is what is named.
 function sqlModeForcedPlace(st) {
   const f = st && st.sql_mode_forced_from;
-  return typeof f === "string" && f !== "" && !f.startsWith("the environment variable") ? f : "";
+  return typeof f === "string" ? f : "";
 }
 
 // routerModeWhere is the sentence that says where the router's own mode

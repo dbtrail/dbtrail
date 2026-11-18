@@ -176,5 +176,20 @@ func Origin(key string) string {
 		}
 		return fmt.Sprintf("an env file (%s)", key)
 	}
-	return "the environment variable " + key
+	return OriginEnvPrefix + key
+}
+
+// OriginEnvPrefix starts what Origin says for a value set in the
+// environment the program was started with, where nothing more precise is
+// known.
+const OriginEnvPrefix = "the environment variable "
+
+// PreciseOrigin is Origin when it names more than the environment: a line
+// of the option file or an env file. "" otherwise, so a page that already
+// says "the environment variable" in its own words keeps them.
+func PreciseOrigin(key string) string {
+	if from := Origin(key); !strings.HasPrefix(from, OriginEnvPrefix) {
+		return from
+	}
+	return ""
 }

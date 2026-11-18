@@ -33,10 +33,10 @@ const rt = (forced, from) => ({ configured: true, status: { fresh: forced === "f
 const out = {
   freshFile: model(cur, rt("fresh", "line 4 of /etc/dbtrail/dbtrail.cnf (sql-tails)"), true).state,
   fastEnvFile: model(cur, rt("fast", "the env file /srv/dbtrail/.bintrail.env (BINTRAIL_SQL_TAILS)"), true).state,
-  freshEnv: model(cur, rt("fresh", "the environment variable BINTRAIL_SQL_TAILS"), true).state,
+  freshEnv: model(cur, rt("fresh", ""), true).state,
   freshOld: model(cur, rt("fresh", undefined), true).state,
   whereFile: where({ sql_mode_forced_from: "line 4 of /etc/dbtrail/dbtrail.cnf (sql-tails)" }),
-  whereEnv: where({ sql_mode_forced_from: "the environment variable BINTRAIL_SQL_TAILS" }),
+  whereEnv: where({ sql_mode_forced_from: "" }),
   whereNone: where({}),
 };
 console.log(JSON.stringify(out));
@@ -126,6 +126,7 @@ console.log(JSON.stringify({
   words: words({ startup_from: from, startup }),
   override: line({ source: "override", startup_from: from, startup }),
   overrideNothingGiven: line({ source: "override" }),
+  overrideInterval: line({ source: "override", startup_from: { interval: "--rotate-interval" }, startup: { interval: "30m" } }),
   notSaved: line({ source: "default", startup_from: from, startup }),
 }));
 `
@@ -143,8 +144,9 @@ console.log(JSON.stringify({
 		t.Fatalf("%v\n%s", err, raw)
 	}
 	w := "retention 6h, by line 3 of /etc/dbtrail/dbtrail.cnf (rotate-retain); future partitions 5, by --rotate-add-future"
-	if got["words"] != w || got["override"] != w+". The policy saved here is used instead of these." ||
-		got["overrideNothingGiven"] != "" || got["notSaved"] != "" {
+	if got["words"] != w || got["override"] != w+". The policy saved here is used for rotation instead of these." ||
+		got["overrideNothingGiven"] != "" || got["notSaved"] != "" ||
+		got["overrideInterval"] != "interval 30m, by --rotate-interval. The policy saved here is used for rotation instead of these; the interval still sets how often old snapshots are pruned." {
 		t.Fatalf("%+v", got)
 	}
 }

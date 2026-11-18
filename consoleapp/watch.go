@@ -725,7 +725,7 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	// Wire the live telemetry client so the console's opt-out toggle stops this
 	// running daemon's beacons immediately, not just on the next start.
 	cfg.Telemetry = tel.Client()
-	cfg.TelemetryFrom = cli.Origin("BINTRAIL_TELEMETRY")
+	cfg.TelemetryFrom = cli.PreciseOrigin("BINTRAIL_TELEMETRY")
 	srv, err := console.New(cfg)
 	if err != nil {
 		return err
@@ -1084,7 +1084,7 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	// Wire the live telemetry client so the console's opt-out toggle reaches
 	// this running daemon (see the other console.New site).
 	cfg.Telemetry = tel.Client()
-	cfg.TelemetryFrom = cli.Origin("BINTRAIL_TELEMETRY")
+	cfg.TelemetryFrom = cli.PreciseOrigin("BINTRAIL_TELEMETRY")
 	srv, err := console.New(cfg)
 	if err != nil {
 		return err
@@ -2991,13 +2991,14 @@ func startupOrigins(cmd *cobra.Command) map[string]string {
 }
 
 // sqlMemoryOrigin says where sqlMemoryFrom took the memory from, for the
-// web interface's lock (#2671): the flag, or where its variable came from
-// (cli.Origin: a line of the option file, an env file, the environment).
+// web interface's lock (#2671), when that is a line of the option file or an
+// env file. "" for the flag and for the environment, which the lock already
+// names in its own words.
 func sqlMemoryOrigin(cmd *cobra.Command) string {
 	if cmd.Flags().Changed("sql-memory") {
-		return "--sql-memory"
+		return ""
 	}
-	return cli.Origin("BINTRAIL_CONSOLE_SQL_MEMORY")
+	return cli.PreciseOrigin("BINTRAIL_CONSOLE_SQL_MEMORY")
 }
 
 // sqlMemoryFrom is --sql-memory on cmd or, when not given,

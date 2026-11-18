@@ -491,7 +491,7 @@ func routerStatus(st routerSettings, numbers console.RouterNumbers, last *router
 	doc.Fresh = &fresh
 	doc.SQLModeForced = forced
 	if forced != "" {
-		doc.SQLModeForcedFrom = cli.Origin("BINTRAIL_SQL_TAILS")
+		doc.SQLModeForcedFrom = cli.PreciseOrigin("BINTRAIL_SQL_TAILS")
 	}
 	doc.FreshByDefault = true
 	doc.PerServerMode = true

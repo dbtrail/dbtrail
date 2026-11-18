@@ -250,7 +250,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		// endpoint must report the live decision — while console actions stay
 		// unrecorded, per TELEMETRY.md.
 		Telemetry:     serveTelemetry{},
-		TelemetryFrom: cli.Origin("BINTRAIL_TELEMETRY"),
+		TelemetryFrom: cli.PreciseOrigin("BINTRAIL_TELEMETRY"),
 		SQLLimits:     sqlsandbox.Limits{MemoryLimit: sqlMemory},
 		// Settable in the web interface too when not given here (#2210).
 		SQLSettingsPath: sqlSettingsFilePath(serversPath),
