@@ -440,7 +440,9 @@ func TestIntegrationPGTailSource(t *testing.T) {
 		// was written: row 1 changed, row 2 gone.
 		r.change(tbl.Table, event.EventUpdate, "1", "ONE", 0x8e0, 24*time.Minute)
 		r.change(tbl.Table, event.EventDelete, "2", "two", 0x8e8, 24*time.Minute)
-		r.pair(tbl, map[string]string{"1": "ONE", "2": ""}, 0x8e8, nil)
+		// The delta's footer records where the NEXT change starts, as a
+		// table file's does: the floor is inclusive, so one past its last.
+		r.pair(tbl, map[string]string{"1": "ONE", "2": ""}, 0x8e9, nil)
 		// And one more change after that update.
 		r.change(tbl.Table, event.EventInsert, "3", "three", 0x900, 24*time.Minute)
 		r.checkpoint(0x900)
@@ -455,13 +457,13 @@ func TestIntegrationPGTailSource(t *testing.T) {
 	t.Run("a table delta whose cut cannot be read: no tail, never the file's floor instead", func(t *testing.T) {
 		for name, write := range map[string]func(tbl views.BaselineTable){
 			"its footer records no LSN": func(tbl views.BaselineTable) {
-				r.pair(tbl, map[string]string{"1": "ONE"}, 0x8e8, func(md map[string]string) { delete(md, baseline.MetaKeyLSN) })
+				r.pair(tbl, map[string]string{"1": "ONE"}, 0x8e9, func(md map[string]string) { delete(md, baseline.MetaKeyLSN) })
 			},
 			"it ends before its file was written": func(tbl views.BaselineTable) {
 				r.pair(tbl, map[string]string{"1": "ONE"}, pgTailFloor-1, nil)
 			},
 			"it was published over a loss of captured changes": func(tbl views.BaselineTable) {
-				r.pair(tbl, map[string]string{"1": "ONE"}, 0x8e8, func(md map[string]string) { md[baseline.MetaKeyCaptureGap] = "a gap" })
+				r.pair(tbl, map[string]string{"1": "ONE"}, 0x8e9, func(md map[string]string) { md[baseline.MetaKeyCaptureGap] = "a gap" })
 			},
 			"one file of its two": func(tbl views.BaselineTable) {
 				_, rows, err := pgdelta.Paths(tbl.Path, 0)
