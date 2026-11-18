@@ -249,6 +249,28 @@ func TestPackaging_postinstallPlacesTheSettingsFileOnlyWhenThereIsNone(t *testin
 	}
 }
 
+// The option file (#2671) is placed the way the settings file is: from the
+// shipped copy, only when there is none, readable by the service's group and
+// nobody else (it can hold passwords).
+func TestPackaging_postinstallPlacesTheOptionFileOnlyWhenThereIsNone(t *testing.T) {
+	if _, err := os.Lstat("/etc/dbtrail/dbtrail.cnf"); err == nil {
+		t.Skip("this host has a real option file, which the script must leave alone")
+	}
+	calls, _ := runScript(t, "postinstall.sh", "", "configure")
+	want := "install -m 0640 -o root -g bintrail /usr/share/bintrail-console/dbtrail.cnf /etc/dbtrail/dbtrail.cnf\n"
+	if !strings.Contains(calls, want) {
+		t.Errorf("want the shipped option file placed with mode 0640, got:\n%s", calls)
+	}
+	post := read(t, filepath.Join(pkgDir, "postinstall.sh"))
+	if !strings.Contains(post, `if [ ! -e "$options" ] && [ ! -L "$options" ]; then`) {
+		t.Error("postinstall.sh must place the option file only when none exists: an upgrade would overwrite the operator's")
+	}
+	cfg := read(t, "../../build/.goreleaser.yaml")
+	if !strings.Contains(cfg, "- src: build/packaging/bintrail-console/dbtrail.cnf\n        dst: /usr/share/bintrail-console/dbtrail.cnf\n") {
+		t.Error("the package does not ship the option file where postinstall.sh copies it from")
+	}
+}
+
 func TestPackaging_postinstallStartsNothingOnAFirstInstallAndRestartsOnAnUpgrade(t *testing.T) {
 	needSystemd(t)
 	for _, tc := range []struct {
@@ -322,6 +344,11 @@ func TestPackaging_postremoveDeletesOnlyTheSettingsFileAndOnlyOnAPurge(t *testin
 	calls, _ := runScript(t, "postremove.sh", "", "purge")
 	if !strings.Contains(calls, "rm -f /etc/bintrail/bintrail-console.env /etc/bintrail/.router-started /etc/bintrail/.pg-router-started\n") {
 		t.Errorf("a purge must delete the settings file, got:\n%s", calls)
+	}
+	// The option file goes on a purge; the folder only if nothing else (a
+	// license) is in it.
+	if !strings.Contains(calls, "rm -f /etc/dbtrail/dbtrail.cnf\n") || strings.Contains(calls, "rm -rf") {
+		t.Errorf("a purge must delete the option file and only it, got:\n%s", calls)
 	}
 	for _, arg := range []string{"remove", "upgrade", "0", "1", "purge"} {
 		calls, _ := runScript(t, "postremove.sh", "", arg)

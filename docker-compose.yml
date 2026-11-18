@@ -61,7 +61,7 @@
 # instead of leaving you to diff two files (#1529). It is passed to the
 # console service below through the YAML anchor, so there is one number to
 # bump: raise it whenever this file gains wiring a running stack would need.
-x-bintrail-compose-version: &compose_version 10
+x-bintrail-compose-version: &compose_version 11
 
 volumes:
   bintrail-index-data:    # MySQL 8.4 datadir — the forensic record (NEW volume:
@@ -529,6 +529,13 @@ services:
       # interface would be back on after an upgrade. See docs/TELEMETRY.md.
       BINTRAIL_TELEMETRY_DIR: /var/lib/bintrail/telemetry
     volumes:
+      # The option file (#2671), /etc/dbtrail/dbtrail.cnf: put it in
+      # ./dbtrail-config/dbtrail.cnf next to this file (the installer leaves a
+      # sample there, every option commented out). A folder is mounted, not
+      # the file, because a mount of a missing file makes a directory in its
+      # place; with no folder here Docker makes an empty one, and nothing is
+      # read. Every DBTrail service below mounts the same folder.
+      - ./dbtrail-config:/etc/dbtrail-config:ro
       - bintrail-state:/var/lib/bintrail
       - bintrail-index-secret:/run/secret:ro
       # Read-only mount of the SAME named volume index-mysql writes its
@@ -782,6 +789,7 @@ services:
     # security_opt:
     #   - writable-cgroups=true
     volumes:
+      - ./dbtrail-config:/etc/dbtrail-config:ro   # the option file (#2671), see the bintrail service
       - bintrail-state:/var/lib/bintrail:ro
     restart: unless-stopped
 
@@ -881,6 +889,7 @@ services:
     mem_limit: ${PG_ROUTER_MEMORY:-0}
     cpus: ${PG_ROUTER_CPUS:-0}
     volumes:
+      - ./dbtrail-config:/etc/dbtrail-config:ro   # the option file (#2671), see the bintrail service
       - bintrail-state:/var/lib/bintrail:ro
     restart: unless-stopped
 
@@ -955,6 +964,7 @@ services:
       # that choice and reports nothing itself. See docs/TELEMETRY.md.
       BINTRAIL_TELEMETRY_DIR: /var/lib/bintrail/telemetry
     volumes:
+      - ./dbtrail-config:/etc/dbtrail-config:ro   # the option file (#2671), see the bintrail service
       - bintrail-state:/var/lib/bintrail:ro   # read-only: baselines for _snapshot
       - bintrail-index-secret:/run/secret:ro
     entrypoint: ["/bin/sh", "-c"]
@@ -1075,6 +1085,7 @@ services:
       BINTRAIL_MYDUMPER_SESSION_FILE: /dump/mydumper-session.cnf
     command: ["dump", "wait-quiet", "--lock-mode", "${BASELINE_LOCK_MODE:-ftwrl}"]
     volumes:
+      - ./dbtrail-config:/etc/dbtrail-config:ro   # the option file (#2671), see the bintrail service
       - bintrail-dump:/dump
 
   baseline-dump:
@@ -1246,6 +1257,7 @@ services:
     image: ghcr.io/dbtrail/bintrail:${BINTRAIL_TAG:-latest}
     command: ["baseline", "--input", "/dump/snapshot", "--output", "/var/lib/bintrail/baselines"]
     volumes:
+      - ./dbtrail-config:/etc/dbtrail-config:ro   # the option file (#2671), see the bintrail service
       - bintrail-dump:/dump
       - bintrail-state:/var/lib/bintrail
     depends_on:
@@ -1340,6 +1352,7 @@ services:
       BINTRAIL_S3_ENDPOINT: ${BINTRAIL_S3_ENDPOINT:-}
       BINTRAIL_S3_PATH_STYLE: ${BINTRAIL_S3_PATH_STYLE:-}
     volumes:
+      - ./dbtrail-config:/etc/dbtrail-config:ro   # the option file (#2671), see the bintrail service
       # Read-only: this reads baselines and writes nowhere but the warehouse.
       - bintrail-state:/var/lib/bintrail:ro
       - bintrail-iceberg:/var/lib/bintrail-iceberg

@@ -19,8 +19,9 @@ import (
 // starts (#2671). It is the only place one is looked for: never the current
 // folder, so what decides where a command sends a password cannot be chosen
 // by whoever prepared the folder it is run in. In the Docker install it is
-// read inside the container, so the file must be mounted there; the compose
-// file does not mount one yet.
+// read inside the container: the images make it a link into
+// /etc/dbtrail-config, where the compose file mounts the install folder's
+// ./dbtrail-config (a link that leads nowhere reads as no file).
 const OptionFilePath = "/etc/dbtrail/dbtrail.cnf"
 
 // OptionGroup is the group of the file DBTrail reads. Other groups are left

@@ -260,6 +260,11 @@ nfpms:
         dst: /usr/lib/systemd/system/bintrail-pg-router.service
       - src: build/packaging/bintrail-console/bintrail-console.env
         dst: /usr/share/bintrail-console/bintrail-console.env
+      # The option file (#2671), generated from internal/settings: installed
+      # at /etc/dbtrail/dbtrail.cnf by postinstall only when there is none,
+      # for the reason the settings file above is.
+      - src: build/packaging/bintrail-console/dbtrail.cnf
+        dst: /usr/share/bintrail-console/dbtrail.cnf
       - dst: /var/lib/bintrail
         type: dir
         file_info:

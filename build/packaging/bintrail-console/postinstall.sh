@@ -16,6 +16,16 @@ if [ ! -e "$settings" ]; then
     install -m 0600 /usr/share/bintrail-console/bintrail-console.env "$settings"
 fi
 
+# The option file (#2671), read by every DBTrail program when it starts:
+# installed the same way, from the copy the package ships, every option
+# commented out. Readable by the service's group, which runs as bintrail, and
+# by nobody else, since it can hold passwords.
+options=/etc/dbtrail/dbtrail.cnf
+if [ ! -e "$options" ] && [ ! -L "$options" ]; then
+    install -d -m 0755 /etc/dbtrail
+    install -m 0640 -o root -g bintrail /usr/share/bintrail-console/dbtrail.cnf "$options"
+fi
+
 # No systemd running (a container build, a chroot): nothing to tell.
 [ -d /run/systemd/system ] || exit 0
 
