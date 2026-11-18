@@ -14982,6 +14982,9 @@ async function renderMySQLClients() {
     const r = await api("/api/servers");
     servers = r.servers || [];
     rememberHiddenRules(servers);
+    // The sidebar, the palette and the notes are named after this list too,
+    // so the page and the sidebar never say two different families (#2773).
+    nameSQLClientsNav(servers);
   } catch (err) { serversFailed = err.status !== 403 && err.status !== 404; }
   // Time-travel port status (#1446): on/off plus its address, never the token.
   // null on failure — the SQL client panel says it could not check.
@@ -15005,7 +15008,9 @@ async function renderMySQLClients() {
   try {
     buildMySQLClients(servers, fbStatus, sqlMem, rtView, serversFailed);
   } catch (err) {
-    const v = VIEW(); clear(v); v.append(pageHead("MySQL clients", null)); renderError(v, err);
+    const v = VIEW(); clear(v);
+    v.append((serversFailed ? sqlClientsPG : postgresInstall(servers)) ? pgClientsHead("") : pageHead("MySQL clients", null));
+    renderError(v, err);
   }
 }
 
@@ -15068,8 +15073,87 @@ function buildConnect(servers, tokStatus, minted) {
   viewEnter();
 }
 
+// The SQL clients page on an installation whose servers are PostgreSQL
+// (#2773): its name, the line under it and its Docs link. The page is the
+// same route; what answers its servers is the PostgreSQL router, not the
+// MySQL port.
+const PG_CLIENTS_TITLE = "PostgreSQL clients";
+const PG_CLIENTS_SUB = "Read your copy from a PostgreSQL client, on the PostgreSQL port.";
+const PG_CLIENTS_DOCS = "guides/query-with-a-postgres-client";
+const PG_MEMORY_RESTART = "That is SQL in this console. The PostgreSQL port takes this setting when the PostgreSQL router starts: after a change, restart it to apply it there. One started with its own memory (--sql-memory) keeps that one.";
+
+// sqlClientsNavName is what the sidebar and the command palette call the
+// SQL clients page: PostgreSQL clients when postgresInstall says the servers
+// are PostgreSQL, MySQL clients otherwise (no server, a list not read, a
+// mixed one). Pure, so it is tested in node.
+function sqlClientsNavName(pg) {
+  return pg ? PG_CLIENTS_TITLE : "MySQL clients";
+}
+
+// sqlClientsPG is postgresInstall over the server list last read
+// (loadServers), for the sidebar and the command palette, which draw before
+// any page has the list.
+let sqlClientsPG = false;
+
+// nameSQLClientsNav names the sidebar's entry for the SQL clients page after
+// the server list just read, both ways: an installation that goes from
+// PostgreSQL servers to none and then a MySQL one is named MySQL again.
+function nameSQLClientsNav(servers) {
+  sqlClientsPG = postgresInstall(servers);
+  const label = document.querySelector('.nav-item[data-route="mysql-clients"] span:last-child');
+  if (label) label.textContent = sqlClientsNavName(sqlClientsPG);
+}
+
+// pgClientsHead is the PostgreSQL clients page's head, with its Docs link on
+// the PostgreSQL guide (the route's own link is the MySQL one).
+function pgClientsHead(sub) {
+  const head = pageHead(PG_CLIENTS_TITLE, sub ? el("p", { class: "page-sub" }, sub) : null);
+  const docs = head.querySelector ? head.querySelector(".page-docs") : null;
+  if (docs) docs.setAttribute("href", DOCS_BASE + PG_CLIENTS_DOCS + "/");
+  return head;
+}
+
 function buildMySQLClients(servers, fbStatus, sqlMem, rtView, serversFailed) {
   const v = VIEW(); clear(v);
+  // PostgreSQL servers (#2773): the page names the PostgreSQL port, its
+  // Docs link opens the PostgreSQL guide, and the MySQL router's numbers
+  // (rtView, GET /api/router) are not handed to the panels: they are about
+  // the MySQL port, not about the router that answers these servers.
+  // A list that could not be read is empty here, which postgresInstall reads
+  // as MySQL: the answer from the last list read (sqlClientsPG, the one the
+  // sidebar shows) decides then, so the page and the sidebar say one thing.
+  const pg = serversFailed ? sqlClientsPG : postgresInstall(servers);
+  if (pg) {
+    v.append(pgClientsHead(PG_CLIENTS_SUB));
+    if (serversFailed) {
+      // The port panel decides its family from the list itself, so without
+      // one it would draw the MySQL port's line. Nothing is drawn rather
+      // than a line for the wrong port.
+      v.append(el("p", { class: "form-msg err cn-servers-err", text:
+        "Could not read the list of servers, so this page cannot show how to connect to them. Reload the page to try again." }));
+      viewEnter();
+      return;
+    }
+    v.append(sqlClientPanel(servers, fbStatus, "", null, null, true));
+    if (sqlMem !== undefined) {
+      v.append(cnSection("Applies to the copy", "", "What each statement that runs on the copy may use.", "sun"));
+      const mem = sqlMemoryPanel(sqlMem, null, null);
+      mem.className += " sqlc";
+      v.append(mem);
+      // The PostgreSQL router reads the saved memory once, when it starts
+      // (runPGRouter calls routerMemory and follows nothing), so a change
+      // saved here reaches the PostgreSQL port only after it restarts. Its
+      // own line, outside the panel, which a save redraws.
+      v.append(el("p", { class: "form-hint pg-mem-restart", text: PG_MEMORY_RESTART }));
+    }
+    const cur = servers.find((s) => s.id === (currentServer || defaultServerId));
+    if (cur && sessionMay("servers:read")) {
+      v.append(cnSection("This server", "", "Tables and columns that SQL on the copy, the PostgreSQL port and the AI connector's SQL tool do not show.", "violet"));
+      v.append(hiddenRulesPanel(cur));
+    }
+    viewEnter();
+    return;
+  }
   const sub = el("p", { class: "page-sub" },
     "Two ways to use one MySQL port.");
   v.append(pageHead("MySQL clients", sub));
@@ -15158,7 +15242,7 @@ function hiddenDownloadNote(h, cls, text) {
 function hiddenSQLNoteText(h) {
   if (!h) return "";
   const all = h.tables.concat(h.columns);
-  const where = sessionMay("servers:write") ? " Change it in Settings, MySQL clients." : "";
+  const where = sessionMay("servers:write") ? " Change it in Settings, " + sqlClientsNavName(sqlClientsPG) + "." : "";
   if (!all.length) return "This server holds hidden rules this DBTrail cannot read, so its SQL is refused." + where;
   const shown = all.slice(0, 6).join(", ") + (all.length > 6 ? " and " + (all.length - 6) + " more" : "");
   return "This server hides some tables and columns from SQL: " + shown + "." +
@@ -15234,6 +15318,18 @@ function hiddenGrantsBlock(g, hasRules, blocked) {
 }
 
 const HIDDEN_DOES = "Hidden tables and columns disappear from SQL on the copy, the MySQL port and the AI connector's SQL tool, and the port's time travel (_flashback, _snapshot, _diff) is off for this server.";
+// A PostgreSQL server's (#2773): the PostgreSQL port's catalog leaves them
+// out too, and the port sends nothing to its source (pgHiddenBarred in
+// consoleapp/pgrouter.go), since a statement run there would read past them.
+const HIDDEN_DOES_PG = "Hidden tables and columns disappear from SQL on the copy, the PostgreSQL port and the AI connector's SQL tool. While this server hides something, the PostgreSQL port sends nothing to your PostgreSQL for it: the copy answers alone.";
+
+// hiddenPGForwardBlock is the line under a PostgreSQL server's rules where a
+// MySQL server's has its forwarding account's grants check: nothing when it
+// hides nothing. Pure, for the tests.
+function hiddenPGForwardBlock(hasRules) {
+  if (!hasRules) return [];
+  return [el("p", { class: "form-hint", text: "The PostgreSQL port sends nothing to your PostgreSQL for this server now, its forwarding account included." })];
+}
 // The access-profiles aside names a page only a build that shows it has.
 const hiddenDoesNot = () => "The data stays in the copy's files and in the index, so time travel in this console and the AI connector's history tools"
   + (capsCache.access_profiles ? " (both follow access profiles)" : "")
@@ -15282,7 +15378,12 @@ function hiddenRulesBody(box, cur, h, g, said) {
   const listed = () => tables.length + columns.length
     ? el("div", { class: "hidden-list" }, tables.length ? names("Tables: ", tables) : null, columns.length ? names("Columns: ", columns) : null)
     : el("p", { class: "cn-sql-row", text: blocked ? "No table or column is listed, and the rules above still apply." : "Nothing is hidden on this server." });
-  const grantsBox = () => el("div", { class: "cn-grants hidden-grants" }, ...hiddenGrantsBlock(g, has, blocked));
+  // A PostgreSQL server (#2773): the PostgreSQL port sends nothing to the
+  // source of a server that hides something, so no forwarding account's
+  // grants are worth checking; the MySQL grants check does not apply.
+  const pgServer = !!cur && cur.flavor === "postgres";
+  const grantsBox = () => el("div", { class: "cn-grants hidden-grants" },
+    ...(pgServer ? hiddenPGForwardBlock(has) : hiddenGrantsBlock(g, has, blocked)));
   if (!h.editable) {
     box.append(el("p", { class: "cn-sql-row hidden-refusal", text: hiddenCap(h.refusal || "these rules cannot be changed by this DBTrail") }));
     if (has) box.append(listed());
@@ -15309,7 +15410,7 @@ function hiddenRulesBody(box, cur, h, g, said) {
       el("span", { class: "form-hint", text: "One per line, like shop.audit_log, or shop.* for every table in shop." })),
     el("label", { class: "field" }, el("span", { class: "field-label", text: "Columns" }), cTA,
       el("span", { class: "form-hint", text: "One per line, like shop.customers.email, or shop.*.email for that column in every table in shop. Put odd names in backticks." })),
-    el("p", { class: "form-hint hidden-does", text: HIDDEN_DOES }),
+    el("p", { class: "form-hint hidden-does", text: pgServer ? HIDDEN_DOES_PG : HIDDEN_DOES }),
     el("p", { class: "form-hint hidden-does-not", text: hiddenDoesNot() }),
     el("div", { class: "bk-restore-row" }, save), msg,
     grantsBox());
@@ -17599,6 +17700,7 @@ async function loadServers() {
   const servers = data.servers || [];
   serverNames = new Map(servers.map((s) => [s.id, s.name]));
   rememberHiddenRules(servers);
+  nameSQLClientsNav(servers);
   // Reconcile a stale selection (server deleted elsewhere).
   if (currentServer && !servers.some((s) => s.id === currentServer)) setCurrentServer("");
   serversEmpty = !servers.length;
@@ -19961,7 +20063,7 @@ function cmdkCommands() {
   ];
   if (capsCache.reconstruct) cmds.push({ group: "Navigate", label: "Time-travel", run: () => navigate("timetravel") });
   cmds.push({ group: "Navigate", label: "MCP Server", run: () => navigate("connect") });
-  cmds.push({ group: "Navigate", label: "MySQL clients", run: () => navigate("mysql-clients") });
+  cmds.push({ group: "Navigate", label: sqlClientsNavName(sqlClientsPG), run: () => navigate("mysql-clients") });
   if (capsCache.monitor) cmds.push({ group: "Navigate", label: "Retention", run: () => navigate("retention") });
   if (capsCache.access_profiles) cmds.push({ group: "Navigate", label: "Access profiles", run: () => navigate("access-profiles") });
   cmds.push({ group: "Actions", label: "Manage servers", run: () => { closeCmdk(); openServersModal(); } });

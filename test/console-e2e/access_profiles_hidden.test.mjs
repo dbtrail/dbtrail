@@ -39,8 +39,11 @@ function load(caps) {
     renderRoute: () => calls.push("renderRoute"),
     viewLoading: () => calls.push("viewLoading"),
     api: () => new Promise(() => {}),
+    // The palette names the SQL clients page after the server list (#2773).
+    sqlClientsPG: false,
   });
-  vm.runInContext(fn("cmdkCommands") + fn("renderAccessProfiles", "async function ") + constDecl("hiddenDoesNot"), ctx);
+  vm.runInContext(fn("cmdkCommands") + fn("renderAccessProfiles", "async function ") + constDecl("hiddenDoesNot")
+    + constDecl("PG_CLIENTS_TITLE") + fn("sqlClientsNavName"), ctx);
   return { ctx, calls };
 }
 const labels = (ctx) => ctx.cmdkCommands().map((c) => c.label);

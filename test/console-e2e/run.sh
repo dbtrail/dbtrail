@@ -90,6 +90,10 @@ node --test "$HERE/access_profiles_hidden.test.mjs"
 echo "==> the port panel for PostgreSQL servers (pg_port_panel_2773.test.mjs)"
 node --test "$HERE/pg_port_panel_2773.test.mjs"
 
+# The SQL clients page for PostgreSQL servers (#2773): the whole app.js drawn.
+echo "==> the SQL clients page for PostgreSQL servers (pg_clients_page_2773.test.mjs)"
+node --test "$HERE/pg_clients_page_2773.test.mjs"
+
 echo "==> build bintrail-console"
 CONSOLE_BIN="${CONSOLE_BIN:-}"
 if [ -z "$CONSOLE_BIN" ]; then
