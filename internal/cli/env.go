@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/spf13/cobra"
 )
@@ -75,6 +76,18 @@ var EnvBindings = []EnvBinding{
 
 var envOnce sync.Once
 
+// envFileUsed is the path of the env file that was read, when one was. See
+// EnvFileUsed.
+var envFileUsed atomic.Value
+
+// EnvFileUsed is the path of the env file this process read when it started
+// (.bintrail.env in the folder it was started in, or config.env), or "" when
+// it read none, for `dbtrail config show` to say where a value came from.
+func EnvFileUsed() string {
+	p, _ := envFileUsed.Load().(string)
+	return p
+}
+
 // envFromFile holds the variables an env file put into the environment, as
 // opposed to the ones the process was started with. See FromEnvFile.
 var envFromFile sync.Map
@@ -93,6 +106,10 @@ func FromEnvFile(key string) bool {
 	return ok
 }
 
+// TestEnvFilePath is the env file a test's ApplyEnvFileForTest is said to
+// have come from (EnvFileUsed).
+const TestEnvFilePath = "/test/.bintrail.env"
+
 // ApplyEnvFileForTest applies data as an env file would be, and returns the
 // function that takes it back. The real load happens once, before any test
 // runs, so a test about a variable that came from a file has no other way to
@@ -101,7 +118,10 @@ func ApplyEnvFileForTest(data string) (undo func()) {
 	before := map[any]bool{}
 	envFromFile.Range(func(k, _ any) bool { before[k] = true; return true })
 	parseAndSetEnv(data)
+	usedBefore := EnvFileUsed()
+	envFileUsed.Store(TestEnvFilePath)
 	return func() {
+		envFileUsed.Store(usedBefore)
 		envFromFile.Range(func(k, _ any) bool {
 			if !before[k] {
 				os.Unsetenv(k.(string))
@@ -145,6 +165,12 @@ func loadEnvFile() {
 			continue
 		}
 		parseAndSetEnv(string(data))
+		// The folder the program was started in is part of which file
+		// that is: said in full.
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+		envFileUsed.Store(p)
 		break // use first found
 	}
 	loadOptionFile()
