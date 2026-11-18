@@ -94,6 +94,10 @@ node --test "$HERE/pg_port_panel_2773.test.mjs"
 echo "==> the SQL clients page for PostgreSQL servers (pg_clients_page_2773.test.mjs)"
 node --test "$HERE/pg_clients_page_2773.test.mjs"
 
+# The Connect screen's way to the full form for a PostgreSQL (#2773).
+echo "==> the Connect screen offers the full form for a PostgreSQL (connect_pg_offer_2773.test.mjs)"
+node --test "$HERE/connect_pg_offer_2773.test.mjs"
+
 echo "==> build bintrail-console"
 CONSOLE_BIN="${CONSOLE_BIN:-}"
 if [ -z "$CONSOLE_BIN" ]; then

@@ -18943,6 +18943,18 @@ function clearFindLine(form) {
   if (line) line.textContent = "";
 }
 
+// connectPGOffer says whether step 1's answer may be a PostgreSQL, which
+// this screen does not add (#2773): something took the connection and said
+// nothing, which is what a PostgreSQL does to a client that waits for a
+// greeting (it speaks only after the client does). Offered only where a
+// PostgreSQL can be added: an installation that serves MySQL and MariaDB
+// refuses one. Pure, so it is tested in node.
+function connectPGOffer(id, family) {
+  return !!id && id.kind === "not_mysql" && id.answer === "silent" && family !== "mysql";
+}
+
+const CONNECT_PG_OFFER = "If it is a PostgreSQL: this screen adds MySQL and MariaDB servers. The full form adds a PostgreSQL, and opens with PostgreSQL picked and this address filled in.";
+
 // showNotFound draws why step 1 did not get there and stays on it.
 function showNotFound(form, id) {
   connectIdentity.delete(form);
@@ -18964,6 +18976,15 @@ function showNotFound(form, id) {
     } }));
   }
   if (p.note) box.append(el("p", { class: "form-hint", text: p.note }));
+  // Maybe a PostgreSQL (#2773): the full form adds it, opened with
+  // PostgreSQL picked and this address filled in.
+  if (connectPGOffer(id, installFamily.family)) {
+    box.append(el("p", { class: "form-hint cx-pg-offer", text: CONNECT_PG_OFFER }));
+    box.append(el("button", { class: "btn btn-sm", type: "button", id: "connect-as-pg", text: "Add it as PostgreSQL", onclick: () => {
+      f.flavor.value = "postgres";
+      openFullForm(form);
+    } }));
+  }
   box.append(el("p", { class: "cx-auto", id: "connect-find-auto", "aria-live": "polite" }));
   $("#connect-found", form).replaceChildren(box);
   setConnectStep(form, 1);
