@@ -32,6 +32,12 @@ type SettingInEffect struct {
 	// file's line.
 	Path string
 	Line int
+	// CommandsUse is set for where the running DBTrail is (console-listen,
+	// console-token, console-auth) when the value came from an env file:
+	// the dbtrail commands that talk to it (server, port, snapshot) ignore
+	// env files for these, so what they use is said here: the option file's
+	// line that the env file hid, or nothing.
+	CommandsUse string
 }
 
 // Where says where the value came from, in a few words.
@@ -60,9 +66,13 @@ type SettingsReport struct {
 	// most programs read that as not set, and so does the option file, which
 	// still applies a line for them.
 	Empty []string
+	// EmptyInEnvFile are the same, set to nothing by a line of the env file.
+	EmptyInEnvFile []string
 	// Unknown are BINTRAIL_ variables of the environment that no DBTrail
 	// program reads: most likely a typo.
 	Unknown []string
+	// UnknownIn is, for an unknown name an env file set, that file.
+	UnknownIn map[string]string
 	// Retired are BINTRAIL_ variables set that no longer do anything.
 	Retired []string
 }
@@ -93,7 +103,11 @@ func SettingsInEffect(environ []string, lookup func(string) (string, bool)) Sett
 			continue
 		}
 		if v == "" {
-			r.Empty = append(r.Empty, e.Option())
+			if FromEnvFile(e.Env) {
+				r.EmptyInEnvFile = append(r.EmptyInEnvFile, e.Option())
+			} else {
+				r.Empty = append(r.Empty, e.Option())
+			}
 			continue
 		}
 		s := SettingInEffect{Env: e.Env, Option: e.Option(), Secret: e.Secret, Value: v, Source: FromEnvironment}
@@ -101,6 +115,12 @@ func SettingsInEffect(environ []string, lookup func(string) (string, bool)) Sett
 			s.Source, s.Path, s.Line = FromOptionFileSource, optionFilePath, line
 		} else if FromEnvFile(e.Env) {
 			s.Source, s.Path = FromEnvFileSource, EnvFileUsed()
+			if slices.Contains(daemonAddressKeys, e.Env) {
+				s.CommandsUse = "nothing: they use their default"
+				if line, ok := optionFileShadowedLine(e.Env); ok {
+					s.CommandsUse = fmt.Sprintf("line %d of %s", line, optionFilePath)
+				}
+			}
 		}
 		r.Set = append(r.Set, s)
 	}
@@ -111,11 +131,21 @@ func SettingsInEffect(environ []string, lookup func(string) (string, bool)) Sett
 		}
 		if _, known := settings.Lookup(k); !known && !slices.Contains(r.Unknown, k) {
 			r.Unknown = append(r.Unknown, k)
+			if FromEnvFile(k) {
+				if r.UnknownIn == nil {
+					r.UnknownIn = map[string]string{}
+				}
+				r.UnknownIn[k] = EnvFileUsed()
+				if r.UnknownIn[k] == "" {
+					r.UnknownIn[k] = "an env file"
+				}
+			}
 		}
 	}
 	slices.SortFunc(r.Set, func(a, b SettingInEffect) int { return strings.Compare(a.Option, b.Option) })
 	slices.Sort(r.Unset)
 	slices.Sort(r.Empty)
+	slices.Sort(r.EmptyInEnvFile)
 	slices.Sort(r.Unknown)
 	slices.Sort(r.Retired)
 	return r

@@ -53,6 +53,8 @@ type OptionReport struct {
 	values map[string]string
 	// shadowed are values an env file hid. See OptionFileValue.
 	shadowed map[string]string
+	// shadowedLine is the line each of them is on.
+	shadowedLine map[string]int
 }
 
 // daemonAddressKeys are what say where the running DBTrail is and how to log
@@ -136,6 +138,7 @@ func ReadOptionFile(path string, lookupEnv func(string) (string, bool), fromEnvF
 	secretsRead := []string{}
 	r.values = map[string]string{}
 	r.shadowed = map[string]string{}
+	r.shadowedLine = map[string]int{}
 	for i, o := range lines.Options {
 		if o.Name == "" {
 			r.Problems = append(r.Problems, fmt.Sprintf("line %d has no option name before the = sign, so it is ignored.", o.Line))
@@ -190,6 +193,7 @@ func ReadOptionFile(path string, lookupEnv func(string) (string, bool), fromEnvF
 				if slices.Contains(daemonAddressKeys, e.Env) {
 					msg += " The dbtrail commands that talk to a running DBTrail (server, port, snapshot) do not read env files for it, and use this line."
 					r.shadowed[e.Env] = o.Value
+					r.shadowedLine[e.Env] = o.Line
 				}
 			}
 			r.Problems = append(r.Problems, msg)
@@ -280,6 +284,15 @@ func OptionFileValue(key string) (string, bool) {
 	defer optionMu.Unlock()
 	v, ok := optionLoaded.shadowed[key]
 	return v, ok
+}
+
+// optionFileShadowedLine is the line of the option file whose value an env
+// file hid for key, when key is one of daemonAddressKeys (OptionFileValue).
+func optionFileShadowedLine(key string) (int, bool) {
+	optionMu.Lock()
+	defer optionMu.Unlock()
+	n, ok := optionLoaded.shadowedLine[key]
+	return n, ok
 }
 
 // CheckOptionFile reads the option file again, as the program would if it

@@ -106,6 +106,10 @@ func FromEnvFile(key string) bool {
 	return ok
 }
 
+// TestEnvFilePath is the env file a test's ApplyEnvFileForTest is said to
+// have come from (EnvFileUsed).
+const TestEnvFilePath = "/test/.bintrail.env"
+
 // ApplyEnvFileForTest applies data as an env file would be, and returns the
 // function that takes it back. The real load happens once, before any test
 // runs, so a test about a variable that came from a file has no other way to
@@ -114,7 +118,10 @@ func ApplyEnvFileForTest(data string) (undo func()) {
 	before := map[any]bool{}
 	envFromFile.Range(func(k, _ any) bool { before[k] = true; return true })
 	parseAndSetEnv(data)
+	usedBefore := EnvFileUsed()
+	envFileUsed.Store(TestEnvFilePath)
 	return func() {
+		envFileUsed.Store(usedBefore)
 		envFromFile.Range(func(k, _ any) bool {
 			if !before[k] {
 				os.Unsetenv(k.(string))
@@ -158,6 +165,11 @@ func loadEnvFile() {
 			continue
 		}
 		parseAndSetEnv(string(data))
+		// The folder the program was started in is part of which file
+		// that is: said in full.
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
 		envFileUsed.Store(p)
 		break // use first found
 	}

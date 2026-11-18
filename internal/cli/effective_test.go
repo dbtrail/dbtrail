@@ -40,8 +40,15 @@ func TestSettingsInEffect_aSecretIsMarked(t *testing.T) {
 	}
 }
 
+// unset takes key out of the environment for the test, and puts it back.
+func unset(t *testing.T, key string) {
+	t.Helper()
+	t.Setenv(key, "")
+	os.Unsetenv(key)
+}
+
 func TestSettingsInEffect_fromTheOptionFile(t *testing.T) {
-	os.Unsetenv("BINTRAIL_ROTATE_RETAIN")
+	unset(t, "BINTRAIL_ROTATE_RETAIN")
 	p := filepath.Join(t.TempDir(), "dbtrail.cnf")
 	if err := os.WriteFile(p, []byte("[dbtrail]\n# a comment\nrotate-retain = 4d\n"), 0o640); err != nil {
 		t.Fatal(err)
@@ -57,15 +64,17 @@ func TestSettingsInEffect_fromTheOptionFile(t *testing.T) {
 }
 
 func TestSettingsInEffect_fromAnEnvFile(t *testing.T) {
-	os.Unsetenv("BINTRAIL_ROTATE_RETAIN")
+	unset(t, "BINTRAIL_ROTATE_RETAIN")
 	defer ApplyEnvFileForTest("BINTRAIL_ROTATE_RETAIN=5d\n")()
 	s, ok := findSet(effective(), "rotate-retain")
-	if !ok || s.Value != "5d" || s.Source != FromEnvFileSource {
+	if !ok || s.Value != "5d" || s.Source != FromEnvFileSource || s.Path != TestEnvFilePath || s.CommandsUse != "" {
 		t.Fatalf("%+v %v", s, ok)
 	}
-	// A test applies the data, not a file: there is no path to name.
-	if s.Path == "" && s.Where() != "an env file, as BINTRAIL_ROTATE_RETAIN" {
+	if s.Where() != TestEnvFilePath+", as BINTRAIL_ROTATE_RETAIN" {
 		t.Fatalf("%q", s.Where())
+	}
+	if got := (SettingInEffect{Env: "BINTRAIL_X", Source: FromEnvFileSource}).Where(); got != "an env file, as BINTRAIL_X" {
+		t.Fatalf("%q", got)
 	}
 	if got := (SettingInEffect{Env: "BINTRAIL_X", Source: FromEnvFileSource, Path: ".bintrail.env"}).Where(); got != ".bintrail.env, as BINTRAIL_X" {
 		t.Fatalf("%q", got)
@@ -87,9 +96,61 @@ func TestSettingsInEffect_theEnvironmentBeforeTheFile(t *testing.T) {
 	}
 }
 
+// An env file line with nothing in it, and the option file's line for the
+// same name: the value is the file's, and said to be (both marks are on the
+// name, so the order of the checks decides).
+func TestSettingsInEffect_anEmptyEnvFileLineAndTheFile(t *testing.T) {
+	unset(t, "BINTRAIL_ROTATE_RETAIN")
+	defer ApplyEnvFileForTest("BINTRAIL_ROTATE_RETAIN=\n")()
+	if !FromEnvFile("BINTRAIL_ROTATE_RETAIN") {
+		t.Fatal("the env file line did not apply")
+	}
+	if r := effective(); !slices.Contains(r.EmptyInEnvFile, "rotate-retain") || slices.Contains(r.Empty, "rotate-retain") {
+		t.Fatalf("empty from an env file: %+v", r)
+	}
+	p := filepath.Join(t.TempDir(), "dbtrail.cnf")
+	if err := os.WriteFile(p, []byte("[dbtrail]\nrotate-retain = 4d\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	defer LoadOptionFileForTest(p)()
+	s, ok := findSet(effective(), "rotate-retain")
+	if !ok || s.Value != "4d" || s.Source != FromOptionFileSource || s.Line != 2 {
+		t.Fatalf("%+v %v", s, ok)
+	}
+}
+
+// Where the running DBTrail is, from an env file: the commands that talk to
+// it ignore that, and use the option file's line it hid, or nothing.
+func TestSettingsInEffect_whatTheCommandsUse(t *testing.T) {
+	unset(t, "BINTRAIL_CONSOLE_LISTEN")
+	defer ApplyEnvFileForTest("BINTRAIL_CONSOLE_LISTEN=127.0.0.1:9999\n")()
+	s, _ := findSet(effective(), "console-listen")
+	if s.CommandsUse != "nothing: they use their default" {
+		t.Fatalf("no option file: %+v", s)
+	}
+	p := filepath.Join(t.TempDir(), "dbtrail.cnf")
+	if err := os.WriteFile(p, []byte("[dbtrail]\n\nconsole-listen = 0.0.0.0:8090\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	defer LoadOptionFileForTest(p)()
+	s, _ = findSet(effective(), "console-listen")
+	if s.Value != "127.0.0.1:9999" || s.Source != FromEnvFileSource || s.CommandsUse != "line 3 of "+p {
+		t.Fatalf("%+v", s)
+	}
+}
+
+func TestSettingsInEffect_anUnknownNameInAnEnvFile(t *testing.T) {
+	unset(t, "BINTRAIL_ROTATE_RETIAN")
+	defer ApplyEnvFileForTest("BINTRAIL_ROTATE_RETIAN=3d\n")()
+	r := effective()
+	if r.UnknownIn["BINTRAIL_ROTATE_RETIAN"] != TestEnvFilePath {
+		t.Fatalf("%+v", r.UnknownIn)
+	}
+}
+
 func TestSettingsInEffect_emptyUnsetUnknownRetired(t *testing.T) {
 	t.Setenv("BINTRAIL_ROTATE_RETAIN", "")
-	os.Unsetenv("BINTRAIL_ROTATE_INTERVAL")
+	unset(t, "BINTRAIL_ROTATE_INTERVAL")
 	t.Setenv("BINTRAIL_COMPOSE_VERSION", "9")
 	r := effective("BINTRAIL_ROTATE_RETIAN=3d", "BINTRAIL_CONSOLE_SQL_PANEL=1", "BINTRAIL_ROTATE_RETIAN=again", "OTHER_THING=1")
 	if _, ok := findSet(r, "rotate-retain"); ok || !slices.Contains(r.Empty, "rotate-retain") {

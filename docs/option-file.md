@@ -113,15 +113,18 @@ dbtrail config show --all
 It lists every setting that has a value, with the value and where it comes
 from: the environment, an env file (`.bintrail.env` or `config.env`), or a line
 of this file. A setting that holds a password, a token or a key is listed
-without its value, and so is any value with a login in it (`user:password@`).
+without its value, and so is any other value that looks like it carries a login
+or a token (`user:password@`, `?token=`).
 `--all` also lists the settings with no value, which each program then decides
-by itself. It also says which `BINTRAIL_` variables are set and read by no
+by itself. For where the running DBTrail is (`console-listen`, `console-token`,
+`console-auth`) given in an env file, it says what the `dbtrail` commands that
+talk to it use instead, since they ignore env files for these. It also says which `BINTRAIL_` variables are set and read by no
 DBTrail program (a typo, most likely), and which no longer do anything.
 
 ```text
 2 settings with a value:
-  commit-within  2s                                    the environment, as BINTRAIL_COMMIT_WITHIN
-  index-dsn      (not shown: it can carry a password)  the environment, as BINTRAIL_INDEX_DSN
+  commit-within  2s                     the environment, as BINTRAIL_COMMIT_WITHIN
+  index-dsn      (not shown: a secret)  the environment, as BINTRAIL_INDEX_DSN
 127 more settings with no value. dbtrail config show --all lists them.
 Note: BINTRAIL_COMMIT_WITHN is set, and no DBTrail program reads it. Is the name right?
 Command-line flags given to a running program come before all of these and are not seen here.

@@ -57,7 +57,8 @@ var configShowCmd = &cobra.Command{
 	Long: `Lists every DBTrail setting that has a value, with the value and where it
 comes from: the environment, an env file (.bintrail.env or config.env), or a
 line of /etc/dbtrail/dbtrail.cnf. A setting that holds a password, a token or a
-key is listed without its value. --all also lists the settings with no value,
+key is listed without its value, and so is any value that looks like it
+carries a login or a token. --all also lists the settings with no value,
 which each program then decides by itself.
 
 It shows what a program started now, with this environment, would read. A
@@ -80,15 +81,19 @@ func init() {
 }
 
 // hiddenValue is what config show prints for a secret's value.
-const hiddenValue = "(not shown: it can carry a password)"
+const hiddenValue = "(not shown: a secret)"
 
 // hiddenLoginValue is what it prints for a value of another setting that
-// looks like it carries a login (user:password@, in a URL or a DSN).
-const hiddenLoginValue = "(not shown: it looks like it carries a login)"
+// looks like it carries a login or a token (see carriesLogin).
+const hiddenLoginValue = "(not shown: it looks like it carries a login or a token)"
 
-// carriesLogin matches user:password@ anywhere in a value: a URL's user
-// information (https://u:p@host) or a DSN (u:p@tcp(host:3306)/db).
-var carriesLogin = regexp.MustCompile(`[^\s/:@]+:[^\s@]*@`)
+// carriesLogin matches what puts a login or a token in a value, anywhere in
+// it: user:password@ or :password@ (a URL's user information, a DSN such as
+// u:p@tcp(host:3306)/db), a URL whose user part is a token
+// (https://TOKEN@host), and a query parameter whose name says token,
+// password, secret, key, signature, credential or auth (?token=, the
+// console's own URL with its token; &X-Amz-Signature=, a presigned URL).
+var carriesLogin = regexp.MustCompile(`(?i)[^\s/:@]*:[^\s@]*@|://[^\s/@]+@|[?&;][^=&\s]*(token|passw|pwd|secret|key|sig|credential|auth)[^=&\s]*=`)
 
 // showValue is a value as config show prints it: as it is, unless it has a
 // character that would break the line or read as something else, which is
@@ -126,9 +131,23 @@ func reportSettings(w io.Writer, r cli.SettingsReport, all bool) {
 		}
 		tw.Flush()
 	}
+	for _, s := range r.Set {
+		if s.CommandsUse != "" {
+			fmt.Fprintf(w, "Note: the dbtrail commands that talk to a running DBTrail (server, port, snapshot) ignore env files for %s, so they use %s.\n",
+				s.Option, s.CommandsUse)
+		}
+	}
 	if len(r.Empty) > 0 {
-		fmt.Fprintf(w, "Set to nothing in the environment, which counts as no value (a line of %s still applies): %s.\n",
+		fmt.Fprintf(w, "Set to nothing in the environment, which counts as no value. A line of %s still applies to them; a line of an env file does not: %s.\n",
 			cli.OptionFilePath, strings.Join(r.Empty, ", "))
+	}
+	if len(r.EmptyInEnvFile) > 0 {
+		where := cli.EnvFileUsed()
+		if where == "" {
+			where = "an env file"
+		}
+		fmt.Fprintf(w, "Set to nothing in %s, which counts as no value. A line of %s still applies to them: %s.\n",
+			where, cli.OptionFilePath, strings.Join(r.EmptyInEnvFile, ", "))
 	}
 	if all {
 		if len(r.Unset) > 0 {
@@ -137,7 +156,7 @@ func reportSettings(w io.Writer, r cli.SettingsReport, all bool) {
 				fmt.Fprintf(w, "  %s\n", o)
 			}
 		}
-	} else if n := len(r.Unset) + len(r.Empty); n > 0 {
+	} else if n := len(r.Unset) + len(r.Empty) + len(r.EmptyInEnvFile); n > 0 {
 		word := "more setting"
 		if len(r.Set) == 0 {
 			word = "setting"
@@ -145,7 +164,11 @@ func reportSettings(w io.Writer, r cli.SettingsReport, all bool) {
 		fmt.Fprintf(w, "%s with no value. dbtrail config show --all lists them.\n", plural(n, word))
 	}
 	for _, k := range r.Unknown {
-		fmt.Fprintf(w, "Note: %s is set, and no DBTrail program reads it. Is the name right?\n", k)
+		in := ""
+		if p := r.UnknownIn[k]; p != "" {
+			in = " (in " + p + ")"
+		}
+		fmt.Fprintf(w, "Note: %s is set%s, and no DBTrail program reads it. Is the name right?\n", k, in)
 	}
 	for _, k := range r.Retired {
 		fmt.Fprintf(w, "Note: %s is set, and no longer does anything.\n", k)
