@@ -130,3 +130,30 @@ func reportSettings(w io.Writer, r cli.SettingsReport, all bool) {
 	}
 	fmt.Fprintln(w, "Command-line flags given to a running program come before all of these and are not seen here.")
 }
+
+func reportOptionFile(w io.Writer, r cli.OptionReport) error {
+	if !r.Found {
+		fmt.Fprintf(w, "There is no %s, so there is nothing to check. DBTrail uses its defaults and the environment.\n", r.Path)
+		return nil
+	}
+	if r.Ignored != "" {
+		fmt.Fprintf(w, "%s %s\n", r.Path, r.Ignored)
+		return fmt.Errorf("%s is not used", r.Path)
+	}
+	fmt.Fprintf(w, "%s sets %s.\n", r.Path, plural(len(r.Applied), "setting"))
+	for _, a := range r.Applied {
+		fmt.Fprintf(w, "  line %d: %s\n", a.Line, a.Option)
+	}
+	for _, n := range r.Notes {
+		fmt.Fprintf(w, "Note: %s\n", n)
+	}
+	if len(r.Problems) == 0 {
+		fmt.Fprintln(w, "Every line is used.")
+		return nil
+	}
+	fmt.Fprintf(w, "%s:\n", plural(len(r.Problems), "problem"))
+	for _, p := range r.Problems {
+		fmt.Fprintf(w, "  %s\n", p)
+	}
+	return fmt.Errorf("%s has %s", r.Path, plural(len(r.Problems), "problem"))
+}
