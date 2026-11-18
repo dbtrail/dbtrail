@@ -1570,6 +1570,32 @@ A numeric with no precision prints with all 18 decimals (`12345.678` as
 
 ---
 
+### Names the copy reads as its own words
+
+The copy's SQL has words PostgreSQL does not, and a table or column with one of
+them as its name is refused by the copy with a syntax error when the name is
+written without quotes. PostgreSQL takes the same statement. Measured against a
+real PostgreSQL with the comparison harness (`internal/pgcompare`), 169
+statements: 73 refused, none answered differently.
+
+- **Tables** named `pivot`, `unpivot`, `qualify`, `asof`, `anti`, `show`,
+  `describe` or `summarize`: `SELECT id, v FROM pivot` is refused, and so is
+  `FROM pivot AS t`.
+- **Columns** named `at`, `by`, `anti`, `semi`, `asof`, `positional`,
+  `qualify`, `pivot`, `pivot_longer`, `pivot_wider`, `unpivot`, `unpack`,
+  `glob`, `lambda`, `show`, `describe` or `summarize`: `SELECT id, at FROM t`,
+  `WHERE describe IS NOT NULL` and `sum(by)` are refused.
+
+Written another way, each of them answers as PostgreSQL does: the name in
+double quotes (`"at"`, `FROM "pivot"`), the table with its schema
+(`FROM public.pivot`), or the column with its table (`t.at`). `SELECT *` is not
+affected.
+
+On the PostgreSQL port, a statement with `qualify`, `asof`, `anti`, `semi` or
+`positional` anywhere in it goes to your PostgreSQL when the server has a
+forwarding user, which answers it; without one, and for the other names, the
+client gets the copy's syntax error (SQLSTATE `42601`).
+
 ## Extensions and custom types
 
 - **bintrail installs nothing in your database.** Capture is via the built-in
