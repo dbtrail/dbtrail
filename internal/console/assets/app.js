@@ -18943,6 +18943,46 @@ function clearFindLine(form) {
   if (line) line.textContent = "";
 }
 
+// connectPGOffer says whether step 1's answer may be a PostgreSQL, which
+// this screen does not add (#2773): something took the connection and said
+// nothing, which is what a PostgreSQL does to a client that waits for a
+// greeting (it speaks only after the client does). Offered only where a
+// PostgreSQL can be added: an installation that serves MySQL and MariaDB
+// refuses one. Pure, so it is tested in node.
+// An installation that holds both families (mixed, from before one family
+// per installation) refuses every add, so it is offered nothing either.
+function connectPGOffer(id, family, mixed) {
+  return !!id && id.kind === "not_mysql" && id.answer === "silent" && family !== "mysql" && !mixed;
+}
+
+// openFullFormAsPG leaves Connect for the full form with PostgreSQL picked
+// and the address step 1 probed. openFullForm is the MySQL path's, left as
+// it is; what a PostgreSQL needs on top is done here:
+// - a blank Port was probed as 3306 (connectAddr), and a PostgreSQL with no
+//   port is 5432, so the probed one is written in;
+// - the full form is built as MySQL and fills in the account the MySQL grant
+//   block creates (dbtrail and a generated password). Picking PostgreSQL by
+//   hand takes them back (the type's change listener); a value set by code
+//   fires nothing, so the same step is run here. A user or password that
+//   was typed stays.
+// If the full form does not hold PostgreSQL after all (the installation was
+// found to serve MySQL meanwhile), that is said instead of going on as MySQL.
+async function openFullFormAsPG(form) {
+  const f = form.elements;
+  if (!f.source_port.value.trim()) f.source_port.value = "3306";
+  f.flavor.value = "postgres";
+  await openFullForm(form);
+  const full = document.getElementById("server-form");
+  if (!full || full === form || full.dataset.connect) return;
+  if (full.elements.flavor.value !== "postgres") {
+    formMsg("This installation does not add PostgreSQL servers now. Reload the page to see what it serves.", true);
+    return;
+  }
+  applyGrantDefaults(full);
+}
+
+const CONNECT_PG_OFFER ="If it is a PostgreSQL: this screen adds MySQL and MariaDB servers. The full form adds a PostgreSQL, and opens with PostgreSQL picked and this address filled in.";
+
 // showNotFound draws why step 1 did not get there and stays on it.
 function showNotFound(form, id) {
   connectIdentity.delete(form);
@@ -18964,6 +19004,12 @@ function showNotFound(form, id) {
     } }));
   }
   if (p.note) box.append(el("p", { class: "form-hint", text: p.note }));
+  // Maybe a PostgreSQL (#2773): the full form adds it, opened with
+  // PostgreSQL picked and this address filled in.
+  if (connectPGOffer(id, installFamily.family, installFamily.mixed)) {
+    box.append(el("p", { class: "form-hint cx-pg-offer", text: CONNECT_PG_OFFER }));
+    box.append(el("button", { class: "btn btn-sm", type: "button", id: "connect-as-pg", text: "Add it as PostgreSQL", onclick: () => openFullFormAsPG(form) }));
+  }
   box.append(el("p", { class: "cx-auto", id: "connect-find-auto", "aria-live": "polite" }));
   $("#connect-found", form).replaceChildren(box);
   setConnectStep(form, 1);
