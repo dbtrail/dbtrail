@@ -357,6 +357,13 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 			return sessionErr("define DATE_ADD: %v", err)
 		}
 	}
+	// PostgreSQL's ROUND of a numeric division and of a numeric AVG, which
+	// the PostgreSQL port writes as these macros.
+	if job.PostgresRules {
+		if _, err := conn.ExecContext(ctx, pgRoundMacros); err != nil {
+			return sessionErr("define PostgreSQL's ROUND: %v", err)
+		}
+	}
 	// The client's time zone (the port's SET time_zone), after the views
 	// script, which pins UTC, and before the lock, after which no SET runs. A
 	// zone the engine does not know refuses the statement by name: running it

@@ -1,5 +1,7 @@
 package sqlsandbox
 
+import "strings"
+
 // pgUnnamed is what PostgreSQL heads a result column with when the statement
 // gives it no name and its expression suggests none.
 const pgUnnamed = "?column?"
@@ -292,6 +294,10 @@ func pgFunctionName(v map[string]any) (string, int, bool) {
 		name = pgSyntaxFunctions[name]
 	} else if name == "count_star" {
 		name = "count"
+	} else if strings.HasPrefix(name, "_bintrail_pg_round_") {
+		// round(a / b, k) and round(avg(x), k), as the port writes them
+		// for the copy (pgRoundMacros).
+		name = "round"
 	}
 	// Folded: a function's name is written without quotes.
 	name = foldName(name)
