@@ -457,8 +457,13 @@ func TestReconstructTables_PGTablePairContinuesThePairBefore(t *testing.T) {
 	f := newPGFixture(t)
 	onRoot, offRoot := t.TempDir(), t.TempDir()
 	taken := f.at(10 * time.Minute)
+	// 64 rows: the seven keys changed below stay a small share of the file.
+	rows := pairRows()
+	for i := 100; i < 140; i++ {
+		rows = append(rows, [2]string{fmt.Sprint(i), "more"})
+	}
 	for _, root := range []string{onRoot, offRoot} {
-		f.baseline(root, taken, 0x500, taken.Add(-time.Minute).Format(time.RFC3339), pairRows()...)
+		f.baseline(root, taken, 0x500, taken.Add(-time.Minute).Format(time.RFC3339), rows...)
 	}
 	f.other(0x600, 12*time.Minute)
 	both := func(at time.Time) *reconstruct.TableReport {
@@ -515,10 +520,10 @@ func TestReconstructTables_PGTablePairContinuesThePairBefore(t *testing.T) {
 		t.Fatalf("third update: delta files %v, %d events, continues %q; want a pair from the 6 changes since the pair before",
 			f.pairFiles(onRoot, at3), r.EventsApplied, footer["bintrail.pgdelta_from"])
 	}
-	// 24 rows in the file; 1, 2 and 7 are taken away; 0, 1, 2, 7 and 9z are
+	// 64 rows in the file; 1, 2 and 7 are taken away; 0, 1, 2, 7 and 9z are
 	// in the pair.
-	if r.BaselineRows != 21 || r.RowsWritten != 26 {
-		t.Fatalf("third update's report: %d rows of the file kept, %d rows in all; want 21 and 26", r.BaselineRows, r.RowsWritten)
+	if r.BaselineRows != 61 || r.RowsWritten != 66 {
+		t.Fatalf("third update's report: %d rows of the file kept, %d rows in all; want 61 and 66", r.BaselineRows, r.RowsWritten)
 	}
 
 	// The pair beside the file is not whole: every change since the file is
