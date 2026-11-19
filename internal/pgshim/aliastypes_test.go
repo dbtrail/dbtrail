@@ -71,7 +71,9 @@ func TestCopyScreen_namesTheStatementDefines(t *testing.T) {
 	for _, q := range []string{
 		`WITH s AS (SELECT customer_id AS c, sum(qty) AS units FROM pgcmp_orders GROUP BY customer_id)
 		 SELECT s.c, s.units FROM s WHERE s.units >= 10 ORDER BY s.units DESC, s.c`,
-		`SELECT o.id FROM pgcmp_orders o JOIN pgcmp_orders p ON o.qty >= p.qty - 5`,
+		// With a text column in the statement, so a name of unknown type
+		// would count as text: p.qty is read as its column.
+		`SELECT o.id, o.note FROM pgcmp_orders o JOIN pgcmp_orders p ON o.qty >= p.qty - 5`,
 		`WITH r AS (SELECT id, row_number() OVER (ORDER BY id) AS rnk FROM pgcmp_orders)
 		 SELECT r.id, r.rnk FROM r WHERE r.rnk <= 3 ORDER BY r.id, r.rnk`,
 		`SELECT max(o.qty) FROM pgcmp_orders o`,
