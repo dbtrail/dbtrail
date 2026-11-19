@@ -464,6 +464,19 @@ func expectations() []expectation {
 		eq(`SELECT id, round(n / d, 4), round(n / d, 5), round(n / d, 6), round(n / i, 2) FROM ` + itRound + ` ORDER BY id`),
 		eq(`SELECT id, round(n / i, 0), round(n / i, 4), round(100.0 * d / i, 3) FROM ` + itRound + ` ORDER BY id`),
 		eq(`SELECT g, round(avg(n), 2), round(avg(d), 4), round(avg(i), 3), round(100 * avg(d), 2), round(1000.0 * avg(i), 1) FROM ` + itRound + ` GROUP BY g ORDER BY g`),
+		// Names a WITH or a subquery defines as numbers, read through a
+		// table's name, compared and sorted: the shapes of the HTAP bench's
+		// reports, which the screen now lets the copy answer.
+		eq(`WITH s AS (SELECT customer_id AS c, sum(qty) AS units, count(*) AS n FROM ` + o + ` GROUP BY customer_id)
+		    SELECT s.c, s.units, s.n FROM s WHERE s.units >= 10 ORDER BY s.units DESC, s.c`),
+		eq(`WITH r AS (SELECT id, customer_id, row_number() OVER (PARTITION BY customer_id ORDER BY amount DESC, id) AS rnk FROM ` + o + `)
+		    SELECT r.id, r.rnk FROM r WHERE r.rnk <= 2 ORDER BY r.id`),
+		eq(`SELECT customer_id, count(*) FROM ` + o + ` GROUP BY customer_id HAVING count(*) >= 2 ORDER BY customer_id`),
+		eq(`SELECT a.id, b.id FROM ` + o + ` a JOIN ` + o + ` b ON b.id > a.id AND b.customer_id = a.customer_id ORDER BY a.id, b.id`),
+		eq(`WITH t AS (SELECT count(*) AS n FROM ` + o + `), g AS (SELECT customer_id AS c, count(*) AS k, sum(amount) AS total FROM ` + o + ` GROUP BY customer_id)
+		    SELECT g.c, round(100.0 * g.k / t.n, 2) AS pct, round(g.total / g.k, 3) AS per FROM g CROSS JOIN t ORDER BY pct DESC, g.c`),
+		eq(`WITH f AS (SELECT id, CASE WHEN qty > 5 THEN 1 ELSE 0 END AS big, qty * 2 AS twice FROM ` + o + `)
+		    SELECT f.id, f.big FROM f WHERE f.big >= 1 AND f.twice > 10 ORDER BY f.twice, f.id`),
 		// What the copy cannot round as PostgreSQL does it refuses, and
 		// never answers otherwise.
 		{stmt: `SELECT id, round(amount / qty, 2) FROM ` + o, verdict: sqlcompare.SourceError},
