@@ -557,9 +557,11 @@ func TestPGTail_HoldsItsRowsPacked(t *testing.T) {
 	if err := plain.Apply(ordinary); err != nil {
 		t.Fatal(err)
 	}
+	// Both sides without the record of each key's last transaction, which
+	// the tail counts beside its changes and packing does not touch.
 	whole, _ := sampledChangeBytes(foldPGPages(t, pkColsIntID(), ordinary).Changes)
-	if got := plain.Bytes(); got <= 0 || got*3 > whole*2 {
-		t.Fatalf("the tail counts %d bytes for 200 rows; the same changes as they arrived count %d: want under two thirds", got, whole)
+	if got := plain.Bytes() - int64(len(plain.fold.pgTxn))*pgTxnBytes; got <= 0 || got*3 > whole*2 {
+		t.Fatalf("the tail counts %d bytes for the changes of 200 rows; held as they arrived they count %d: want under two thirds", got, whole)
 	}
 
 	// A key changed again after its row was put away, and one pruned.
