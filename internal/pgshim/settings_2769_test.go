@@ -706,6 +706,7 @@ func TestParseSessionCmd(t *testing.T) {
 		{"SELECT pg_backend_pid(), current_setting('server_version')", "func pg_backend_pid,current_setting(server_version)"},
 		{"select PG_BACKEND_PID()", "func pg_backend_pid"},
 		{"select pg_catalog.pg_backend_pid();", "func pg_backend_pid"},
+		{"SELECT pg_is_in_recovery()", "func pg_is_in_recovery"},
 		{"SELECT current_setting('TimeZone')", "func current_setting(timezone)"},
 		{"SELECT current_setting('nope', true)", "func current_setting(nope)?"},
 		{"SELECT current_setting('nope', false)", "func current_setting(nope)"},

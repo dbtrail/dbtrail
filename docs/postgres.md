@@ -1591,6 +1591,26 @@ A numeric with no precision prints with all 18 decimals (`12345.678` as
 
 ---
 
+### A proxy in front of the port
+
+A proxy such as ProxySQL logs into the port twice:
+
+- **With your application's login**, for every statement it sends. Save that
+  username and password as the server's **application login** (the same one
+  the MySQL port takes): it opens that server whatever database the
+  connection names.
+- **With its monitor login**, for its health checks (ProxySQL's
+  `pgsql-monitor_username` and `pgsql-monitor_password`). The port takes the
+  **monitor login** saved for the MySQL port: one username and password for
+  both ports. A connection opened with it opens no server, whatever database
+  it names (ProxySQL's is `postgres`), and answers only what the monitor
+  sends: an empty query as its ping, `SET`, and `SELECT pg_is_in_recovery()`,
+  which is `true` on this port, so a server in a replication hostgroup stays
+  among the readers. Any other statement is refused (SQLSTATE `0A000`).
+
+`SELECT pg_is_in_recovery()` is `true` on every connection: the port is
+read-only, as a standby is.
+
 ### Names the copy reads as its own words
 
 The copy's SQL has words PostgreSQL does not, and a table or column with one of

@@ -440,3 +440,62 @@ servers:
 		}
 	}
 }
+
+// ProxySQL's monitor logs into the PostgreSQL port with the monitor login
+// saved for the port (the MySQL port's too): its password only, whatever
+// database it names, and a connection that answers its checks and opens no
+// server.
+func TestPGRouter_monitorLogin(t *testing.T) {
+	f := newRouterFiles(t)
+	if _, err := f.owner.Add(console.ServerEntry{Name: "prod", Flavor: console.FlavorPostgres, DSN: "u:p@tcp(127.0.0.1:1)/idx_prod"}); err != nil {
+		t.Fatal(err)
+	}
+	body := "version: 1\nenabled: true\npassword: port-pw\nmonitor_user: monitor\nmonitor_password: monitor-pw\n"
+	if err := os.WriteFile(f.portFile, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv, runner, err := newRouterConsole(f.settings(""), console.SQLPool{Workers: 1, Threads: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runner.Close)
+	srv.RefreshFollowedFiles()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- servePGPort(ctx, srv, ln, 0) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	addr := ln.Addr().String()
+	for _, tc := range []struct{ user, pw, db, want, why string }{
+		{"monitor", "monitor-pw", "postgres", "", "ProxySQL's monitor, with its database"},
+		{"monitor", "monitor-pw", "prod", "", "any database"},
+		{"monitor", "port-pw", "prod", "28P01", "the monitor login with the port's password"},
+		{"monitor", "wrong", "postgres", "28P01", "a wrong password"},
+		{"Monitor", "monitor-pw", "postgres", "28P01", "the username in another case"},
+		{"anyone", "monitor-pw", "prod", "28P01", "the monitor's password under another username"},
+		{"anyone", "port-pw", "prod", "", "the port's own password, as before"},
+	} {
+		if got := pgLoginCode(t, addr, tc.user, tc.pw, tc.db); got != tc.want {
+			t.Errorf("%s (%s/%s/%s): %q, want %q", tc.why, tc.user, tc.pw, tc.db, got, tc.want)
+		}
+	}
+	host, port, _ := net.SplitHostPort(addr)
+	conn, err := pgconn.Connect(context.Background(), fmt.Sprintf("host=%s port=%s user=monitor password=monitor-pw dbname=postgres sslmode=disable", host, port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(context.Background())
+	res := conn.ExecParams(context.Background(), "SELECT pg_is_in_recovery()", nil, nil, nil, nil).Read()
+	if res.Err != nil || len(res.Rows) != 1 || string(res.Rows[0][0]) != "t" {
+		t.Errorf("pg_is_in_recovery(): %v %v", res.Rows, res.Err)
+	}
+	if res := conn.ExecParams(context.Background(), "SELECT 1", nil, nil, nil, nil).Read(); res.Err == nil {
+		t.Error("the monitor login answered SELECT 1")
+	}
+}

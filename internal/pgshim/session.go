@@ -342,6 +342,10 @@ type classified struct {
 	timeTravel bool
 }
 
+// monitorRefusal is what a connection opened with the monitor login answers
+// to a statement that is not one of a proxy's checks.
+var monitorRefusal = &pgErr{"0A000", "this is the port's monitor login, for a proxy's health checks: it opens no server, and answers an empty query and SELECT pg_is_in_recovery() only; connect with the port's password or an application login to read a server"}
+
 // classify decides which way resolve answers qstr, without running it. It is
 // the one place that decides: resolve acts on it, and the extended protocol
 // asks it before a statement runs (to say whether it returns rows, and how
@@ -400,6 +404,9 @@ func (s *session) classify(qstr string) classified {
 				}
 				return classified{kind: kindRefused, perr: catalogRefusal}
 			}
+		}
+		if s.bound != nil && s.bound.Monitor {
+			return classified{kind: kindRefused, perr: monitorRefusal}
 		}
 		if s.bound != nil {
 			return classified{kind: kindFree}

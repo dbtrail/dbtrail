@@ -748,6 +748,25 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		// before this username's are checked: the work a login does then
 		// says nothing about which usernames are application logins.
 		pgshim.WarmPasswords(srv.AllFlashbackPasswords())
+		// The monitor login (console.MonitorPasswordFor), the one ProxySQL's
+		// health checks log in with (pgsql-monitor_username/_password, the
+		// pair saved for the MySQL port's monitor too): its password only,
+		// and a connection that opens no server, whatever database it names
+		// (ProxySQL's is postgres). It answers what ProxySQL's PostgreSQL
+		// monitor sends (lib/PgSQL_Monitor.cpp): an empty query as its ping,
+		// and SELECT pg_is_in_recovery() for a server in a replication
+		// hostgroup, which is true here (a reader). Everything else is
+		// refused (pgshim.Binding.Monitor).
+		if mp, ok, err := srv.MonitorPasswordFor(user); err != nil || ok {
+			if err != nil || !password.Matches([]string{mp}) {
+				return nil, &pgshim.Error{Code: "28P01", Message: fmt.Sprintf("password authentication failed for user %q", user)}
+			}
+			untrack, tracked := srv.TrackLoginConn(console.MonitorLoginKey, epoch, drop)
+			if !tracked {
+				return nil, &pgshim.Error{Code: "57P03", Message: "the monitor login changed while connecting; reconnect"}
+			}
+			return &pgshim.Binding{Actor: "monitor", Schema: pgPortSchema, Monitor: true, Close: untrack}, nil
+		}
 		if !password.Matches(passwords) {
 			return nil, &pgshim.Error{Code: "28P01", Message: fmt.Sprintf("password authentication failed for user %q", user)}
 		}
