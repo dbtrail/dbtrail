@@ -81,6 +81,11 @@ const (
 	// oldest change it left to the next one); absent, readers assume
 	// reconstruct.PGDeltaMargin before the snapshot's time.
 	MetaKeyPGDeltaSince = "bintrail.pg_delta_since"
+	// PGDeltaMargin is how far before a PostgreSQL snapshot's time the
+	// changes it may be missing reach, when nothing knows better: what a
+	// full read records as MetaKeyPGDeltaSince, and what a reader assumes of
+	// a file that records none (reconstruct.PGDeltaMargin says why a minute).
+	PGDeltaMargin = time.Minute
 	// MetaKeyPGAnchorLSN is, on a file a full read of a PostgreSQL source
 	// wrote, the source's WAL position when the read's snapshot opened
 	// (#2963). The file's rows are the source as of that snapshot, which is

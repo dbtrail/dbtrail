@@ -58,3 +58,28 @@ func TestTableFooter_recordsTheSnapshotsOwnPosition(t *testing.T) {
 		t.Fatalf("floor %q, anchor %q; want 42 and 57", md[baseline.MetaKeyLSN], md[baseline.MetaKeyPGAnchorLSN])
 	}
 }
+
+// A full read's file records how far back the changes it may be missing
+// reach: the margin before its snapshot's time a reader assumed anyway.
+// Without it the first update after every full read wrote every changed
+// table again in full, never a table delta beside it.
+func TestTableFooter_recordsHowFarBackItsMissingChangesReach(t *testing.T) {
+	for ts, want := range map[string]string{
+		"2026-06-10T12:00:00Z":      "2026-06-10T11:59:00Z",
+		"2026-06-10T00:00:30Z":      "2026-06-09T23:59:30Z",
+		"2026-06-10T14:00:00+02:00": "2026-06-10T11:59:00Z",
+	} {
+		md, err := tableFooter(ordersInfo, ts, 42, 57)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := md[baseline.MetaKeyPGDeltaSince]; got != want {
+			t.Errorf("snapshot taken %s: bound %q, want %q", ts, got, want)
+		}
+	}
+	for _, ts := range []string{"", "2026-06-10 12:00:00", "2026-06-10T12-00-00Z"} {
+		if _, err := tableFooter(ordersInfo, ts, 42, 57); err == nil {
+			t.Errorf("snapshot time %q: a footer was written with no bound", ts)
+		}
+	}
+}
