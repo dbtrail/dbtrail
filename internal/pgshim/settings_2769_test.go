@@ -702,6 +702,25 @@ func TestParseSessionCmd(t *testing.T) {
 		{"select current_schema", "func current_schema"},
 		{"select pg_catalog.current_schema()", "func current_schema"},
 		{"SELECT version() AS v", ""},
+		// psycopg-based tools on connect (the HTAP bench of 2026-11-18).
+		{"SELECT pg_backend_pid(), current_setting('server_version')", "func pg_backend_pid,current_setting(server_version)"},
+		{"select PG_BACKEND_PID()", "func pg_backend_pid"},
+		{"select pg_catalog.pg_backend_pid();", "func pg_backend_pid"},
+		{"SELECT current_setting('TimeZone')", "func current_setting(timezone)"},
+		{"SELECT current_setting('nope', true)", "func current_setting(nope)?"},
+		{"SELECT current_setting('nope', false)", "func current_setting(nope)"},
+		{"SELECT version(), current_schema", "func version,current_schema"},
+		{"SELECT pg_backend_pid(),", ""},
+		{"SELECT pg_backend_pid() AS pid", ""},
+		{"SELECT pg_backend_pid(1)", ""},
+		{"SELECT pg_backend_pid", ""},
+		{"SELECT current_setting(name)", ""},
+		{"SELECT current_setting('a', 'b')", ""},
+		{"SELECT current_setting()", ""},
+		{"SELECT current_setting('server_version_num')::int/100 as version", ""},
+		{"SELECT pg_backend_pid() FROM t", ""},
+		{"SELECT pg_backend_pid(), 1", ""},
+		{"SELECT", ""},
 		{"select 1", ""},
 		{"settle", ""},
 		{"", ""},
@@ -767,7 +786,17 @@ func describeCmd(c *sessionCmd) string {
 	case cmdRollback:
 		return "rollback"
 	case cmdFunc:
-		return "func " + c.fn
+		names := make([]string, len(c.fns))
+		for i, f := range c.fns {
+			names[i] = f.fn
+			if f.param != "" {
+				names[i] += "(" + f.param + ")"
+			}
+			if f.missingOK {
+				names[i] += "?"
+			}
+		}
+		return "func " + strings.Join(names, ",")
 	}
 	return "?"
 }
