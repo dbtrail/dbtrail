@@ -119,24 +119,25 @@ func TestMemoryBudgetWords(t *testing.T) {
 // PostgreSQL router was stopped by the kernel for memory). Outside a
 // container, or with a share set, it says nothing more.
 func TestLogMemoryBudget_saysTheMachineIsSharedInAContainer(t *testing.T) {
-	saved := memoryInContainer
-	defer func() { memoryInContainer = saved }()
+	saved, savedCap := memoryInContainer, memoryCappedHere
+	defer func() { memoryInContainer, memoryCappedHere = saved, savedCap }()
 	for _, c := range []struct {
-		inContainer bool
-		share       float64
-		want        bool
-	}{{true, 1, true}, {false, 1, false}, {true, 0.3, false}} {
+		inContainer, capped bool
+		share               float64
+		want                bool
+	}{{true, false, 1, true}, {false, false, 1, false}, {true, false, 0.3, false}, {true, true, 1, false}} {
 		memoryInContainer = func() bool { return c.inContainer }
+		memoryCappedHere = func() bool { return c.capped }
 		var buf strings.Builder
 		l := slog.New(slog.NewTextHandler(&buf, nil))
 		logMemoryBudget(l, 8<<30, c.share, memoryBudgetFor(8<<30, c.share))
 		got := strings.Contains(buf.String(), "level=WARN") && strings.Contains(buf.String(), "PG_ROUTER_MEMORY_SHARE")
 		if got != c.want {
-			t.Errorf("container=%v share=%v: warned=%v\n%s", c.inContainer, c.share, got, buf.String())
+			t.Errorf("container=%v capped=%v share=%v: warned=%v\n%s", c.inContainer, c.capped, c.share, got, buf.String())
 		}
 	}
 	// No host memory: nothing is sized, nothing to say.
-	memoryInContainer = func() bool { return true }
+	memoryInContainer, memoryCappedHere = func() bool { return true }, func() bool { return false }
 	var buf strings.Builder
 	logMemoryBudget(slog.New(slog.NewTextHandler(&buf, nil)), 0, 1, 0)
 	if strings.Contains(buf.String(), "level=WARN") {

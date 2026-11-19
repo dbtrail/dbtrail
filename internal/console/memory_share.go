@@ -119,18 +119,23 @@ func logMemoryBudget(l *slog.Logger, host uint64, share float64, budget uint64) 
 		l.Info("memory budget: a share of this host", "share", share, "budget_mib", budget>>20, "host_mib", host>>20, "set_by", MemoryShareEnv)
 	default:
 		l.Info("memory budget: the whole host", "budget_mib", budget>>20, "set_by", MemoryShareEnv+" (unset)")
-		if memoryInContainer() {
+		if memoryInContainer() && !memoryCappedHere() {
 			l.Warn(memorySharedWarning)
 		}
 	}
 }
 
-// memorySharedWarning is said at startup by a process in a container that
-// sizes itself from the whole machine: in the Docker Compose stack the
+// memorySharedWarning is said at startup by a process in a container with no
+// memory cap of its own that sizes itself from the whole machine: in the Docker Compose stack the
 // machine is shared, and each service planning with all of it adds up to
 // more than there is. The kernel then stops one of them for memory (a router
 // and every client connected to it, or the index MySQL).
 const memorySharedWarning = "memory budget: this process sizes its memory from the whole machine, but it runs in a container, and with the Docker Compose stack it shares the machine with capture, the routers and the index MySQL, each also sized from all of it. If the kernel stops DBTrail's processes for memory, give each service its part in .env: DAEMON_MEMORY_SHARE (capture and the web interface), ROUTER_MEMORY_SHARE (the MySQL port) and PG_ROUTER_MEMORY_SHARE (the PostgreSQL port), adding up to less than 1 with the index MySQL's quarter, then docker compose up -d. Uncommenting security_opt (writable-cgroups=true) on the routers gives each statement a memory ceiling of its own (Docker 28 or later)."
+
+// memoryCappedHere reports whether this process's container has a memory
+// cap of its own: then HostMemoryBytes is that cap, not the machine, and
+// there is nothing shared to warn about. A seam for tests.
+var memoryCappedHere = func() bool { return memoryCapped("/") }
 
 // memoryInContainer reports whether this process runs in a container, by
 // the files Docker and Podman leave at the root. A seam for tests.
