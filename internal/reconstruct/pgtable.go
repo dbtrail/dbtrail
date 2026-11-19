@@ -141,6 +141,23 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 	if err != nil {
 		return nil, "", fmt.Errorf("%s.%s: %w", schema, table, err)
 	}
+	// A full read's file that capture has not passed is published as it is
+	// (pgHeldForFullRead): its rows are newer than the changes this run
+	// could lay over them.
+	if why, err := pgHeldForFullRead(ctx, db, cfg, p.baselinePath, bmeta, b); err != nil {
+		return nil, "", fmt.Errorf("%s.%s: %w", schema, table, err)
+	} else if why != "" {
+		linked, delta, cerr := pgCarryForward(ctx, p.baselinePath, cfg.snapshotDir, schema, table)
+		if cerr != nil {
+			return nil, "", fmt.Errorf("carry %s.%s forward as its full read left it: %w", schema, table, cerr)
+		}
+		rep.PG, rep.CarriedForward, rep.CarriedByLink = true, true, linked
+		rep.Files = append([]string{filepath.Join(schema, table+".parquet")}, delta...)
+		rep.Duration = time.Since(start)
+		slog.Info("table published as its full read left it: the changes captured so far are older than its rows",
+			"schema", schema, "table", table, "linked", linked, "reason", why)
+		return rep, "", nil
+	}
 	shapes, err := metadata.LoadPGShapes(ctx, db, floor)
 	if err != nil {
 		return nil, "", fmt.Errorf("%s.%s: %w", schema, table, err)
@@ -343,6 +360,55 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 		"deletes_skipped", rep.DeletesSkipped,
 		"duration_ms", rep.Duration.Milliseconds())
 	return rep, "", nil
+}
+
+// pgHeldForFullRead says why a table's file is published as it is instead of
+// having this run's changes laid over it, "" when the run goes on.
+//
+// A full read's rows are the source as of a position PAST the file's floor
+// (baseline.MetaKeyPGAnchorLSN, #2963): the floor is where the replication
+// slot stood, the rows are as of where the WAL stood when the read opened.
+// Every commit between the two is in the file already. A run that ends short
+// of that position has some of those commits and not the later ones: for a
+// row that changed twice in between it holds the first change, and would
+// write it over the second, which the file holds. The snapshot published
+// would show that row older than the one before it did, or a deleted row
+// back, until an update that reaches the position put it right.
+//
+// So the run goes on only when it holds every commit below that position:
+// it ends at or past it, or capture says it has indexed the source through
+// it (PGSentThrough, which moves on a source with no commit too) and the run
+// ends at the newest change the index holds. Otherwise the file is the
+// table: every change the index holds is in it. The next update reads from
+// the same floor.
+//
+// Only where a file can be carried (Parquet out of a local folder, with the
+// option on, a file that records its own bound); elsewhere the run goes on
+// as it always did, and says so.
+func pgHeldForFullRead(ctx context.Context, db *sql.DB, cfg FullTableConfig, srcPath string, bmeta baseline.DumpMetadata, b pgFoldBounds) (string, error) {
+	anchor := bmeta.PGAnchorLSN
+	if anchor == 0 || (b.Until != nil && b.Until.Pos >= anchor) {
+		return "", nil
+	}
+	sent, ok, err := PGSentThrough(ctx, db)
+	if err != nil {
+		return "", err
+	}
+	if ok && sent >= anchor && cfg.pgRun.allIn {
+		return "", nil
+	}
+	why := fmt.Sprintf("the full read is of the source at LSN %s, and capture has not said it indexed the source that far", lsnText(anchor))
+	if ok {
+		why = fmt.Sprintf("the full read is of the source at LSN %s, and this update holds the changes up to an earlier one (capture has indexed through %s)", lsnText(anchor), lsnText(sent))
+	}
+	// A file that records no bound of its own cannot be published again as
+	// it is either (pgCarryForwardEligible says why).
+	if !carryForwardEligible(cfg.CarryForwardUnchanged, cfg.OutputFormat, srcPath, 0, nil) || bmeta.PGDeltaSince == "" {
+		slog.Warn("the changes captured so far are laid over a full read whose rows may be newer than them; rows that changed more than once since can read older until the next update",
+			"baseline", srcPath, "reason", why)
+		return "", nil
+	}
+	return why, nil
 }
 
 // pgNeverPartitionedBefore is the index's first hour when a PostgreSQL fold
