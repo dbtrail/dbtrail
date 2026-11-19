@@ -164,15 +164,15 @@ func (r *pgTailRig) rewritten(tbl views.BaselineTable, at time.Time, floor uint6
 		r.t.Fatal(err)
 	}
 	stamp := at.Format(time.RFC3339)
+	// The bound of time (no change at or after floor committed before it) is
+	// the first file's: the rig's changes are stamped within the first half
+	// hour, so it holds for every later file.
 	md := map[string]string{
 		baseline.MetaKeySnapshotTimestamp: stamp,
 		baseline.MetaKeyLastDumpAt:        stamp,
 		baseline.MetaKeyLSN:               strconv.FormatUint(floor, 10),
-		// The bound of time: no change at or after floor committed before
-		// it. The rig's changes are stamped within the first half hour, so
-		// the first file's bound holds for every later one.
-		baseline.MetaKeyPGDeltaSince: r.at.Add(-time.Minute).Format(time.RFC3339),
-		baseline.MetaKeyPGRelation:   old.PGRelation,
+		baseline.MetaKeyPGDeltaSince:      r.at.Add(-time.Minute).Format(time.RFC3339),
+		baseline.MetaKeyPGRelation:        old.PGRelation,
 		baseline.MetaKeyRenderGUCs:        baseline.RenderGUCsPinned,
 		baseline.MetaKeyLockMode:          baseline.LockStampPGRepeatableRead,
 		baseline.MetaKeySnapshotProducer:  baseline.ProducerDump,
