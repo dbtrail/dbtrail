@@ -17,6 +17,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
+	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/pgdelta"
 )
@@ -397,6 +398,52 @@ type pgPrevPair struct {
 	// keys is how many rows its .pgnew holds.
 	run, base string
 	keys      int64
+	// over is why no further pair is written beside the file, "" when one
+	// may be. size is the file and the pair together, in bytes.
+	over string
+	size int64
+}
+
+// materializePGBaseWithPair writes the table as its file and the pair beside
+// it leave it, as ONE temporary Parquet file the ordinary merge takes for its
+// baseline: how a table whose pair has ended is written in full without
+// reading again, from the index, every change since its file was written.
+// The PostgreSQL sibling of materializeBaseWithDelta, which says why this is
+// nothing new to the merge (an S3 baseline makes the same trip).
+//
+// dir is where the temporary file goes (FullTableConfig.DownloadDir, "" the
+// system's); with a dir and a spaceCheck the free disk there is checked first
+// against the file and the pair together, and a full disk during the write
+// is ErrLocalDiskFull.
+func materializePGBaseWithPair(ctx context.Context, basePath string, prev *pgPrevPair, tuning duckdbutil.Tuning, dir string, spaceCheck func(string, int64) error) (string, func(), error) {
+	if err := baselineintegrity.ValidateLocalFileOnce(basePath); err != nil {
+		return "", nil, err
+	}
+	if dir != "" && spaceCheck != nil {
+		if err := spaceCheck(dir, prev.size); err != nil {
+			return "", nil, err
+		}
+	}
+	tmpDir, err := os.MkdirTemp(dir, "bintrail-compact-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("mkdir temp: %w", err)
+	}
+	cleanup := func() { os.RemoveAll(tmpDir) }
+	tmpPath := filepath.Join(tmpDir, "baseline.parquet")
+	duck, err := sql.Open("duckdb", "")
+	if err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("open duckdb: %w", err)
+	}
+	defer duck.Close()
+	applyDuckDBTuning(ctx, duck, tuning)
+	q := fmt.Sprintf("COPY (%s) TO '%s' (FORMAT PARQUET, COMPRESSION '%s')",
+		pgdelta.StateSQL(basePath, []string{prev.dead}, []string{prev.rows}), strings.ReplaceAll(tmpPath, "'", "''"), ParquetWriterCompression)
+	if _, err := duck.ExecContext(ctx, q); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("apply the table delta to its file: %w", localWriteErr(err))
+	}
+	return tmpPath, cleanup, nil
 }
 
 // pgPrevPairOf reads the pair beside the table file at srcPath, for an
@@ -475,12 +522,23 @@ func pgPrevPairOf(ctx context.Context, cfg FullTableConfig, srcPath string, bmet
 	// written over a loss. Anything else is not a pair of this file's.
 	case p.meta.CaptureGap != bmeta.CaptureGap:
 		return nil, "the delta beside the previous file records another loss of captured changes than its file"
-	case deadRows*pgPairMaxShare > baseRows:
-		return nil, "the delta beside the previous file already takes away too many of its rows"
 	case p.meta.LSN == 0 || p.meta.LSN < bmeta.LSN || p.meta.PGDeltaSince == "" || p.meta.SnapshotTimestamp.IsZero():
 		return nil, "the delta beside the previous file does not record where its window ended"
+	}
+	// A pair that is whole and already too large beside its file is still
+	// what the table is: the update reads the window after it and writes
+	// the table in full from the file and the pair (over).
+	switch {
+	case deadRows*pgPairMaxShare > baseRows:
+		p.over = "the delta beside the previous file already takes away too many of its rows"
 	case p.keys*pgPairMaxShare > baseRows:
-		return nil, "the delta beside the previous file already holds too many changes beside it"
+		p.over = "the delta beside the previous file already holds too many changes beside it"
+	}
+	p.size = fi.Size()
+	for _, f := range []string{p.dead, p.rows} {
+		if st, serr := os.Stat(f); serr == nil {
+			p.size += st.Size()
+		}
 	}
 	return p, ""
 }

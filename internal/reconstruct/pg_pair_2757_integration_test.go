@@ -350,6 +350,21 @@ func TestReconstructTables_PGTablePair(t *testing.T) {
 	if md4.LSN != 0x90f {
 		t.Fatalf("the rewritten file's LSN is %X, want 90F", md4.LSN)
 	}
+	// Written from the previous file and the pair beside it, with the five
+	// changes since: the nine before them, which the pair held, were not
+	// read again from the index.
+	if reps[0].EventsApplied != 5 {
+		t.Fatalf("the rewrite applied %d events; want the 5 since the pair before", reps[0].EventsApplied)
+	}
+
+	// And the update after it starts from that file: a pair again.
+	f.event(0xa00, 52*time.Minute, 2, "20", s("after the rewrite"))
+	f.checkpoint(0xa00)
+	at5 := f.at(60 * time.Minute)
+	reps = both(at5)
+	if left := f.pairFiles(onRoot, at5); len(left) != 2 || reps[0].EventsApplied != 1 || !f.sameFile(f.tableFile(onRoot, at4), f.tableFile(onRoot, at5)) {
+		t.Fatalf("fifth update: delta files %v, %d events; want a pair of 1 change beside the rewritten file", left, reps[0].EventsApplied)
+	}
 	// The older snapshots still read as they did: the rewrite wrote a new
 	// file, not through the linked one.
 	if got, _ := f.state(onRoot, at3); !sameRows(got, want) {
