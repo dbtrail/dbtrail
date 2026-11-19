@@ -720,6 +720,8 @@ func (s *session) localColumns(c *sessionCmd) ([]string, []colType, *pgErr) {
 				types[i] = colType{oid: oidName, size: 64, typmod: -1}
 			case "pg_backend_pid":
 				types[i] = colType{oid: oidInt4, size: 4, typmod: -1}
+			case "pg_is_in_recovery":
+				types[i] = colType{oid: oidBool, size: 1, typmod: -1}
 			case "current_setting":
 				// An unknown parameter reaches here only where nothing
 				// else can answer it (classify sends it on otherwise), and
@@ -787,6 +789,8 @@ func (s *session) funcCell(f funcCall) []byte {
 			pid = s.cancelTarget.pid
 		}
 		return []byte(strconv.FormatUint(uint64(pid), 10))
+	case "pg_is_in_recovery":
+		return []byte("t")
 	case "current_setting":
 		g, perr := lookupGUC(f.param)
 		if perr != nil {

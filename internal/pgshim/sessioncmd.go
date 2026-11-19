@@ -84,8 +84,8 @@ func (c *sessionCmd) returnsRows() bool { return c.kind == cmdShow || c.kind == 
 
 // funcCall is one connect-time function of a cmdFunc's select list.
 type funcCall struct {
-	// fn is "version", "current_schema", "pg_backend_pid" or
-	// "current_setting".
+	// fn is "version", "current_schema", "pg_backend_pid",
+	// "pg_is_in_recovery" or "current_setting".
 	fn string
 	// param is current_setting's parameter, lowercased; missingOK is its
 	// second argument (true: an unknown parameter is NULL, not an error).
@@ -694,6 +694,11 @@ func (p *cmdParser) funcCall() (funcCall, bool) {
 		return funcCall{fn: "version"}, p.punct("(") && p.punct(")")
 	case p.kw("pg_backend_pid"):
 		return funcCall{fn: "pg_backend_pid"}, p.punct("(") && p.punct(")")
+	case p.kw("pg_is_in_recovery"):
+		// True: the port is read-only, as a standby is. ProxySQL's monitor
+		// asks it of a server in a replication hostgroup, and keeps a true
+		// one among the readers.
+		return funcCall{fn: "pg_is_in_recovery"}, p.punct("(") && p.punct(")")
 	case p.kw("current_schema"):
 		// current_schema is also a word PostgreSQL reads without its
 		// parentheses.

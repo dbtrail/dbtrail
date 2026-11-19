@@ -90,6 +90,11 @@ type Binding struct {
 	Answered func(took time.Duration, refused bool)
 	// Close, when set, runs once when the connection ends.
 	Close func()
+	// Monitor is a connection opened with a proxy's monitor login: it opens
+	// no server, and answers only the proxy's checks, an empty query, the
+	// session's own statements and SELECT pg_is_in_recovery(); any other
+	// statement is refused (monitorRefusal).
+	Monitor bool
 	// Forward, when set, is how the connection reaches the server's source,
 	// which answers a transaction block the client opens, a catalog
 	// statement the copy does not answer, and every statement the copy is
