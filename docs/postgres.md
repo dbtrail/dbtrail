@@ -1198,7 +1198,10 @@ What this costs and where it can go wrong:
 
 - **One round trip to the source** for each statement the copy could answer,
   and a connection there for that moment (`--max-source-connections`), given
-  back as soon as the copy is chosen. With every one of them taken, or a
+  back as soon as the copy is chosen. A client connection holds one there
+  only while something of its own lives on it, so most statements open it,
+  a login of the forwarding user, as a statement the source answers did
+  already. With every one of them taken, or a
   source that cannot be reached, the statement goes to the source and gets
   that error (`53300`, `08001`), where the copy used to answer it.
 - **An `EXPLAIN` the source refuses** (a table it does not have, a syntax it
