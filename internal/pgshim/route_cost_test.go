@@ -426,7 +426,7 @@ func TestRouteByCost_simple(t *testing.T) {
 		{"a read by the primary key", "SELECT n FROM t WHERE id = 1", costOutcome{"42", "", RouteSource, ReasonCheapPlan}, "EXPLAIN (FORMAT JSON) SELECT n FROM t WHERE id = 1"},
 		{"a report", "SELECT sum(n) FROM big", costOutcome{"7", "", RouteCopy, ReasonAnswersTheSame}, "EXPLAIN (FORMAT JSON) SELECT sum(n) FROM big"},
 		{"a scan over the row threshold that costs little", "SELECT sum(n) FROM wide", costOutcome{"7", "", RouteCopy, ReasonAnswersTheSame}, "EXPLAIN (FORMAT JSON) SELECT sum(n) FROM wide"},
-		{"a scan of a small table", "SELECT max(n) FROM hb", costOutcome{"42", "", RouteSource, ReasonCheapPlan}, "EXPLAIN (FORMAT JSON) SELECT max(n) FROM hb"},
+		{"a scan of a small table", "SELECT sum(n) FROM hb", costOutcome{"42", "", RouteSource, ReasonCheapPlan}, "EXPLAIN (FORMAT JSON) SELECT sum(n) FROM hb"},
 		{"EXPLAIN refused: the source answers, with its error", "SELECT count(*) FROM nosuch", costOutcome{"", "42P01", RouteSource, ReasonExplainFailed}, "EXPLAIN (FORMAT JSON) SELECT count(*) FROM nosuch"},
 		{"a plan that cannot be read", "SELECT count(*) FROM garbled", costOutcome{"42", "", RouteSource, ReasonExplainFailed}, "EXPLAIN (FORMAT JSON) SELECT count(*) FROM garbled"},
 		{"cancelled while its plan was asked for: not run anywhere", "SELECT count(*) FROM canceled", costOutcome{"", "57014", RouteSource, ReasonExplainFailed}, "EXPLAIN (FORMAT JSON) SELECT count(*) FROM canceled"},
@@ -529,7 +529,7 @@ func TestRouteByCost_prepared(t *testing.T) {
 	src := startFakeSource(t, costPlans)
 	l := &costLogin{src: src}
 	c := costPortConn(t, ctx, l)
-	for _, tc := range []struct {
+	for i, tc := range []struct {
 		name, stmt string
 		args       [][]byte
 		answer     string
@@ -538,10 +538,10 @@ func TestRouteByCost_prepared(t *testing.T) {
 		explain    string
 	}{
 		{"a read by the primary key", "SELECT n FROM t WHERE id = $1", [][]byte{[]byte("1")}, "42", RouteSource, ReasonCheapPlan, "EXPLAIN (GENERIC_PLAN, FORMAT JSON) SELECT n FROM t WHERE id = $1"},
-		{"a report with a parameter", "SELECT sum(n) FROM big WHERE n > $1", [][]byte{[]byte("0")}, "7", RouteCopy, ReasonAnswersTheSame, "EXPLAIN (GENERIC_PLAN, FORMAT JSON) SELECT sum(n) FROM big WHERE n > $1"},
+		{"a report with a parameter", "SELECT sum(n) FROM big WHERE n = $1", [][]byte{[]byte("1")}, "7", RouteCopy, ReasonAnswersTheSame, "EXPLAIN (GENERIC_PLAN, FORMAT JSON) SELECT sum(n) FROM big WHERE n = $1"},
 		{"a report without a parameter", "SELECT sum(n) FROM big", nil, "7", RouteCopy, ReasonAnswersTheSame, "EXPLAIN (FORMAT JSON) SELECT sum(n) FROM big"},
 	} {
-		name := fmt.Sprintf("s%d", len(src.explained()))
+		name := fmt.Sprintf("s%d", i)
 		before := len(src.explained())
 		sd, err := c.Prepare(ctx, name, tc.stmt, nil)
 		if err != nil {
@@ -601,11 +601,17 @@ func TestRouteByCost_unreachableSource(t *testing.T) {
 	t.Cleanup(func() { _ = ln.Close() })
 	l := &costLogin{src: &fakeSource{addr: ln.Addr().String()}}
 	c := costPortConn(t, ctx, l)
+	// What one statement sent to the source tries (the driver may dial
+	// more than once to connect).
+	if got := costSimple(ctx, c, l, "SELECT now()"); got.code != "08001" || got.reason != ReasonVeto {
+		t.Fatalf("a veto with the source down: %+v", got)
+	}
+	once := dials.Load()
 	got := costSimple(ctx, c, l, "SELECT sum(n) FROM big")
 	if got.answer != "" || got.code != "08001" || got.side != RouteSource || got.reason != ReasonExplainFailed {
 		t.Errorf("an unreachable source: %+v", got)
 	}
-	if n := dials.Load(); n != 1 {
-		t.Errorf("%d connections tried, want 1", n)
+	if n := dials.Load() - once; once == 0 || n != once {
+		t.Errorf("asking for the plan tried %d connections, want %d: the statement was sent to the source again", n, once)
 	}
 }
