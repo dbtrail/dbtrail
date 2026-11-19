@@ -350,6 +350,21 @@ func TestReconstructTables_PGTablePair(t *testing.T) {
 	if md4.LSN != 0x90f {
 		t.Fatalf("the rewritten file's LSN is %X, want 90F", md4.LSN)
 	}
+	// Written from the previous file and the pair beside it, with the five
+	// changes since: the nine before them, which the pair held, were not
+	// read again from the index.
+	if reps[0].EventsApplied != 5 {
+		t.Fatalf("the rewrite applied %d events; want the 5 since the pair before", reps[0].EventsApplied)
+	}
+
+	// And the update after it starts from that file: a pair again.
+	f.event(0xa00, 52*time.Minute, 2, "20", s("after the rewrite"))
+	f.checkpoint(0xa00)
+	at5 := f.at(60 * time.Minute)
+	reps = both(at5)
+	if left := f.pairFiles(onRoot, at5); len(left) != 2 || reps[0].EventsApplied != 1 || !f.sameFile(f.tableFile(onRoot, at4), f.tableFile(onRoot, at5)) {
+		t.Fatalf("fifth update: delta files %v, %d events; want a pair of 1 change beside the rewritten file", left, reps[0].EventsApplied)
+	}
 	// The older snapshots still read as they did: the rewrite wrote a new
 	// file, not through the linked one.
 	if got, _ := f.state(onRoot, at3); !sameRows(got, want) {
@@ -552,5 +567,71 @@ func TestReconstructTables_PGTablePairContinuesThePairBefore(t *testing.T) {
 	if len(f.pairFiles(onRoot, at4)) != 2 || r.EventsApplied != 12 || footer["bintrail.pgdelta_from"] != "" {
 		t.Fatalf("fourth update: delta files %v, %d events, continues %q; want a pair from all 12 changes since the file, continuing none",
 			f.pairFiles(onRoot, at4), r.EventsApplied, footer["bintrail.pgdelta_from"])
+	}
+}
+
+// A pair ends for other reasons than its size: its file has grown too old
+// for the index to keep the events it starts from, with changes in the
+// window or with none. The table is then written in full from the file and
+// the pair, with the window's changes alone read from the index: what the
+// pair held is in the table, and is not read again.
+func TestReconstructTables_PGTablePairEndsWithoutReadingItsChangesAgain(t *testing.T) {
+	for name, changes := range map[string]bool{"changes in the window": true, "no change in the window": false} {
+		t.Run(name, func(t *testing.T) {
+			f := newPGFixture(t)
+			onRoot, offRoot := t.TempDir(), t.TempDir()
+			taken := f.at(10 * time.Minute)
+			for _, root := range []string{onRoot, offRoot} {
+				f.baseline(root, taken, 0x500, taken.Add(-time.Minute).Format(time.RFC3339), pairRows()...)
+			}
+			f.other(0x600, 12*time.Minute)
+			f.event(0x700, 12*time.Minute, 2, "1", s("one"))
+			f.event(0x710, 13*time.Minute, 3, "2", nil)
+			f.event(0x720, 14*time.Minute, 1, "40", s("forty"))
+			f.checkpoint(0x720)
+			at1 := f.at(20 * time.Minute)
+			run := func(at, floor time.Time) (*reconstruct.TableReport, map[string]string) {
+				t.Helper()
+				reconstruct.SetPGTableDeltas(t, false)
+				want, _, _, err := f.run(offRoot, pgRun{at: at, carry: true, chainFloor: floor})
+				if err != nil {
+					t.Fatal(err)
+				}
+				reconstruct.SetPGTableDeltas(t, true)
+				_, _, reps, err := f.run(onRoot, pgRun{at: at, carry: true, chainFloor: floor})
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, _ := f.state(onRoot, at)
+				if !sameRows(got, want) {
+					t.Fatalf("at %s the table reads %v, and a rewrite gives %v", at.Format("15:04"), got, want)
+				}
+				return reps[0], got
+			}
+			if r, _ := run(at1, f.base); len(f.pairFiles(onRoot, at1)) != 2 || r.EventsApplied != 3 {
+				t.Fatalf("first update: delta files %v, %d events; want a pair from 3", f.pairFiles(onRoot, at1), r.EventsApplied)
+			}
+
+			window := int64(0)
+			if changes {
+				f.event(0x800, 22*time.Minute, 2, "3", s("three"))
+				f.event(0x810, 23*time.Minute, 3, "40", nil)
+				f.checkpoint(0x810)
+				window = 2
+			}
+			// The line is now past the file's own bound: no pair beside it.
+			at2 := f.at(30 * time.Minute)
+			r, got := run(at2, at1)
+			if left := f.pairFiles(onRoot, at2); len(left) != 0 || r.CarriedForward || f.sameFile(f.tableFile(onRoot, taken), f.tableFile(onRoot, at2)) {
+				t.Fatalf("second update: delta files %v, carried %v; want the table written in full", left, r.CarriedForward)
+			}
+			if r.EventsApplied != window {
+				t.Fatalf("second update applied %d events; want the %d of its window, not the 3 the pair held", r.EventsApplied, window)
+			}
+			// What only the pair held is in the table.
+			if got["1"] != "one" || got["2"] != "" {
+				t.Fatalf("second update: row 1 reads %q and row 2 %q; want one, and no row 2", got["1"], got["2"])
+			}
+		})
 	}
 }

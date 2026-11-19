@@ -17,6 +17,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
+	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/pgdelta"
 )
@@ -125,6 +126,12 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		// A pair that was already there is not this call's to remove.
 		if !errors.Is(cause, pgdelta.ErrPairExists) {
 			removePGPair(dst)
+		}
+		// Whatever kept this pair from being written may be the pair before
+		// it (its rows or its dead rows would not read): the table is then
+		// not written from that pair either.
+		if prev != nil {
+			prev.distrust = why
 		}
 		slog.Warn("PostgreSQL table delta not written; the table is written without it",
 			"schema", in.Schema, "table", in.Table, "reason", why, "error", cause,
@@ -397,6 +404,77 @@ type pgPrevPair struct {
 	// keys is how many rows its .pgnew holds.
 	run, base string
 	keys      int64
+	// over is why no further pair is written beside the file, "" when one
+	// may be. size is the file and the pair together, in bytes.
+	over string
+	size int64
+	// distrust is set by a write that could not continue this pair for a
+	// reason that is not its size: the caller then reads every change since
+	// the file instead of taking the pair's word for the table.
+	distrust string
+}
+
+// materializePGBaseWithPair writes the table as its file and the pair beside
+// it leave it, as ONE temporary Parquet file the ordinary merge takes for its
+// baseline: how a table whose pair has ended is written in full without
+// reading again, from the index, every change since its file was written.
+// The PostgreSQL sibling of materializeBaseWithDelta, which says why this is
+// nothing new to the merge (an S3 baseline makes the same trip).
+//
+// dir is where the temporary file goes: the caller gives the folder the
+// snapshot is being written in, the disk that is about to take the table
+// anyway (the system's temporary folder is often too small for one). With a
+// spaceCheck the free disk there is checked first against the file and the
+// pair together.
+func materializePGBaseWithPair(ctx context.Context, basePath string, prev *pgPrevPair, tuning duckdbutil.Tuning, dir string, spaceCheck func(string, int64) error) (string, func(), error) {
+	if err := baselineintegrity.ValidateLocalFileOnce(basePath); err != nil {
+		return "", nil, err
+	}
+	if dir != "" && spaceCheck != nil {
+		if err := spaceCheck(dir, prev.size); err != nil {
+			return "", nil, err
+		}
+	}
+	tmpDir, err := os.MkdirTemp(dir, "bintrail-compact-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("mkdir temp: %w", err)
+	}
+	cleanup := func() { os.RemoveAll(tmpDir) }
+	tmpPath := filepath.Join(tmpDir, "baseline.parquet")
+	duck, err := sql.Open("duckdb", "")
+	if err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("open duckdb: %w", err)
+	}
+	defer duck.Close()
+	applyDuckDBTuning(ctx, duck, tuning)
+	lit := func(p string) string { return "'" + strings.ReplaceAll(p, "'", "''") + "'" }
+	q := fmt.Sprintf("COPY (%s) TO %s (FORMAT PARQUET, COMPRESSION '%s')",
+		pgdelta.StateSQL(basePath, []string{prev.dead}, []string{prev.rows}), lit(tmpPath), ParquetWriterCompression)
+	if _, err := duck.ExecContext(ctx, q); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("apply the table delta to its file: %w", localWriteErr(err))
+	}
+	// The table has the file's rows, less the ones the pair takes away, plus
+	// the rows the pair puts. Anything else is a pair that does not say what
+	// it seems to (a row number the file does not have, a key written
+	// twice), and no table is written from it.
+	var got, base, dead, puts int64
+	err = duck.QueryRowContext(ctx, "SELECT (SELECT count(*) FROM read_parquet("+lit(pgdelta.GlobLiteral(tmpPath))+")),"+
+		" (SELECT count(*) FROM read_parquet("+lit(pgdelta.GlobLiteral(basePath))+", hive_partitioning=false)),"+
+		" (SELECT count(*) FROM read_parquet("+lit(pgdelta.GlobLiteral(prev.dead))+", hive_partitioning=false)),"+
+		" (SELECT count(*) FROM read_parquet("+lit(pgdelta.GlobLiteral(prev.rows))+", hive_partitioning=false) WHERE "+pgdelta.OpColumn+" = '"+pgdelta.OpPut+"')").
+		Scan(&got, &base, &dead, &puts)
+	if err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("count the rows of the file with its delta: %w", err)
+	}
+	if got != base-dead+puts {
+		cleanup()
+		return "", nil, fmt.Errorf("the file with its delta has %d rows, and the file's %d less the %d its delta takes away plus the %d it puts is %d",
+			got, base, dead, puts, base-dead+puts)
+	}
+	return tmpPath, cleanup, nil
 }
 
 // pgPrevPairOf reads the pair beside the table file at srcPath, for an
@@ -475,12 +553,23 @@ func pgPrevPairOf(ctx context.Context, cfg FullTableConfig, srcPath string, bmet
 	// written over a loss. Anything else is not a pair of this file's.
 	case p.meta.CaptureGap != bmeta.CaptureGap:
 		return nil, "the delta beside the previous file records another loss of captured changes than its file"
-	case deadRows*pgPairMaxShare > baseRows:
-		return nil, "the delta beside the previous file already takes away too many of its rows"
 	case p.meta.LSN == 0 || p.meta.LSN < bmeta.LSN || p.meta.PGDeltaSince == "" || p.meta.SnapshotTimestamp.IsZero():
 		return nil, "the delta beside the previous file does not record where its window ended"
+	}
+	// A pair that is whole and already too large beside its file is still
+	// what the table is: the update reads the window after it and writes
+	// the table in full from the file and the pair (over).
+	switch {
+	case deadRows*pgPairMaxShare > baseRows:
+		p.over = "the delta beside the previous file already takes away too many of its rows"
 	case p.keys*pgPairMaxShare > baseRows:
-		return nil, "the delta beside the previous file already holds too many changes beside it"
+		p.over = "the delta beside the previous file already holds too many changes beside it"
+	}
+	p.size = fi.Size()
+	for _, f := range []string{p.dead, p.rows} {
+		if st, serr := os.Stat(f); serr == nil {
+			p.size += st.Size()
+		}
 	}
 	return p, ""
 }
