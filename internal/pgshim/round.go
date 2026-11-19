@@ -34,9 +34,11 @@ func RewriteForCopy(stmt string) string {
 
 // The macros the rewrite writes, which the screen lets through.
 const (
-	pgRoundDiv = "_bintrail_pg_round_div"
-	pgRoundAvg = "_bintrail_pg_round_avg"
-	pgFloorDiv = "_bintrail_pg_floor_div"
+	pgRoundDiv         = "_bintrail_pg_round_div"
+	pgRoundAvg         = "_bintrail_pg_round_avg"
+	pgFloorDiv         = "_bintrail_pg_floor_div"
+	pgEpochMacro       = "_bintrail_pg_epoch"
+	pgToTimestampMacro = "_bintrail_pg_to_timestamp"
 )
 
 // maxRoundDecimals is the most decimals a rewritten round may ask for, the
@@ -67,16 +69,25 @@ func rewriteRounds(q string) (string, bool) {
 	var b strings.Builder
 	last, changed := 0, false
 	for i := 0; i < len(toks); i++ {
-		if toks[i].kind != rtWord || (toks[i].text != "round" && toks[i].text != "floor") || !isOpTok(toks, i+1, "(") || isOpTok(toks, i-1, ".") {
+		if toks[i].kind != rtWord || !isOpTok(toks, i+1, "(") || isOpTok(toks, i-1, ".") {
+			continue
+		}
+		var call func(string, []rtToken, [][2]int, int, int) (string, bool)
+		switch toks[i].text {
+		case "round":
+			call = roundCall
+		case "floor":
+			call = floorCall
+		case "extract":
+			call = epochCall
+		case "to_timestamp":
+			call = toTimestampCall
+		default:
 			continue
 		}
 		end := closingParen(toks, i+1)
 		if end < 0 {
 			continue
-		}
-		call := roundCall
-		if toks[i].text == "floor" {
-			call = floorCall
 		}
 		repl, ok := call(q, toks, spans, i+2, end)
 		if !ok {
@@ -244,6 +255,37 @@ func floorCall(q string, toks []rtToken, spans [][2]int, from, to int) (string, 
 		return "", false
 	}
 	return pgFloorDiv + "(" + p + ", " + d + ")", true
+}
+
+// epochCall is the macro call for extract(epoch from <x>), false for any
+// other field: the screen lets year, month and day through as they are.
+func epochCall(q string, toks []rtToken, spans [][2]int, from, to int) (string, bool) {
+	if to-from < 3 || toks[from].kind != rtWord || toks[from].text != "epoch" || toks[from+1].kind != rtWord || toks[from+1].text != "from" {
+		return "", false
+	}
+	x, _ := rewriteRounds(q[spans[from+2][0]:spans[to-1][1]])
+	return pgEpochMacro + "(" + x + ")", true
+}
+
+// toTimestampCall is the macro call for to_timestamp(<x>) of one argument
+// (to_timestamp(text, format) is another function).
+func toTimestampCall(q string, toks []rtToken, spans [][2]int, from, to int) (string, bool) {
+	if from >= to {
+		return "", false
+	}
+	depth := 0
+	for i := from; i < to; i++ {
+		switch {
+		case isOpTok(toks, i, "("):
+			depth++
+		case isOpTok(toks, i, ")"):
+			depth--
+		case depth == 0 && isOpTok(toks, i, ","):
+			return "", false
+		}
+	}
+	x, _ := rewriteRounds(q[spans[from][0]:spans[to-1][1]])
+	return pgToTimestampMacro + "(" + x + ")", true
 }
 
 // splitDivision reads toks[a0:a1] as P / Q, where P is a product of values

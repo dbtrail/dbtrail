@@ -154,7 +154,7 @@ func TestCopyScreen(t *testing.T) {
 		`SELECT id FROM "Orders"`:                                 "capitals",
 		`SELECT ~1`:                                               "~",
 		`SELECT date_trunc('month', signup) FROM pgcmp_customers`: "date_trunc",
-		`SELECT extract(epoch FROM placed_at) FROM pgcmp_orders`:  "extract",
+		`SELECT extract(hour FROM placed_at) FROM pgcmp_orders`:   "extract",
 		`SELECT id || ratio FROM pgcmp_orders`:                    "||",
 		`SELECT concat(id, ratio) FROM pgcmp_orders`:              "concat",
 		// Found by review: a comment that a carriage return ends, an alias

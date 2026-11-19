@@ -506,6 +506,9 @@ var copyFuncs = map[string]bool{
 	// floor(a / b), as RewriteForCopy writes it, and ntile(n), whose
 	// buckets pgcompare measured the same.
 	pgFloorDiv: true, "ntile": true,
+	// extract(epoch from x) of a timestamp and to_timestamp(n) of whole
+	// seconds, as RewriteForCopy writes them.
+	pgEpochMacro: true, pgToTimestampMacro: true,
 	"row_number": true, "rank": true, "lag": true,
 	"date_trunc": true, "date_part": true, "extract": true,
 }
