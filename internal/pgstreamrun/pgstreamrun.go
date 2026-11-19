@@ -229,6 +229,20 @@ func One(ctx context.Context, cfg Config) error {
 		state.resumed = true
 	}
 
+	// What the index holds past the position this run starts from is about
+	// to arrive again (deleteEventsPastCheckpointPG). Before the capturer
+	// exists: nothing new is indexed while this runs.
+	if saved != nil {
+		n, err := deleteEventsPastCheckpointPG(ctx, indexDB, startLSN)
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			logger.Info("pgstreamrun: removed the changes indexed past the saved position; the source sends them again from there",
+				"rows_removed", n, "resume_lsn", pglogrepl.LSN(startLSN).String())
+		}
+	}
+
 	cap := pgcapture.New(pgcapture.Config{
 		ReplDSN:            cfg.ReplDSN,
 		QueryDSN:           cfg.QueryDSN,
@@ -673,11 +687,11 @@ func streamLoopPG(
 
 		case <-w.WithinC():
 			// Complete transactions have waited long enough for a batch to
-			// fill (#2666). The whole checkpoint, not the commit alone: a
-			// resume here deletes nothing, PostgreSQL sends again whatever is
-			// after the saved LSN, so rows committed without it would be
-			// indexed twice after a crash. With the LSN saved in the same
-			// step that window stays as short as it was on a quiet source.
+			// fill (#2666). The whole checkpoint, not the commit alone:
+			// PostgreSQL sends again whatever is after the saved LSN, and
+			// the next start removes what the index holds past it
+			// (deleteEventsPastCheckpointPG), so the less that is committed
+			// without its LSN, the less a start after a crash has to remove.
 			if err := checkpoint(); err != nil {
 				return err
 			}
@@ -822,6 +836,50 @@ func loadStreamStatePG(db *sql.DB) (*pgStreamState, error) {
 		return nil, nil
 	}
 	return &pgStreamState{lsn: lsn, eventsIndexed: eventsIndexed, serverID: serverID, lastEventTime: lastEventTime}, nil
+}
+
+// deleteEventsPastCheckpointPG removes the changes the index holds past lsn,
+// the position a resumed run starts from, and returns how many: the
+// PostgreSQL sibling of streamrun's deleteEventsSinceCheckpoint (#759, #1482).
+//
+// Rows are made durable before the position is saved (checkpoint: commit,
+// then saveCheckpointPG), so a run that stops between the two leaves whole
+// transactions in the index past the saved position; and a transaction too
+// large to hold back is made visible in parts before its commit
+// (TxnBatcher's Split), all of them past it. PostgreSQL sends every
+// transaction that commits after the start position again, in full, and the
+// index has no key that would refuse the second copy: without this each such
+// row was in the index twice, for every reader, for good.
+//
+// Every row of a PostgreSQL transaction carries its commit LSN as its
+// position, so "past lsn" is exactly what arrives again. lsn 0 (no position
+// to resume from) removes nothing.
+//
+// The index has no key on the position. The event the saved position
+// reached (stream_state.pg_checkpoint_event_id, #2756) bounds the rows from
+// below: every row past the position was written after it. It prunes, it
+// never selects: the position stays the filter, so a bound that is too low
+// only reads more rows. With none recorded (an index from before it was) the
+// whole table is read, once, at this start.
+func deleteEventsPastCheckpointPG(ctx context.Context, db *sql.DB, lsn uint64) (int64, error) {
+	if lsn == 0 {
+		return 0, nil
+	}
+	var floor sql.NullInt64
+	err := db.QueryRowContext(ctx, `SELECT IF(binlog_position <= ?, pg_checkpoint_event_id, NULL)
+		FROM stream_state WHERE id = 1 AND flavor = ?`, lsn, pgFlavor).Scan(&floor)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("pgstreamrun: read the event the saved position reached: %w", err)
+	}
+	where, args := `start_pos > ?`, []any{lsn}
+	if floor.Valid && floor.Int64 > 0 {
+		where, args = `event_id > ? AND start_pos > ?`, []any{floor.Int64, lsn}
+	}
+	res, err := db.ExecContext(ctx, `DELETE FROM binlog_events WHERE `+where, args...)
+	if err != nil {
+		return 0, fmt.Errorf("pgstreamrun: remove the changes indexed past %s: %w", pglogrepl.LSN(lsn), err)
+	}
+	return res.RowsAffected()
 }
 
 // newestEventThrough is the newest event of the index whose position is at
