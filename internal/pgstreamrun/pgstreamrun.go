@@ -903,6 +903,7 @@ func deleteEventsPastCheckpointPG(ctx context.Context, db *sql.DB, lsn uint64) (
 		return 0, fmt.Errorf("pgstreamrun: remove the changes indexed past %s: %w", pglogrepl.LSN(lsn), err)
 	}
 	return res.RowsAffected()
+}
 
 // loadCaptureSkipsPG reads the persisted capture-skip counters (the PostgreSQL
 // twin of streamrun's loadCaptureSkips), so a restarting capture resumes the
