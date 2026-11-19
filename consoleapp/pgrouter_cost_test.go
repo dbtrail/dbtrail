@@ -25,7 +25,7 @@ func TestPGRouterCostSettings(t *testing.T) {
 		t.Fatalf("from the environment: %+v %v", st.Cost, err)
 	}
 	// A flag wins over its variable, and one rule may be off.
-	if st, err = pgRouterSettingsFrom(pgRouterTestCmd(t, "--route-cost-threshold", "0", "--route-scan-rows", "5")); err != nil || st.Cost != (pgshim.CostPolicy{CostThreshold: 0, ScanRows: 5}) {
+	if st, err = pgRouterSettingsFrom(pgRouterTestCmd(t, "--cost-threshold", "0", "--scan-rows", "5")); err != nil || st.Cost != (pgshim.CostPolicy{CostThreshold: 0, ScanRows: 5}) {
 		t.Fatalf("flags over the environment: %+v %v", st.Cost, err)
 	}
 	clearPGRouterEnv(t)
@@ -35,15 +35,15 @@ func TestPGRouterCostSettings(t *testing.T) {
 		env  [2]string
 		want string
 	}{
-		{[]string{"--route-cost-threshold", "0", "--route-scan-rows", "0"}, [2]string{}, "are both 0"},
-		{[]string{"--route-cost-threshold", "-1"}, [2]string{}, "--route-cost-threshold must be 0 or more"},
-		{[]string{"--route-scan-rows", "-1"}, [2]string{}, "--route-scan-rows must be 0 or more"},
-		{[]string{"--route-cost-threshold", "NaN"}, [2]string{}, "--route-cost-threshold must be a number"},
-		{[]string{"--route-cost-threshold", "+Inf"}, [2]string{}, "--route-cost-threshold must be a number"},
+		{[]string{"--cost-threshold", "0", "--scan-rows", "0"}, [2]string{}, "are both 0"},
+		{[]string{"--cost-threshold", "-1"}, [2]string{}, "--cost-threshold must be 0 or more"},
+		{[]string{"--scan-rows", "-1"}, [2]string{}, "--scan-rows must be 0 or more"},
+		{[]string{"--cost-threshold", "NaN"}, [2]string{}, "--cost-threshold must be a number"},
+		{[]string{"--cost-threshold", "+Inf"}, [2]string{}, "--cost-threshold must be a number"},
 		{nil, [2]string{"BINTRAIL_PG_ROUTER_COST_THRESHOLD", "cheap"}, `BINTRAIL_PG_ROUTER_COST_THRESHOLD="cheap" is not a number`},
 		{nil, [2]string{"BINTRAIL_PG_ROUTER_SCAN_ROWS", "1e6"}, `BINTRAIL_PG_ROUTER_SCAN_ROWS="1e6" is not a whole number`},
 		{nil, [2]string{"BINTRAIL_PG_ROUTER_SCAN_ROWS", "-5"}, "BINTRAIL_PG_ROUTER_SCAN_ROWS must be 0 or more"},
-		{[]string{"--route-cost-threshold", "0"}, [2]string{"BINTRAIL_PG_ROUTER_SCAN_ROWS", "0"}, "--route-cost-threshold and BINTRAIL_PG_ROUTER_SCAN_ROWS are both 0"},
+		{[]string{"--cost-threshold", "0"}, [2]string{"BINTRAIL_PG_ROUTER_SCAN_ROWS", "0"}, "--cost-threshold and BINTRAIL_PG_ROUTER_SCAN_ROWS are both 0"},
 	} {
 		clearPGRouterEnv(t)
 		if tc.env[0] != "" {
@@ -61,7 +61,7 @@ func TestPGRouterCostStartupLine(t *testing.T) {
 		pol  pgshim.CostPolicy
 		want []string
 	}{
-		{pgshim.DefaultCostPolicy(), []string{"costs 50,000 or more (--route-cost-threshold)", "sequential scan of 1,000,000 rows or more (--route-scan-rows)", "has no index"}},
+		{pgshim.DefaultCostPolicy(), []string{"costs 50,000 or more (--cost-threshold)", "sequential scan of 1,000,000 rows or more (--scan-rows)", "has no index"}},
 		{pgshim.CostPolicy{CostThreshold: 2500}, []string{"costs 2,500 or more", "the rule on sequential scans is off"}},
 		{pgshim.CostPolicy{ScanRows: 999}, []string{"sequential scan of 999 rows or more", "the rule on cost is off"}},
 	} {

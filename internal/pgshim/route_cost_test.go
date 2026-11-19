@@ -328,8 +328,10 @@ type costLogin struct {
 	src  *fakeSource
 	cost *CostPolicy
 	// held counts the connections to the source held now, and heldAtCopy
-	// what it was each time the copy ran a statement.
+	// what it was each time the copy ran a statement; opened how many were
+	// asked for.
 	held       atomic.Int32
+	opened     atomic.Int32
 	mu         sync.Mutex
 	heldAtCopy []int32
 	notes      []RouteNote
@@ -353,6 +355,7 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 	}}
 	if l.src != nil {
 		b.Forward = &Forward{DSN: l.src.dsn(), Limit: 4, Cost: l.cost, Acquire: func() (func(), bool) {
+			l.opened.Add(1)
 			l.held.Add(1)
 			var once sync.Once
 			return func() { once.Do(func() { l.held.Add(-1) }) }, true
@@ -587,31 +590,23 @@ func TestRouteByCost_unreachableSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var dials atomic.Int32
 	go func() {
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			dials.Add(1)
 			_ = c.Close()
 		}
 	}()
 	t.Cleanup(func() { _ = ln.Close() })
 	l := &costLogin{src: &fakeSource{addr: ln.Addr().String()}}
 	c := costPortConn(t, ctx, l)
-	// What one statement sent to the source tries (the driver may dial
-	// more than once to connect).
-	if got := costSimple(ctx, c, l, "SELECT now()"); got.code != "08001" || got.reason != ReasonVeto {
-		t.Fatalf("a veto with the source down: %+v", got)
-	}
-	once := dials.Load()
 	got := costSimple(ctx, c, l, "SELECT sum(n) FROM big")
 	if got.answer != "" || got.code != "08001" || got.side != RouteSource || got.reason != ReasonExplainFailed {
 		t.Errorf("an unreachable source: %+v", got)
 	}
-	if n := dials.Load() - once; once == 0 || n != once {
-		t.Errorf("asking for the plan tried %d connections, want %d: the statement was sent to the source again", n, once)
+	if n := l.opened.Load(); n != 1 {
+		t.Errorf("%d connections to the source were opened for one statement, want 1: it was sent there again", n)
 	}
 }

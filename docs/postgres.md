@@ -1177,10 +1177,10 @@ the forwarding user's connection (the statement itself does not run), and
 sends it to the copy only when:
 
 - the **Total Cost** at the top of the plan is **50,000 or more**
-  (`--route-cost-threshold`, `BINTRAIL_PG_ROUTER_COST_THRESHOLD`), or
+  (`--cost-threshold`, `BINTRAIL_PG_ROUTER_COST_THRESHOLD`), or
 - the plan has a **sequential scan** (a `Seq Scan` node, at any depth: in a
   join, a subquery, a `WITH`) estimated at **1,000,000 rows or more**
-  (`--route-scan-rows`, `BINTRAIL_PG_ROUTER_SCAN_ROWS`), whatever its cost. A
+  (`--scan-rows`, `BINTRAIL_PG_ROUTER_SCAN_ROWS`), whatever its cost. A
   scan run by parallel workers counts the rows of all of them.
 
 Anything else is answered by the source (`cheap_plan` in `/status`). 0 turns

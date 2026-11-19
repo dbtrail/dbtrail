@@ -142,8 +142,8 @@ func addPGRouterFlags(cmd *cobra.Command) {
 	f.Int("max-source-connections", defaultPGRouterMaxSourceConns, fmt.Sprintf("How many connections to the servers' own PostgreSQL this process holds at once, across every server, 1 to %d. A client holds one while a statement the source answers, or its transaction block, runs there; past the limit, the statement that needed one is refused with an error (53300). Env BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS.", maxPGRouterMaxSourceConns))
 	f.String("status-addr", "", "Address to serve the port's status on (host:port, e.g. 127.0.0.1:9092): /status, as JSON, says per server which side answered each statement and why, and /metrics this process's Prometheus metrics. Empty: none. It asks for no password. Env BINTRAIL_PG_ROUTER_STATUS_ADDR.")
 	f.Bool("status-statements", false, "Keep a row per statement shape and side in /status (values blanked, table and column names kept): whoever reaches --status-addr then reads the names of the tables and columns your clients query. Env BINTRAIL_PG_ROUTER_STATUS_STATEMENTS.")
-	f.Float64("route-cost-threshold", pgshim.DefaultCostThreshold, "With a server's forwarding user, a statement the copy answers as PostgreSQL does goes to the copy only when it is expensive on the source: when the Total Cost at the top of its plan (EXPLAIN on the source, before it runs) is at least this, or a sequential scan in the plan is estimated at --route-scan-rows rows or more; otherwise the source answers it, by its indexes (a read by a primary key costs about 1 to 12). 0 turns this rule off. Env BINTRAIL_PG_ROUTER_COST_THRESHOLD.")
-	f.Int64("route-scan-rows", pgshim.DefaultScanRows, "With a server's forwarding user, a statement the copy answers as PostgreSQL does goes to the copy when a sequential scan in its plan on the source (any Seq Scan node, at any depth) is estimated at this many rows or more, whatever its cost. 0 turns this rule off. Env BINTRAIL_PG_ROUTER_SCAN_ROWS.")
+	f.Float64("cost-threshold", pgshim.DefaultCostThreshold, "With a server's forwarding user, a statement the copy answers as PostgreSQL does goes to the copy only when it is expensive on the source: when the Total Cost at the top of its plan (EXPLAIN on the source, before it runs) is at least this, or a sequential scan in the plan is estimated at --scan-rows rows or more; otherwise the source answers it, by its indexes (a read by a primary key costs about 1 to 12). 0 turns this rule off. Env BINTRAIL_PG_ROUTER_COST_THRESHOLD.")
+	f.Int64("scan-rows", pgshim.DefaultScanRows, "With a server's forwarding user, a statement the copy answers as PostgreSQL does goes to the copy when a sequential scan in its plan on the source (any Seq Scan node, at any depth) is estimated at this many rows or more, whatever its cost. 0 turns this rule off. Env BINTRAIL_PG_ROUTER_SCAN_ROWS.")
 	f.String("max-wait", "", "How long a statement waits for its turn when every worker is busy, e.g. 30s or 2m; past it the client gets an error. Empty or 0: no limit of its own, and the five minutes one statement may take, its wait included, is what ends it. Env BINTRAIL_PG_ROUTER_MAX_WAIT.")
 	f.Int("sql-port-max-rows", console.DefaultSQLPortMaxRows, "Most rows one statement returns; a result with more is refused, not cut. Env BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS.")
 }
@@ -168,8 +168,8 @@ type pgRouterSettings struct {
 	StatusAddr       string
 	StatusStatements bool
 	// Cost is when a statement the copy answers as PostgreSQL does goes
-	// there rather than to the source (--route-cost-threshold,
-	// --route-scan-rows).
+	// there rather than to the source (--cost-threshold,
+	// --scan-rows).
 	Cost pgshim.CostPolicy
 	// TLS is the operator's certificate (--tls-cert, --tls-key), nil when
 	// none is set: the port then serves one made up at start.
@@ -335,14 +335,14 @@ func pgRouterAddressLine(listen string, container bool) string {
 	return "PostgreSQL router: that address is reached from other machines. Whoever reaches it can try the port's password, and reads the copy of every PostgreSQL server with it; keep it behind a firewall.\n"
 }
 
-// pgRouterCostFrom reads --route-cost-threshold and --route-scan-rows, or
+// pgRouterCostFrom reads --cost-threshold and --scan-rows, or
 // their variables, and refuses what no plan can be compared with.
 func pgRouterCostFrom(cmd *cobra.Command) (pgshim.CostPolicy, error) {
 	f := cmd.Flags()
 	var pol pgshim.CostPolicy
-	costName, rowsName := "--route-cost-threshold", "--route-scan-rows"
-	pol.CostThreshold, _ = f.GetFloat64("route-cost-threshold")
-	if !f.Changed("route-cost-threshold") {
+	costName, rowsName := "--cost-threshold", "--scan-rows"
+	pol.CostThreshold, _ = f.GetFloat64("cost-threshold")
+	if !f.Changed("cost-threshold") {
 		if v := os.Getenv("BINTRAIL_PG_ROUTER_COST_THRESHOLD"); v != "" {
 			costName = "BINTRAIL_PG_ROUTER_COST_THRESHOLD"
 			var err error
@@ -351,8 +351,8 @@ func pgRouterCostFrom(cmd *cobra.Command) (pgshim.CostPolicy, error) {
 			}
 		}
 	}
-	pol.ScanRows, _ = f.GetInt64("route-scan-rows")
-	if !f.Changed("route-scan-rows") {
+	pol.ScanRows, _ = f.GetInt64("scan-rows")
+	if !f.Changed("scan-rows") {
 		if v := os.Getenv("BINTRAIL_PG_ROUTER_SCAN_ROWS"); v != "" {
 			rowsName = "BINTRAIL_PG_ROUTER_SCAN_ROWS"
 			var err error
@@ -377,15 +377,15 @@ func pgRouterCostFrom(cmd *cobra.Command) (pgshim.CostPolicy, error) {
 // pgCostRuleWords says when a statement goes to the copy by its plan, for
 // the startup lines.
 func pgCostRuleWords(pol pgshim.CostPolicy) string {
-	cost := fmt.Sprintf("its plan there (EXPLAIN) costs %s or more (--route-cost-threshold)", groupThousands(int64(math.Ceil(pol.CostThreshold))))
-	scan := fmt.Sprintf("its plan there (EXPLAIN) has a sequential scan of %s rows or more (--route-scan-rows)", groupThousands(pol.ScanRows))
+	cost := fmt.Sprintf("its plan there (EXPLAIN) costs %s or more (--cost-threshold)", groupThousands(int64(math.Ceil(pol.CostThreshold))))
+	scan := fmt.Sprintf("its plan there (EXPLAIN) has a sequential scan of %s rows or more (--scan-rows)", groupThousands(pol.ScanRows))
 	switch {
 	case pol.CostThreshold > 0 && pol.ScanRows > 0:
-		return cost + ", or has a sequential scan of " + groupThousands(pol.ScanRows) + " rows or more (--route-scan-rows)"
+		return cost + ", or has a sequential scan of " + groupThousands(pol.ScanRows) + " rows or more (--scan-rows)"
 	case pol.CostThreshold > 0:
-		return cost + "; the rule on sequential scans is off (--route-scan-rows 0)"
+		return cost + "; the rule on sequential scans is off (--scan-rows 0)"
 	case pol.ScanRows > 0:
-		return scan + "; the rule on cost is off (--route-cost-threshold 0)"
+		return scan + "; the rule on cost is off (--cost-threshold 0)"
 	}
 	return "no rule is set, and every statement the copy can answer goes to the copy"
 }
