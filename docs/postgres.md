@@ -1143,7 +1143,12 @@ The source answers:
 - **Text sorted or compared by order** (`ORDER BY` a text column, `min()` of
   one, `name > 'B'`): PostgreSQL orders text by the database's collation, the
   copy by bytes. Text compared for equality, grouped or matched with `LIKE`
-  stays on the copy.
+  stays on the copy. A name the statement gives a value itself (`SUM(x) AS
+  units`, a column of a `WITH` or a subquery, read as `s.units`) is judged by
+  what it stands for: a count, a sum, an average, a rank, arithmetic, a
+  `CASE` that answers only numbers, or a number column renamed is not text;
+  anything else may be, and goes to the source when it is sorted or compared
+  by order.
 - **A session `TimeZone` other than UTC**, which the harness has not measured.
 - **What the copy cannot run, before the client is told anything**: a table
   the copy does not hold, a statement the copy refuses (a reserved word of its
