@@ -38,6 +38,15 @@ func TestPGRoundMacros(t *testing.T) {
 		{"avg, negative, no decimals", "(SELECT _bintrail_pg_round_avg(x, 0, 1) FROM (VALUES (-1), (-2)) v(x))", "-2", "DECIMAL(38,0)"},
 		{"avg leaves NULLs out", "(SELECT _bintrail_pg_round_avg(x, 1, 0.1) FROM (VALUES (1), (NULL), (2)) v(x))", "1.5", "DECIMAL(38,1)"},
 		{"avg of no row", "(SELECT _bintrail_pg_round_avg(x, 2, 0.01) FROM (VALUES (1)) v(x) WHERE x > 1)", "<nil>", "DECIMAL(38,2)"},
+		// floor(a / b): the whole number below, a numeric with no decimals.
+		{"floor", "_bintrail_pg_floor_div(CAST(10.50 AS DECIMAL(12,2)), 3)", "3", "DECIMAL(38,0)"},
+		{"floor, negative", "_bintrail_pg_floor_div(CAST(-10.50 AS DECIMAL(12,2)), 3)", "-4", "DECIMAL(38,0)"},
+		{"floor, negative divisor", "_bintrail_pg_floor_div(CAST(10.50 AS DECIMAL(12,2)), -3)", "-4", "DECIMAL(38,0)"},
+		{"floor of a whole quotient", "_bintrail_pg_floor_div(CAST(5.00 AS DECIMAL(3,2)), 5)", "1", "DECIMAL(38,0)"},
+		{"floor of a whole negative quotient", "_bintrail_pg_floor_div(CAST(-5.00 AS DECIMAL(3,2)), 5)", "-1", "DECIMAL(38,0)"},
+		{"floor just under a whole number", "_bintrail_pg_floor_div(CAST(9.99 AS DECIMAL(3,2)), 1)", "9", "DECIMAL(38,0)"},
+		{"floor of zero", "_bintrail_pg_floor_div(CAST(0.00 AS DECIMAL(3,2)), 7)", "0", "DECIMAL(38,0)"},
+		{"floor of a NULL side", "_bintrail_pg_floor_div(CAST(NULL AS DECIMAL(3,2)), 7)", "<nil>", "DECIMAL(38,0)"},
 	}
 	items := make([]string, len(cases))
 	for i, c := range cases {
@@ -73,6 +82,12 @@ func TestPGRoundMacros(t *testing.T) {
 		{"just under a half, past PostgreSQL's scale", "_bintrail_pg_round_div(CAST(0.004999999999999999 AS DECIMAL(18,18)), 1, 2, 0.01)", "too close to a half"},
 		// A quotient of 16 whole digits: PostgreSQL's scale does not reach past k.
 		{"a quotient too large", "_bintrail_pg_round_div(CAST(1000000000000000.0 AS DECIMAL(17,1)), 1, 2, 0.01)", "too close to a half"},
+		{"floor by zero", "_bintrail_pg_floor_div(1.0, 0)", "division by zero"},
+		{"floor of two whole numbers", "_bintrail_pg_floor_div(7, 2)", "both sides of the division are whole numbers"},
+		{"floor of a float", "_bintrail_pg_floor_div(CAST(1.5 AS DOUBLE), 2)", "not a numeric or a whole number"},
+		// PostgreSQL's first rounding could reach 3, or -2.
+		{"floor just under a whole number, past PostgreSQL's scale", "_bintrail_pg_floor_div(CAST(2.99999999999999999 AS DECIMAL(18,17)), 1)", "too close to a whole number"},
+		{"floor just over a negative whole number", "_bintrail_pg_floor_div(CAST(-2.00000000000000001 AS DECIMAL(18,17)), 1)", "too close to a whole number"},
 		{"too large for 128 bits", "_bintrail_pg_round_div(CAST(99999999999999999999999999999999999999 AS DECIMAL(38,0)), CAST(0.3 AS DECIMAL(2,1)), 2, 0.01)", "Overflow"},
 	} {
 		job := f.job("SELECT " + c.expr)
@@ -85,17 +100,17 @@ func TestPGRoundMacros(t *testing.T) {
 
 	// Grouped, as a report writes it, and headed round as PostgreSQL heads
 	// an unnamed round(...).
-	job = f.job("SELECT g, _bintrail_pg_round_div(100.0 * sum(x), count(*), 2, 0.01), _bintrail_pg_round_avg(x, 1, 0.1) FROM (VALUES (1, 1), (1, 2), (2, 5)) v(g, x) GROUP BY g ORDER BY g")
+	job = f.job("SELECT g, _bintrail_pg_round_div(100.0 * sum(x), count(*), 2, 0.01), _bintrail_pg_round_avg(x, 1, 0.1), _bintrail_pg_floor_div(1.0 * g, 2) FROM (VALUES (1, 1), (1, 2), (2, 5)) v(g, x) GROUP BY g ORDER BY g")
 	job.Session = Session{PostgresRules: true, PostgresNames: true}
 	res, err = r.Run(context.Background(), job)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := fmt.Sprint(res.Rows); got != "[[1 150.00 1.5] [2 500.00 5.0]]" {
+	if got := fmt.Sprint(res.Rows); got != "[[1 150.00 1.5 0] [2 500.00 5.0 1]]" {
 		t.Errorf("grouped: %s", got)
 	}
-	if len(res.Columns) == 3 && (res.Columns[1].Name != "round" || res.Columns[2].Name != "round") {
-		t.Errorf("headed %s and %s, want round", res.Columns[1].Name, res.Columns[2].Name)
+	if len(res.Columns) != 4 || res.Columns[1].Name != "round" || res.Columns[2].Name != "round" || res.Columns[3].Name != "floor" {
+		t.Errorf("headed %v, want round, round and floor", res.Columns)
 	}
 
 	// A session for MySQL has none of them.
