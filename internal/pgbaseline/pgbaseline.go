@@ -87,6 +87,13 @@ type Config struct {
 	// source's bintrail_id. Empty leaves it unsigned. See baseline/writersig.go.
 	WriterID string
 
+	// DirStarting, when set, is told the snapshot directory's parent and
+	// name right before Run creates it: the name comes from the source's own
+	// clock, so the caller cannot know it sooner. The console journals the
+	// directory there and removes it when the run then fails (#1938, #2180),
+	// as it does for a MySQL read. Nil for the command line.
+	DirStarting func(root, name string)
+
 	Logger *slog.Logger // nil → slog.Default()
 }
 
@@ -303,6 +310,9 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	// directory and flag it _INCOMPLETE BEFORE any table conversion; only
 	// full success replaces the marker with _SUCCESS.
 	snapDir := filepath.Join(cfg.OutputDir, tsDir)
+	if cfg.DirStarting != nil {
+		cfg.DirStarting(cfg.OutputDir, tsDir)
+	}
 	if err := os.MkdirAll(snapDir, 0o755); err != nil {
 		return Stats{}, fmt.Errorf("pgbaseline: create snapshot directory %s: %w", snapDir, err)
 	}
