@@ -365,7 +365,7 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 				if ctx.Err() != nil {
 					return
 				}
-				n, err := processTable(ctx, wconn, t, cfg.OutputDir, tsDir, tsStr, uint64(deltaStartLSN), compression, rowGroupSize, logger)
+				n, err := processTable(ctx, wconn, t, cfg.OutputDir, tsDir, tsStr, uint64(deltaStartLSN), uint64(anchorLSN), compression, rowGroupSize, logger)
 				mu.Lock()
 				if err != nil {
 					logger.Error("pgbaseline: failed to process table",
@@ -441,7 +441,7 @@ func openWorkerConn(ctx context.Context, dsn, snapshotID string) (*pgx.Conn, err
 }
 
 // tableFooter is the footer of one table of a PostgreSQL snapshot.
-func tableFooter(t tableInfo, tsStr string, deltaStartLSN uint64) (map[string]string, error) {
+func tableFooter(t tableInfo, tsStr string, deltaStartLSN, anchorLSN uint64) (map[string]string, error) {
 	// The table's OID and typed column list (#1596 slice 1). Written only if
 	// it reads back: a shape the readers would reject is a bug here, and a
 	// baseline without its shape must not be published as if it had one.
@@ -479,6 +479,11 @@ func tableFooter(t tableInfo, tsStr string, deltaStartLSN uint64) (map[string]st
 		// deliberately absent: it is MySQL text the reconstruct engine parses
 		// as MySQL; MetaKeyPGRelation below is the PostgreSQL shape (#1596).
 		baseline.MetaKeyLSN: strconv.FormatUint(deltaStartLSN, 10),
+		// Where the source's WAL stood when the snapshot opened (#2963): the
+		// rows are as of here, past the floor above. A reader that lays the
+		// changes from the floor over this file waits until capture has
+		// indexed every commit below this position.
+		baseline.MetaKeyPGAnchorLSN: strconv.FormatUint(anchorLSN, 10),
 		// The rendering-GUC stamp (#593 slice D): records that this baseline's
 		// text was rendered under the pinned canonical GUCs. Readers use its
 		// ABSENCE to detect a pre-pin baseline whose GUC-sensitive text may
@@ -496,10 +501,10 @@ func tableFooter(t tableInfo, tsStr string, deltaStartLSN uint64) (map[string]st
 // would CRC-certify a stale or partial Parquet (possibly carrying another
 // anchor's MetaKeyLSN) into a _SUCCESS baseline. The CLI's --retry applies
 // only to baseline.Upload's S3 object skip, which keys on real object state.
-func processTable(ctx context.Context, conn *pgx.Conn, t tableInfo, outputDir, tsDir, tsStr string, deltaStartLSN uint64, compression string, rowGroupSize int, logger *slog.Logger) (int64, error) {
+func processTable(ctx context.Context, conn *pgx.Conn, t tableInfo, outputDir, tsDir, tsStr string, deltaStartLSN, anchorLSN uint64, compression string, rowGroupSize int, logger *slog.Logger) (int64, error) {
 	outPath := filepath.Join(outputDir, tsDir, t.Schema, t.Table+".parquet")
 
-	md, err := tableFooter(t, tsStr, deltaStartLSN)
+	md, err := tableFooter(t, tsStr, deltaStartLSN, anchorLSN)
 	if err != nil {
 		return 0, err
 	}

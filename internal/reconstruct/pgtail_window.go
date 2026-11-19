@@ -57,6 +57,32 @@ func PGCheckpoint(ctx context.Context, db *sql.DB) (lsn, eventID uint64, ok bool
 	return uint64(pos.Int64), uint64(id.Int64), true, nil
 }
 
+// PGSentThrough is the position below which every commit of the source is
+// in the index, as the PostgreSQL capture last saved it
+// (stream_state.pg_sent_through_lsn, #2746): the walsender's own position,
+// which moves on a source with no commit too. ok is false when the index
+// records none it can be held to: no PostgreSQL capture, one that has not
+// received a position since it started, a save by a writer that does not set
+// it (an older capture, a reset: the two times differ then), or an index no
+// capture of that version has opened.
+func PGSentThrough(ctx context.Context, db *sql.DB) (lsn uint64, ok bool, err error) {
+	var pos sql.NullInt64
+	err = db.QueryRowContext(ctx, `SELECT IF(pg_sent_through_at <=> last_checkpoint, pg_sent_through_lsn, NULL)
+		FROM stream_state WHERE id = 1 AND flavor = 'postgres'`).Scan(&pos)
+	var missing *mysql.MySQLError
+	switch {
+	case err == sql.ErrNoRows:
+		return 0, false, nil
+	case errors.As(err, &missing) && missing.Number == 1054:
+		return 0, false, nil
+	case err != nil:
+		return 0, false, fmt.Errorf("read how far the capture has indexed the source: %w", err)
+	case !pos.Valid || pos.Int64 <= 0:
+		return 0, false, nil
+	}
+	return uint64(pos.Int64), true, nil
+}
+
 // PGShapeKey checks the shapes the stream recorded for schema.table from
 // floor up to cut against rel, the shape its snapshot recorded, as the fold
 // does (checkPGShapeKey): the table made again, renamed, a column added,

@@ -646,6 +646,56 @@ func TestIntegrationPGTailSource(t *testing.T) {
 		}
 	})
 
+	// A full read's file holds the source as of a position past its own
+	// floor (#2963). Until capture has indexed every commit below that
+	// position, a tail read from the floor would put an older change of a
+	// row over the newer one the file holds: the table has none till then.
+	t.Run("a full read's file: no tail until capture has passed the position it was read at", func(t *testing.T) {
+		// Read at 0xd80: row 1 changed at 0xd10 and again at 0xd40, and the
+		// file holds the second change.
+		tbl := r.table(func(md map[string]string) { md[baseline.MetaKeyPGAnchorLSN] = strconv.FormatUint(0xd80, 10) },
+			[2]string{"1", "second"})
+		src := r.k.src.(*pgTailSource)
+		sent := func(lsn uint64) {
+			t.Helper()
+			testutil.MustExec(t, r.db, fmt.Sprintf("UPDATE stream_state SET pg_sent_through_lsn = %d, pg_sent_through_at = last_checkpoint WHERE id = 1", lsn))
+			if _, err := src.Newest(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Capture has the first change and not the second.
+		r.change(tbl.Table, event.EventUpdate, "1", "first", 0xd10, 24*time.Minute)
+		r.checkpoint(0xd10)
+		for name, through := range map[string]uint64{"not recorded": 0, "below the position": 0xd7f} {
+			if through != 0 {
+				sent(through)
+			} else if _, err := src.Newest(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if _, why := src.Cut(tbl); why == "" {
+				t.Errorf("%s: the file has a cut a tail may be laid from", name)
+			}
+			tail, why, err := src.Start(ctx, tbl)
+			if err == nil || tail != nil || why != "" {
+				t.Errorf("%s: Start gave tail %v, refusal %q, error %v; want an error, so the build is tried again", name, tail != nil, why, err)
+			}
+			if got := r.state(ctx, tbl); !reflect.DeepEqual(got, noTail) {
+				t.Errorf("%s: state %v, want no tail (the older change must not lie over the file)", name, got)
+			}
+		}
+		// Capture passes it, with the second change indexed: the tail.
+		r.change(tbl.Table, event.EventUpdate, "1", "second", 0xd40, 25*time.Minute)
+		r.change(tbl.Table, event.EventInsert, "2", "two", 0xd90, 26*time.Minute)
+		r.checkpoint(0xd90)
+		sent(0xd91)
+		if _, why := src.Cut(tbl); why != "" {
+			t.Fatalf("after capture passed the position: %s", why)
+		}
+		if tail, why, err := src.Start(ctx, tbl); err != nil || why != "" || tail == nil {
+			t.Fatalf("after capture passed the position: Start gave tail %v, refusal %q, error %v", tail != nil, why, err)
+		}
+	})
+
 	t.Run("a table delta beside the file: the tail starts at the delta's cut", func(t *testing.T) {
 		tbl := r.table(nil, [2]string{"1", "one"}, [2]string{"2", "two"})
 		// A snapshot update published the file with what changed since it
