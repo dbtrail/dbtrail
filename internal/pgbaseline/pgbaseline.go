@@ -466,6 +466,7 @@ func tableFooter(t tableInfo, tsStr string, deltaStartLSN, anchorLSN uint64) (ma
 		// it: without it the file had to be written again in full by the
 		// first update after every full read.
 		baseline.MetaKeyPGDeltaSince: taken.Add(-baseline.PGDeltaMargin).UTC().Format(time.RFC3339),
+
 		baseline.MetaKeySnapshotTimestamp: tsStr,
 		"bintrail.source_database":        t.Schema,
 		"bintrail.source_table":           t.Table,
