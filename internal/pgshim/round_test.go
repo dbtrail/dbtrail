@@ -40,6 +40,10 @@ func TestRewriteForCopy_rounds(t *testing.T) {
 		{"SELECT FLOOR(i_price / 5) * 5 AS price_from", "SELECT _bintrail_pg_floor_div(i_price, 5) * 5 AS price_from"},
 		{"SELECT floor(100.0 * a / (b * c))", "SELECT _bintrail_pg_floor_div(100.0 * a, (b * c))"},
 		{"SELECT round(floor(a / b) / c, 2)", "SELECT _bintrail_pg_round_div(_bintrail_pg_floor_div(a, b), c, 2, 0.01)"},
+		// Ten-minute buckets, the HTAP bench's Q04 and Q13.
+		{"SELECT to_timestamp(FLOOR(EXTRACT(EPOCH FROM o.o_entry_d) / 600) * 600) AS period_start",
+			"SELECT _bintrail_pg_to_timestamp(_bintrail_pg_floor_div(_bintrail_pg_epoch(o.o_entry_d), 600) * 600) AS period_start"},
+		{"SELECT extract(epoch from t)", "SELECT _bintrail_pg_epoch(t)"},
 	} {
 		if got := RewriteForCopy(c.in); got != c.want {
 			t.Errorf("%q\n got %q\nwant %q", c.in, got, c.want)
@@ -85,9 +89,13 @@ func TestRewriteForCopy_leavesOtherShapes(t *testing.T) {
 		"SELECT floor(a, b)",
 		"SELECT floor()",
 		"SELECT floor(date_part('day', d) / 7.0)",
-		"SELECT pg_catalog.floor(a / b)", // qualified
-		`SELECT "round"(a / b, 2)`,       // quoted
-		"SELECT round(1e2 / 3, 2)",       // the lexer refuses the statement
+		"SELECT pg_catalog.floor(a / b)",      // qualified
+		"SELECT extract(year from t)",         // the screen reads year, month and day as they are
+		"SELECT extract(epoch)",               // no FROM
+		"SELECT to_timestamp('2026', 'YYYY')", // another function, of text
+		"SELECT to_timestamp()",
+		`SELECT "round"(a / b, 2)`, // quoted
+		"SELECT round(1e2 / 3, 2)", // the lexer refuses the statement
 		"SELECT x FROM t",
 		"",
 	} {
@@ -142,7 +150,7 @@ func TestCopyScreen_benchReportsWithRound(t *testing.T) {
 		"ol_w_id": {"INTEGER"}, "ol_supply_w_id": {"INTEGER"}, "ol_quantity": {"SMALLINT"}, "ol_amount": {"DECIMAL(6,2)"},
 		"ol_delivery_d": {"TIMESTAMP WITH TIME ZONE"}, "ol_number": {"SMALLINT"}, "ol_i_id": {"INTEGER"},
 		"i_id": {"INTEGER"}, "i_price": {"DECIMAL(5,2)"}, "i_data": {"VARCHAR"}, "o_w_id": {"INTEGER"}, "o_d_id": {"SMALLINT"},
-		"o_id": {"INTEGER"}, "o_ol_cnt": {"SMALLINT"}, "o_all_local": {"SMALLINT"}, "ol_d_id": {"SMALLINT"}, "ol_o_id": {"INTEGER"},
+		"o_id": {"INTEGER"}, "o_entry_d": {"TIMESTAMP WITH TIME ZONE"}, "o_ol_cnt": {"SMALLINT"}, "o_all_local": {"SMALLINT"}, "ol_d_id": {"SMALLINT"}, "ol_o_id": {"INTEGER"},
 	}
 	for name, q := range map[string]string{
 		"Q01": `SELECT d_w_id AS w_id, SUM(d_next_o_id - 1) AS orders_taken, SUM(d_ytd) AS ytd_payments,
@@ -164,6 +172,12 @@ deciles AS (SELECT t.*, NTILE(10) OVER (ORDER BY t.total) AS decile FROM order_t
 SELECT decile, COUNT(*) AS orders, MIN(total) AS min_value, MAX(total) AS max_value, ROUND(AVG(total), 2) AS avg_value,
        ROUND(AVG(o_ol_cnt), 2) AS avg_lines, ROUND(100.0 * SUM(total) / NULLIF(SUM(SUM(total)) OVER (), 0), 2) AS pct_of_revenue
 FROM deciles GROUP BY decile ORDER BY decile`,
+		"Q04": `SELECT to_timestamp(FLOOR(EXTRACT(EPOCH FROM o.o_entry_d) / 600) * 600) AS period_start,
+       SUM(CASE WHEN ol.ol_number = 1 THEN 1 ELSE 0 END) AS orders, COUNT(*) AS order_lines, SUM(ol.ol_amount) AS revenue,
+       ROUND(1.0 * COUNT(*) / NULLIF(SUM(CASE WHEN ol.ol_number = 1 THEN 1 ELSE 0 END), 0), 2) AS lines_per_order
+FROM orders o JOIN order_line ol ON ol.ol_w_id = o.o_w_id AND ol.ol_d_id = o.o_d_id AND ol.ol_o_id = o.o_id
+WHERE o.o_w_id BETWEEN 1 AND 20 AND o.o_entry_d >= TIMESTAMP '2026-11-18 10:00:00' AND o.o_entry_d < TIMESTAMP '2026-11-18 18:00:00'
+GROUP BY 1 ORDER BY 1`,
 		"Q12": `SELECT ol_supply_w_id AS w_id, COUNT(*) AS lines,
        ROUND(100.0 * SUM(CASE WHEN ol_delivery_d IS NULL THEN 1 ELSE 0 END) / COUNT(*), 2) AS pct_pending
 FROM order_line GROUP BY ol_supply_w_id ORDER BY ol_supply_w_id LIMIT 10`,

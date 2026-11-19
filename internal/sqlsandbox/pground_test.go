@@ -47,6 +47,14 @@ func TestPGRoundMacros(t *testing.T) {
 		{"floor just under a whole number", "_bintrail_pg_floor_div(CAST(9.99 AS DECIMAL(3,2)), 1)", "9", "DECIMAL(38,0)"},
 		{"floor of zero", "_bintrail_pg_floor_div(CAST(0.00 AS DECIMAL(3,2)), 7)", "0", "DECIMAL(38,0)"},
 		{"floor of a NULL side", "_bintrail_pg_floor_div(CAST(NULL AS DECIMAL(3,2)), 7)", "<nil>", "DECIMAL(38,0)"},
+		// extract(epoch from x): six decimals, as PostgreSQL 14 and later.
+		{"epoch of a timestamptz", "_bintrail_pg_epoch(CAST('2026-11-18 10:00:00.5+00' AS TIMESTAMPTZ))", "1794996000.500000", "DECIMAL(38,6)"},
+		{"epoch of a timestamp", "_bintrail_pg_epoch(CAST('2026-11-18 10:00:00' AS TIMESTAMP))", "1794996000.000000", "DECIMAL(38,6)"},
+		{"epoch before 1970", "_bintrail_pg_epoch(CAST('1969-12-31 23:59:59.5' AS TIMESTAMP))", "-0.500000", "DECIMAL(38,6)"},
+		{"epoch of NULL", "(SELECT _bintrail_pg_epoch(x) FROM (VALUES (CAST(NULL AS TIMESTAMP))) v(x))", "<nil>", "DECIMAL(38,6)"},
+		// Ten-minute buckets, as the HTAP bench's reports write them.
+		{"a ten-minute bucket", "CAST(_bintrail_pg_to_timestamp(_bintrail_pg_floor_div(_bintrail_pg_epoch(CAST('2026-11-18 10:07:30.25+00' AS TIMESTAMPTZ)), 600) * 600) AS VARCHAR)", "2026-11-18 10:00:00+00", "VARCHAR"},
+		{"a bucket before 1970", "CAST(_bintrail_pg_to_timestamp(_bintrail_pg_floor_div(_bintrail_pg_epoch(CAST('1969-12-31 23:55:00+00' AS TIMESTAMPTZ)), 600) * 600) AS VARCHAR)", "1969-12-31 23:50:00+00", "VARCHAR"},
 	}
 	items := make([]string, len(cases))
 	for i, c := range cases {
@@ -88,6 +96,10 @@ func TestPGRoundMacros(t *testing.T) {
 		// PostgreSQL's first rounding could reach 3, or -2.
 		{"floor just under a whole number, past PostgreSQL's scale", "_bintrail_pg_floor_div(CAST(2.99999999999999999 AS DECIMAL(18,17)), 1)", "too close to a whole number"},
 		{"floor just over a negative whole number", "_bintrail_pg_floor_div(CAST(-2.00000000000000001 AS DECIMAL(18,17)), 1)", "too close to a whole number"},
+		{"epoch of a date", "_bintrail_pg_epoch(CAST('2026-11-18' AS DATE))", "not a timestamp"},
+		{"epoch of an interval", "_bintrail_pg_epoch(INTERVAL 1 DAY)", "not a timestamp"},
+		{"to_timestamp of a fraction", "_bintrail_pg_to_timestamp(1.5)", "not a whole number of seconds"},
+		{"to_timestamp of a float", "_bintrail_pg_to_timestamp(CAST(15 AS DOUBLE))", "not a whole number of seconds"},
 		{"too large for 128 bits", "_bintrail_pg_round_div(CAST(99999999999999999999999999999999999999 AS DECIMAL(38,0)), CAST(0.3 AS DECIMAL(2,1)), 2, 0.01)", "Overflow"},
 	} {
 		job := f.job("SELECT " + c.expr)

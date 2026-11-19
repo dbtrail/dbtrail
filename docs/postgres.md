@@ -1117,7 +1117,10 @@ The source answers:
   and `a`, `b` and `x` are numerics or whole numbers, rounded as PostgreSQL
   rounds a `numeric`: half away from zero, to exactly `k` decimals (`50.00`);
   `floor(a / b)` of numerics, as PostgreSQL takes it (`95`, not `95.0`);
-  `ntile(n)`;
+  `ntile(n)`; `extract(epoch from x)` of a timestamp (a `numeric` with six
+  decimals, as on PostgreSQL 14 and later) and `to_timestamp(n)` of a whole
+  number of seconds, so `to_timestamp(floor(extract(epoch from x) / 600) *
+  600)` buckets as PostgreSQL does;
   the
   operators `=`, `<>`, `<`, `>`, `<=`, `>=`, `+`, `-`, `*`, `||`, `LIKE`
   (a pattern without a backslash), `IN`, `BETWEEN`, `IS [NOT] DISTINCT FROM`,

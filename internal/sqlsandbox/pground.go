@@ -48,6 +48,14 @@ package sqlsandbox
 // over one, when negative) may reach it there; the macro refuses that band,
 // as the round macros refuse theirs.
 //
+// extract(epoch from x) of a timestamp is a numeric with six decimals on
+// PostgreSQL (1763460000.123456), a DOUBLE here: _bintrail_pg_epoch takes it
+// from the engine's whole microseconds instead, exact, and refuses anything
+// but a timestamp (a date or an interval PostgreSQL reads otherwise).
+// to_timestamp(n) reads a double on PostgreSQL; _bintrail_pg_to_timestamp
+// takes only a whole number of seconds, which a double holds exactly, so
+// to_timestamp(floor(extract(epoch from x) / 600) * 600) answers as there.
+//
 // TEMP, as the other macros. A macro takes no DISTINCT, and the port leaves
 // avg(DISTINCT x) alone.
 const pgRoundMacros = `CREATE OR REPLACE TEMP MACRO _bintrail_pg_exact(x) AS (
@@ -111,6 +119,18 @@ CREATE OR REPLACE TEMP MACRO _bintrail_pg_floor_div(n, d) AS (
     WHEN d = 0 THEN error('division by zero')
     ELSE _bintrail_pg_floor_core(_bintrail_pg_unscaled(n), _bintrail_pg_scale(n), _bintrail_pg_unscaled(d), _bintrail_pg_scale(d))
   END AS DECIMAL(38,0))
+);
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_epoch(x) AS (
+  CASE WHEN typeof(x) IN ('TIMESTAMP', 'TIMESTAMP WITH TIME ZONE')
+    THEN CAST(epoch_us(x) AS DECIMAL(38,0)) * CAST(0.000001 AS DECIMAL(7,6))
+  ELSE error('the copy cannot take extract(epoch) of this as PostgreSQL does: it is not a timestamp') END
+);
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_to_timestamp(x) AS (
+  CASE WHEN NOT (typeof(x) LIKE 'DECIMAL(%,0)' OR typeof(x) IN ('TINYINT', 'SMALLINT', 'INTEGER', 'BIGINT', 'HUGEINT'))
+    THEN error('the copy cannot take to_timestamp() of this as PostgreSQL does: it is not a whole number of seconds')
+  WHEN abs(x) > 9007199254740992
+    THEN error('the copy cannot take to_timestamp() of this as PostgreSQL does: too many seconds')
+  ELSE to_timestamp(CAST(x AS DOUBLE)) END
 );
 CREATE OR REPLACE TEMP MACRO _bintrail_pg_round_div(n, d, k, unit) AS (
   CAST(_bintrail_pg_round_q(n, d, k, 'div') AS DECIMAL(38,0)) * unit

@@ -300,6 +300,10 @@ func pgFunctionName(v map[string]any) (string, int, bool) {
 		name = "round"
 	} else if strings.HasPrefix(name, "_bintrail_pg_floor_") {
 		name = "floor"
+	} else if name == "_bintrail_pg_epoch" {
+		name = "extract"
+	} else if name == "_bintrail_pg_to_timestamp" {
+		name = "to_timestamp"
 	}
 	// Folded: a function's name is written without quotes.
 	name = foldName(name)
