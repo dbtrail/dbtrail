@@ -546,11 +546,20 @@ func TestPGTail_HoldsItsRowsPacked(t *testing.T) {
 			t.Errorf("key %q: its row is not held packed (held %v, image %v)", k, held, ev.RowAfter)
 		}
 	}
-	// What a tail holding the same changes as they arrived would count.
-	arrived := foldPGPages(t, pkColsIntID(), pages...)
-	whole, _ := sampledChangeBytes(arrived.Changes)
-	if got := tail.Bytes(); got <= 0 || got >= whole {
-		t.Fatalf("the tail counts %d bytes; the same changes as they arrived count %d", got, whole)
+	// What the tail counts for rows of an ordinary size, against the same
+	// changes held as they arrived: the map of a two-column row is most of
+	// what it cost.
+	var ordinary []query.ResultRow
+	for i := 0; i < 200; i++ {
+		ordinary = append(ordinary, pgIns(uint64(100+i), uint64(0x1000+i), fmt.Sprint(1000+i), "shipped"))
+	}
+	plain := newTestPGTail(t, md)
+	if err := plain.Apply(ordinary); err != nil {
+		t.Fatal(err)
+	}
+	whole, _ := sampledChangeBytes(foldPGPages(t, pkColsIntID(), ordinary).Changes)
+	if got := plain.Bytes(); got <= 0 || got*3 > whole*2 {
+		t.Fatalf("the tail counts %d bytes for 200 rows; the same changes as they arrived count %d: want under two thirds", got, whole)
 	}
 
 	// A key changed again after its row was put away, and one pruned.

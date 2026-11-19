@@ -75,7 +75,6 @@ type PGTail struct {
 	// writer takes them: the tail's rows hold exactly these, or the view's
 	// UNION ALL BY NAME would add a column to the table.
 	names  []string
-	inNames map[string]bool
 	cols   []baseline.Column
 	pkCols []metadata.ColumnMeta
 	// pkNames are the key columns in the order a key is written in: their
@@ -87,6 +86,8 @@ type PGTail struct {
 	// not: the table's generated columns. Any other column the copy lacks
 	// was added at the source after the cut.
 	generated map[string]bool
+	// inNames is names as a set.
+	inNames map[string]bool
 	// needFull: see Tail.needFull.
 	needFull bool
 	// packed holds, for a key, the row of its change in place of the image
