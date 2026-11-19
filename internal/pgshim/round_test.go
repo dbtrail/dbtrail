@@ -72,8 +72,8 @@ func TestRewriteForCopy_leavesOtherShapes(t *testing.T) {
 		"SELECT round(3 * avg(x), 2)", // a multiplier other than 10^j
 		"SELECT round(0.1 * avg(x), 2)",
 		"SELECT round(avg(x) * 100, 2)",
-		"SELECT round(100 * avg(x), 14)",              // 16 decimals of the average
-		"SELECT round(date_part('day', d) / 7.0, 2)",   // a double precision on PostgreSQL
+		"SELECT round(100 * avg(x), 14)",             // 16 decimals of the average
+		"SELECT round(date_part('day', d) / 7.0, 2)", // a double precision on PostgreSQL
 		"SELECT round(avg(date_part('month', d)), 2)",
 		"SELECT pg_catalog.round(a / b, 2)", // qualified
 		`SELECT "round"(a / b, 2)`,          // quoted
