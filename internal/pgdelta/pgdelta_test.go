@@ -911,3 +911,67 @@ func TestMergeDead(t *testing.T) {
 		}
 	}
 }
+
+// BasePositionsOf answers as BasePositions does, key for key: the engine
+// builds the base's key from its key columns, and it has to be the text
+// KeyOf makes, byte for byte.
+func TestBasePositionsOfAnswersAsBasePositions(t *testing.T) {
+	db := duck(t)
+	ctx := context.Background()
+	base := filepath.Join(t.TempDir(), "t.parquet")
+	cols := []string{"a", "odd \"name", "val"}
+	keyCols := cols[:2]
+	vals := []string{"", "1", "01", "a", "A", "é", "e\u0301", "x|y", `x\y`, `x\|y`, `\`, "|", `|\`, " ", "a b", "ñandú", "'", `"`, "%", "*", "🙂", "a\nb"}
+	var rows [][]cell
+	var all []string
+	for _, x := range vals {
+		for _, y := range []string{"", "k", "|", `\`} {
+			rows = append(rows, []cell{v(x), v(y), v("v")})
+			all = append(all, KeyOf([]string{x, y}))
+		}
+	}
+	writeBase(t, base, cols, rows...)
+	asked := append([]string{"not there", KeyOf([]string{"1", "nope"}), all[3], all[3]}, all...)
+	wanted := map[string]bool{}
+	for _, k := range asked {
+		wanted[k] = true
+	}
+	slow, err := BasePositions(ctx, db, base, keyCols, func(k string) bool { return wanted[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	fast, err := BasePositionsOf(ctx, db, base, keyCols, asked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(slow) != len(all) || !reflect.DeepEqual(fast, slow) {
+		t.Fatalf("%d keys in the file; row by row finds %d, the join %d:\n row by row %v\n the join    %v", len(all), len(slow), len(fast), slow, fast)
+	}
+	// A few of them, and none.
+	few, err := BasePositionsOf(ctx, db, base, keyCols, []string{all[10], all[40], "not there"})
+	if err != nil || len(few) != 2 || few[all[10]] != 10 || few[all[40]] != 40 {
+		t.Fatalf("two keys of the file and one that is not: %v, %v", few, err)
+	}
+	if none, err := BasePositionsOf(ctx, db, base, keyCols, nil); err != nil || len(none) != 0 {
+		t.Fatalf("no key asked: %v, %v", none, err)
+	}
+	if _, err := BasePositionsOf(ctx, db, base, nil, all); err == nil {
+		t.Error("no key column: no error")
+	}
+
+	// A key the file holds twice, and a row with no value in a key column:
+	// both refuse, as row by row does.
+	twice := filepath.Join(t.TempDir(), "t.parquet")
+	writeBase(t, twice, []string{"id", "val"}, []cell{v("1"), v("a")}, []cell{v("2"), v("b")}, []cell{v("1"), v("c")})
+	if _, err := BasePositionsOf(ctx, db, twice, []string{"id"}, []string{"1"}); err == nil || !strings.Contains(err.Error(), "twice, at rows 0 and 2") {
+		t.Errorf("a key twice: %v", err)
+	}
+	if got, err := BasePositionsOf(ctx, db, twice, []string{"id"}, []string{"2"}); err != nil || got["2"] != 1 {
+		t.Errorf("the other key of that file: %v, %v", got, err)
+	}
+	holed := filepath.Join(t.TempDir(), "t.parquet")
+	writeBase(t, holed, []string{"id", "val"}, []cell{v("1"), v("a")}, []cell{null, v("b")})
+	if _, err := BasePositionsOf(ctx, db, holed, []string{"id"}, []string{"1"}); err == nil || !strings.Contains(err.Error(), "row 1 of") {
+		t.Errorf("a NULL key column: %v", err)
+	}
+}

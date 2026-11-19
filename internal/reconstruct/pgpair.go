@@ -204,7 +204,7 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	positions, err := pgdelta.BasePositions(ctx, duck, src, keyCols, func(k string) bool { _, ok := fold.Changes[k]; return ok })
+	positions, err := pgdelta.BasePositionsOf(ctx, duck, src, keyCols, keys)
 	if err != nil {
 		return full("could not find the changed rows in the table file", err)
 	}

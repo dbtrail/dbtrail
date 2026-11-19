@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -82,6 +84,92 @@ func BasePositions(ctx context.Context, db *sql.DB, basePath string, keyColumns 
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read the keys of %s: %w", basePath, err)
+	}
+	return found, nil
+}
+
+// BasePositionsOf is BasePositions for a list of keys, found by the engine
+// that reads the file: the keys are written to a file of their own and
+// joined with the base's key, built there from its key columns the way KeyOf
+// builds it. BasePositions hands every row of the file to this process to
+// ask about its key, which on a table of tens of millions of rows is most of
+// what writing a pair costs.
+//
+// The two answer alike: keys are compared as their bytes, a key the file
+// does not hold is absent, a wanted key the file holds twice is an error,
+// and so is a row of the file with a NULL in a key column, wanted or not.
+// keys need not be sorted; one named twice is asked once.
+func BasePositionsOf(ctx context.Context, db *sql.DB, basePath string, keyColumns []string, keys []string) (map[string]int64, error) {
+	if len(keyColumns) == 0 {
+		return nil, errors.New("pgdelta: a table with no key column")
+	}
+	found := map[string]int64{}
+	if len(keys) == 0 {
+		return found, nil
+	}
+	quoted := make([]string, len(keyColumns))
+	parts := make([]string, len(keyColumns))
+	nulls := make([]string, len(keyColumns))
+	for i, c := range keyColumns {
+		quoted[i] = `"` + strings.ReplaceAll(c, `"`, `""`) + `"`
+		// event.EscapePKValue, in the same order: the backslash first.
+		parts[i] = `replace(replace(` + quoted[i] + `, '\', '\\'), '|', '\|')`
+		nulls[i] = quoted[i] + " IS NULL"
+	}
+	src := "read_parquet(" + file(basePath) + ", file_row_number=true" + noHive + ")"
+	var badRow sql.NullInt64
+	err := db.QueryRowContext(ctx, "SELECT min(file_row_number) FROM "+src+" WHERE "+strings.Join(nulls, " OR ")).Scan(&badRow)
+	if err != nil {
+		return nil, fmt.Errorf("read the keys of %s: %w", basePath, err)
+	}
+	if badRow.Valid {
+		return nil, fmt.Errorf("row %d of %s has no value in a key column (%s)", badRow.Int64, basePath, strings.Join(keyColumns, ", "))
+	}
+
+	dir, err := os.MkdirTemp("", "bintrail-pgkeys-")
+	if err != nil {
+		return nil, fmt.Errorf("pgdelta: a folder for the changed keys: %w", err)
+	}
+	defer os.RemoveAll(dir)
+	wanted := filepath.Join(dir, "keys.parquet")
+	w, err := baseline.NewWriter(wanted, []baseline.Column{{Name: KeyColumn, RawText: true}}, baseline.WriterConfig{Compression: "zstd", RowGroupSize: 100_000})
+	if err != nil {
+		return nil, fmt.Errorf("pgdelta: write the changed keys: %w", err)
+	}
+	for _, k := range keys {
+		if err := w.WriteRow([]string{k}, []bool{false}); err != nil {
+			_ = w.Close()
+			return nil, fmt.Errorf("pgdelta: write the changed keys: %w", err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		return nil, fmt.Errorf("pgdelta: write the changed keys: %w", err)
+	}
+
+	rows, err := db.QueryContext(ctx, "SELECT bintrail_b.file_row_number, bintrail_w."+KeyColumn+
+		" FROM (SELECT file_row_number, encode("+strings.Join(parts, " || '|' || ")+") AS bintrail_k FROM "+src+") AS bintrail_b"+
+		" JOIN (SELECT DISTINCT "+KeyColumn+" FROM read_parquet("+file(wanted)+noHive+")) AS bintrail_w"+
+		" ON bintrail_b.bintrail_k = encode(bintrail_w."+KeyColumn+")")
+	if err != nil {
+		return nil, fmt.Errorf("find the changed keys in %s: %w", basePath, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pos int64
+		var key string
+		if err := rows.Scan(&pos, &key); err != nil {
+			return nil, fmt.Errorf("find the changed keys in %s: %w", basePath, err)
+		}
+		if at, twice := found[key]; twice {
+			if at > pos {
+				at, pos = pos, at
+			}
+			return nil, fmt.Errorf("%s holds key %q twice, at rows %d and %d", basePath, key, at, pos)
+		}
+		found[key] = pos
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("find the changed keys in %s: %w", basePath, err)
 	}
 	return found, nil
 }
