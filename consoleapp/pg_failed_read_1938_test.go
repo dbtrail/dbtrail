@@ -17,7 +17,9 @@ import (
 // recordingJournal is the run's journal, recorded.
 type recordingJournal struct{ dirs []string }
 
-func (j *recordingJournal) Created(root, name string) { j.dirs = append(j.dirs, filepath.Join(root, name)) }
+func (j *recordingJournal) Created(root, name string) {
+	j.dirs = append(j.dirs, filepath.Join(root, name))
+}
 
 // A PostgreSQL full read keeps the snapshot folder it creates the way a
 // MySQL read does (#1938, #2180): journaled as it is created, removed when
