@@ -41,6 +41,9 @@ type pgFixture struct {
 	db   *sql.DB
 	dsn  string
 	base time.Time
+	// anchor, when set, is what baseline records as the position its rows
+	// are as of (MetaKeyPGAnchorLSN): a full read's file.
+	anchor uint64
 }
 
 // newPGFixture is an index a PostgreSQL stream wrote: its flavor, the
@@ -131,6 +134,9 @@ func (f *pgFixture) baseline(root string, at time.Time, floor uint64, deltaSince
 	}
 	if deltaSince != "" {
 		md[baseline.MetaKeyPGDeltaSince] = deltaSince
+	}
+	if f.anchor != 0 {
+		md[baseline.MetaKeyPGAnchorLSN] = fmt.Sprint(f.anchor)
 	}
 	path := filepath.Join(root, reconstruct.SnapshotDirName(at), "public", "orders.parquet")
 	w, err := baseline.NewWriter(path, []baseline.Column{{Name: "id", RawText: true}, {Name: "status", RawText: true}},
