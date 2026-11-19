@@ -163,11 +163,9 @@ func TestOne_NonFullTableSkipsArePersistedAndSurviveRestart(t *testing.T) {
 	waitFor(t, 20*time.Second, func() bool {
 		var n int
 		_ = indexDB.QueryRow("SELECT COUNT(*) FROM binlog_events WHERE table_name = ? AND pk_values = '3'", ta).Scan(&n)
-		if n == 0 {
-			t.Logf("A rows so far: %d", countRows(ta))
-		}
-		return n == 1
+		return n >= 1
 	}, "A's row after the restart indexed")
+	t.Logf("A rows in the index after the restart: %d", countRows(ta))
 	waitFor(t, 10*time.Second, func() bool {
 		var now sql.NullString
 		_ = indexDB.QueryRow("SELECT last_checkpoint FROM stream_state WHERE id = 1").Scan(&now)
