@@ -24,7 +24,8 @@ func TestRewriteForCopy_rounds(t *testing.T) {
 		{"SELECT round(10.00 * avg(x), 1)", "SELECT _bintrail_pg_round_avg(x, 2, 0.1)"},
 		{"SELECT round(1 * avg(x), 0)", "SELECT _bintrail_pg_round_avg(x, 0, 1)"},
 		{"SELECT round(avg(CASE WHEN f = 1 THEN o END), 2)", "SELECT _bintrail_pg_round_avg(CASE WHEN f = 1 THEN o END, 2, 0.01)"},
-		{"SELECT round(a / b, 17)", "SELECT _bintrail_pg_round_div(a, b, 17, 0.00000000000000001)"},
+		{"SELECT round(a / b, 15)", "SELECT _bintrail_pg_round_div(a, b, 15, 0.000000000000001)"},
+		{"SELECT round(100 * avg(x), 13)", "SELECT _bintrail_pg_round_avg(x, 15, 0.0000000000001)"},
 		{"SELECT round(a / b, 0)", "SELECT _bintrail_pg_round_div(a, b, 0, 1)"},
 		// The rest of the text is kept byte for byte, comments, case and
 		// spacing included.
@@ -51,7 +52,7 @@ func TestRewriteForCopy_leavesOtherShapes(t *testing.T) {
 		"SELECT round(a / b, $1)",                     // k must be written
 		"SELECT round(a / b, -1)",                     // a negative k
 		"SELECT round(a / b, 2.0)",                    // k must be a whole number
-		"SELECT round(a / b, 18)",                     // a DECIMAL(38,18) answer
+		"SELECT round(a / b, 16)",                     // past what the copy can round
 		"SELECT round(a / b, 2, 3)",                   // three arguments
 		"SELECT round(a / b * c, 2)",                  // the division is not last
 		"SELECT round(a + b / c, 2)",                  // nor here
@@ -71,6 +72,9 @@ func TestRewriteForCopy_leavesOtherShapes(t *testing.T) {
 		"SELECT round(3 * avg(x), 2)", // a multiplier other than 10^j
 		"SELECT round(0.1 * avg(x), 2)",
 		"SELECT round(avg(x) * 100, 2)",
+		"SELECT round(100 * avg(x), 14)",              // 16 decimals of the average
+		"SELECT round(date_part('day', d) / 7.0, 2)",   // a double precision on PostgreSQL
+		"SELECT round(avg(date_part('month', d)), 2)",
 		"SELECT pg_catalog.round(a / b, 2)", // qualified
 		`SELECT "round"(a / b, 2)`,          // quoted
 		"SELECT round(1e2 / 3, 2)",          // the lexer refuses the statement
@@ -156,5 +160,18 @@ FROM order_line GROUP BY ol_supply_w_id ORDER BY ol_supply_w_id LIMIT 10`,
 		if veto := CopyScreen(q, types); !strings.Contains(veto, says) {
 			t.Errorf("%s: veto %q, want one naming %s", q, veto, says)
 		}
+	}
+}
+
+// Only a connection that can send a statement to its source hands the copy
+// the rewritten text: without one the copy answers every statement, and a
+// refusal would be an error the client sees.
+func TestCopyText_onlyWithAForwardingAccount(t *testing.T) {
+	q := "SELECT round(sum(qty) / count(*), 2) FROM pgcmp_orders"
+	if got := routeSession(false).copyText(q); got != q {
+		t.Errorf("without a forwarding account: %q", got)
+	}
+	if got := routeSession(true).copyText(q); got != RewriteForCopy(q) || got == q {
+		t.Errorf("with a forwarding account: %q", got)
 	}
 }

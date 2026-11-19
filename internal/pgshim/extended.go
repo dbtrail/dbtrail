@@ -628,7 +628,7 @@ func (s *session) columnsOf(text string) ([]sqlsandbox.Column, error) {
 	started := time.Now()
 	ctx, done := s.statementContext()
 	defer done()
-	res, err := s.bound.Run(ctx, RewriteForCopy(text), s.runOptions())
+	res, err := s.bound.Run(ctx, s.copyText(text), s.runOptions())
 	if s.bound.Answered != nil && ctx.Err() == nil {
 		s.bound.Answered(time.Since(started), err != nil)
 	}

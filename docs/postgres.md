@@ -844,8 +844,8 @@ listener, its own workers, its own memory.
 
   An expression's type is the one the copy computes it with, which is not
   always PostgreSQL's: `avg()` of whole numbers is a `double precision` here
-  and a `numeric` there (inside `round(avg(x), k)` it is PostgreSQL's
-  `numeric`, as above), and an aggregate or a literal of a `numeric` keeps its
+  and a `numeric` there (through a forwarding account, inside
+  `round(avg(x), k)` it is PostgreSQL's `numeric`, as below), and an aggregate or a literal of a `numeric` keeps its
   precision and scale here (`numeric(10,2)`) where PostgreSQL reports none. A
   `numeric` declared without precision is a `numeric(38,18)` here and is
   written with its 18 decimals (`12345.678000000000000000` where the source
@@ -1112,7 +1112,8 @@ The source answers:
   `concat`, `abs`, `bool_and`, `string_agg`, `row_number`, `rank`, `lag`, and
   `extract`, `date_part` and `date_trunc` of a year, month or day;
   `round(a / b, k)` and `round(avg(x), k)` (also `round(100 * avg(x), k)`, or
-  any other power of ten) where `k` is written as a whole number from 0 to 17
+  any other power of ten) where `k` is written as a whole number from 0 to 15 (counting the
+  power of ten of `avg`)
   and `a`, `b` and `x` are numerics or whole numbers, rounded as PostgreSQL
   rounds a `numeric`: half away from zero, to exactly `k` decimals (`50.00`);
   the

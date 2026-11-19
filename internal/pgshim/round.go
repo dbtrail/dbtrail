@@ -6,6 +6,18 @@ import (
 	"strings"
 )
 
+// copyText is text as this connection hands it to the copy: rewritten
+// (RewriteForCopy) when it can send a statement to its source, since a
+// round the copy then refuses goes there; as written otherwise, where the
+// copy answers every statement and a refusal would be an error the client
+// sees (a round of two whole numbers is a common one).
+func (s *session) copyText(text string) string {
+	if s.forwarding() {
+		return RewriteForCopy(text)
+	}
+	return text
+}
+
 // RewriteForCopy writes stmt for the copy of a PostgreSQL source: each
 // round(a / b, k) and round(avg(x), k), round(10^j * avg(x), k) among them,
 // becomes the copy's macro for it (sqlsandbox pgRoundMacros), which rounds
@@ -26,10 +38,12 @@ const (
 	pgRoundAvg = "_bintrail_pg_round_avg"
 )
 
-// maxRoundDecimals is the most decimals a rewritten round may ask for:
-// 18 would answer a DECIMAL(38,18), the copy's type for a numeric with no
-// precision, which the port sends to the source (writtenOtherwise).
-const maxRoundDecimals = 17
+// maxRoundDecimals is the most decimals a rewritten round may ask for, the
+// shift of round(10^j * avg(x), k) included: PostgreSQL's division keeps at
+// least 16 decimals of a quotient under 1, so the macro refuses 16 and past
+// it (l - kk < 1), and a unit of 16 decimals or more is a number the lexer
+// refuses (more than 18 characters).
+const maxRoundDecimals = 15
 
 // ownName names a word of the client's statement that DBTrail keeps for the
 // copy's own macros (_bintrail_...), "" when none: on PostgreSQL there is no
@@ -147,6 +161,14 @@ func roundCall(q string, toks []rtToken, spans [][2]int, from, to int) (string, 
 		unit = "0." + strings.Repeat("0", k-1) + "1"
 	}
 	a0, a1 := from, comma
+	// date_part is a double precision on PostgreSQL, where round(x, k) of
+	// one fails, and a whole number on the copy, where the macro would
+	// round it.
+	for i := a0; i < a1; i++ {
+		if toks[i].kind == rtWord && toks[i].text == "date_part" && isOpTok(toks, i+1, "(") {
+			return "", false
+		}
+	}
 
 	// round(avg(x), k) and round(10^j * avg(x), k).
 	at, shift := a0, 0
@@ -176,6 +198,9 @@ func roundCall(q string, toks []rtToken, spans [][2]int, from, to int) (string, 
 			case d == 0 && (isOpTok(toks, i, ",") || toks[i].kind == rtWord && toks[i].text == "order"):
 				return "", false
 			}
+		}
+		if k+shift > maxRoundDecimals {
+			return "", false
 		}
 		inner, _ := rewriteRounds(text(inner0, inner1))
 		return pgRoundAvg + "(" + inner + ", " + strconv.Itoa(k+shift) + ", " + unit + ")", true
