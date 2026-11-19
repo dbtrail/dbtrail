@@ -483,6 +483,13 @@ func expectations() []expectation {
 		eq(`SELECT id, floor(n / d), floor(n / i), floor(100.0 * d / i) FROM ` + itRound + ` ORDER BY id`),
 		eq(`SELECT price_from, price_from + 5 AS price_to, count(*) FROM (SELECT floor(amount / 5) * 5 AS price_from FROM ` + o + ` WHERE amount IS NOT NULL) t GROUP BY price_from ORDER BY price_from`),
 		refused("both sides of the division are whole numbers", "by design: PostgreSQL divides them as whole numbers", `SELECT id, floor(qty / 2) FROM `+o),
+		// extract(epoch from x) of a timestamp and to_timestamp of whole
+		// seconds: the ten-minute buckets of the HTAP bench's reports.
+		eq(`SELECT id, extract(epoch from seen_at), extract(epoch from placed_at) FROM ` + o + ` ORDER BY id`),
+		eq(`SELECT to_timestamp(floor(extract(epoch from seen_at) / 600) * 600) AS p, count(*) FROM ` + o + ` GROUP BY 1 ORDER BY 1`),
+		eq(`SELECT to_timestamp(floor(extract(epoch from placed_at) / 3600) * 3600) AS p, count(*), sum(count(*)) OVER (ORDER BY to_timestamp(floor(extract(epoch from placed_at) / 3600) * 3600)) FROM ` + o + ` GROUP BY 1 ORDER BY 1`),
+		refused("not a timestamp", "by design: PostgreSQL reads a date or an interval otherwise", `SELECT id, extract(epoch from span) FROM `+tm),
+		refused("not a whole number of seconds", "by design: a fraction of a second is a double on PostgreSQL", `SELECT to_timestamp(extract(epoch from seen_at)) FROM `+o),
 		// ntile(n): the same buckets, even and uneven, partitioned, more
 		// buckets than rows.
 		eq(`SELECT id, ntile(3) OVER (ORDER BY id), ntile(5) OVER (ORDER BY id), ntile(20) OVER (ORDER BY id) FROM ` + o + ` ORDER BY id`),
