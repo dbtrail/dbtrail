@@ -351,19 +351,31 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 	// The pair before has ended. The table is the file and that pair, and
 	// the window's changes go over the two: the changes the pair holds are
 	// not read again from the index, which on a table whose file is hours
-	// old was most of what ending a pair cost. If the two cannot be put
-	// together, nothing has been written and the caller reads every change
-	// since the file, as before; a full disk is the run's to report.
+	// old was most of what ending a pair cost. If the pair is not to be
+	// trusted, or the two cannot be put together (no room for the temporary
+	// file among the reasons), nothing has been written and the caller reads
+	// every change since the file, as before: slower, and needing no
+	// temporary file.
 	if prev != nil {
-		merged, done, merr := materializePGBaseWithPair(ctx, p.baselinePath, prev, cfg.DuckDBTuning, cfg.DownloadDir, cfg.SpaceCheck)
+		if prev.distrust != "" {
+			return nil, "the delta beside the previous file could not be continued: " + prev.distrust, nil
+		}
+		tmp := cfg.DownloadDir
+		if tmp == "" {
+			tmp = cfg.snapshotDir
+		}
+		merged, done, merr := materializePGBaseWithPair(ctx, p.baselinePath, prev, cfg.DuckDBTuning, tmp, cfg.SpaceCheck)
 		if merr != nil {
-			if errors.Is(merr, ErrLocalDiskFull) || ctx.Err() != nil {
-				return nil, "", fmt.Errorf("%s.%s: %w", schema, table, merr)
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, "", cerr
 			}
+			slog.Warn("a table could not be written from its previous file and the delta beside it; every change since the file is read instead",
+				"schema", schema, "table", table, "error", merr)
 			return nil, fmt.Sprintf("%s; and the file and its delta could not be put together: %v", fromPair, merr), nil
 		}
 		defer done()
 		in.LocalBaselinePath = merged
+		rep.DeltaCompacted = fromPair
 		slog.Info("table written in full from its previous file and the delta beside it",
 			"schema", schema, "table", table, "reason", fromPair, "file_lsn", lsnText(bmeta.LSN), "delta_lsn", lsnText(prev.meta.LSN))
 	}
