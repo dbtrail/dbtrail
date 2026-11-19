@@ -34,11 +34,11 @@ func RewriteForCopy(stmt string) string {
 
 // The macros the rewrite writes, which the screen lets through.
 const (
-	pgRoundDiv = "_bintrail_pg_round_div"
-	pgRoundAvg = "_bintrail_pg_round_avg"
-	pgFloorDiv    = "_bintrail_pg_floor_div"
-	pgEpoch       = "_bintrail_pg_epoch"
-	pgToTimestamp = "_bintrail_pg_to_timestamp"
+	pgRoundDiv         = "_bintrail_pg_round_div"
+	pgRoundAvg         = "_bintrail_pg_round_avg"
+	pgFloorDiv         = "_bintrail_pg_floor_div"
+	pgEpochMacro       = "_bintrail_pg_epoch"
+	pgToTimestampMacro = "_bintrail_pg_to_timestamp"
 )
 
 // maxRoundDecimals is the most decimals a rewritten round may ask for, the
@@ -264,7 +264,7 @@ func epochCall(q string, toks []rtToken, spans [][2]int, from, to int) (string, 
 		return "", false
 	}
 	x, _ := rewriteRounds(q[spans[from+2][0]:spans[to-1][1]])
-	return pgEpoch + "(" + x + ")", true
+	return pgEpochMacro + "(" + x + ")", true
 }
 
 // toTimestampCall is the macro call for to_timestamp(<x>) of one argument
@@ -285,7 +285,7 @@ func toTimestampCall(q string, toks []rtToken, spans [][2]int, from, to int) (st
 		}
 	}
 	x, _ := rewriteRounds(q[spans[from][0]:spans[to-1][1]])
-	return pgToTimestamp + "(" + x + ")", true
+	return pgToTimestampMacro + "(" + x + ")", true
 }
 
 // splitDivision reads toks[a0:a1] as P / Q, where P is a product of values

@@ -508,7 +508,7 @@ var copyFuncs = map[string]bool{
 	pgFloorDiv: true, "ntile": true,
 	// extract(epoch from x) of a timestamp and to_timestamp(n) of whole
 	// seconds, as RewriteForCopy writes them.
-	pgEpoch: true, pgToTimestamp: true,
+	pgEpochMacro: true, pgToTimestampMacro: true,
 	"row_number": true, "rank": true, "lag": true,
 	"date_trunc": true, "date_part": true, "extract": true,
 }

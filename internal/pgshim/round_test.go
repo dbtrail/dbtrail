@@ -89,13 +89,13 @@ func TestRewriteForCopy_leavesOtherShapes(t *testing.T) {
 		"SELECT floor(a, b)",
 		"SELECT floor()",
 		"SELECT floor(date_part('day', d) / 7.0)",
-		"SELECT pg_catalog.floor(a / b)",
-		"SELECT extract(year from t)",
-		"SELECT extract(epoch)",
-		"SELECT to_timestamp('2026', 'YYYY')",
-		"SELECT to_timestamp()", // qualified
-		`SELECT "round"(a / b, 2)`,       // quoted
-		"SELECT round(1e2 / 3, 2)",       // the lexer refuses the statement
+		"SELECT pg_catalog.floor(a / b)",      // qualified
+		"SELECT extract(year from t)",         // the screen reads year, month and day as they are
+		"SELECT extract(epoch)",               // no FROM
+		"SELECT to_timestamp('2026', 'YYYY')", // another function, of text
+		"SELECT to_timestamp()",
+		`SELECT "round"(a / b, 2)`, // quoted
+		"SELECT round(1e2 / 3, 2)", // the lexer refuses the statement
 		"SELECT x FROM t",
 		"",
 	} {
