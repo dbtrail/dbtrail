@@ -615,7 +615,7 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 	if why := aliasUse(in); why != "" {
 		return why
 	}
-	types = withoutAliases(in, types)
+	types = withAliasTypes(in, types)
 	// A typed literal (DATE '...', '...'::date) is one value, never text:
 	// its string is folded into one token.
 	toks := make([]rtToken, 0, len(in))
@@ -746,8 +746,13 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 	// sortKeyText reports whether an ORDER BY key may sort text.
 	sortKeyText := func(key []rtToken) bool {
 		var core []rtToken
-		for _, t := range key {
+		for j, t := range key {
 			if t.kind == rtWord && (t.text == "asc" || t.text == "desc" || t.text == "nulls" || t.text == "first" || t.text == "last") {
+				continue
+			}
+			// A qualified name (t.col) is its column, and a key of one
+			// column is judged as one: an alias of a WITH may be text.
+			if t.kind == rtWord && isOpTok(key, j+1, ".") || isOpTok(key, j, ".") && j > 0 && key[j-1].kind == rtWord {
 				continue
 			}
 			core = append(core, t)
@@ -855,6 +860,11 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 
 	for i, t := range toks {
 		next, prev := at(i+1), at(i-1)
+		if next.kind == rtWord && at(i+2).kind == rtOp && at(i+2).text == "." && (at(i+3).kind == rtWord || at(i+3).kind == rtQuoted) {
+			// A qualified name (t.col) is its column: the table's name says
+			// nothing of the value.
+			next = at(i + 3)
+		}
 		switch t.kind {
 		case rtQuoted:
 			if strings.ToLower(t.text) != t.text {
@@ -986,7 +996,11 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 				}
 				if orderingFuncs[t.text] {
 					for _, arg := range a {
-						for _, x := range arg {
+						for j, x := range arg {
+							if x.kind == rtWord && isOpTok(arg, j+1, ".") {
+								// A table's name before its column.
+								continue
+							}
 							if operandText(x) || x.kind == rtParam {
 								return fmt.Sprintf("%s() of text (the source compares it by its collation)", t.text)
 							}
@@ -1072,26 +1086,9 @@ func aliases(toks []rtToken) (names map[string]bool, at map[int]bool) {
 	return names, at
 }
 
-// withoutAliases is types without the names the statement gives as
-// aliases: a name that may stand for an expression is a name of unknown
-// type (SELECT name AS id ... ORDER BY id sorts text).
-func withoutAliases(toks []rtToken, types map[string][]string) map[string][]string {
-	names, _ := aliases(toks)
-	if types == nil || len(names) == 0 {
-		return types
-	}
-	out := make(map[string][]string, len(types))
-	for k, v := range types {
-		if !names[k] {
-			out[k] = v
-		}
-	}
-	return out
-}
-
 // aliasUse names an alias of the select list used in WHERE or HAVING, which
 // PostgreSQL refuses and the copy answers. A name followed by a dot is a
-// table's.
+// table's, and one after a dot is a column of what it qualifies.
 func aliasUse(toks []rtToken) string {
 	names, at := aliases(toks)
 	if len(names) == 0 {
@@ -1110,7 +1107,9 @@ func aliasUse(toks []rtToken) string {
 			clause = ""
 			continue
 		}
-		if clause != "" && names[t.text] && !at[i] && !(i+1 < len(toks) && toks[i+1].kind == rtOp && toks[i+1].text == ".") {
+		// A name after a dot is a column of a table, a WITH or a subquery
+		// (r.rnk), which WHERE reads on PostgreSQL too.
+		if clause != "" && names[t.text] && !at[i] && !(i+1 < len(toks) && toks[i+1].kind == rtOp && toks[i+1].text == ".") && !isOpTok(toks, i-1, ".") {
 			return fmt.Sprintf("the name %s, given in the select list, used in %s", t.text, strings.ToUpper(clause))
 		}
 	}
