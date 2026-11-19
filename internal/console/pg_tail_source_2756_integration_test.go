@@ -168,8 +168,11 @@ func (r *pgTailRig) rewritten(tbl views.BaselineTable, at time.Time, floor uint6
 		baseline.MetaKeySnapshotTimestamp: stamp,
 		baseline.MetaKeyLastDumpAt:        stamp,
 		baseline.MetaKeyLSN:               strconv.FormatUint(floor, 10),
-		baseline.MetaKeyPGDeltaSince:      at.Add(-time.Minute).Format(time.RFC3339),
-		baseline.MetaKeyPGRelation:        old.PGRelation,
+		// The bound of time: no change at or after floor committed before
+		// it. The rig's changes are stamped within the first half hour, so
+		// the first file's bound holds for every later one.
+		baseline.MetaKeyPGDeltaSince: r.at.Add(-time.Minute).Format(time.RFC3339),
+		baseline.MetaKeyPGRelation:   old.PGRelation,
 		baseline.MetaKeyRenderGUCs:        baseline.RenderGUCsPinned,
 		baseline.MetaKeyLockMode:          baseline.LockStampPGRepeatableRead,
 		baseline.MetaKeySnapshotProducer:  baseline.ProducerDump,
