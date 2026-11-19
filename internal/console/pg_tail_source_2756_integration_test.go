@@ -789,6 +789,49 @@ func TestIntegrationPGTailSource(t *testing.T) {
 		}
 	})
 
+	// A table whose changes capture dropped (below REPLICA IDENTITY FULL)
+	// after its rows were read from the source has old rows in its copy: its
+	// tail must not vouch for it. Asked after an answer was kept, so the kept
+	// answer is shown to follow the ledger.
+	t.Run("capture dropped changes of the table since the snapshot: its tail ends, other tables' stand", func(t *testing.T) {
+		tbl := r.table(nil, [2]string{"1", "one"})
+		r.change(tbl.Table, event.EventUpdate, "1", "paid", 0xa80, 25*time.Minute)
+		r.checkpoint(0xa80)
+		want := []string{"1=paid"}
+		if got := r.state(ctx, tbl); !reflect.DeepEqual(got, want) {
+			t.Fatalf("state %v, want %v", got, want)
+		}
+		ledger := func(at time.Time, tables ...string) {
+			t.Helper()
+			doc, err := json.Marshal(map[string]any{"replica_identity_not_full": map[string]any{
+				"count": 3, "last_at": at.UTC().Format(time.RFC3339Nano), "tables": tables}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			testutil.MustExec(t, r.db, "UPDATE stream_state SET capture_skips = ? WHERE id = 1", string(doc))
+		}
+		t.Cleanup(func() { testutil.MustExec(t, r.db, "UPDATE stream_state SET capture_skips = NULL WHERE id = 1") })
+		name := tbl.Schema + "." + tbl.Table
+		after, before := time.Now().Add(time.Hour), time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+
+		ledger(after, name)
+		if got := r.state(ctx, tbl); !reflect.DeepEqual(got, noTail) {
+			t.Fatalf("a drop of this table after the snapshot: state %v, want no tail", got)
+		}
+		ledger(after, tbl.Schema+".another_table")
+		if got := r.state(ctx, tbl); !reflect.DeepEqual(got, want) {
+			t.Fatalf("a drop of another table only: state %v, want %v", got, want)
+		}
+		ledger(before, name)
+		if got := r.state(ctx, tbl); !reflect.DeepEqual(got, want) {
+			t.Fatalf("a drop before the snapshot's read of the source, which the read covers: state %v, want %v", got, want)
+		}
+		ledger(after) // no table list: it may be any table
+		if got := r.state(ctx, tbl); !reflect.DeepEqual(got, noTail) {
+			t.Fatalf("a drop that names no table: state %v, want no tail", got)
+		}
+	})
+
 	// Last: a loss on record is the whole server's.
 	t.Run("capture lost events since the snapshot: no table has a tail", func(t *testing.T) {
 		tbl := r.table(nil, [2]string{"1", "one"})

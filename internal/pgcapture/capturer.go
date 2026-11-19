@@ -181,7 +181,7 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 	// every other table down with it. Said here once, at start, for the tables
 	// already in the publication; the decoder says it again for each description
 	// of the table it receives.
-	notFull, err := validateReplicaIdentity(startupCtx, queryConn, c.cfg.Publication)
+	notFull, err := validateReplicaIdentity(startupCtx, queryConn, c.cfg.Publication, c.cfg.Filters)
 	if err != nil {
 		return err
 	}

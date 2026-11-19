@@ -197,15 +197,18 @@ func missingPublishedOps(ins, upd, del bool) []string {
 //     refused: the decoder's cacheRelation skips the changes of every relation it is
 //     handed below FULL (and records each one in the capture-skip ledger), at start
 //     and mid-stream alike, so refusing here would stop every table over one. The
-//     caller warns with the list.
+//     caller warns with the list. Only the tables filters accepts are returned: the
+//     decoder neither warns about nor counts the others, whose rows are dropped by
+//     the filter anyway.
 //
 // The report-only CheckReplicaIdentity (doctor, console preflight) still FAILS on
-// the same list: there, it is the advice to fix before capture, not a stop.
-func validateReplicaIdentity(ctx context.Context, conn *pgx.Conn, publication string) (notFull []string, err error) {
+// the whole publication's list: there, it is the advice to fix before capture, not
+// a stop.
+func validateReplicaIdentity(ctx context.Context, conn *pgx.Conn, publication string, filters event.Filters) (notFull []string, err error) {
 	if err := checkWALLevel(ctx, conn); err != nil {
 		return nil, err
 	}
-	return replicaIdentityNotFull(ctx, conn, publication)
+	return replicaIdentityNotFullWhere(ctx, conn, publication, filters.Matches)
 }
 
 // ErrWALLevelNotLogical marks the "wal_level is readable but not 'logical'" case (a
@@ -248,6 +251,12 @@ func checkWALLevel(ctx context.Context, conn *pgx.Conn) error {
 // the doctor check (which fails on one) and the report-only QueryReplicaIdentityNotFull (which surfaces the list
 // for the console health panel). An empty result means every published table is FULL.
 func replicaIdentityNotFull(ctx context.Context, conn *pgx.Conn, publication string) ([]string, error) {
+	return replicaIdentityNotFullWhere(ctx, conn, publication, nil)
+}
+
+// replicaIdentityNotFullWhere is replicaIdentityNotFull limited to the tables
+// keep accepts (nil: every published table).
+func replicaIdentityNotFullWhere(ctx context.Context, conn *pgx.Conn, publication string, keep func(schema, table string) bool) ([]string, error) {
 	rows, err := conn.Query(ctx, `
 		SELECT pt.schemaname, pt.tablename, c.relreplident::text
 		FROM pg_publication_tables pt
@@ -265,7 +274,7 @@ func replicaIdentityNotFull(ctx context.Context, conn *pgx.Conn, publication str
 		if err := rows.Scan(&schema, &table, &relreplident); err != nil {
 			return nil, fmt.Errorf("pgcapture: scanning replica identity for publication %q: %w", publication, err)
 		}
-		if relreplident != "f" {
+		if relreplident != "f" && (keep == nil || keep(schema, table)) {
 			notFull = append(notFull, fmt.Sprintf("%s.%s (relreplident=%s)", schema, table, relreplident))
 		}
 	}
