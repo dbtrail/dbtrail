@@ -477,6 +477,19 @@ func expectations() []expectation {
 		    SELECT g.c, round(100.0 * g.k / t.n, 2) AS pct, round(g.total / g.k, 3) AS per FROM g CROSS JOIN t ORDER BY pct DESC, g.c`),
 		eq(`WITH f AS (SELECT id, CASE WHEN qty > 5 THEN 1 ELSE 0 END AS big, qty * 2 AS twice FROM ` + o + `)
 		    SELECT f.id, f.big FROM f WHERE f.big >= 1 AND f.twice > 10 ORDER BY f.twice, f.id`),
+		// floor(a / b), as the port writes it for the copy: the whole number
+		// below PostgreSQL's numeric quotient, over the random quotients and
+		// the ones exactly on a half.
+		eq(`SELECT id, floor(n / d), floor(n / i), floor(100.0 * d / i) FROM ` + itRound + ` ORDER BY id`),
+		eq(`SELECT price_from, price_from + 5 AS price_to, count(*) FROM (SELECT floor(amount / 5) * 5 AS price_from FROM ` + o + ` WHERE amount IS NOT NULL) t GROUP BY price_from ORDER BY price_from`),
+		refused("both sides of the division are whole numbers", "by design: PostgreSQL divides them as whole numbers", `SELECT id, floor(qty / 2) FROM `+o),
+		// ntile(n): the same buckets, even and uneven, partitioned, more
+		// buckets than rows.
+		eq(`SELECT id, ntile(3) OVER (ORDER BY id), ntile(5) OVER (ORDER BY id), ntile(20) OVER (ORDER BY id) FROM ` + o + ` ORDER BY id`),
+		eq(`SELECT id, ntile(2) OVER (PARTITION BY customer_id ORDER BY id) FROM ` + o + ` ORDER BY id`),
+		eq(`SELECT id, ntile(10) OVER (ORDER BY id) AS decile FROM ` + itRound + ` ORDER BY id`),
+		eq(`WITH t AS (SELECT id, ntile(7) OVER (ORDER BY id) AS b FROM ` + itRound + `) SELECT t.b, count(*), min(t.id), max(t.id) FROM t GROUP BY t.b ORDER BY t.b`),
+		{stmt: `SELECT id, ntile(0) OVER (ORDER BY id) FROM ` + o, verdict: sqlcompare.SourceError},
 		// What the copy cannot round as PostgreSQL does it refuses, and
 		// never answers otherwise.
 		{stmt: `SELECT id, round(amount / qty, 2) FROM ` + o, verdict: sqlcompare.SourceError},

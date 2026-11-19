@@ -357,8 +357,8 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 			return sessionErr("define DATE_ADD: %v", err)
 		}
 	}
-	// PostgreSQL's ROUND of a numeric division and of a numeric AVG, which
-	// the PostgreSQL port writes as these macros.
+	// PostgreSQL's ROUND and FLOOR of a numeric division and ROUND of a
+	// numeric AVG, which the PostgreSQL port writes as these macros.
 	if job.PostgresRules {
 		if _, err := conn.ExecContext(ctx, pgRoundMacros); err != nil {
 			return sessionErr("define PostgreSQL's ROUND: %v", err)

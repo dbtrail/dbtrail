@@ -298,6 +298,8 @@ func pgFunctionName(v map[string]any) (string, int, bool) {
 		// round(a / b, k) and round(avg(x), k), as the port writes them
 		// for the copy (pgRoundMacros).
 		name = "round"
+	} else if strings.HasPrefix(name, "_bintrail_pg_floor_") {
+		name = "floor"
 	}
 	// Folded: a function's name is written without quotes.
 	name = foldName(name)

@@ -503,6 +503,9 @@ var copyFuncs = map[string]bool{
 	// round(a / b, k) and round(avg(x), k), as RewriteForCopy writes them:
 	// rounded as PostgreSQL rounds a numeric (sqlsandbox pgRoundMacros).
 	pgRoundDiv: true, pgRoundAvg: true,
+	// floor(a / b), as RewriteForCopy writes it, and ntile(n), whose
+	// buckets pgcompare measured the same.
+	pgFloorDiv: true, "ntile": true,
 	"row_number": true, "rank": true, "lag": true,
 	"date_trunc": true, "date_part": true, "extract": true,
 }

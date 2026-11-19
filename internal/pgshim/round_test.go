@@ -36,6 +36,10 @@ func TestRewriteForCopy_rounds(t *testing.T) {
 		{"SELECT round(round(a / b, 2) / c, 1)", "SELECT _bintrail_pg_round_div(_bintrail_pg_round_div(a, b, 2, 0.01), c, 1, 0.1)"},
 		{"SELECT round(round(a / b, 2), 1)", "SELECT round(_bintrail_pg_round_div(a, b, 2, 0.01), 1)"},
 		{"SELECT round(avg(round(a / b, 1)), 2)", "SELECT _bintrail_pg_round_avg(_bintrail_pg_round_div(a, b, 1, 0.1), 2, 0.01)"},
+		// floor(a / b), the HTAP bench's price bands.
+		{"SELECT FLOOR(i_price / 5) * 5 AS price_from", "SELECT _bintrail_pg_floor_div(i_price, 5) * 5 AS price_from"},
+		{"SELECT floor(100.0 * a / (b * c))", "SELECT _bintrail_pg_floor_div(100.0 * a, (b * c))"},
+		{"SELECT round(floor(a / b) / c, 2)", "SELECT _bintrail_pg_round_div(_bintrail_pg_floor_div(a, b), c, 2, 0.01)"},
 	} {
 		if got := RewriteForCopy(c.in); got != c.want {
 			t.Errorf("%q\n got %q\nwant %q", c.in, got, c.want)
@@ -75,9 +79,15 @@ func TestRewriteForCopy_leavesOtherShapes(t *testing.T) {
 		"SELECT round(100 * avg(x), 14)",             // 16 decimals of the average
 		"SELECT round(date_part('day', d) / 7.0, 2)", // a double precision on PostgreSQL
 		"SELECT round(avg(date_part('month', d)), 2)",
-		"SELECT pg_catalog.round(a / b, 2)", // qualified
-		`SELECT "round"(a / b, 2)`,          // quoted
-		"SELECT round(1e2 / 3, 2)",          // the lexer refuses the statement
+		"SELECT pg_catalog.round(a / b, 2)",
+		"SELECT floor(x)",
+		"SELECT floor(a / b * c)",
+		"SELECT floor(a, b)",
+		"SELECT floor()",
+		"SELECT floor(date_part('day', d) / 7.0)",
+		"SELECT pg_catalog.floor(a / b)", // qualified
+		`SELECT "round"(a / b, 2)`,       // quoted
+		"SELECT round(1e2 / 3, 2)",       // the lexer refuses the statement
 		"SELECT x FROM t",
 		"",
 	} {
@@ -131,6 +141,8 @@ func TestCopyScreen_benchReportsWithRound(t *testing.T) {
 		"d_w_id": {"INTEGER"}, "d_next_o_id": {"INTEGER"}, "d_ytd": {"DECIMAL(12,2)"}, "d_tax": {"DECIMAL(4,4)"},
 		"ol_w_id": {"INTEGER"}, "ol_supply_w_id": {"INTEGER"}, "ol_quantity": {"SMALLINT"}, "ol_amount": {"DECIMAL(6,2)"},
 		"ol_delivery_d": {"TIMESTAMP WITH TIME ZONE"}, "ol_number": {"SMALLINT"}, "ol_i_id": {"INTEGER"},
+		"i_id": {"INTEGER"}, "i_price": {"DECIMAL(5,2)"}, "i_data": {"VARCHAR"}, "o_w_id": {"INTEGER"}, "o_d_id": {"SMALLINT"},
+		"o_id": {"INTEGER"}, "o_ol_cnt": {"SMALLINT"}, "o_all_local": {"SMALLINT"}, "ol_d_id": {"SMALLINT"}, "ol_o_id": {"INTEGER"},
 	}
 	for name, q := range map[string]string{
 		"Q01": `SELECT d_w_id AS w_id, SUM(d_next_o_id - 1) AS orders_taken, SUM(d_ytd) AS ytd_payments,
@@ -140,6 +152,18 @@ FROM district WHERE d_w_id BETWEEN 1 AND 20 GROUP BY d_w_id ORDER BY orders_take
 		"Q03": `SELECT ol_w_id AS w_id, COUNT(*) AS order_lines, ROUND(AVG(ol_quantity), 2) AS avg_quantity,
        ROUND(100.0 * SUM(CASE WHEN ol_supply_w_id <> ol_w_id THEN 1 ELSE 0 END) / COUNT(*), 3) AS pct_remote
 FROM order_line WHERE ol_w_id BETWEEN 1 AND 20 GROUP BY ol_w_id ORDER BY ol_w_id`,
+		"Q02": `SELECT price_from, price_from + 5 AS price_to, COUNT(*) AS items, ROUND(AVG(i_price), 2) AS avg_price,
+       SUM(is_original) AS original_items, ROUND(100.0 * SUM(is_original) / COUNT(*), 2) AS pct_original
+FROM (SELECT i_price, FLOOR(i_price / 5) * 5 AS price_from, CASE WHEN i_data LIKE '%ORIGINAL%' THEN 1 ELSE 0 END AS is_original
+      FROM item WHERE i_id BETWEEN 1 AND 5000) t
+GROUP BY price_from ORDER BY price_from`,
+		"Q09": `WITH order_totals AS (SELECT o.o_w_id, o.o_d_id, o.o_id, o.o_ol_cnt, o.o_all_local, SUM(ol.ol_amount) AS total
+  FROM orders o JOIN order_line ol ON ol.ol_w_id = o.o_w_id AND ol.ol_d_id = o.o_d_id AND ol.ol_o_id = o.o_id
+  WHERE o.o_w_id BETWEEN 1 AND 20 GROUP BY o.o_w_id, o.o_d_id, o.o_id, o.o_ol_cnt, o.o_all_local),
+deciles AS (SELECT t.*, NTILE(10) OVER (ORDER BY t.total) AS decile FROM order_totals t)
+SELECT decile, COUNT(*) AS orders, MIN(total) AS min_value, MAX(total) AS max_value, ROUND(AVG(total), 2) AS avg_value,
+       ROUND(AVG(o_ol_cnt), 2) AS avg_lines, ROUND(100.0 * SUM(total) / NULLIF(SUM(SUM(total)) OVER (), 0), 2) AS pct_of_revenue
+FROM deciles GROUP BY decile ORDER BY decile`,
 		"Q12": `SELECT ol_supply_w_id AS w_id, COUNT(*) AS lines,
        ROUND(100.0 * SUM(CASE WHEN ol_delivery_d IS NULL THEN 1 ELSE 0 END) / COUNT(*), 2) AS pct_pending
 FROM order_line GROUP BY ol_supply_w_id ORDER BY ol_supply_w_id LIMIT 10`,

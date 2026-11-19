@@ -152,7 +152,7 @@ var neverText = map[string]bool{
 	"char_length": true, "octet_length": true, "position": true, "extract": true, "date_part": true,
 	"round": true, "floor": true, "ceil": true, "ceiling": true, "trunc": true, "stddev": true,
 	"stddev_pop": true, "stddev_samp": true, "variance": true, "var_pop": true, "var_samp": true,
-	"bool_and": true, "bool_or": true, "every": true, pgRoundDiv: true, pgRoundAvg: true,
+	"bool_and": true, "bool_or": true, "every": true, pgRoundDiv: true, pgRoundAvg: true, pgFloorDiv: true,
 }
 
 // asTheirArguments are the functions that answer a value of their first

@@ -36,6 +36,7 @@ func RewriteForCopy(stmt string) string {
 const (
 	pgRoundDiv = "_bintrail_pg_round_div"
 	pgRoundAvg = "_bintrail_pg_round_avg"
+	pgFloorDiv = "_bintrail_pg_floor_div"
 )
 
 // maxRoundDecimals is the most decimals a rewritten round may ask for, the
@@ -66,14 +67,18 @@ func rewriteRounds(q string) (string, bool) {
 	var b strings.Builder
 	last, changed := 0, false
 	for i := 0; i < len(toks); i++ {
-		if toks[i].kind != rtWord || toks[i].text != "round" || !isOpTok(toks, i+1, "(") || isOpTok(toks, i-1, ".") {
+		if toks[i].kind != rtWord || (toks[i].text != "round" && toks[i].text != "floor") || !isOpTok(toks, i+1, "(") || isOpTok(toks, i-1, ".") {
 			continue
 		}
 		end := closingParen(toks, i+1)
 		if end < 0 {
 			continue
 		}
-		repl, ok := roundCall(q, toks, spans, i+2, end)
+		call := roundCall
+		if toks[i].text == "floor" {
+			call = floorCall
+		}
+		repl, ok := call(q, toks, spans, i+2, end)
 		if !ok {
 			// Left as written; a round inside it is still read.
 			continue
@@ -213,8 +218,39 @@ func roundCall(q string, toks []rtToken, spans [][2]int, from, to int) (string, 
 // PostgreSQL reads a * b / c ((a * b) / c). Anything else at the top of the
 // argument (a + b / c, a / b * c, a / b / c, -a / b, a cast with ::) is not.
 func roundDivision(q string, toks []rtToken, spans [][2]int, a0, a1, k int, unit string, text func(int, int) string) (string, bool) {
-	if toks[a0].kind == rtOp && toks[a0].text != "(" {
+	p, d, ok := splitDivision(toks, a0, a1, text)
+	if !ok {
 		return "", false
+	}
+	return pgRoundDiv + "(" + p + ", " + d + ", " + strconv.Itoa(k) + ", " + unit + ")", true
+}
+
+// floorCall is the macro call for floor(<toks[from:to]>) of a division,
+// false for any other floor: floor(x) of a numeric is already PostgreSQL's
+// on the copy, but floor of a float or a column is not something this
+// port has measured, and it stays with the source.
+func floorCall(q string, toks []rtToken, spans [][2]int, from, to int) (string, bool) {
+	if from >= to {
+		return "", false
+	}
+	text := func(a, b int) string { return q[spans[a][0]:spans[b-1][1]] }
+	for i := from; i < to; i++ {
+		if toks[i].kind == rtWord && toks[i].text == "date_part" && isOpTok(toks, i+1, "(") {
+			return "", false
+		}
+	}
+	p, d, ok := splitDivision(toks, from, to, text)
+	if !ok {
+		return "", false
+	}
+	return pgFloorDiv + "(" + p + ", " + d + ")", true
+}
+
+// splitDivision reads toks[a0:a1] as P / Q, where P is a product of values
+// and Q one value, and gives P and Q as written (each rewritten in turn).
+func splitDivision(toks []rtToken, a0, a1 int, text func(int, int) string) (string, string, bool) {
+	if toks[a0].kind == rtOp && toks[a0].text != "(" {
+		return "", "", false
 	}
 	slash, depth := -1, 0
 	for i := a0; i < a1; i++ {
@@ -235,29 +271,29 @@ func roundDivision(q string, toks []rtToken, spans [][2]int, a0, a1, k int, unit
 			switch t.text {
 			case "/":
 				if slash >= 0 {
-					return "", false
+					return "", "", false
 				}
 				slash = i
 			case "*":
 				if slash >= 0 {
-					return "", false
+					return "", "", false
 				}
 			case ".":
 			default:
-				return "", false
+				return "", "", false
 			}
 		case rtWord:
 			if notInADivision[t.text] {
-				return "", false
+				return "", "", false
 			}
 		case rtString, rtParam, rtTyped:
-			return "", false
+			return "", "", false
 		}
 	}
 	if slash <= a0 || slash+1 >= a1 {
-		return "", false
+		return "", "", false
 	}
 	p, _ := rewriteRounds(text(a0, slash))
 	d, _ := rewriteRounds(text(slash+1, a1))
-	return pgRoundDiv + "(" + p + ", " + d + ", " + strconv.Itoa(k) + ", " + unit + ")", true
+	return p, d, true
 }
