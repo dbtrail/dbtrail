@@ -585,7 +585,7 @@ func TestReconstructTables_PGTablePairEndsWithoutReadingItsChangesAgain(t *testi
 	} {
 		changes := c.changes
 		t.Run(name, func(t *testing.T) {
-			reconstruct.SetPGFoldByEngine(t, c.byEngine)
+			folds := reconstruct.CountPGFoldsByEngine(t, c.byEngine)
 			f := newPGFixture(t)
 			onRoot, offRoot := t.TempDir(), t.TempDir()
 			taken := f.at(10 * time.Minute)
@@ -635,6 +635,40 @@ func TestReconstructTables_PGTablePairEndsWithoutReadingItsChangesAgain(t *testi
 			}
 			if r.EventsApplied != window {
 				t.Fatalf("second update applied %d events; want the %d of its window, not the 3 the pair held", r.EventsApplied, window)
+			}
+			// Written the way this case names: by the engine once, or not
+			// by it at all.
+			if want := map[bool]int{true: 1, false: 0}[c.byEngine]; *folds != want {
+				t.Fatalf("the engine folded %d tables; want %d", *folds, want)
+			}
+			// Its footer has the keys the row-by-row merge writes, no other,
+			// and the values that do not depend on which file it came from.
+			duck, err := sql.Open("duckdb", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer duck.Close()
+			onKV, err := pgdelta.Footer(context.Background(), duck, f.tableFile(onRoot, at2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			offKV, err := pgdelta.Footer(context.Background(), duck, f.tableFile(offRoot, at2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for k := range onKV {
+				if _, ok := offKV[k]; !ok && changes {
+					t.Errorf("the rewritten file's footer has %q, which the row-by-row merge with deltas off does not write", k)
+				}
+			}
+			for k, v := range offKV {
+				got, ok := onKV[k]
+				if !ok {
+					t.Errorf("the rewritten file's footer lacks %q", k)
+				}
+				if changes && got != v && !strings.Contains(k, "derived_from") && !strings.Contains(k, "generation") {
+					t.Errorf("footer %q is %q; with deltas off %q", k, got, v)
+				}
 			}
 			// What only the pair held is in the table.
 			if got["1"] != "one" || got["2"] != "" {

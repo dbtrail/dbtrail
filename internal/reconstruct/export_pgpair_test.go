@@ -15,15 +15,22 @@ func SetPGTableDeltas(t *testing.T, on bool) {
 	t.Cleanup(func() { pgTableDeltas = prev })
 }
 
-// SetPGFoldByEngine turns off, for one test, the engine's fold of a table's
-// delta into its file, so the table is written the row-by-row way.
-func SetPGFoldByEngine(t *testing.T, on bool) {
+// CountPGFoldsByEngine counts, for one test, the tables the engine wrote in
+// full from a file and its delta; with on false the engine's fold fails
+// instead, so the table is written the row-by-row way.
+func CountPGFoldsByEngine(t *testing.T, on bool) *int {
 	t.Helper()
-	prev := pgFoldPair
-	if !on {
-		pgFoldPair = func(context.Context, *sql.DB, string, string, string, string, map[string]string) (int64, error) {
-			return 0, errors.New("the engine's fold is turned off for this test")
+	prev, n := pgFoldPair, new(int)
+	pgFoldPair = func(ctx context.Context, duck *sql.DB, base, dead, rows, dst string, md map[string]string) (string, int64, error) {
+		if !on {
+			return "", 0, errors.New("the engine's fold is turned off for this test")
 		}
+		folded, total, err := prev(ctx, duck, base, dead, rows, dst, md)
+		if err == nil {
+			*n++
+		}
+		return folded, total, err
 	}
 	t.Cleanup(func() { pgFoldPair = prev })
+	return n
 }

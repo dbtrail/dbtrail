@@ -125,6 +125,13 @@ func pgPairEligible(cfg FullTableConfig, srcPath string, bmeta baseline.DumpMeta
 func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *TableReport, prev *pgPrevPair, end string) (written bool, err error) {
 	src, bmeta := in.SourceBaseline.Path, in.SourceBaseline.Metadata
 	dst := filepath.Join(in.SnapshotDir, in.Schema, in.Table+".parquet")
+	// blamePrev: a refusal below makes the caller read every change since
+	// the file instead of writing the table from the pair before. Always
+	// for a run that set out to continue that pair: it could not, and the
+	// pair may be why. For a run that set out to end it (end given), only
+	// where that pair is what did not read: the other refusals say nothing
+	// of it, and its file may be too old for those changes to be read again.
+	blamePrev := end == ""
 	full := func(why string, cause error) (bool, error) {
 		if cerr := ctx.Err(); cerr != nil {
 			return false, cerr
@@ -136,7 +143,7 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		// Whatever kept this pair from being written may be the pair before
 		// it (its rows or its dead rows would not read): the table is then
 		// not written from that pair either.
-		if prev != nil {
+		if prev != nil && blamePrev {
 			prev.distrust = why
 		}
 		slog.Warn("PostgreSQL table delta not written; the table is written without it",
@@ -230,9 +237,11 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 	var carriedDead []int64
 	if prev != nil {
 		if prev.base != baseID {
+			blamePrev = true
 			return full("the delta beside the previous file was written for another file", nil)
 		}
 		if carriedDead, err = pgdelta.ReadDead(ctx, duck, prev.dead); err != nil {
+			blamePrev = true
 			return full("could not read the rows the previous delta takes away", err)
 		}
 	}
@@ -347,6 +356,8 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 			return false, fmt.Errorf("%s.%s: a table delta is already in this snapshot's folder: %w", in.Schema, in.Table, err)
 		}
 		if err != nil {
+			// The pair before is read while this one is written.
+			blamePrev = true
 			return full("the delta could not be written", err)
 		}
 		wrote = true
@@ -377,16 +388,35 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 	// is as good as it was.
 	if end != "" {
 		if in.SpaceCheck != nil {
-			if serr := in.SpaceCheck(in.SnapshotDir, fi.Size()); serr != nil {
+			need := fi.Size()
+			if st, serr := os.Stat(rows); serr == nil {
+				need += st.Size()
+			}
+			if serr := in.SpaceCheck(in.SnapshotDir, need); serr != nil {
 				if terr := takeBack(); terr != nil {
 					return false, terr
 				}
 				return false, serr
 			}
 		}
-		total, ferr := pgFoldPair(ctx, duck, src, dead, rows, dst, md)
+		// A table file already at its place in this run's folder is not one
+		// this run can explain, as with a pair (ErrPairExists).
+		if _, lerr := os.Lstat(dst); lerr == nil {
+			return false, fmt.Errorf("%s.%s: a table file is already in this snapshot's folder: %s", in.Schema, in.Table, dst)
+		}
+		// The footer a table file carries: the run's own, without the keys
+		// of a pair.
+		folded, total, ferr := pgFoldPair(ctx, duck, src, dead, rows, dst, snapshotFileMetadata(in))
+		// The pair goes before the file takes its place: a table file with
+		// the pair of another beside it must never be in a folder.
 		if terr := takeBack(); terr != nil {
+			os.Remove(folded)
 			return false, terr
+		}
+		if ferr == nil {
+			if ferr = os.Rename(folded, dst); ferr != nil {
+				os.Remove(folded)
+			}
 		}
 		if ferr != nil {
 			if cerr := ctx.Err(); cerr != nil {
@@ -438,28 +468,28 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 }
 
 // pgFoldPair is pgFoldPairIntoFile, a seam: a test makes it fail to reach
-// the row-by-row way a table is written when the engine cannot.
+// the row-by-row way a table is written when the engine cannot, and counts
+// the folds that were made.
 var pgFoldPair = pgFoldPairIntoFile
 
-// pgFoldPairIntoFile writes, at dst, the table a file and the pair beside it
-// leave (pgdelta.StateSQL), with md as its footer, and returns how many rows
-// it holds. The engine reads the three files and writes the new one; no row
-// passes through this process, which is what makes writing a table of tens
-// of millions of rows in full a matter of seconds where the merge takes
-// minutes. The technique is CompactTableDeltaMinor's: the footer handed to
-// the engine as it is, a name of its own until the file is whole and synced.
+// pgFoldPairIntoFile writes the table a file and the pair beside it leave
+// (pgdelta.StateSQL), with md as its footer, to a name of its own beside dst,
+// and returns that name and how many rows the table holds: the caller gives
+// the file its place. The engine reads the three files and writes the new
+// one; no row passes through this process, which is what makes writing a
+// table of tens of millions of rows in full a matter of seconds where the
+// merge takes minutes. The technique is CompactTableDeltaMinor's: the footer
+// handed to the engine as it is, the file synced before it is renamed.
 //
-// The file is held to its count: the base's rows, less the ones the pair
-// takes away, plus the rows the pair puts. A pair that does not add up (a
-// row number the base does not have, a key twice) leaves no file.
-func pgFoldPairIntoFile(ctx context.Context, duck *sql.DB, base, dead, rows, dst string, md map[string]string) (int64, error) {
-	if _, err := os.Lstat(dst); err == nil {
-		return 0, fmt.Errorf("%s is already there", dst)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return 0, err
-	}
+// The table is held to its count: the file's rows, less the ones the pair
+// takes away, plus the rows the pair puts, and the pair's keys each once. A
+// row number the file does not have, a row taken away twice or a key written
+// twice leaves no file. A pair that names the wrong rows of the file with
+// the right count is not caught here: that is what the pair's own writer and
+// the snapshot's record of its files are for.
+func pgFoldPairIntoFile(ctx context.Context, duck *sql.DB, base, dead, rows, dst string, md map[string]string) (folded string, total int64, err error) {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return 0, err
+		return "", 0, err
 	}
 	lit := func(v string) string { return "'" + strings.ReplaceAll(v, "'", "''") + "'" }
 	keys := make([]string, 0, len(md))
@@ -472,35 +502,49 @@ func pgFoldPairIntoFile(ctx context.Context, duck *sql.DB, base, dead, rows, dst
 		kv = append(kv, lit(k)+": "+lit(md[k]))
 	}
 	tmp := dst + ".tmp-fold"
-	fail := func(err error) (int64, error) {
+	fail := func(err error) (string, int64, error) {
 		os.Remove(tmp)
-		return 0, err
+		return "", 0, err
 	}
 	q := fmt.Sprintf("COPY (%s) TO %s (FORMAT PARQUET, COMPRESSION '%s', KV_METADATA {%s})",
 		pgdelta.StateSQL(base, []string{dead}, []string{rows}), lit(tmp), ParquetWriterCompression, strings.Join(kv, ", "))
 	if _, err := duck.ExecContext(ctx, q); err != nil {
 		return fail(fmt.Errorf("fold the delta into its file: %w", localWriteErr(err)))
 	}
-	one := func(path, where string) string {
-		return "(SELECT count(*) FROM read_parquet(" + lit(pgdelta.GlobLiteral(path)) + ", hive_partitioning=false)" + where + ")"
-	}
-	var got, had, gone, put int64
-	err := duck.QueryRowContext(ctx, "SELECT "+one(tmp, "")+", "+one(base, "")+", "+one(dead, "")+", "+
-		one(rows, " WHERE "+pgdelta.OpColumn+" = '"+pgdelta.OpPut+"'")).Scan(&got, &had, &gone, &put)
+	got, want, err := pgPairRowCount(ctx, duck, tmp, base, dead, rows)
 	if err != nil {
-		return fail(fmt.Errorf("count the rows of the folded file: %w", err))
+		return fail(err)
 	}
-	if got != had-gone+put {
-		return fail(fmt.Errorf("the folded file has %d rows, and the file's %d less the %d its delta takes away plus the %d it puts is %d",
-			got, had, gone, put, had-gone+put))
+	if got != want {
+		return fail(fmt.Errorf("the folded file has %d rows, and its file and delta add up to %d", got, want))
 	}
 	if err := fsyncFile(tmp); err != nil {
 		return fail(err)
 	}
-	if err := os.Rename(tmp, dst); err != nil {
-		return fail(err)
+	return tmp, got, nil
+}
+
+// pgPairRowCount counts the rows of table, a file written from base and the
+// pair (dead, rows), and what they should be: base's rows, less the pair's
+// dead rows, plus the rows the pair puts. A pair that holds a key twice is
+// an error: the table would hold that row twice with the count adding up.
+func pgPairRowCount(ctx context.Context, duck *sql.DB, table, base, dead, rows string) (got, want int64, err error) {
+	lit := func(v string) string { return "'" + strings.ReplaceAll(v, "'", "''") + "'" }
+	one := func(what, path, where string) string {
+		return "(SELECT " + what + " FROM read_parquet(" + lit(pgdelta.GlobLiteral(path)) + ", hive_partitioning=false)" + where + ")"
 	}
-	return got, nil
+	var had, gone, put, keys, distinct int64
+	err = duck.QueryRowContext(ctx, "SELECT "+one("count(*)", table, "")+", "+one("count(*)", base, "")+", "+one("count(*)", dead, "")+", "+
+		one("count(*)", rows, " WHERE "+pgdelta.OpColumn+" = '"+pgdelta.OpPut+"'")+", "+
+		one("count(*)", rows, "")+", "+one("count(DISTINCT encode("+pgdelta.KeyColumn+"))", rows, "")).
+		Scan(&got, &had, &gone, &put, &keys, &distinct)
+	if err != nil {
+		return 0, 0, fmt.Errorf("count the rows of a file and its delta: %w", err)
+	}
+	if keys != distinct {
+		return 0, 0, fmt.Errorf("the delta holds %d rows for %d keys: a key is in it twice", keys, distinct)
+	}
+	return got, had - gone + put, nil
 }
 
 // pgPairMetaKeyFrom is, on a pair written from the pair before it and the
@@ -585,24 +629,15 @@ func materializePGBaseWithPair(ctx context.Context, basePath string, prev *pgPre
 		cleanup()
 		return "", nil, fmt.Errorf("apply the table delta to its file: %w", localWriteErr(err))
 	}
-	// The table has the file's rows, less the ones the pair takes away, plus
-	// the rows the pair puts. Anything else is a pair that does not say what
-	// it seems to (a row number the file does not have, a key written
-	// twice), and no table is written from it.
-	var got, base, dead, puts int64
-	err = duck.QueryRowContext(ctx, "SELECT (SELECT count(*) FROM read_parquet("+lit(pgdelta.GlobLiteral(tmpPath))+")),"+
-		" (SELECT count(*) FROM read_parquet("+lit(pgdelta.GlobLiteral(basePath))+", hive_partitioning=false)),"+
-		" (SELECT count(*) FROM read_parquet("+lit(pgdelta.GlobLiteral(prev.dead))+", hive_partitioning=false)),"+
-		" (SELECT count(*) FROM read_parquet("+lit(pgdelta.GlobLiteral(prev.rows))+", hive_partitioning=false) WHERE "+pgdelta.OpColumn+" = '"+pgdelta.OpPut+"')").
-		Scan(&got, &base, &dead, &puts)
+	// Held to its count, as a fold by the engine is (pgPairRowCount).
+	got, want, err := pgPairRowCount(ctx, duck, tmpPath, basePath, prev.dead, prev.rows)
 	if err != nil {
 		cleanup()
-		return "", nil, fmt.Errorf("count the rows of the file with its delta: %w", err)
+		return "", nil, err
 	}
-	if got != base-dead+puts {
+	if got != want {
 		cleanup()
-		return "", nil, fmt.Errorf("the file with its delta has %d rows, and the file's %d less the %d its delta takes away plus the %d it puts is %d",
-			got, base, dead, puts, base-dead+puts)
+		return "", nil, fmt.Errorf("the file with its delta has %d rows, and the two add up to %d", got, want)
 	}
 	return tmpPath, cleanup, nil
 }
