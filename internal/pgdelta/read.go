@@ -126,40 +126,37 @@ func BasePositionsOf(ctx context.Context, db *sql.DB, basePath string, keyColumn
 		return nil, fmt.Errorf("row %d of %s has no value in a key column (%s)", badRow.Int64, basePath, strings.Join(keyColumns, ", "))
 	}
 
-	dir, err := os.MkdirTemp("", "bintrail-pgkeys-")
+	// The wanted keys, in a file the engine reads. Where none can be written
+	// (no temporary folder to write in), the keys are found row by row: it
+	// costs time, not the pair.
+	wanted, cleanup, err := writeWantedKeys(keys)
 	if err != nil {
-		return nil, fmt.Errorf("pgdelta: a folder for the changed keys: %w", err)
-	}
-	defer os.RemoveAll(dir)
-	wanted := filepath.Join(dir, "keys.parquet")
-	w, err := baseline.NewWriter(wanted, []baseline.Column{{Name: KeyColumn, RawText: true}}, baseline.WriterConfig{Compression: "zstd", RowGroupSize: 100_000})
-	if err != nil {
-		return nil, fmt.Errorf("pgdelta: write the changed keys: %w", err)
-	}
-	for _, k := range keys {
-		if err := w.WriteRow([]string{k}, []bool{false}); err != nil {
-			_ = w.Close()
-			return nil, fmt.Errorf("pgdelta: write the changed keys: %w", err)
+		set := make(map[string]bool, len(keys))
+		for _, k := range keys {
+			set[k] = true
 		}
+		return BasePositions(ctx, db, basePath, keyColumns, func(k string) bool { return set[k] })
 	}
-	if err := w.Close(); err != nil {
-		return nil, fmt.Errorf("pgdelta: write the changed keys: %w", err)
-	}
+	defer cleanup()
 
-	rows, err := db.QueryContext(ctx, "SELECT bintrail_b.file_row_number, bintrail_w."+KeyColumn+
+	// Both sides as their bytes, the wanted keys made distinct as bytes too:
+	// under a session collation that sets case or accents aside, two keys
+	// that differ only there are still two.
+	rows, err := db.QueryContext(ctx, "SELECT bintrail_b.file_row_number, bintrail_w.bintrail_k"+
 		" FROM (SELECT file_row_number, encode("+strings.Join(parts, " || '|' || ")+") AS bintrail_k FROM "+src+") AS bintrail_b"+
-		" JOIN (SELECT DISTINCT "+KeyColumn+" FROM read_parquet("+file(wanted)+noHive+")) AS bintrail_w"+
-		" ON bintrail_b.bintrail_k = encode(bintrail_w."+KeyColumn+")")
+		" JOIN (SELECT DISTINCT encode("+KeyColumn+") AS bintrail_k FROM read_parquet("+file(wanted)+noHive+")) AS bintrail_w"+
+		" ON bintrail_b.bintrail_k = bintrail_w.bintrail_k")
 	if err != nil {
 		return nil, fmt.Errorf("find the changed keys in %s: %w", basePath, err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var pos int64
-		var key string
-		if err := rows.Scan(&pos, &key); err != nil {
+		var raw []byte
+		if err := rows.Scan(&pos, &raw); err != nil {
 			return nil, fmt.Errorf("find the changed keys in %s: %w", basePath, err)
 		}
+		key := string(raw)
 		if at, twice := found[key]; twice {
 			if at > pos {
 				at, pos = pos, at
@@ -172,6 +169,33 @@ func BasePositionsOf(ctx context.Context, db *sql.DB, basePath string, keyColumn
 		return nil, fmt.Errorf("find the changed keys in %s: %w", basePath, err)
 	}
 	return found, nil
+}
+
+// writeWantedKeys writes keys to a Parquet file of one column (KeyColumn) in
+// a folder of its own, and returns the file and what removes the folder.
+func writeWantedKeys(keys []string) (path string, cleanup func(), err error) {
+	dir, err := os.MkdirTemp("", "bintrail-pgkeys-")
+	if err != nil {
+		return "", nil, err
+	}
+	cleanup = func() { os.RemoveAll(dir) }
+	path = filepath.Join(dir, "keys.parquet")
+	w, err := baseline.NewWriter(path, []baseline.Column{{Name: KeyColumn, RawText: true}}, baseline.WriterConfig{Compression: "zstd", RowGroupSize: 100_000})
+	if err == nil {
+		for _, k := range keys {
+			if err = w.WriteRow([]string{k}, []bool{false}); err != nil {
+				break
+			}
+		}
+		if cerr := w.Close(); err == nil {
+			err = cerr
+		}
+	}
+	if err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return path, cleanup, nil
 }
 
 // ReadDead is the row numbers a .pgdead file names, ascending. A file that

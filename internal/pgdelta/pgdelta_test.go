@@ -947,6 +947,25 @@ func TestBasePositionsOfAnswersAsBasePositions(t *testing.T) {
 	if len(slow) != len(all) || !reflect.DeepEqual(fast, slow) {
 		t.Fatalf("%d keys in the file; row by row finds %d, the join %d:\n row by row %v\n the join    %v", len(all), len(slow), len(fast), slow, fast)
 	}
+	// The same in a session that sets case and accents aside when it
+	// compares text: "a" and "A", and the two spellings of é, stay four keys.
+	loose := duck(t)
+	if _, err := loose.Exec("SET default_collation='nocase.noaccent'"); err != nil {
+		t.Fatal(err)
+	}
+	var same bool
+	if err := loose.QueryRow("SELECT 'a' = 'A'").Scan(&same); err != nil || !same {
+		t.Fatalf("the session still tells a from A (%v, %v): this part of the test checks nothing", same, err)
+	}
+	if fast, err = BasePositionsOf(ctx, loose, base, keyCols, asked); err != nil || !reflect.DeepEqual(fast, slow) {
+		t.Fatalf("under a collation that sets case aside the join finds %d keys (%v), row by row %d", len(fast), err, len(slow))
+	}
+	// A key of one column, the empty text among its values.
+	one := filepath.Join(t.TempDir(), "t.parquet")
+	writeBase(t, one, []string{"id", "val"}, []cell{v("b"), v("1")}, []cell{v(""), v("2")}, []cell{v("B"), v("3")})
+	if got, err := BasePositionsOf(ctx, db, one, []string{"id"}, []string{"", "B", "c"}); err != nil || len(got) != 2 || got[""] != 1 || got["B"] != 2 {
+		t.Fatalf("a one-column key with the empty text: %v, %v", got, err)
+	}
 	// A few of them, and none.
 	few, err := BasePositionsOf(ctx, db, base, keyCols, []string{all[10], all[40], "not there"})
 	if err != nil || len(few) != 2 || few[all[10]] != 10 || few[all[40]] != 40 {
