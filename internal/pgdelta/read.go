@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/event"
 )
 
@@ -83,6 +84,87 @@ func BasePositions(ctx context.Context, db *sql.DB, basePath string, keyColumns 
 		return nil, fmt.Errorf("read the keys of %s: %w", basePath, err)
 	}
 	return found, nil
+}
+
+// ReadDead is the row numbers a .pgdead file names, ascending. A file that
+// names a row twice, or holds a NULL or a negative number, is an error.
+func ReadDead(ctx context.Context, db *sql.DB, deadPath string) ([]int64, error) {
+	rows, err := db.QueryContext(ctx, `SELECT "`+baseline.TableDeltaPosColumn+`" FROM read_parquet(`+file(deadPath)+noHive+`) ORDER BY 1`)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", deadPath, err)
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var p sql.NullInt64
+		if err := rows.Scan(&p); err != nil {
+			return nil, fmt.Errorf("read %s: %w", deadPath, err)
+		}
+		if !p.Valid || p.Int64 < 0 || (len(out) > 0 && p.Int64 <= out[len(out)-1]) {
+			return nil, fmt.Errorf("%s does not hold ascending row numbers (row %d of it)", deadPath, len(out))
+		}
+		out = append(out, p.Int64)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read %s: %w", deadPath, err)
+	}
+	return out, nil
+}
+
+// EachNew hands every row of a .pgnew file to yield, in the file's order,
+// which is ascending order of the key's bytes: a file in any other order is
+// an error, as is a key twice. columns are the table's, in the order each
+// Change's Values follow. The Change handed over is yield's until it
+// returns: its slices are used again for the next row. An error from yield
+// is returned as it is.
+func EachNew(ctx context.Context, db *sql.DB, newPath string, columns []string, yield func(Change) error) error {
+	sel := make([]string, 0, len(columns)+2)
+	sel = append(sel, KeyColumn, OpColumn)
+	for _, c := range columns {
+		sel = append(sel, `"`+strings.ReplaceAll(c, `"`, `""`)+`"`)
+	}
+	// The file's own order, asked for: a read on several threads hands the
+	// row groups over as they come.
+	rows, err := db.QueryContext(ctx, "SELECT "+strings.Join(sel, ", ")+
+		" FROM read_parquet("+file(newPath)+", file_row_number=true"+noHive+") ORDER BY file_row_number")
+	if err != nil {
+		return fmt.Errorf("read %s: %w", newPath, err)
+	}
+	defer rows.Close()
+	var key, op sql.NullString
+	vals := make([]sql.NullString, len(columns))
+	dest := make([]any, 0, len(columns)+2)
+	dest = append(dest, &key, &op)
+	for i := range vals {
+		dest = append(dest, &vals[i])
+	}
+	c := Change{Values: make([]string, len(columns)), Nulls: make([]bool, len(columns))}
+	prev, first := "", true
+	for rows.Next() {
+		if err := rows.Scan(dest...); err != nil {
+			return fmt.Errorf("read %s: %w", newPath, err)
+		}
+		switch {
+		case !key.Valid || !op.Valid:
+			return fmt.Errorf("%s holds a row with no key or no mark of what happened to it", newPath)
+		case op.String != OpPut && op.String != OpDelete:
+			return fmt.Errorf("%s holds a row of key %q marked %q", newPath, key.String, op.String)
+		case !first && key.String <= prev:
+			return fmt.Errorf("%s is not in the order of its keys (%q after %q)", newPath, key.String, prev)
+		}
+		prev, first = key.String, false
+		c.Key, c.Delete = key.String, op.String == OpDelete
+		for i, v := range vals {
+			c.Values[i], c.Nulls[i] = v.String, !v.Valid
+		}
+		if err := yield(c); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read %s: %w", newPath, err)
+	}
+	return nil
 }
 
 // BaseRows is how many rows a base file holds, for BaseID.
