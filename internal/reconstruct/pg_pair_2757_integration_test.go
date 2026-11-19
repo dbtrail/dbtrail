@@ -491,10 +491,14 @@ func TestReconstructTables_PGTablePairContinuesThePairBefore(t *testing.T) {
 	f.event(0x700, 12*time.Minute, 2, "1", s("one"))
 	f.event(0x710, 13*time.Minute, 3, "2", nil)
 	f.event(0x720, 14*time.Minute, 1, "40", s("forty"))
-	f.checkpoint(0x720)
+	// Two keys no later window names: the pair after this one has the row
+	// of 5 and the dead row of 6 from this pair alone.
+	f.event(0x730, 15*time.Minute, 2, "5", s("five"))
+	f.event(0x740, 16*time.Minute, 3, "6", nil)
+	f.checkpoint(0x740)
 	at1 := f.at(20 * time.Minute)
-	if r := both(at1); len(f.pairFiles(onRoot, at1)) != 2 || r.EventsApplied != 3 {
-		t.Fatalf("first update: delta files %v, %d events; want a pair from 3", f.pairFiles(onRoot, at1), r.EventsApplied)
+	if r := both(at1); len(f.pairFiles(onRoot, at1)) != 2 || r.EventsApplied != 5 {
+		t.Fatalf("first update: delta files %v, %d events; want a pair from 5", f.pairFiles(onRoot, at1), r.EventsApplied)
 	}
 
 	// No change: the file and its pair, as they are.
@@ -520,10 +524,15 @@ func TestReconstructTables_PGTablePairContinuesThePairBefore(t *testing.T) {
 		t.Fatalf("third update: delta files %v, %d events, continues %q; want a pair from the 6 changes since the pair before",
 			f.pairFiles(onRoot, at3), r.EventsApplied, footer["bintrail.pgdelta_from"])
 	}
-	// 64 rows in the file; 1, 2 and 7 are taken away; 0, 1, 2, 7 and 9z are
-	// in the pair.
-	if r.BaselineRows != 61 || r.RowsWritten != 66 {
-		t.Fatalf("third update's report: %d rows of the file kept, %d rows in all; want 61 and 66", r.BaselineRows, r.RowsWritten)
+	// 64 rows in the file; 1, 2, 5, 6 and 7 are taken away; 0, 1, 2, 7 and
+	// 9z are the window's rows, and 5 is kept from the pair before. Without
+	// the rows that pair took away, 5 and 6 would be read from the file too.
+	if r.BaselineRows != 60 || r.RowsWritten != 65 || r.InsertsEmitted+r.UpdatesApplied != 5 {
+		t.Fatalf("third update's report: %d rows left as they were, %d rows in all, %d written by the window; want 60, 65 and 5",
+			r.BaselineRows, r.RowsWritten, r.InsertsEmitted+r.UpdatesApplied)
+	}
+	if got, _ := f.state(onRoot, at3); got["5"] != "five" || got["6"] != "" || len(got) != 65 {
+		t.Fatalf("third update: 5 reads %q, 6 reads %q, %d rows; want five, no row, 65", got["5"], got["6"], len(got))
 	}
 
 	// The pair beside the file is not whole: every change since the file is
@@ -540,8 +549,8 @@ func TestReconstructTables_PGTablePairContinuesThePairBefore(t *testing.T) {
 	at4 := f.at(50 * time.Minute)
 	r = both(at4)
 	_, footer = f.state(onRoot, at4)
-	if len(f.pairFiles(onRoot, at4)) != 2 || r.EventsApplied != 10 || footer["bintrail.pgdelta_from"] != "" {
-		t.Fatalf("fourth update: delta files %v, %d events, continues %q; want a pair from all 10 changes since the file, continuing none",
+	if len(f.pairFiles(onRoot, at4)) != 2 || r.EventsApplied != 12 || footer["bintrail.pgdelta_from"] != "" {
+		t.Fatalf("fourth update: delta files %v, %d events, continues %q; want a pair from all 12 changes since the file, continuing none",
 			f.pairFiles(onRoot, at4), r.EventsApplied, footer["bintrail.pgdelta_from"])
 	}
 }
