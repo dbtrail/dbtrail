@@ -313,6 +313,12 @@ func TestReconstructTables_PGTablePair(t *testing.T) {
 	f.checkpoint(0x840)
 	at3 := f.at(40 * time.Minute)
 	reps = both(at3)
+	// Written from the second update's pair and the five changes since:
+	// the four before them were not read again from the index.
+	if _, footer := f.state(onRoot, at3); reps[0].EventsApplied != 5 || footer["bintrail.pgdelta_from"] == "" {
+		t.Fatalf("third update applied %d events and its pair continues %q; want the 5 since the pair before, continued",
+			reps[0].EventsApplied, footer["bintrail.pgdelta_from"])
+	}
 	want["40"], want["2"] = "newer", "back"
 	delete(want, "3")
 	if got, _ := f.state(onRoot, at3); !sameRows(got, want) {
@@ -437,5 +443,100 @@ func TestReconstructTables_PGTablePairIsCarriedWithItsFile(t *testing.T) {
 				t.Fatalf("the carried table reads %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+// A pair is continued: an update reads the changes since the pair beside the
+// previous file ended, and writes the next pair from that one and them. From
+// a full read's file on, which records its bound; across an update that
+// found no change and carried the file and its pair as they were; and when
+// the pair beside the file cannot be continued, by reading every change
+// since the file again, as before. At every step the table reads as a
+// rewrite leaves it.
+func TestReconstructTables_PGTablePairContinuesThePairBefore(t *testing.T) {
+	f := newPGFixture(t)
+	onRoot, offRoot := t.TempDir(), t.TempDir()
+	taken := f.at(10 * time.Minute)
+	for _, root := range []string{onRoot, offRoot} {
+		f.baseline(root, taken, 0x500, taken.Add(-baseline.PGDeltaMargin).Format(time.RFC3339), pairRows()...)
+	}
+	f.other(0x600, 12*time.Minute)
+	both := func(at time.Time) *reconstruct.TableReport {
+		t.Helper()
+		reconstruct.SetPGTableDeltas(t, false)
+		want, _, _, err := f.run(offRoot, pgRun{at: at, carry: true, chainFloor: f.base})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reconstruct.SetPGTableDeltas(t, true)
+		_, _, reps, err := f.run(onRoot, pgRun{at: at, carry: true, chainFloor: f.base})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := f.state(onRoot, at); !sameRows(got, want) {
+			t.Fatalf("at %s the table reads %v, and a rewrite gives %v", at.Format("15:04"), got, want)
+		}
+		if !f.sameFile(f.tableFile(onRoot, taken), f.tableFile(onRoot, at)) {
+			t.Fatalf("at %s the table file is not the full read's own", at.Format("15:04"))
+		}
+		return reps[0]
+	}
+
+	// The first update after the full read: a pair, not the table in full.
+	f.event(0x700, 12*time.Minute, 2, "1", s("one"))
+	f.event(0x710, 13*time.Minute, 3, "2", nil)
+	f.event(0x720, 14*time.Minute, 1, "40", s("forty"))
+	f.checkpoint(0x720)
+	at1 := f.at(20 * time.Minute)
+	if r := both(at1); len(f.pairFiles(onRoot, at1)) != 2 || r.EventsApplied != 3 {
+		t.Fatalf("first update: delta files %v, %d events; want a pair from 3", f.pairFiles(onRoot, at1), r.EventsApplied)
+	}
+
+	// No change: the file and its pair, as they are.
+	at2 := f.at(30 * time.Minute)
+	if r := both(at2); !r.CarriedForward || len(r.Files) != 3 {
+		t.Fatalf("second update: carried %v files %v; want the file and its pair carried", r.CarriedForward, r.Files)
+	}
+
+	// Changes again, continued from the carried pair: a key before every
+	// key it holds and one after, a key it holds changed and one deleted, a
+	// row it took away put back, and a row of the file it never named.
+	f.event(0x800, 32*time.Minute, 1, "0", s("zero"))
+	f.event(0x810, 33*time.Minute, 1, "9z", s("last"))
+	f.event(0x820, 34*time.Minute, 2, "1", s("one again"))
+	f.event(0x830, 35*time.Minute, 3, "40", nil)
+	f.event(0x840, 36*time.Minute, 1, "2", s("two is back"))
+	f.event(0x850, 37*time.Minute, 2, "7", s("seven"))
+	f.checkpoint(0x850)
+	at3 := f.at(40 * time.Minute)
+	r := both(at3)
+	_, footer := f.state(onRoot, at3)
+	if len(f.pairFiles(onRoot, at3)) != 2 || r.EventsApplied != 6 || footer["bintrail.pgdelta_from"] == "" {
+		t.Fatalf("third update: delta files %v, %d events, continues %q; want a pair from the 6 changes since the pair before",
+			f.pairFiles(onRoot, at3), r.EventsApplied, footer["bintrail.pgdelta_from"])
+	}
+	// 24 rows in the file; 1, 2 and 7 are taken away; 0, 1, 2, 7 and 9z are
+	// in the pair.
+	if r.BaselineRows != 21 || r.RowsWritten != 26 {
+		t.Fatalf("third update's report: %d rows of the file kept, %d rows in all; want 21 and 26", r.BaselineRows, r.RowsWritten)
+	}
+
+	// The pair beside the file is not whole: every change since the file is
+	// read again, and the table is the same.
+	dead, _, err := pgdelta.Paths(f.tableFile(onRoot, at3), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(dead); err != nil {
+		t.Fatal(err)
+	}
+	f.event(0x900, 42*time.Minute, 2, "8", s("eight"))
+	f.checkpoint(0x900)
+	at4 := f.at(50 * time.Minute)
+	r = both(at4)
+	_, footer = f.state(onRoot, at4)
+	if len(f.pairFiles(onRoot, at4)) != 2 || r.EventsApplied != 10 || footer["bintrail.pgdelta_from"] != "" {
+		t.Fatalf("fourth update: delta files %v, %d events, continues %q; want a pair from all 10 changes since the file, continuing none",
+			f.pairFiles(onRoot, at4), r.EventsApplied, footer["bintrail.pgdelta_from"])
 	}
 }

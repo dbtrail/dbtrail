@@ -107,7 +107,14 @@ func pgPairEligible(cfg FullTableConfig, srcPath string, bmeta baseline.DumpMeta
 //
 // The pair's footer is the one a rewrite would have written (the run's cut
 // and its bound); the carried file keeps its own.
-func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *TableReport) (written bool, err error) {
+//
+// prev is the pair beside the previous file when fold holds only the changes
+// since that pair's cut (pgPrevPairOf), nil when it holds every change since
+// the file was written. With prev the new pair is that pair's rows which
+// the window left alone, then the window's: one pair again, holding every
+// change since the file was written, without reading them again from the
+// index.
+func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *TableReport, prev *pgPrevPair) (written bool, err error) {
 	src, bmeta := in.SourceBaseline.Path, in.SourceBaseline.Metadata
 	dst := filepath.Join(in.SnapshotDir, in.Schema, in.Table+".parquet")
 	full := func(why string, cause error) (bool, error) {
@@ -171,9 +178,15 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 	if err != nil {
 		return full("could not count the table file's rows", err)
 	}
-	if int64(len(fold.Changes))*pgPairMaxShare > baseRows {
+	// With a pair before, its keys and the window's: some are the same
+	// ones, so this ends the pair at most one update early.
+	var prevKeys int64
+	if prev != nil {
+		prevKeys = prev.keys
+	}
+	if (int64(len(fold.Changes))+prevKeys)*pgPairMaxShare > baseRows {
 		slog.Info("PostgreSQL table delta not written: the changes since the table file was written are too many beside it; the table is written in full",
-			"schema", in.Schema, "table", in.Table, "changes", len(fold.Changes), "file_rows", baseRows)
+			"schema", in.Schema, "table", in.Table, "changes", int64(len(fold.Changes))+prevKeys, "file_rows", baseRows)
 		return false, nil
 	}
 	baseID, err := pgdelta.BaseID(bmeta, fi.Size(), baseRows)
@@ -195,54 +208,99 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		return full("could not find the changed rows in the table file", err)
 	}
 
-	var puts, replaced, removed int
+	var carriedDead []int64
+	if prev != nil {
+		if prev.base != baseID {
+			return full("the delta beside the previous file was written for another file", nil)
+		}
+		if carriedDead, err = pgdelta.ReadDead(ctx, duck, prev.dead); err != nil {
+			return full("could not read the rows the previous delta takes away", err)
+		}
+	}
+
+	// puts, replaced and removed count the window's changes, as the merge
+	// does; kept counts the previous pair's rows the window left alone.
+	var puts, replaced, removed, kept int
+	values, nulls := make([]string, len(colNames)), make([]bool, len(colNames))
+	window := func(k string, yield func(pgdelta.Change) error) error {
+		ev := fold.Changes[k]
+		_, inBase := positions[k]
+		// A change with no row after it is a row that is gone, as in
+		// the full merge.
+		if ev.EventType == event.EventDelete || ev.RowAfter == nil {
+			if inBase {
+				removed++
+			}
+			return yield(pgdelta.Change{Key: k, Delete: true})
+		}
+		for i, c := range colNames {
+			v, ok := ev.RowAfter[c]
+			if !ok {
+				return fmt.Errorf("the row of key %q has no column %s", k, c)
+			}
+			text, null, rerr := renderBaselineValue(baseline.Column{Name: c, RawText: true}, v)
+			if rerr != nil {
+				return rerr
+			}
+			values[i], nulls[i] = text, null
+		}
+		puts++
+		if inBase {
+			replaced++
+		}
+		return yield(pgdelta.Change{Key: k, Values: values, Nulls: nulls})
+	}
 	changes := func(yield func(pgdelta.Change) error) error {
-		values, nulls := make([]string, len(colNames)), make([]bool, len(colNames))
-		for _, k := range keys {
-			ev := fold.Changes[k]
-			_, inBase := positions[k]
-			// A change with no row after it is a row that is gone, as in
-			// the full merge.
-			if ev.EventType == event.EventDelete || ev.RowAfter == nil {
-				if inBase {
-					removed++
-				}
-				if err := yield(pgdelta.Change{Key: k, Delete: true}); err != nil {
+		next := 0
+		// upTo hands over the window's keys below limit, or all that are
+		// left when there is no limit.
+		upTo := func(limit string, bounded bool) error {
+			for next < len(keys) && (!bounded || keys[next] < limit) {
+				if err := window(keys[next], yield); err != nil {
 					return err
 				}
-				continue
+				next++
 			}
-			for i, c := range colNames {
-				v, ok := ev.RowAfter[c]
-				if !ok {
-					return fmt.Errorf("the row of key %q has no column %s", k, c)
+			return nil
+		}
+		if prev != nil {
+			// The two in key order, as one. A key in both is the window's:
+			// it is the newer. A row the previous pair deleted is left out
+			// unless the window names it: the row it took away from the
+			// file stays dead (carriedDead), and no file holds another.
+			err := pgdelta.EachNew(ctx, duck, prev.rows, colNames, func(c pgdelta.Change) error {
+				if err := upTo(c.Key, true); err != nil {
+					return err
 				}
-				text, null, rerr := renderBaselineValue(baseline.Column{Name: c, RawText: true}, v)
-				if rerr != nil {
-					return rerr
+				if next < len(keys) && keys[next] == c.Key {
+					return nil
 				}
-				values[i], nulls[i] = text, null
-			}
-			puts++
-			if inBase {
-				replaced++
-			}
-			if err := yield(pgdelta.Change{Key: k, Values: values, Nulls: nulls}); err != nil {
+				if c.Delete {
+					return nil
+				}
+				kept++
+				return yield(c)
+			})
+			if err != nil {
 				return err
 			}
 		}
-		return nil
+		return upTo("", false)
 	}
 
 	run, err := pgPairRun(in.SnapshotAt)
 	if err != nil {
 		return full("could not name the write", err)
 	}
+	md := snapshotFileMetadata(in)
+	if prev != nil {
+		md[pgPairMetaKeyFrom] = prev.run
+	}
 	dead, rows, _, err := pgdelta.WritePair(pgdelta.PairInput{
 		BasePath: dst, Seq: 0, Base: baseID, Run: run,
 		Columns: colNames, KeyColumns: keyCols,
-		Positions: positions, Changes: changes,
-		Metadata: snapshotFileMetadata(in),
+		Positions: positions, CarriedDead: carriedDead, Changes: changes,
+		Metadata: md,
 	})
 	if errors.Is(err, pgdelta.ErrPairExists) {
 		// Never the full merge here: it would write the table's file beside
@@ -264,10 +322,13 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		return false, fmt.Errorf("carry %s.%s forward beside its delta: %w", in.Schema, in.Table, err)
 	}
 
-	// The file's rows that no change claimed, as the merge counts them.
-	rep.BaselineRows = baseRows - int64(len(positions))
+	// The file's rows that no change claimed, as the merge counts them;
+	// with a pair before, the rows no change has claimed since the file was
+	// written.
+	deadRows := int64(pgDeadCount(positions, carriedDead))
+	rep.BaselineRows = baseRows - deadRows
 	rep.UpdatesApplied, rep.InsertsEmitted, rep.DeletesSkipped = int64(replaced), int64(puts-replaced), int64(removed)
-	rep.RowsWritten = baseRows - int64(len(positions)) + int64(puts)
+	rep.RowsWritten = baseRows - deadRows + int64(puts) + int64(kept)
 	rep.Files = []string{
 		filepath.Join(in.Schema, in.Table+".parquet"),
 		filepath.Join(in.Schema, filepath.Base(dead)),
@@ -276,8 +337,111 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 	slog.Info("table published as its previous file and a delta",
 		"schema", in.Schema, "table", in.Table, "linked", linked,
 		"lsn", lsnText(in.PGCutLSN), "file_lsn", lsnText(bmeta.LSN),
-		"file_rows", baseRows, "changed_keys", len(keys), "dead_rows", len(positions))
+		"file_rows", baseRows, "changed_keys", len(keys), "dead_rows", deadRows,
+		"kept_from_previous_delta", kept, "from_previous_delta", prev != nil)
 	return true, nil
+}
+
+// pgPairMetaKeyFrom is, on a pair written from the pair before it and the
+// window after it, that pair's run: which write this one continued.
+const pgPairMetaKeyFrom = "bintrail.pgdelta_from"
+
+// pgDeadCount is how many rows of the file a pair takes away: the rows of
+// the window's keys (positions) and the ones carried from the pair before
+// (ascending), a row in both counted once.
+func pgDeadCount(positions map[string]int64, carried []int64) int {
+	n := len(carried)
+	for _, p := range positions {
+		if i := sort.Search(len(carried), func(i int) bool { return carried[i] >= p }); i == len(carried) || carried[i] != p {
+			n++
+		}
+	}
+	return n
+}
+
+// pgPrevPair is the pair beside the previous file, read so the next one can
+// be written from it and the changes after it.
+type pgPrevPair struct {
+	// dead and rows are its two files.
+	dead, rows string
+	// meta is the footer of its .pgnew file: where its window ended
+	// (LSN, the next window's floor), the time bound that goes with it
+	// (PGDeltaSince), and the time of the update that wrote it
+	// (SnapshotTimestamp).
+	meta baseline.DumpMetadata
+	// run names its write, base the file it was written for (BaseID), and
+	// keys is how many rows its .pgnew holds.
+	run, base string
+	keys      int64
+}
+
+// pgPrevPairOf reads the pair beside the table file at srcPath, for an
+// update to continue from where that pair's window ended instead of reading
+// every change since the file was written again. nil, with why, when the
+// update reads from the file's floor as before: the switch is off, there is
+// no pair, or anything about the pair is not as one write of this package
+// left it. Reading from the file's floor is always right, so nothing here is
+// an error.
+//
+// columns are the file's, as its footer records them.
+func pgPrevPairOf(ctx context.Context, cfg FullTableConfig, srcPath string, bmeta baseline.DumpMetadata, columns []string) (prev *pgPrevPair, why string) {
+	if !pgTableDeltas() || cfg.OutputFormat != OutputFormatParquet || strings.HasPrefix(srcPath, "s3://") {
+		return nil, ""
+	}
+	names, err := pgPairBeside(srcPath)
+	if err != nil {
+		return nil, err.Error()
+	}
+	switch {
+	case len(names) == 0:
+		return nil, ""
+	case len(names) != 2:
+		return nil, "the previous file has more than one delta beside it"
+	}
+	dir := filepath.Dir(srcPath)
+	table := strings.TrimSuffix(pgTableFile(srcPath), ".parquet")
+	chain, err := pgdelta.ChainOf(table, names)
+	if err != nil {
+		return nil, err.Error()
+	}
+	duck, err := sql.Open("duckdb", "")
+	if err != nil {
+		return nil, err.Error()
+	}
+	defer duck.Close()
+	applyDuckDBTuning(ctx, duck, cfg.DuckDBTuning)
+	fi, err := os.Stat(srcPath)
+	if err != nil {
+		return nil, err.Error()
+	}
+	baseRows, err := pgdelta.BaseRows(ctx, duck, srcPath)
+	if err != nil {
+		return nil, err.Error()
+	}
+	baseID, err := pgdelta.BaseID(bmeta, fi.Size(), baseRows)
+	if err != nil {
+		return nil, err.Error()
+	}
+	footer, err := pgdelta.CheckChain(ctx, duck, dir, chain, baseID, columns)
+	if err != nil {
+		return nil, err.Error()
+	}
+	p := &pgPrevPair{dead: filepath.Join(dir, names[0]), rows: filepath.Join(dir, names[1]), run: footer[pgdelta.MetaKeyRun], base: baseID}
+	if p.meta, err = baseline.ReadParquetMetadata(p.rows); err != nil {
+		return nil, err.Error()
+	}
+	if p.keys, err = pgdelta.BaseRows(ctx, duck, p.rows); err != nil {
+		return nil, err.Error()
+	}
+	switch {
+	case p.meta.CaptureGap != "":
+		return nil, "the delta beside the previous file was published over a known loss of captured changes"
+	case p.meta.LSN == 0 || p.meta.LSN < bmeta.LSN || p.meta.PGDeltaSince == "" || p.meta.SnapshotTimestamp.IsZero():
+		return nil, "the delta beside the previous file does not record where its window ended"
+	case p.keys*pgPairMaxShare > baseRows:
+		return nil, "the delta beside the previous file already holds too many changes beside it"
+	}
+	return p, ""
 }
 
 // pgPairRun names one write of a pair: the snapshot's time and eight random

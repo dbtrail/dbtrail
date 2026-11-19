@@ -138,6 +138,13 @@ type PairInput struct {
 	// changed. Every key in it must be one Changes hands over, and no two
 	// keys share a row.
 	Positions map[string]int64
+	// CarriedDead is rows of the base that the pair this one takes the
+	// place of already took away, ascending: they stay dead, with no key
+	// named for them. A pair written from the one before it and the window
+	// after it has them from that pair's .pgdead file (ReadDead), and its
+	// Changes hand over that pair's rows that the window left alone. A row
+	// both here and in Positions dies once.
+	CarriedDead []int64
 	// Changes hands every changed key to yield, in ascending order of Key's
 	// bytes, none twice. An error from yield must be returned as it is.
 	Changes func(yield func(Change) error) error
@@ -221,6 +228,12 @@ func WritePair(in PairInput) (dead, rows string, keys int64, err error) {
 		rowOf[p] = key
 	}
 
+	for i, p := range in.CarriedDead {
+		if p < 0 || (i > 0 && p <= in.CarriedDead[i-1]) {
+			return "", "", 0, fmt.Errorf("pgdelta: the rows carried from the pair before are not ascending row numbers (%d at place %d)", p, i)
+		}
+	}
+
 	md := make(map[string]string, len(in.Metadata)+5)
 	for k, v := range in.Metadata {
 		md[k] = v
@@ -250,6 +263,7 @@ func WritePair(in PairInput) (dead, rows string, keys int64, err error) {
 		err = ErrNothingToWrite
 		return
 	}
+	deadRows = mergeDead(deadRows, in.CarriedDead)
 	if err = writeDead(deadTmp, deadRows, md); err != nil {
 		return
 	}
@@ -268,6 +282,28 @@ func WritePair(in PairInput) (dead, rows string, keys int64, err error) {
 		}
 	}
 	return
+}
+
+// mergeDead is two ascending lists of row numbers as one, each row once.
+func mergeDead(a, b []int64) []int64 {
+	if len(b) == 0 {
+		return a
+	}
+	out := make([]int64, 0, len(a)+len(b))
+	i, j := 0, 0
+	for i < len(a) || j < len(b) {
+		var v int64
+		switch {
+		case j == len(b) || (i < len(a) && a[i] < b[j]):
+			v, i = a[i], i+1
+		case i == len(a) || b[j] < a[i]:
+			v, j = b[j], j+1
+		default:
+			v, i, j = a[i], i+1, j+1
+		}
+		out = append(out, v)
+	}
+	return out
 }
 
 // tempNames makes the two names this call writes under, beside the final

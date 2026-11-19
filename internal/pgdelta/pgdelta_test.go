@@ -792,3 +792,122 @@ func TestGlobInAFileName(t *testing.T) {
 		t.Fatalf("the other table: %v, want %v", got, want)
 	}
 }
+
+// A pair written from the pair before it and the window after it: the rows
+// that pair took away stay dead with no key named for them, and its rows
+// come back in key order, NULLs and deletions as they were written.
+func TestAPairFromThePairBefore(t *testing.T) {
+	db := duck(t)
+	ctx := context.Background()
+	cols, keyCols := []string{"id", "val"}, []string{"id"}
+	up := func(k string, val cell) change { return change{key: k, row: []cell{v(k), val}} }
+	dir := t.TempDir()
+	base := filepath.Join(dir, "t.parquet")
+	writeBase(t, base, cols, []cell{v("1"), v("a")}, []cell{v("2"), v("b")}, []cell{v("3"), v("c")}, []cell{v("4"), v("d")}, []cell{v("5"), v("e")})
+	dead0, rows0 := pair(t, db, base, 0, cols, keyCols, up("2", null), change{key: "4", del: true}, up("9", v("new")), up("1|x", v("p")))
+
+	gotDead, err := ReadDead(ctx, db, dead0)
+	if err != nil || !reflect.DeepEqual(gotDead, []int64{1, 3}) {
+		t.Fatalf("ReadDead = %v, %v; want rows 1 and 3", gotDead, err)
+	}
+	var seen []string
+	err = EachNew(ctx, db, rows0, cols, func(c Change) error {
+		line := c.Key
+		if c.Delete {
+			line += " deleted"
+		} else {
+			for i := range c.Values {
+				if c.Nulls[i] {
+					line += " ∅"
+				} else {
+					line += " [" + c.Values[i] + "]"
+				}
+			}
+		}
+		seen = append(seen, line)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want(t, "the pair's rows", seen, `1\|x [1|x] [p]`, "2 [2] ∅", "4 deleted", "9 [9] [new]")
+	// The columns in another order are handed over in that order.
+	if err := EachNew(ctx, db, rows0, []string{"val", "id"}, func(c Change) error {
+		if c.Key == "9" && (c.Values[0] != "new" || c.Values[1] != "9") {
+			return fmt.Errorf("key 9 came as %v", c.Values)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stop := errors.New("stop")
+	if err := EachNew(ctx, db, rows0, cols, func(Change) error { return stop }); !errors.Is(err, stop) {
+		t.Fatalf("yield's error came back as %v", err)
+	}
+
+	// The next pair, in another folder beside the same file's link: key 2
+	// is kept from the pair before, 4 stays dead with nothing written of
+	// it, 5 dies now, and 3 was never named.
+	dir2 := t.TempDir()
+	base2 := filepath.Join(dir2, "t.parquet")
+	if err := os.Link(base, base2); err != nil {
+		t.Fatal(err)
+	}
+	kept := []Change{
+		{Key: `1\|x`, Values: []string{"1|x", "p"}, Nulls: []bool{false, false}},
+		{Key: "2", Values: []string{"2", ""}, Nulls: []bool{false, true}},
+		{Key: "5", Delete: true},
+	}
+	write := func(carried []int64, positions map[string]int64) (string, string, error) {
+		d, r, _, err := WritePair(PairInput{
+			BasePath: base2, Seq: 0, Base: "base-1", Run: "run-next", Columns: cols, KeyColumns: keyCols,
+			Positions: positions, CarriedDead: carried,
+			Changes: func(yield func(Change) error) error {
+				for _, c := range kept {
+					if err := yield(c); err != nil {
+						return err
+					}
+				}
+				return nil
+			},
+		})
+		return d, r, err
+	}
+	for name, carried := range map[string][]int64{"descending": {3, 1}, "twice": {1, 1}, "negative": {-1, 3}} {
+		if _, _, err := write(carried, map[string]int64{"5": 4}); err == nil || !strings.Contains(err.Error(), "not ascending") {
+			t.Errorf("carried rows %s: %v", name, err)
+		}
+	}
+	// Row 4 both carried and placed: dead once.
+	dead1, rows1, err := write([]int64{1, 3, 4}, map[string]int64{"5": 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotDead, err = ReadDead(ctx, db, dead1); err != nil || !reflect.DeepEqual(gotDead, []int64{1, 3, 4}) {
+		t.Fatalf("the next pair's dead rows = %v, %v; want 1, 3 and 4", gotDead, err)
+	}
+	want(t, "the table through the next pair", state(t, db, base2, []string{dead1}, []string{rows1}, "id", "val"),
+		"[1] [a]", "[1|x] [p]", "[2] ∅", "[3] [c]")
+
+	// A file that is not a .pgdead, or not in order, is refused.
+	if _, err := ReadDead(ctx, db, base); err == nil {
+		t.Error("a table file was read as dead rows")
+	}
+	if err := EachNew(ctx, db, base, cols, func(Change) error { return nil }); err == nil {
+		t.Error("a table file was read as a pair's rows")
+	}
+}
+
+func TestMergeDead(t *testing.T) {
+	for _, c := range []struct{ a, b, want []int64 }{
+		{nil, nil, nil},
+		{[]int64{1, 5}, nil, []int64{1, 5}},
+		{nil, []int64{2}, []int64{2}},
+		{[]int64{1, 5}, []int64{0, 5, 9}, []int64{0, 1, 5, 9}},
+		{[]int64{7}, []int64{1, 2}, []int64{1, 2, 7}},
+	} {
+		if got := mergeDead(c.a, c.b); !reflect.DeepEqual(got, c.want) && (len(got) != 0 || len(c.want) != 0) {
+			t.Errorf("mergeDead(%v, %v) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}
