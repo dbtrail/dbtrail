@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/pgdelta"
 )
@@ -97,8 +98,8 @@ func pgPairEligible(cfg FullTableConfig, srcPath string, bmeta baseline.DumpMeta
 // carried into the new snapshot folder, and one pair beside it holding every
 // change of the fold: the changes since that file was written. in is the
 // input the full merge would be given. written is false, with no error, when
-// the table has to be written in full instead; nothing is in the new folder
-// then.
+// the table has to be written another way; nothing of it is in the new
+// folder then, and a pair that could not be removed from it is an error.
 //
 // The pair is written first and the file carried last. Until the file is
 // there the table is not in the new folder, so every refusal before it can
@@ -125,8 +126,9 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		if !errors.Is(cause, pgdelta.ErrPairExists) {
 			removePGPair(dst)
 		}
-		slog.Warn("PostgreSQL table delta not written; the table is written in full",
-			"schema", in.Schema, "table", in.Table, "reason", why, "error", cause)
+		slog.Warn("PostgreSQL table delta not written; the table is written without it",
+			"schema", in.Schema, "table", in.Table, "reason", why, "error", cause,
+			"continuing_the_delta_before", prev != nil)
 		return false, nil
 	}
 	// The same checks the full merge makes of the file's columns against
@@ -178,13 +180,15 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 	if err != nil {
 		return full("could not count the table file's rows", err)
 	}
-	tooMany := func(changes int64) (bool, error) {
-		slog.Info("PostgreSQL table delta not written: the changes since the table file was written are too many beside it; the table is written in full",
-			"schema", in.Schema, "table", in.Table, "changes", changes, "file_rows", baseRows)
+	// tooMany declines: what, counted as n, is too large a share of the
+	// file for a delta beside it.
+	tooMany := func(what string, n int64) (bool, error) {
+		slog.Info("PostgreSQL table delta not written: too much has changed beside the table file for a delta",
+			"schema", in.Schema, "table", in.Table, "what", what, "count", n, "file_rows", baseRows)
 		return false, nil
 	}
 	if int64(len(fold.Changes))*pgPairMaxShare > baseRows {
-		return tooMany(int64(len(fold.Changes)))
+		return tooMany("keys changed in this window", int64(len(fold.Changes)))
 	}
 	baseID, err := pgdelta.BaseID(bmeta, fi.Size(), baseRows)
 	if err != nil {
@@ -213,6 +217,15 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		if carriedDead, err = pgdelta.ReadDead(ctx, duck, prev.dead); err != nil {
 			return full("could not read the rows the previous delta takes away", err)
 		}
+	}
+
+	// The file's rows the pair takes away, counted before anything is
+	// written. A pair written from the one before leaves out the rows that
+	// one deleted, so a table whose rows are mostly deleted has few keys in
+	// its pair and many dead rows in its file: those end the pair too.
+	deadRows := int64(pgDeadCount(positions, carriedDead))
+	if deadRows*pgPairMaxShare > baseRows {
+		return tooMany("rows of the file no longer in the table", deadRows)
 	}
 
 	// puts, replaced and removed count the window's changes, as the merge
@@ -312,12 +325,17 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 	}
 	// A pair written from the one before holds that pair's keys too, and
 	// how many of them the window named again is known only now. Nothing
-	// reads this folder yet: the pair is taken back and the table written
-	// in full, from every change since its file.
+	// reads this folder yet: the pair is taken back and the caller reads
+	// every change since the file again. A pair that cannot be taken back
+	// fails the table: the table's file written beside it would be read
+	// with another file's delta.
 	if prev != nil && pairKeys*pgPairMaxShare > baseRows {
-		os.Remove(dead)
-		os.Remove(rows)
-		return tooMany(pairKeys)
+		for _, f := range []string{dead, rows} {
+			if rerr := os.Remove(f); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+				return false, fmt.Errorf("%s.%s: take back a table delta that holds too many keys: %w", in.Schema, in.Table, rerr)
+			}
+		}
+		return tooMany("keys changed since the file was written", pairKeys)
 	}
 	// From here the table is published or the table fails: the file is in
 	// the new folder, and a full merge would write through it.
@@ -328,11 +346,11 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		return false, fmt.Errorf("carry %s.%s forward beside its delta: %w", in.Schema, in.Table, err)
 	}
 
-	// The file's rows that no change claimed, as the merge counts them;
-	// with a pair before, the rows no change has claimed since the file was
-	// written.
-	deadRows := int64(pgDeadCount(positions, carriedDead))
-	rep.BaselineRows = baseRows - deadRows
+	// The rows this window left as they were: the file's that no change has
+	// claimed since it was written, and the previous pair's that the window
+	// did not name. With the window's own counts they add up to the table,
+	// as the merge's do.
+	rep.BaselineRows = baseRows - deadRows + int64(kept)
 	rep.UpdatesApplied, rep.InsertsEmitted, rep.DeletesSkipped = int64(replaced), int64(puts-replaced), int64(removed)
 	rep.RowsWritten = baseRows - deadRows + int64(puts) + int64(kept)
 	rep.Files = []string{
@@ -439,9 +457,26 @@ func pgPrevPairOf(ctx context.Context, cfg FullTableConfig, srcPath string, bmet
 	if p.keys, err = pgdelta.BaseRows(ctx, duck, p.rows); err != nil {
 		return nil, err.Error()
 	}
+	// What the next pair is written from is checked against the snapshot's
+	// record of its files, as a file carried forward is: a damaged pair
+	// would otherwise pass its rows into a new one with a clean record.
+	for _, f := range []string{p.dead, p.rows} {
+		if err := baselineintegrity.ValidateLocalFileOnce(f); err != nil {
+			return nil, fmt.Sprintf("the delta beside the previous file does not pass the snapshot's record of it: %v", err)
+		}
+	}
+	deadRows, err := pgdelta.BaseRows(ctx, duck, p.dead)
+	if err != nil {
+		return nil, err.Error()
+	}
 	switch {
-	case p.meta.CaptureGap != "":
-		return nil, "the delta beside the previous file was published over a known loss of captured changes"
+	// A pair's footer repeats the capture loss its file was published over
+	// (the file's own line). One of its own it cannot have: no pair is
+	// written over a loss. Anything else is not a pair of this file's.
+	case p.meta.CaptureGap != bmeta.CaptureGap:
+		return nil, "the delta beside the previous file records another loss of captured changes than its file"
+	case deadRows*pgPairMaxShare > baseRows:
+		return nil, "the delta beside the previous file already takes away too many of its rows"
 	case p.meta.LSN == 0 || p.meta.LSN < bmeta.LSN || p.meta.PGDeltaSince == "" || p.meta.SnapshotTimestamp.IsZero():
 		return nil, "the delta beside the previous file does not record where its window ended"
 	case p.keys*pgPairMaxShare > baseRows:
@@ -520,11 +555,14 @@ func pgPairBeside(basePath string) ([]string, error) {
 
 // pgCarryForward is carryForward for a PostgreSQL table: the file, and the
 // delta beside it when it has one. A table with no change in the window is
-// what its file AND its delta say. The fold found no change either because
-// there was none since the file was written, and then there is no delta, or
-// because the changes the delta holds are no longer in the window (the index
-// holds no event at all, so the fetch was skipped): carried alone, the file
-// would be the table as it was before them, to whatever reads the delta.
+// what its file AND its delta say. The window is the one since the delta
+// ended when the update continues it (pgPrevPairOf), and then no change
+// means none since the delta. Read from the file's floor, the fold found no
+// change either because there was none since the file was written, and then
+// there is no delta, or because the changes the delta holds are no longer in
+// the window (the index holds no event at all, so the fetch was skipped).
+// Carried alone, the file would be the table as it was before them, to
+// whatever reads the delta.
 //
 // The delta first and the file last, as writePGPair does: until the file is
 // there the table is not in the new folder. It returns the delta's files as

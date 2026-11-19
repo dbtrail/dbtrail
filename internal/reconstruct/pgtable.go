@@ -93,44 +93,36 @@ func reconstructPGTable(ctx context.Context, cfg FullTableConfig, p pgTableInput
 		}
 		if prev != nil {
 			try := *rep
-			out, declined, err := reconstructPGTableFrom(ctx, cfg, p, &try, start, prev)
+			out, declined, err := reconstructPGTableWindow(ctx, cfg, p, &try, start, prev)
 			if err != nil {
 				return nil, err
 			}
-			if !declined {
+			if declined == "" {
 				*rep = *out
 				return rep, nil
 			}
 			slog.Info("the table delta beside the previous file is not continued by this update; the changes are read again from where the file starts",
-				"schema", p.schema, "table", p.table, "baseline", p.baselinePath)
+				"schema", p.schema, "table", p.table, "baseline", p.baselinePath, "reason", declined)
 		}
 	}
-	out, _, err := reconstructPGTableFrom(ctx, cfg, p, rep, start, nil)
+	out, _, err := reconstructPGTableWindow(ctx, cfg, p, rep, start, nil)
 	return out, err
 }
 
-// reconstructPGTableFrom is reconstructPGTable reading its window from the
+// reconstructPGTableWindow is reconstructPGTable reading its window from the
 // file's floor (prev nil) or from where the pair beside the file ended
-// (prev). declined is only for a run with prev: it could not publish the
-// table as the file and a pair, wrote nothing, and the caller runs again
-// from the file's floor.
-func reconstructPGTableFrom(ctx context.Context, cfg FullTableConfig, p pgTableInput, rep *TableReport, start time.Time, prev *pgPrevPair) (_ *TableReport, declined bool, _ error) {
-	out, declined, err := reconstructPGTableWindow(ctx, cfg, p, rep, start, prev)
-	if prev == nil {
-		declined = false
-	}
-	return out, declined, err
-}
-
-func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTableInput, rep *TableReport, start time.Time, prev *pgPrevPair) (*TableReport, bool, error) {
+// (prev). declined, only from a run with prev, is why that run could not
+// publish the table as the file and a pair: it left nothing of the table in
+// the new folder, and the caller runs again from the file's floor.
+func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTableInput, rep *TableReport, start time.Time, prev *pgPrevPair) (_ *TableReport, declined string, _ error) {
 	schema, table, db, bmeta := p.schema, p.table, p.db, p.bmeta
 	rel, err := checkPGFoldable(schema, table, bmeta)
 	if err != nil {
-		return nil, false, err
+		return nil, "", err
 	}
 	since, from, _, err := PGDeltaWindow(bmeta, p.snapshotTime)
 	if err != nil {
-		return nil, false, fmt.Errorf("%s.%s: %w", schema, table, err)
+		return nil, "", fmt.Errorf("%s.%s: %w", schema, table, err)
 	}
 	// fileSince is the file's own bound, which the file keeps while it is
 	// published again: what decides whether it still can be. since, from,
@@ -138,22 +130,24 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 	fileSince, floor, windowAt := since, bmeta.LSN, p.snapshotTime
 	if prev != nil {
 		windowAt = prev.meta.SnapshotTimestamp
-		if since, from, _, err = PGDeltaWindow(prev.meta, windowAt); err != nil || from == nil {
-			return nil, true, nil
+		if since, from, _, err = PGDeltaWindow(prev.meta, windowAt); err != nil {
+			return nil, "the delta's footer: " + err.Error(), nil
+		} else if from == nil {
+			return nil, "the delta's footer records no LSN to continue from", nil
 		}
 		floor = prev.meta.LSN
 	}
 	b, err := cfg.pgRun.boundsFor(floor, windowAt, since)
 	if err != nil {
-		return nil, false, fmt.Errorf("%s.%s: %w", schema, table, err)
+		return nil, "", fmt.Errorf("%s.%s: %w", schema, table, err)
 	}
 	shapes, err := metadata.LoadPGShapes(ctx, db, floor)
 	if err != nil {
-		return nil, false, fmt.Errorf("%s.%s: %w", schema, table, err)
+		return nil, "", fmt.Errorf("%s.%s: %w", schema, table, err)
 	}
 	key, err := checkPGShapeKey(schema, table, rel, floor, b.Next, shapes)
 	if err != nil {
-		return nil, false, err
+		return nil, "", err
 	}
 	tm, err := p.resolver.Resolve(schema, table)
 	// noShape: the index records no shape of the table. The stream records
@@ -166,12 +160,12 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 	if err != nil {
 		noShape = fmt.Errorf("resolve schema for %s.%s: %w", schema, table, err)
 		if tm = PGShapeFromFile(schema, table, rel); tm == nil {
-			return nil, false, noShape
+			return nil, "", noShape
 		}
 	}
 	pkCols := tm.PKColumnMetas()
 	if len(pkCols) == 0 {
-		return nil, false, fmt.Errorf("%s.%s has no primary key in the loaded snapshot; full-table reconstruct requires a PK", schema, table)
+		return nil, "", fmt.Errorf("%s.%s has no primary key in the loaded snapshot; full-table reconstruct requires a PK", schema, table)
 	}
 	// The key the rows are joined by is the newest shape's, which can be
 	// past the point. The changes in the window name their rows by the key
@@ -183,7 +177,7 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 			now[i] = c.Name
 		}
 		if !slices.Equal(now, key) {
-			return nil, false, fmt.Errorf("%s.%s: the table's primary key is now (%s), but the changes since the snapshot were captured under (%s); %s",
+			return nil, "", fmt.Errorf("%s.%s: the table's primary key is now (%s), but the changes since the snapshot were captured under (%s); %s",
 				schema, table, strings.Join(now, ", "), strings.Join(key, ", "), pgRebaseline)
 		}
 	}
@@ -194,12 +188,12 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 	}
 
 	if err := CheckDestructiveDDL(ctx, db, schema, table, DDLWindow{Since: since, Until: cfg.At}); err != nil {
-		return nil, false, err
+		return nil, "", err
 	}
 	afterDestructiveDDLCheck()
 	capGap, err := CheckCaptureGapStatus(ctx, db, schema, table, since, cfg.At, cfg.AllowGaps)
 	if err != nil {
-		return nil, false, err
+		return nil, "", err
 	}
 
 	fetchOpts := query.Options{
@@ -224,19 +218,19 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 		// Nothing past the floor up to the run's end; the coverage check
 		// the fetch would have run still runs (see ReconstructTable).
 		if cerr := verifyFoldCoverage(ctx, fc); cerr != nil {
-			return nil, false, annotateFoldFetchError(cerr, fc)
+			return nil, "", annotateFoldFetchError(cerr, fc)
 		}
 		slog.Info("skipping the event fetch: the run ends at or before this snapshot's LSN, so the window cannot hold an event",
 			"schema", schema, "table", table, "lsn", lsnText(floor))
 	} else if fold, err = foldWindow(ctx, fc); err != nil {
-		return nil, false, err
+		return nil, "", err
 	}
 	defer fold.close()
 	if noShape != nil {
 		// A change of a table the index has no shape of was captured under
 		// a shape this run cannot read: refused as it always was.
 		if fold.Total > 0 || fold.First != nil {
-			return nil, false, noShape
+			return nil, "", noShape
 		}
 		slog.Info("the index records no shape of this table and no change of it since its snapshot; its shape is read from its own file",
 			"schema", schema, "table", table, "baseline", p.baselinePath)
@@ -260,7 +254,7 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 	if pgCarryForwardEligible(cfg, p.baselinePath, bmeta, fileSince, b.Since, fold.changeCount(), capGap) {
 		linked, delta, cerr := pgCarryForward(ctx, p.baselinePath, cfg.snapshotDir, schema, table)
 		if cerr != nil {
-			return nil, false, fmt.Errorf("carry %s.%s forward unchanged: %w", schema, table, cerr)
+			return nil, "", fmt.Errorf("carry %s.%s forward unchanged: %w", schema, table, cerr)
 		}
 		rep.CarriedForward, rep.CarriedByLink = true, linked
 		rep.Files = append([]string{filepath.Join(schema, table+".parquet")}, delta...)
@@ -269,19 +263,19 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 			"reason", "no events in the window", "linked", linked,
 			"lsn", lsnText(bmeta.LSN), "reads_from", fileSince.UTC().Format(time.RFC3339),
 			"fetch_ms", rep.FetchDuration.Milliseconds(), "fold_ms", rep.FoldDuration.Milliseconds())
-		return rep, false, nil
+		return rep, "", nil
 	}
 
 	// From a pair's end the table is published as the file and a pair, or
 	// not by this run: a merge onto the file alone would lose what only the
 	// pair held.
 	if prev != nil && !pgPairEligible(cfg, p.baselinePath, bmeta, fileSince, fold, capGap) {
-		return nil, true, nil
+		return nil, "a table delta cannot be written for this window (no change in it and the file too old to carry, changes too many to hold in memory, a loss of captured changes, or the file's start is past the line the index keeps events to)", nil
 	}
 
 	localPath, cleanup, err := materializeBaselineLocalIn(ctx, p.baselinePath, cfg.DuckDBTuning, cfg.DownloadDir, cfg.SpaceCheck)
 	if err != nil {
-		return nil, false, fmt.Errorf("materialize baseline: %w", err)
+		return nil, "", fmt.Errorf("materialize baseline: %w", err)
 	}
 	defer cleanup()
 
@@ -321,22 +315,22 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 	if pgPairEligible(cfg, p.baselinePath, bmeta, fileSince, fold, capGap) {
 		written, perr := writePGPair(ctx, in, fold, rep, prev)
 		if perr != nil {
-			return nil, false, perr
+			return nil, "", perr
 		}
 		if written {
 			rep.Duration = time.Since(start)
-			return rep, false, nil
+			return rep, "", nil
 		}
 	}
 	if prev != nil {
-		return nil, true, nil
+		return nil, "the delta was not written (the line before this one says why)", nil
 	}
 	merge := mergeBaselineIntoParquet
 	if cfg.OutputFormat == OutputFormatPsql {
 		merge = mergeBaselineIntoPsql
 	}
 	if err := merge(ctx, in, rep); err != nil {
-		return nil, false, err
+		return nil, "", err
 	}
 	rep.Duration = time.Since(start)
 	slog.Info("table reconstructed",
@@ -348,7 +342,7 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 		"inserts_emitted", rep.InsertsEmitted,
 		"deletes_skipped", rep.DeletesSkipped,
 		"duration_ms", rep.Duration.Milliseconds())
-	return rep, false, nil
+	return rep, "", nil
 }
 
 // pgNeverPartitionedBefore is the index's first hour when a PostgreSQL fold
@@ -395,7 +389,8 @@ func pgNeverPartitionedBefore(ctx context.Context, db *sql.DB, dbName, schema, t
 // A carried file keeps its footer: the LSN floor and the time bound
 // (MetaKeyPGDeltaSince) the previous snapshot's readers used, both older
 // than the ones a rewrite would record. Reading from them stays right: the
-// fold just showed the table has no change from that floor to the run's end,
+// fold just showed the table has no change from that floor to the run's end
+// (or, continuing a delta, none since the delta, which holds the ones before),
 // and the bound was already true of every change past the floor. What it
 // costs is that the readers of the new snapshot start further back, in
 // events the index has to still hold. So:

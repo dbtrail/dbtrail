@@ -86,8 +86,8 @@ func BasePositions(ctx context.Context, db *sql.DB, basePath string, keyColumns 
 	return found, nil
 }
 
-// ReadDead is the row numbers a .pgdead file names, ascending, each once:
-// the order WritePair writes them in, and an error in any other.
+// ReadDead is the row numbers a .pgdead file names, ascending. A file that
+// names a row twice, or holds a NULL or a negative number, is an error.
 func ReadDead(ctx context.Context, db *sql.DB, deadPath string) ([]int64, error) {
 	rows, err := db.QueryContext(ctx, `SELECT "`+baseline.TableDeltaPosColumn+`" FROM read_parquet(`+file(deadPath)+noHive+`) ORDER BY 1`)
 	if err != nil {
