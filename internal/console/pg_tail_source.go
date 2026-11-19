@@ -80,6 +80,9 @@ type pgTailSource struct {
 	shapes        []metadata.PGShape
 	shapesID      int64
 	shapesFromLSN uint64
+	// sentThrough is the highest position Newest has read below which every
+	// commit of the source is in the index (anchorReached).
+	sentThrough uint64
 	// broken remembers each table's answer to Broken for as long as nothing
 	// it is made from changed (pgBrokenKey).
 	broken map[string]pgBrokenMemo
@@ -132,9 +135,24 @@ func (x *pgTailSource) capturing(captures func(schema, table string) bool) *pgTa
 // when the index records none (PGCheckpoint), or no longer holds that event
 // as a PostgreSQL event at or before the position.
 func (x *pgTailSource) Newest(ctx context.Context) (tailMark, error) {
+	// How far capture has indexed the source, read BEFORE its saved position:
+	// the position read next is of the same save or a later one, so every
+	// commit below this is at or before the event that position names
+	// (anchorReached).
+	sent, sentOK, err := reconstruct.PGSentThrough(ctx, x.b.db)
+	if err != nil {
+		return tailMark{}, err
+	}
 	checkpoint, id, ok, err := reconstruct.PGCheckpoint(ctx, x.b.db)
 	if err != nil || !ok {
 		return tailMark{}, err
+	}
+	if sentOK {
+		x.mu.Lock()
+		// Only up: what was indexed stays indexed, and a capture that just
+		// started has no position to give yet.
+		x.sentThrough = max(x.sentThrough, sent)
+		x.mu.Unlock()
 	}
 	var file sql.NullString
 	var pos sql.NullInt64
@@ -292,12 +310,48 @@ func (x *pgTailSource) pairCut(t views.BaselineTable, name string, file baseline
 
 // Cut is where Fill starts t's window, as the keeper orders it. A PostgreSQL
 // footer records no event id.
+//
+// None for a full read's file capture has not passed (anchorReached): the
+// tail the table had is then not laid over it.
 func (x *pgTailSource) Cut(t views.BaselineTable) (tailFloor, string) {
 	c := x.cut(t)
 	if c.refusal != "" {
 		return tailFloor{}, c.refusal
 	}
+	if why := x.anchorReached(t, c.md); why != "" {
+		return tailFloor{}, why
+	}
 	return tailFloor{anchor: reconstruct.PGTailPos(c.floor)}, ""
+}
+
+// anchorReached says why t's file cannot have a tail laid over it yet: it
+// was written by a full read, whose rows are the source as of a position
+// PAST the file's floor (baseline.MetaKeyPGAnchorLSN, #2963), and capture has
+// not yet indexed every commit below that position. A tail read from the
+// floor up to a cursor short of it holds, for a row that changed twice in
+// between, the first change, and would put it over the second, which the
+// file holds: an older value, or a deleted row back, with nothing to say so.
+// "" when the file records no such position (an update wrote it, or a full
+// read before this was recorded) or capture has passed it.
+//
+// The position compared is the one Newest read with the keeper's cursor, not
+// a later one: a tail is read up to that cursor.
+func (x *pgTailSource) anchorReached(t views.BaselineTable, md baseline.DumpMetadata) string {
+	if md.PGAnchorLSN == 0 {
+		return ""
+	}
+	x.mu.Lock()
+	sent := x.sentThrough
+	x.mu.Unlock()
+	if sent >= md.PGAnchorLSN {
+		return ""
+	}
+	if sent == 0 {
+		return fmt.Sprintf("the snapshot of %s.%s was read at %s, and the index does not record how far capture has indexed the source",
+			t.Schema, t.Table, reconstruct.PGLSNText(md.PGAnchorLSN))
+	}
+	return fmt.Sprintf("the snapshot of %s.%s was read at %s, and capture has indexed the source through %s",
+		t.Schema, t.Table, reconstruct.PGLSNText(md.PGAnchorLSN), reconstruct.PGLSNText(sent))
 }
 
 // BaseFile names what a tail of t was checked against. For a MySQL table
@@ -380,6 +434,12 @@ func (x *pgTailSource) Start(ctx context.Context, t views.BaselineTable) (tailTa
 	c := x.cut(t)
 	if c.refusal != "" {
 		return nil, c.refusal, nil
+	}
+	// An error, not a refusal: a refusal stands until the next snapshot, and
+	// this ends when capture passes the position, so the build is tried
+	// again.
+	if why := x.anchorReached(t, c.md); why != "" {
+		return nil, "", errors.New(why + "; its tail waits for capture to pass it")
 	}
 	// A table that entered capture after the snapshot's floor: its changes
 	// between the two were never captured.

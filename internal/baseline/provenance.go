@@ -180,6 +180,9 @@ func readProvenance(path string, m *DumpMetadata, lookup func(string) (string, b
 	if v, ok := lookup(MetaKeyPGDeltaSince); ok {
 		m.PGDeltaSince = v
 	}
+	if v, ok := lookup(MetaKeyPGAnchorLSN); ok {
+		m.PGAnchorLSN = parsePGAnchorLSN(path, v)
+	}
 }
 
 // parseFooterTime reads an RFC3339 footer value, warning rather than failing on

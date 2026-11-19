@@ -19,7 +19,7 @@ var ordersInfo = tableInfo{
 
 // The footer carries the table's OID and typed columns, and they read back.
 func TestTableFooter_recordsTheShape(t *testing.T) {
-	md, err := tableFooter(ordersInfo, "2026-06-10T12:00:00Z", 42)
+	md, err := tableFooter(ordersInfo, "2026-06-10T12:00:00Z", 42, 57)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,8 +40,21 @@ func TestTableFooter_refusesAMissingShape(t *testing.T) {
 		"no oid":     {Schema: "public", Table: "orders", Shape: ordersInfo.Shape},
 		"no columns": {Schema: "public", Table: "orders", OID: 16411},
 	} {
-		if _, err := tableFooter(ti, "2026-06-10T12:00:00Z", 42); err == nil {
+		if _, err := tableFooter(ti, "2026-06-10T12:00:00Z", 42, 57); err == nil {
 			t.Errorf("%s: tableFooter returned no error", name)
 		}
+	}
+}
+
+// A full read's file records where the source's WAL stood when its snapshot
+// opened, beside its floor (#2963): its rows are as of there, and a reader
+// that lays changes from the floor over it has to know.
+func TestTableFooter_recordsTheSnapshotsOwnPosition(t *testing.T) {
+	md, err := tableFooter(ordersInfo, "2026-06-10T12:00:00Z", 42, 57)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md[baseline.MetaKeyLSN] != "42" || md[baseline.MetaKeyPGAnchorLSN] != "57" {
+		t.Fatalf("floor %q, anchor %q; want 42 and 57", md[baseline.MetaKeyLSN], md[baseline.MetaKeyPGAnchorLSN])
 	}
 }

@@ -9,7 +9,7 @@ import (
 // #1380: a PostgreSQL snapshot reads every table inside one REPEATABLE READ
 // transaction, so its footer records a read of one instant.
 func TestTableFooter_recordsAConsistentRead(t *testing.T) {
-	md, err := tableFooter(ordersInfo, "2026-06-10T12:00:00Z", 42)
+	md, err := tableFooter(ordersInfo, "2026-06-10T12:00:00Z", 42, 57)
 	if err != nil {
 		t.Fatal(err)
 	}

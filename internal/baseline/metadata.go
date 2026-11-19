@@ -81,6 +81,18 @@ const (
 	// oldest change it left to the next one); absent, readers assume
 	// reconstruct.PGDeltaMargin before the snapshot's time.
 	MetaKeyPGDeltaSince = "bintrail.pg_delta_since"
+	// MetaKeyPGAnchorLSN is, on a file a full read of a PostgreSQL source
+	// wrote, the source's WAL position when the read's snapshot opened
+	// (#2963). The file's rows are the source as of that snapshot, which is
+	// LATER than its floor (MetaKeyLSN, read before the snapshot opens, #771):
+	// the file already holds the changes between the two. A reader that lays
+	// the changes from the floor over the file, and stops before this
+	// position, puts an older image of a row over the newer one the file
+	// holds. Such a reader waits until capture has indexed every commit below
+	// it. Absent on a file an update wrote (its floor is one past the last
+	// change it holds), on a MySQL file, and on a full read taken before this
+	// was recorded.
+	MetaKeyPGAnchorLSN = "bintrail.pg_anchor_lsn"
 	// MetaKeyCaptureGap marks a snapshot that was published over a KNOWN
 	// permanent capture gap — a `baseline refresh` / `reconstruct
 	// --output-format parquet` run whose window contained a stamped
@@ -152,6 +164,8 @@ type DumpMetadata struct {
 	// text: a value that does not parse must refuse, never read as absent
 	// (absent means a default that can look back less far than it said).
 	PGDeltaSince string
+	// PGAnchorLSN is MetaKeyPGAnchorLSN; 0 when absent or not a number.
+	PGAnchorLSN uint64
 	// DeltaChainStart / DeltaBaseAnchor / DeltaBaseSize are set only on the two
 	// files of a table delta (#1638, tabledelta.go): when the chain over the
 	// base started, and which exact base the row numbers were computed against.
@@ -664,6 +678,8 @@ func applyS3FooterKV(m *DumpMetadata, path, key, val string) (corrupt bool) {
 		m.RenderGUCs = val
 	case MetaKeyPGDeltaSince:
 		m.PGDeltaSince = val
+	case MetaKeyPGAnchorLSN:
+		m.PGAnchorLSN = parsePGAnchorLSN(path, val)
 	case MetaKeyCaptureGap:
 		m.CaptureGap = val
 	case MetaKeyLockMode:
@@ -808,4 +824,17 @@ func BinaryColumnsStoredAsText(path string, cols []Column) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// parsePGAnchorLSN reads MetaKeyPGAnchorLSN. A value that is not a number is
+// said and read as absent: the anchor only ever makes a reader wait, so a
+// file without one is read as files were before it was recorded.
+func parsePGAnchorLSN(path, val string) uint64 {
+	lsn, err := strconv.ParseUint(val, 10, 64)
+	if err != nil {
+		slog.Warn("the snapshot file's "+MetaKeyPGAnchorLSN+" is not a number; read as absent",
+			"path", path, "raw_value", val, "error", err)
+		return 0
+	}
+	return lsn
 }
