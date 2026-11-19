@@ -284,10 +284,16 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 	}
 
 	// From a pair's end the table is published as the file and a pair, or
-	// not by this run: a merge onto the file alone would lose what only the
-	// pair held.
-	if prev != nil && !pgPairEligible(cfg, p.baselinePath, bmeta, fileSince, fold, capGap) {
-		return nil, "a table delta cannot be written for this window (no change in it and the file too old to carry, changes too many to hold in memory, a loss of captured changes, or the file's start is past the line the index keeps events to)", nil
+	// written in full from the two of them (fromPair): never from the file
+	// alone, which would lose what only the pair held.
+	fromPair := ""
+	if prev != nil {
+		switch {
+		case prev.over != "":
+			fromPair = prev.over
+		case !pgPairEligible(cfg, p.baselinePath, bmeta, fileSince, fold, capGap):
+			fromPair = "no delta can be written for this window (no change and the file too old to carry, changes too many to hold in memory, a loss of captured changes, or the file starts before the line the index keeps events to)"
+		}
 	}
 
 	localPath, cleanup, err := materializeBaselineLocalIn(ctx, p.baselinePath, cfg.DuckDBTuning, cfg.DownloadDir, cfg.SpaceCheck)
@@ -329,7 +335,7 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 	// A table that changed, as its previous file and a delta beside it
 	// (#2757, off unless PGTableDeltaEnv says so). After every refusal above,
 	// like the carry; when it declines, the merge below writes the table.
-	if pgPairEligible(cfg, p.baselinePath, bmeta, fileSince, fold, capGap) {
+	if fromPair == "" && pgPairEligible(cfg, p.baselinePath, bmeta, fileSince, fold, capGap) {
 		written, perr := writePGPair(ctx, in, fold, rep, prev)
 		if perr != nil {
 			return nil, "", perr
@@ -338,9 +344,40 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 			rep.Duration = time.Since(start)
 			return rep, "", nil
 		}
+		if prev != nil {
+			fromPair = "the delta was not written (the line before this one says why)"
+		}
 	}
+	// The pair before has ended. The table is the file and that pair, and
+	// the window's changes go over the two: the changes the pair holds are
+	// not read again from the index, which on a table whose file is hours
+	// old was most of what ending a pair cost. If the pair is not to be
+	// trusted, or the two cannot be put together (no room for the temporary
+	// file among the reasons), nothing has been written and the caller reads
+	// every change since the file, as before: slower, and needing no
+	// temporary file.
 	if prev != nil {
-		return nil, "the delta was not written (the line before this one says why)", nil
+		if prev.distrust != "" {
+			return nil, "the delta beside the previous file could not be continued: " + prev.distrust, nil
+		}
+		tmp := cfg.DownloadDir
+		if tmp == "" {
+			tmp = cfg.snapshotDir
+		}
+		merged, done, merr := materializePGBaseWithPair(ctx, p.baselinePath, prev, cfg.DuckDBTuning, tmp, cfg.SpaceCheck)
+		if merr != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, "", cerr
+			}
+			slog.Warn("a table could not be written from its previous file and the delta beside it; every change since the file is read instead",
+				"schema", schema, "table", table, "error", merr)
+			return nil, fmt.Sprintf("%s; and the file and its delta could not be put together: %v", fromPair, merr), nil
+		}
+		defer done()
+		in.LocalBaselinePath = merged
+		rep.DeltaCompacted = fromPair
+		slog.Info("table written in full from its previous file and the delta beside it",
+			"schema", schema, "table", table, "reason", fromPair, "file_lsn", lsnText(bmeta.LSN), "delta_lsn", lsnText(prev.meta.LSN))
 	}
 	merge := mergeBaselineIntoParquet
 	if cfg.OutputFormat == OutputFormatPsql {
