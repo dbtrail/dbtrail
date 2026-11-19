@@ -31,11 +31,11 @@ func TestExprNotText(t *testing.T) {
 		"row_number() OVER (PARTITION BY qty ORDER BY amount)": true,
 		"sum(amount) OVER ()":                           true,
 		"count(*) FILTER (WHERE qty > 1)":               true,
-		"(SELECT note FROM t WHERE t.qty = qty + 1)": false,
-		"(SELECT * FROM t)":                          false,
-		"attrs - 1":                                  false,
-		"amount - qty":                               true,
-		"(qty - 1) * 2":                              true,
+		"(SELECT note FROM t WHERE t.qty = qty + 1)":    false,
+		"(SELECT * FROM t)":                             false,
+		"attrs - 1":                                     false,
+		"amount - qty":                                  true,
+		"(qty - 1) * 2":                                 true,
 		"count(*) + 1":                                  true,
 		"qty * 2 - 1":                                   true,
 		"min(qty)":                                      true,
@@ -116,7 +116,7 @@ func TestCopyScreen_namesTheStatementDefines(t *testing.T) {
 		`SELECT (SELECT name FROM pgcmp_customers c WHERE c.id = o.customer_id + 1) AS x FROM pgcmp_orders o ORDER BY x`: "text sorted",
 		// A name a column list gives (AS b(n)) is not read as a definition:
 		// nothing the statement defines is known then.
-		`WITH d AS (SELECT count(*) AS n FROM pgcmp_orders) SELECT b.n FROM d, (SELECT note FROM pgcmp_orders) AS b(n) ORDER BY b.n`: "the function b()",
+		`WITH d AS (SELECT count(*) AS n FROM pgcmp_orders) SELECT b.n FROM d, (SELECT note FROM pgcmp_orders) AS b(n) ORDER BY b.n`:    "the function b()",
 		`WITH c(n) AS (SELECT note FROM pgcmp_orders), d AS (SELECT count(*) AS n FROM pgcmp_orders) SELECT c.n FROM c, d ORDER BY c.n`: "the function c()",
 		// Only comparisons read a qualified name as its column.
 		`SELECT id::pg_catalog.date FROM pgcmp_orders`: "a cast with ::",
