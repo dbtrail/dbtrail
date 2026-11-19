@@ -712,10 +712,24 @@ func showMillis(d time.Duration) string {
 // without running it (a Describe).
 func (s *session) localColumns(c *sessionCmd) ([]string, []colType, *pgErr) {
 	if c.kind == cmdFunc {
-		if c.fn == "current_schema" {
-			return []string{"current_schema"}, []colType{{oid: oidName, size: 64, typmod: -1}}, nil
+		cols, types := make([]string, len(c.fns)), make([]colType, len(c.fns))
+		for i, f := range c.fns {
+			cols[i], types[i] = f.fn, textColumn
+			switch f.fn {
+			case "current_schema":
+				types[i] = colType{oid: oidName, size: 64, typmod: -1}
+			case "pg_backend_pid":
+				types[i] = colType{oid: oidInt4, size: 4, typmod: -1}
+			case "current_setting":
+				// An unknown parameter reaches here only where nothing
+				// else can answer it (classify sends it on otherwise), and
+				// is refused as SHOW refuses it.
+				if _, perr := lookupGUC(f.param); perr != nil && !f.missingOK {
+					return nil, nil, perr
+				}
+			}
 		}
-		return []string{"version"}, []colType{textColumn}, nil
+		return cols, types, nil
 	}
 	if c.all {
 		return []string{"name", "setting", "description"}, []colType{textColumn, textColumn, textColumn}, nil
@@ -734,14 +748,12 @@ func (s *session) answerLocal(c *sessionCmd) (cols []string, types []colType, ro
 		return nil, nil, nil, "", perr
 	}
 	switch {
-	case c.kind == cmdFunc && c.fn == "current_schema":
-		var cell []byte
-		if s.set.schema != "" {
-			cell = []byte(s.set.schema)
-		}
-		return cols, types, [][][]byte{{cell}}, "SELECT 1", nil
 	case c.kind == cmdFunc:
-		return cols, types, [][][]byte{{[]byte("PostgreSQL " + serverVersion)}}, "SELECT 1", nil
+		row := make([][]byte, len(c.fns))
+		for i, f := range c.fns {
+			row[i] = s.funcCell(f)
+		}
+		return cols, types, [][][]byte{row}, "SELECT 1", nil
 	case c.all:
 		names := make([]string, 0, len(gucs))
 		for n := range gucs {
@@ -756,6 +768,33 @@ func (s *session) answerLocal(c *sessionCmd) (cols []string, types []colType, ro
 	}
 	g := gucs[c.param]
 	return cols, types, [][][]byte{{[]byte(g.show(s, &s.set))}}, "SHOW", nil
+}
+
+// funcCell is one connect-time function's value, nil for NULL.
+func (s *session) funcCell(f funcCall) []byte {
+	switch f.fn {
+	case "current_schema":
+		if s.set.schema == "" {
+			return nil
+		}
+		return []byte(s.set.schema)
+	case "pg_backend_pid":
+		// The process number the login gave this connection
+		// (BackendKeyData), so a client that cancels by it reaches this
+		// connection.
+		var pid uint32
+		if s.cancelTarget != nil {
+			pid = s.cancelTarget.pid
+		}
+		return []byte(strconv.FormatUint(uint64(pid), 10))
+	case "current_setting":
+		g, perr := lookupGUC(f.param)
+		if perr != nil {
+			return nil // missing_ok: localColumns refused it otherwise
+		}
+		return []byte(g.show(s, &s.set))
+	}
+	return []byte("PostgreSQL " + serverVersion)
 }
 
 // --- ParameterStatus --------------------------------------------------------

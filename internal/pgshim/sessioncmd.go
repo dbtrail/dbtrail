@@ -30,7 +30,7 @@ const (
 	cmdBegin              // BEGIN, START TRANSACTION
 	cmdCommit             // COMMIT, END
 	cmdRollback           // ROLLBACK, ABORT
-	cmdFunc               // SELECT version(), SELECT current_schema()
+	cmdFunc               // SELECT version(), current_schema(), pg_backend_pid(), current_setting('x')
 	cmdNoop               // RESET ROLE, RESET SESSION AUTHORIZATION: nothing was set
 )
 
@@ -47,8 +47,8 @@ type sessionCmd struct {
 	all bool
 	// modes are a BEGIN's or a SET TRANSACTION's transaction modes.
 	modes txModes
-	// fn is the function a cmdFunc calls: "version" or "current_schema".
-	fn string
+	// fns are the functions a cmdFunc calls, in the select list's order.
+	fns []funcCall
 	// refusal refuses the statement when it runs (SET ROLE, for one).
 	refusal *pgErr
 	// viaSet is a cmdReset written as a SET (SET x TO DEFAULT, SET TIME ZONE
@@ -81,6 +81,28 @@ func (c *sessionCmd) tag() string {
 // returnsRows says whether the statement answers with rows (SHOW and the
 // functions), which the port then describes and answers itself.
 func (c *sessionCmd) returnsRows() bool { return c.kind == cmdShow || c.kind == cmdFunc }
+
+// funcCall is one connect-time function of a cmdFunc's select list.
+type funcCall struct {
+	// fn is "version", "current_schema", "pg_backend_pid" or
+	// "current_setting".
+	fn string
+	// param is current_setting's parameter, lowercased; missingOK is its
+	// second argument (true: an unknown parameter is NULL, not an error).
+	param     string
+	missingOK bool
+}
+
+// unknownSetting says whether a cmdFunc reads, without missing_ok, a
+// parameter this port does not take.
+func (c *sessionCmd) unknownSetting() bool {
+	for _, f := range c.fns {
+		if f.fn == "current_setting" && !f.missingOK && gucs[f.param] == nil {
+			return true
+		}
+	}
+	return false
+}
 
 // setVal is one value of a SET.
 type setVal struct {
@@ -639,30 +661,66 @@ func (p *cmdParser) show() *sessionCmd {
 	return p.end(c)
 }
 
-// function reads SELECT version() and SELECT current_schema(), with or
-// without pg_catalog in front, which drivers send on connect: SQLAlchemy
-// reads the server's version from version() and fails the connection when it
-// does not start with PostgreSQL.
+// function reads a SELECT whose list is only connect-time functions, each
+// with or without pg_catalog in front: version() and current_schema(), which
+// SQLAlchemy reads on connect (it fails the connection when version() does
+// not start with PostgreSQL), and pg_backend_pid() and current_setting('x'),
+// which psycopg-based tools send on connect. None of them is the copy's to
+// answer: the copy is DuckDB, which has no pg_backend_pid and its own
+// settings. Anything else in the list (an alias, a cast, a FROM) and the
+// statement is not one: it goes where it went before.
 func (p *cmdParser) function() *sessionCmd {
+	c := &sessionCmd{kind: cmdFunc}
+	for {
+		f, ok := p.funcCall()
+		if !ok {
+			return nil
+		}
+		c.fns = append(c.fns, f)
+		if !p.punct(",") {
+			break
+		}
+	}
+	return p.end(c)
+}
+
+// funcCall reads one connect-time function call.
+func (p *cmdParser) funcCall() (funcCall, bool) {
 	if p.peek(0) == (token{tokIdent, "pg_catalog"}) && p.peek(1) == (token{tokPunct, "."}) {
 		p.i += 2
 	}
-	var fn string
 	switch {
 	case p.kw("version"):
-		fn = "version"
-		if !p.punct("(") || !p.punct(")") {
-			return nil
-		}
+		return funcCall{fn: "version"}, p.punct("(") && p.punct(")")
+	case p.kw("pg_backend_pid"):
+		return funcCall{fn: "pg_backend_pid"}, p.punct("(") && p.punct(")")
 	case p.kw("current_schema"):
-		fn = "current_schema"
 		// current_schema is also a word PostgreSQL reads without its
 		// parentheses.
 		if p.punct("(") && !p.punct(")") {
-			return nil
+			return funcCall{}, false
 		}
-	default:
-		return nil
+		return funcCall{fn: "current_schema"}, true
+	case p.kw("current_setting"):
+		if !p.punct("(") {
+			return funcCall{}, false
+		}
+		t := p.peek(0)
+		if t.kind != tokString {
+			return funcCall{}, false
+		}
+		p.i++
+		f := funcCall{fn: "current_setting", param: strings.ToLower(t.text)}
+		if p.punct(",") {
+			switch {
+			case p.kw("true"):
+				f.missingOK = true
+			case p.kw("false"):
+			default:
+				return funcCall{}, false
+			}
+		}
+		return f, p.punct(")")
 	}
-	return p.end(&sessionCmd{kind: cmdFunc, fn: fn})
+	return funcCall{}, false
 }
