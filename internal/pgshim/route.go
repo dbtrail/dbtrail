@@ -885,10 +885,13 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 
 	for i, t := range toks {
 		next, prev := at(i+1), at(i-1)
-		// A qualified name (t.col, s.t.col) is its column: the names before
-		// it say nothing of the value.
+		// qnext is the operand after t read as a value: a qualified name
+		// (t.col, s.t.col) is its column, the names before it say nothing of
+		// the value. Only comparisons read it; every other check reads the
+		// token itself (x::pg_catalog.date is not a cast to date).
+		qnext := next
 		for j := i + 1; at(j).kind == rtWord && at(j+1).kind == rtOp && at(j+1).text == "." && (at(j+2).kind == rtWord || at(j+2).kind == rtQuoted); j += 2 {
-			next = at(j + 2)
+			qnext = at(j + 2)
 		}
 		switch t.kind {
 		case rtQuoted:
@@ -931,7 +934,7 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 				if compareOps[t.text] {
 					// A text column against a number: PostgreSQL refuses it, the
 					// copy converts one of them.
-					if textCol(prev) && next.kind == rtNumber || textCol(next) && prev.kind == rtNumber {
+					if textCol(prev) && qnext.kind == rtNumber || textCol(qnext) && prev.kind == rtNumber {
 						return "a text column compared with a number"
 					}
 					// A time zone in a string compared with a timestamp column.
@@ -943,8 +946,8 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 				if orderingOps[t.text] {
 					// Two parameters, or a parameter and a string, compare
 					// as text on PostgreSQL: nothing else gives them a type.
-					bothUntyped := (prev.kind == rtParam || prev.kind == rtString) && (next.kind == rtParam || next.kind == rtString)
-					if !typedBy(prev, next) && !typedBy(next, prev) && (bothUntyped || operandText(prev) && !endsNeverText(i-1) || operandText(next) && !startsNeverText(i+1)) {
+					bothUntyped := (prev.kind == rtParam || prev.kind == rtString) && (qnext.kind == rtParam || qnext.kind == rtString)
+					if !typedBy(prev, qnext) && !typedBy(qnext, prev) && (bothUntyped || operandText(prev) && !endsNeverText(i-1) || operandText(qnext) && !startsNeverText(i+1)) {
 						return "text compared by order (the source compares it by its collation)"
 					}
 				} else if !copyOps[t.text] {
@@ -971,7 +974,7 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 					}
 				}
 			case t.text == "between":
-				if !typedBy(prev, next) && (operandText(prev) && !endsNeverText(i-1) || operandText(next) && !startsNeverText(i+1)) {
+				if !typedBy(prev, qnext) && (operandText(prev) && !endsNeverText(i-1) || operandText(qnext) && !startsNeverText(i+1)) {
 					return "text compared with BETWEEN (the source compares it by its collation)"
 				}
 			case next.kind == rtOp && next.text == "(":

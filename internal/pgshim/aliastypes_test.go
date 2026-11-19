@@ -116,8 +116,10 @@ func TestCopyScreen_namesTheStatementDefines(t *testing.T) {
 		`SELECT (SELECT name FROM pgcmp_customers c WHERE c.id = o.customer_id + 1) AS x FROM pgcmp_orders o ORDER BY x`: "text sorted",
 		// A name a column list gives (AS b(n)) is not read as a definition:
 		// nothing the statement defines is known then.
-		`WITH d AS (SELECT count(*) AS n FROM pgcmp_orders) SELECT b.n FROM d, (SELECT note FROM pgcmp_orders) AS b(n) ORDER BY b.n`: "text sorted",
-		`WITH c(n) AS (SELECT note FROM pgcmp_orders), d AS (SELECT count(*) AS n FROM pgcmp_orders) SELECT c.n FROM c, d ORDER BY c.n`: "text sorted",
+		`WITH d AS (SELECT count(*) AS n FROM pgcmp_orders) SELECT b.n FROM d, (SELECT note FROM pgcmp_orders) AS b(n) ORDER BY b.n`: "the function b()",
+		`WITH c(n) AS (SELECT note FROM pgcmp_orders), d AS (SELECT count(*) AS n FROM pgcmp_orders) SELECT c.n FROM c, d ORDER BY c.n`: "the function c()",
+		// Only comparisons read a qualified name as its column.
+		`SELECT id::pg_catalog.date FROM pgcmp_orders`: "a cast with ::",
 		// A name of three parts is its last.
 		`SELECT id FROM public.pgcmp_orders WHERE 'm' < public.pgcmp_orders.note`: "text compared",
 		// A call that may answer text is still read as one.
