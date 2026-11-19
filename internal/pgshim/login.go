@@ -271,7 +271,7 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	if refusal := s.admitResult(); refusal != nil {
 		return nil, nil, nil, "", refusal
 	}
-	res, err := s.bound.Run(ctx, qstr, s.runOptions())
+	res, err := s.bound.Run(ctx, RewriteForCopy(qstr), s.runOptions())
 	if res.Spool != nil {
 		// Only a bug gets here: this port asks for no result in a file.
 		_ = res.Spool.Close()

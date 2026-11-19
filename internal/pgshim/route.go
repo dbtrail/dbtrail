@@ -90,7 +90,10 @@ func (s *session) toSource(c classified, qstr string) bool {
 // then refuses still goes to the source). types is the copy's column types
 // by lowercased name; nil when not known. For internal/pgcompare.
 func CopyScreen(stmt string, types map[string][]string) string {
-	toks, why := lexSQL(stmt)
+	if w := ownName(stmt); w != "" {
+		return w
+	}
+	toks, why := lexSQL(RewriteForCopy(stmt))
 	if why != "" {
 		return why
 	}
@@ -130,7 +133,8 @@ func (s *session) route(c classified, qstr string) routeDecision {
 // routeFree decides a statement outside a transaction block on a connection
 // that can reach its source.
 func (s *session) routeFree(qstr string) routeDecision {
-	toks, why := lexSQL(qstr)
+	// Screened as the copy runs it (runFree, columnsOf).
+	toks, why := lexSQL(RewriteForCopy(qstr))
 	first := firstWord(toks)
 	switch first {
 	case "select", "with":
@@ -151,6 +155,10 @@ func (s *session) routeFree(qstr string) routeDecision {
 		return routeDecision{RouteSource, ReasonSessionDiffers}
 	}
 	if why != "" {
+		return routeDecision{RouteSource, ReasonVeto}
+	}
+	if w := ownName(qstr); w != "" {
+		s.logger.Debug("pgshim: sent to the source", "reason", ReasonVeto, "construct", w)
 		return routeDecision{RouteSource, ReasonVeto}
 	}
 	if veto := screenForCopy(toks, s.columnTypes()); veto != "" {
@@ -281,12 +289,21 @@ type rtToken struct {
 // escapes, a dollar quote, a bit string, a $n parameter, a number written in
 // another base.
 func lexSQL(q string) (toks []rtToken, why string) {
+	toks, _, why = lexSQLSpans(q)
+	return toks, why
+}
+
+// lexSQLSpans is lexSQL with where each token is in q: spans[i] is the
+// byte offsets [start, end) of toks[i] (a typed literal's are the type's
+// and the string's together, as screenForCopy folds them later).
+func lexSQLSpans(q string) (toks []rtToken, spans [][2]int, why string) {
 	isWordStart := func(c byte) bool { return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= 0x80 }
 	isWord := func(c byte) bool { return isWordStart(c) || c >= '0' && c <= '9' || c == '$' }
 	isDigit := func(c byte) bool { return c >= '0' && c <= '9' }
 	const opChars = "+-*/<>=~!@#%^&|`?"
 	for i := 0; i < len(q); {
 		c := q[i]
+		start, before := i, len(toks)
 		switch {
 		case c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f':
 			i++
@@ -313,7 +330,7 @@ func lexSQL(q string) (toks []rtToken, why string) {
 				}
 			}
 			if depth != 0 {
-				return toks, "an unterminated comment"
+				return toks, spans, "an unterminated comment"
 			}
 		case c == '\'':
 			var b strings.Builder
@@ -333,7 +350,7 @@ func lexSQL(q string) (toks []rtToken, why string) {
 				j++
 			}
 			if !closed {
-				return toks, "an unterminated string"
+				return toks, spans, "an unterminated string"
 			}
 			toks = append(toks, rtToken{rtString, b.String()})
 			i = j + 1
@@ -355,7 +372,7 @@ func lexSQL(q string) (toks []rtToken, why string) {
 				j++
 			}
 			if !closed {
-				return toks, "an unterminated quoted name"
+				return toks, spans, "an unterminated quoted name"
 			}
 			toks = append(toks, rtToken{rtQuoted, b.String()})
 			i = j + 1
@@ -369,9 +386,9 @@ func lexSQL(q string) (toks []rtToken, why string) {
 				}
 				toks = append(toks, rtToken{rtParam, q[i:j]})
 				i = j
-				continue
+				break
 			}
-			return toks, "a dollar-quoted string"
+			return toks, spans, "a dollar-quoted string"
 		case isDigit(c) || c == '.' && i+1 < len(q) && isDigit(q[i+1]):
 			j := i
 			for j < len(q) && isDigit(q[j]) {
@@ -398,12 +415,12 @@ func lexSQL(q string) (toks []rtToken, why string) {
 			if j < len(q) && isWord(q[j]) {
 				// 0x1F, 1_000, 10abc: another base, separators, or a
 				// number run into a name.
-				return toks, "a number written in another form"
+				return toks, spans, "a number written in another form"
 			}
 			if strings.ContainsAny(q[i:j], "eE") || len(q[i:j]) > 18 {
 				// A numeric on PostgreSQL, a DOUBLE on the copy (1e-1 * 3 is
 				// 0.3 there and 0.30000000000000004 here).
-				return toks, "a number with an exponent or of more than 18 digits"
+				return toks, spans, "a number with an exponent or of more than 18 digits"
 			}
 			toks = append(toks, rtToken{rtNumber, q[i:j]})
 			i = j
@@ -418,11 +435,11 @@ func lexSQL(q string) (toks []rtToken, why string) {
 				case "e", "b", "x", "n", "u":
 					// E'...' escapes, B'' and X'' bit strings, N'' national
 					// strings, U&'' and U&"" Unicode escapes.
-					return toks, "a string or name written with a prefix (E'', B'', X'', N'', U&'')"
+					return toks, spans, "a string or name written with a prefix (E'', B'', X'', N'', U&'')"
 				}
 			}
 			if strings.ContainsRune(w, '$') {
-				return toks, "a name with a dollar sign"
+				return toks, spans, "a name with a dollar sign"
 			}
 			toks = append(toks, rtToken{rtWord, w})
 			i = j
@@ -443,10 +460,13 @@ func lexSQL(q string) (toks []rtToken, why string) {
 			toks = append(toks, rtToken{rtOp, q[i:j]})
 			i = j
 		default:
-			return toks, fmt.Sprintf("the character %q", c)
+			return toks, spans, fmt.Sprintf("the character %q", c)
+		}
+		if len(toks) > before {
+			spans = append(spans, [2]int{start, i})
 		}
 	}
-	return toks, ""
+	return toks, spans, ""
 }
 
 // isSelectLike reports whether a statement is a query: its first word is
@@ -480,6 +500,9 @@ var copyFuncs = map[string]bool{
 	"coalesce": true, "nullif": true, "greatest": true, "least": true,
 	"length": true, "substring": true, "trim": true, "position": true, "concat": true,
 	"abs": true, "bool_and": true, "string_agg": true,
+	// round(a / b, k) and round(avg(x), k), as RewriteForCopy writes them:
+	// rounded as PostgreSQL rounds a numeric (sqlsandbox pgRoundMacros).
+	pgRoundDiv: true, pgRoundAvg: true,
 	"row_number": true, "rank": true, "lag": true,
 	"date_trunc": true, "date_part": true, "extract": true,
 }
