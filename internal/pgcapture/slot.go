@@ -183,29 +183,29 @@ func missingPublishedOps(ins, upd, del bool) []string {
 	return missing
 }
 
-// validateReplicaIdentity is the PostgreSQL analog of metadata.ValidateBinlogRowImage:
-// it refuses a source that can't produce complete before-images. PostgreSQL's knob is
-// per-table (REPLICA IDENTITY), not a global like MySQL's binlog_row_image, so every
-// table the publication will stream must be at FULL.
+// validateReplicaIdentity is the PostgreSQL analog of metadata.ValidateBinlogRowImage,
+// run once when capture starts. PostgreSQL's knob is per-table (REPLICA IDENTITY), not a
+// global like MySQL's binlog_row_image.
 //
 //   - wal_level must be 'logical' (global) — logical replication is impossible
-//     otherwise.
+//     otherwise. This one is fatal.
 //   - Every table in pg_publication_tables (which expands FOR ALL TABLES to the actual
-//     set PostgreSQL will stream — NOT the narrower client-side Filters) must have
+//     set PostgreSQL will stream — NOT the narrower client-side Filters) should have
 //     pg_class.relreplident = 'f' (FULL). Under any weaker identity ('d' default,
 //     'i' using-index, 'n' nothing) an unchanged out-of-line TOAST value is GONE from
-//     the before-image (proven in the spike, Part A), so we fail loud rather than index
-//     partial, unrecoverable before-images.
+//     the before-image (proven in the spike, Part A). Those tables are RETURNED, not
+//     refused: the decoder's cacheRelation skips the changes of every relation it is
+//     handed below FULL (and records each one in the capture-skip ledger), at start
+//     and mid-stream alike, so refusing here would stop every table over one. The
+//     caller warns with the list.
 //
-// This is the STARTUP gate (existing tables); the decoder's cacheRelation
-// re-enforces REPLICA IDENTITY FULL on every RelationMessage, so a table added to a
-// FOR ALL TABLES publication mid-stream — which this one-shot check never re-runs for
-// — is caught at the live boundary too.
-func validateReplicaIdentity(ctx context.Context, conn *pgx.Conn, publication string) error {
+// The report-only CheckReplicaIdentity (doctor, console preflight) still FAILS on
+// the same list: there, it is the advice to fix before capture, not a stop.
+func validateReplicaIdentity(ctx context.Context, conn *pgx.Conn, publication string) (notFull []string, err error) {
 	if err := checkWALLevel(ctx, conn); err != nil {
-		return err
+		return nil, err
 	}
-	return checkReplicaIdentityTables(ctx, conn, publication)
+	return replicaIdentityNotFull(ctx, conn, publication)
 }
 
 // ErrWALLevelNotLogical marks the "wal_level is readable but not 'logical'" case (a
@@ -244,8 +244,8 @@ func checkWALLevel(ctx context.Context, conn *pgx.Conn) error {
 
 // replicaIdentityNotFull returns the sorted "schema.table (relreplident=x)" of every
 // published table NOT at REPLICA IDENTITY FULL. It is the single catalog-query source
-// of truth shared by the capture-time validator (which turns a non-empty list into a
-// fatal error) and the report-only QueryReplicaIdentityNotFull (which surfaces the list
+// of truth shared by the capture-time validator (which warns with a non-empty list),
+// the doctor check (which fails on one) and the report-only QueryReplicaIdentityNotFull (which surfaces the list
 // for the console health panel). An empty result means every published table is FULL.
 func replicaIdentityNotFull(ctx context.Context, conn *pgx.Conn, publication string) ([]string, error) {
 	rows, err := conn.Query(ctx, `
@@ -324,8 +324,7 @@ func QueryReplicaIdentityNotFull(ctx context.Context, conn *pgx.Conn, publicatio
 // listUnloggedCaptureTables returns the "schema.table" of every UNLOGGED base table in
 // the capture scope. UNLOGGED tables generate NO WAL, so logical decoding never sees
 // their changes — they are captured as exactly nothing, silently; an operator may keep
-// ephemeral data UNLOGGED on purpose, so this is surfaced as a WARNING (not the fatal
-// fail of validateReplicaIdentity): a coverage hole the operator should see now rather
+// ephemeral data UNLOGGED on purpose, so this is surfaced as a WARNING: a coverage hole the operator should see now rather
 // than discover during a failed recovery. (#555)
 //
 // CRUCIAL: an UNLOGGED table is NEVER in pg_publication_tables, so it must be found

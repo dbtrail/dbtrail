@@ -28,6 +28,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/parser"
 	"github.com/dbtrail/dbtrail/internal/pgcapture"
 )
 
@@ -149,6 +150,13 @@ type pgStreamState struct {
 	// again after a restart stay above it until that delivery is whole.
 	checkpointEvent uint64
 	stampEvent      bool
+	// skips is the capture-skip ledger (the MySQL path's #1034 counters): the
+	// capturer records each change it drops (a table not at REPLICA IDENTITY
+	// FULL) and every checkpoint persists it to stream_state.capture_skips, so
+	// `status` reports degraded capture and names the table. Seeded from the
+	// persisted document at start. nil writes NULL, which the save keeps as
+	// whatever is there.
+	skips *parser.SkipCounters
 	// metrics is where the loop publishes its Prometheus metrics (#2762);
 	// nil publishes none (metrics.go).
 	metrics *pgMetrics
@@ -229,6 +237,20 @@ func One(ctx context.Context, cfg Config) error {
 		state.resumed = true
 	}
 
+	// The capture-skip ledger, as the MySQL capture keeps it (streamrun): seeded
+	// from what the previous run persisted, so a restart never zeroes the
+	// degraded verdict `status` shows. A document that does not parse is not
+	// replaced by fresh counters: SeedPreserving records that fact under
+	// unreadable_previous_ledger, so the next checkpoint does not write a clean
+	// "{}" over possible evidence of loss. Never a reason not to start.
+	skips := parser.NewSkipCounters(logger)
+	if raw, err := loadCaptureSkipsPG(indexDB); err != nil {
+		logger.Warn("pgstreamrun: could not load the persisted capture-skip counters; starting from zero", "error", err)
+	} else if err := skips.SeedPreserving(raw); err != nil {
+		logger.Error("pgstreamrun: could not parse the persisted capture-skip counters; the previous ledger may have recorded permanent loss, so that is kept under reason unreadable_previous_ledger", "error", err)
+	}
+	state.skips = skips
+
 	cap := pgcapture.New(pgcapture.Config{
 		ReplDSN:            cfg.ReplDSN,
 		QueryDSN:           cfg.QueryDSN,
@@ -245,6 +267,7 @@ func One(ctx context.Context, cfg Config) error {
 		// run and says so at ERROR level; it never stops capture.
 		LoadKnownShapes: func(from uint64) (pgcapture.KnownState, error) { return loadKnownState(indexDB, from) },
 		LastChange:      lastIndexedChange(indexDB),
+		Skips:           skips,
 	})
 	idx := indexer.New(indexDB, cfg.BatchSize)
 
@@ -824,6 +847,22 @@ func loadStreamStatePG(db *sql.DB) (*pgStreamState, error) {
 	return &pgStreamState{lsn: lsn, eventsIndexed: eventsIndexed, serverID: serverID, lastEventTime: lastEventTime}, nil
 }
 
+// loadCaptureSkipsPG reads the persisted capture-skip counters (the PostgreSQL
+// twin of streamrun's loadCaptureSkips), so a restarting capture resumes the
+// monotonic tallies. Runs after EnsureSchema, so the column exists; no row, or a
+// NULL column, returns "" (nothing persisted yet).
+func loadCaptureSkipsPG(db *sql.DB) (string, error) {
+	var raw sql.NullString
+	err := db.QueryRow(`SELECT capture_skips FROM stream_state WHERE id = 1`).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return raw.String, nil
+}
+
 // newestEventThrough is the newest event of the index whose position is at
 // or before lsn, 0 when it holds none. The rows above it are what was made
 // visible past lsn (a transaction still arriving in parts), so the walk back
@@ -889,6 +928,18 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 	if state.stampEvent && state.checkpointEvent != 0 {
 		checkpointEvent = state.checkpointEvent
 	}
+	// capture_skips: the ledger rides every checkpoint, as on the MySQL path
+	// (streamrun.saveCheckpoint). A nil ledger writes NULL, which the update
+	// arm's COALESCE turns into "keep what is there", so no writer of a bare
+	// state wipes counters a capture persisted.
+	var captureSkips any
+	if state.skips != nil {
+		snap, err := state.skips.Snapshot()
+		if err != nil {
+			return fmt.Errorf("pgstreamrun: serialize capture-skip counters: %w", err)
+		}
+		captureSkips = snap
+	}
 	// pg_sent_through_at gets the same UTC_TIMESTAMP() as last_checkpoint
 	// (one statement, one value). Verify trusts pg_sent_through_lsn only while
 	// the two are equal, so a save by any writer that does not set it (an
@@ -898,9 +949,9 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 			(id, mode, binlog_file, binlog_position, gtid_set, flavor,
 			 events_indexed, last_event_time, last_checkpoint, server_id,
 			 pg_sent_through_lsn, pg_sent_through_at, caught_up_at, pg_capture_from_lsn,
-			 pg_caught_up_source_at, pg_checkpoint_event_id)
+			 pg_caught_up_source_at, pg_checkpoint_event_id, capture_skips)
 		VALUES (1, 'gtid', ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, UTC_TIMESTAMP(),
-			UTC_TIMESTAMP(6) - INTERVAL ? MICROSECOND, ?, ?, ?)
+			UTC_TIMESTAMP(6) - INTERVAL ? MICROSECOND, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			binlog_file     = VALUES(binlog_file),
 			binlog_position = VALUES(binlog_position),
@@ -915,9 +966,11 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 			caught_up_at = COALESCE(VALUES(caught_up_at), caught_up_at),
 			pg_caught_up_source_at = COALESCE(VALUES(pg_caught_up_source_at), pg_caught_up_source_at),
 			pg_capture_from_lsn = IF(?, pg_capture_from_lsn, VALUES(pg_capture_from_lsn)),
-			pg_checkpoint_event_id = IF(?, VALUES(pg_checkpoint_event_id), pg_checkpoint_event_id)`,
+			pg_checkpoint_event_id = IF(?, VALUES(pg_checkpoint_event_id), pg_checkpoint_event_id),
+			capture_skips = COALESCE(VALUES(capture_skips), capture_skips)`,
 		lsnStr, commitLSN, lsnStr, pgFlavor, state.eventsIndexed, lastEventTime, state.serverID,
-		state.sentThrough, caughtUpAgo, captureFrom, caughtUpSourceAt, checkpointEvent, state.resumed, state.stampEvent)
+		state.sentThrough, caughtUpAgo, captureFrom, caughtUpSourceAt, checkpointEvent, captureSkips,
+		state.resumed, state.stampEvent)
 	if err != nil {
 		return fmt.Errorf("pgstreamrun: save checkpoint at %s: %w", lsnStr, err)
 	}

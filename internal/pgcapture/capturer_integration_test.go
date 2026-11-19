@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/dbtrail/dbtrail/internal/event"
+	"github.com/dbtrail/dbtrail/internal/parser"
 	"github.com/dbtrail/dbtrail/internal/pgcapture"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -191,15 +192,17 @@ func TestCapturer_Integration(t *testing.T) {
 // TestCapturer_PublicationCoverageFailsLoud proves the validate-don't-create gate:
 // a publication that omits a requested table fails loud rather than silently
 // streaming zero events for it.
-// TestCapturer_NonFullReplicaIdentityFailsLoud proves the #531-A RI-FULL validator:
-// a publication table left at the default replica identity (not FULL) makes Run fail
-// loud — its before-images would be partial (an unchanged out-of-line TOAST value
-// lost), which is unrecoverable.
-func TestCapturer_NonFullReplicaIdentityFailsLoud(t *testing.T) {
+// TestCapturer_NonFullReplicaIdentityAtStartIsSkipped: a publication table left at
+// the default replica identity (not FULL) used to make Run refuse to start. Its
+// before-images would be partial (an unchanged out-of-line TOAST value lost), so its
+// rows must still never be indexed, but one such table must not stop capture: Run
+// starts, the table's changes are dropped and recorded in the skip ledger.
+func TestCapturer_NonFullReplicaIdentityAtStartIsSkipped(t *testing.T) {
 	baseDSN := testutil.SkipIfNoPostgres(t)
 	ctx := context.Background()
 	const pub = "bintrail_pgcap_ri_pub"
 	const tbl = "pgcap_ri_t"
+	const slot = "bintrail_pgcap_ri_slot"
 
 	setup, err := pgx.Connect(ctx, baseDSN)
 	if err != nil {
@@ -210,6 +213,7 @@ func TestCapturer_NonFullReplicaIdentityFailsLoud(t *testing.T) {
 		bg := context.Background()
 		_, _ = setup.Exec(bg, "DROP PUBLICATION IF EXISTS "+pub)
 		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS "+tbl)
+		_, _ = setup.Exec(bg, "SELECT pg_drop_replication_slot($1) WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)", slot)
 	}
 	cleanup()
 	t.Cleanup(cleanup)
@@ -222,18 +226,36 @@ func TestCapturer_NonFullReplicaIdentityFailsLoud(t *testing.T) {
 		t.Fatalf("create publication: %v", err)
 	}
 
+	skips := parser.NewSkipCounters(nil)
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	cap := pgcapture.New(pgcapture.Config{
-		ReplDSN:     replDSN(baseDSN),
-		QueryDSN:    baseDSN,
-		SlotName:    "bintrail_pgcap_ri_slot",
-		Publication: pub,
+		ReplDSN:         replDSN(baseDSN),
+		QueryDSN:        baseDSN,
+		SlotName:        slot,
+		Publication:     pub,
+		Skips:           skips,
+		StandbyInterval: 200 * time.Millisecond,
 	})
-	err = cap.Run(ctx, make(chan event.Event, 1))
-	if err == nil {
-		t.Fatal("expected Run to fail loud on a table that is not at REPLICA IDENTITY FULL")
+	events := make(chan event.Event, 64)
+	runErr := make(chan error, 1)
+	go func() { runErr <- cap.Run(runCtx, events) }()
+	waitSlotActive(t, setup, slot, runErr)
+
+	if _, err := setup.Exec(ctx, fmt.Sprintf("INSERT INTO %s VALUES (1, 'x')", tbl)); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "REPLICA IDENTITY FULL") {
-		t.Errorf("unexpected error (want RI-FULL failure): %v", err)
+	waitFor(t, 15*time.Second, func() bool { return skips.Count(pgcapture.SkipReplicaIdentityNotFull) >= 1 },
+		"the change of the non-FULL table recorded as a skip")
+	assertRunning(t, runErr)
+	for _, ev := range drain(events) {
+		if ev.Table == tbl && isRow(ev) {
+			t.Errorf("a row of the non-FULL table was emitted: %+v", ev)
+		}
+	}
+	cancel()
+	if err := <-runErr; err != nil {
+		t.Errorf("Run returned non-nil on graceful cancel: %v", err)
 	}
 }
 
