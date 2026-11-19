@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"reflect"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -90,38 +89,65 @@ type PGTail struct {
 	generated map[string]bool
 	// needFull: see Tail.needFull.
 	needFull bool
-	// packed holds the row of each key whose change carries pgPackedImage in
-	// place of its image (pack): the copy's columns, in names' order, as one
-	// run of bytes. The image a change arrives with is a map, which costs
-	// several times the row it holds; a table written to all the time kept
-	// a few hundred thousand of them between two updates of its copy, and
-	// the tails of a busy source passed their memory budget in minutes.
-	packed map[string][]byte
+	// packed holds, for a key, the row of its change in place of the image
+	// the change arrived with (pack): the copy's columns, in names' order,
+	// as one run of bytes. The image is a map, which costs several times the
+	// row it holds; a table written to all the time kept a few hundred
+	// thousand of them between two updates of its copy, and the tails of a
+	// busy source passed their memory budget in minutes.
+	packed map[string]pgPackedRow
 }
 
-// pgPackedImage stands, in a change the tail holds, for an image kept in
-// PGTail.packed. One map for every such change; it is never read or written.
-var pgPackedImage = map[string]any{}
+// pgPackedRow is the row of one change, put away. of is the change it is
+// the row of: a key whose change has since been replaced has a row here that
+// is no longer its own, and is not read.
+type pgPackedRow struct {
+	of  *query.ResultRow
+	row []byte
+}
 
 // pgPackedEntryBytes is what a packed row holds on the heap beside its own
 // bytes: its key in the map of packed rows, the slice and the map's slot.
-const pgPackedEntryBytes = 80
+const pgPackedEntryBytes = 96
 
-// pack moves the image of key's change, when the tail holds one as it
-// arrived, into packed. Only an image tailRow would write as it is: every
-// column of the copy present, each a text or NULL, and no other column but a
-// generated one. Any other image stays as it arrived, for tailRow to refuse
-// with its own words.
+// held is the packed row of key's change ev, when ev's image was put away.
+func (t *PGTail) held(key string, ev *query.ResultRow) ([]byte, bool) {
+	p, ok := t.packed[key]
+	if !ok || p.of != ev {
+		return nil, false
+	}
+	return p.row, true
+}
+
+// pack puts the image of key's change away as its packed row and lets the
+// image go. Only an image tailRow would write as it is: every column of the
+// copy present, each a text or NULL, and no other column but a generated
+// one. Any other image stays as it arrived, for tailRow to refuse with its
+// own words.
 func (t *PGTail) pack(key string) {
 	ev, ok := t.fold.Changes[key]
 	if !ok {
 		delete(t.packed, key)
 		return
 	}
-	img := ev.RowAfter
-	if ev.EventType == event.EventDelete || img == nil || len(img) < len(t.names) {
+	if _, already := t.held(key, ev); already {
+		return
+	}
+	row, ok := t.packImage(ev)
+	if !ok {
 		delete(t.packed, key)
 		return
+	}
+	t.packed[key] = pgPackedRow{of: ev, row: row}
+	ev.RowAfter = nil
+}
+
+// packImage is ev's image as a packed row: for each column of the copy, 0
+// for NULL or the length of its text plus one, then the text.
+func (t *PGTail) packImage(ev *query.ResultRow) ([]byte, bool) {
+	img := ev.RowAfter
+	if ev.EventType == event.EventDelete || img == nil || len(img) < len(t.names) {
+		return nil, false
 	}
 	size := 0
 	for _, c := range t.names {
@@ -130,24 +156,20 @@ func (t *PGTail) pack(key string) {
 			size += len(v) + binary.MaxVarintLen32
 		case nil:
 			if _, present := img[c]; !present {
-				delete(t.packed, key)
-				return
+				return nil, false
 			}
 			size++
 		default:
-			delete(t.packed, key)
-			return
+			return nil, false
 		}
 	}
 	if len(img) > len(t.names) {
 		for c := range img {
 			if !t.generated[c] && !t.inNames[c] {
-				delete(t.packed, key)
-				return
+				return nil, false
 			}
 		}
 	}
-	// Each column: 0 for NULL, or its length plus one, then its bytes.
 	b := make([]byte, 0, size)
 	for _, c := range t.names {
 		if v, ok := img[c].(string); ok {
@@ -157,17 +179,12 @@ func (t *PGTail) pack(key string) {
 			b = append(b, 0)
 		}
 	}
-	t.packed[key] = b
-	ev.RowAfter = pgPackedImage
+	return b, true
 }
 
-// unpack is the image pack put away for key: the copy's columns, each the
-// text it was or nil.
-func (t *PGTail) unpack(key string) (map[string]any, error) {
-	b, ok := t.packed[key]
-	if !ok {
-		return nil, fmt.Errorf("internal: the tail of %s.%s holds no row for key %q", t.schema, t.table, key)
-	}
+// unpackImage is the image a packed row was made from: the copy's columns,
+// each the text it was or nil.
+func (t *PGTail) unpackImage(key string, b []byte) (map[string]any, error) {
 	img := make(map[string]any, len(t.names)+2)
 	for _, c := range t.names {
 		n, w := binary.Uvarint(b)
@@ -259,7 +276,7 @@ func NewPGTail(schema, table string, md baseline.DumpMetadata, fileColumns []str
 	}
 	return &PGTail{schema: schema, table: table, names: append([]string(nil), fileColumns...), inNames: inFile, cols: cols,
 		pkCols: pkCols, pkNames: pkNames, generated: gen,
-		fold: foldResult{Changes: map[string]*query.ResultRow{}}, dirty: map[string]struct{}{}, packed: map[string][]byte{}}, nil
+		fold: foldResult{Changes: map[string]*query.ResultRow{}}, dirty: map[string]struct{}{}, packed: map[string]pgPackedRow{}}, nil
 }
 
 // sameNames: the same names, in any order.
@@ -313,9 +330,7 @@ func (t *PGTail) Apply(page []query.ResultRow) error {
 	// After the whole page: the fold has compared and checked every event
 	// as it arrived, and the change left for each key is its last.
 	for _, key := range touched {
-		if ev, ok := t.fold.Changes[key]; !ok || !sameImage(ev.RowAfter, pgPackedImage) {
-			t.pack(key)
-		}
+		t.pack(key)
 	}
 	for i := range own {
 		t.fold.LastEventID = max(t.fold.LastEventID, own[i].EventID)
@@ -361,17 +376,14 @@ func (t *PGTail) Keys() int { return len(t.fold.Changes) }
 
 // Bytes is an estimate of the heap the tail holds (see Tail.Bytes).
 //
-// A sample, as Tail's is: a packed row counts as its change without an
-// image, its bytes and pgPackedEntryBytes.
+// A sample, as Tail's is: a packed row counts as its change, which holds no
+// image then, its bytes and pgPackedEntryBytes.
 func (t *PGTail) Bytes() int64 {
 	var sum, seen int64
 	for k, ev := range t.fold.Changes {
-		if sameImage(ev.RowAfter, pgPackedImage) {
-			kept := *ev
-			kept.RowAfter = nil
-			sum += approxChangeBytes(&kept) + pgPackedEntryBytes + int64(len(k)+len(t.packed[k]))
-		} else {
-			sum += approxChangeBytes(ev)
+		sum += approxChangeBytes(ev)
+		if row, ok := t.held(k, ev); ok {
+			sum += pgPackedEntryBytes + int64(len(k)+len(row))
 		}
 		if seen++; seen == changeSampleRows {
 			break
@@ -382,12 +394,6 @@ func (t *PGTail) Bytes() int64 {
 		rows = max(1, sum/seen) * int64(len(t.fold.Changes))
 	}
 	return rows + int64(len(t.fold.pgTxn))*pgTxnBytes
-}
-
-// sameImage reports whether a and b are the same map, not maps that hold
-// the same: how a change says its image is the packed one.
-func sameImage(a, b map[string]any) bool {
-	return reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer()
 }
 
 // Dirty is how many keys changed since the last file was written.
@@ -521,9 +527,9 @@ func (t *PGTail) tailRow(key string, ev *query.ResultRow) (map[string]any, error
 		row[baseline.TableDeltaOpColumn] = baseline.TableDeltaOpDelete
 	} else {
 		after := ev.RowAfter
-		if sameImage(after, pgPackedImage) {
+		if row, ok := t.held(key, ev); ok {
 			var uerr error
-			if after, uerr = t.unpack(key); uerr != nil {
+			if after, uerr = t.unpackImage(key, row); uerr != nil {
 				return nil, uerr
 			}
 		}
