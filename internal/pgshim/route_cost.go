@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 )
@@ -178,7 +179,11 @@ func byCostApplies(d routeDecision) bool {
 // multiStatement reports whether a text holds more than one statement: EXPLAIN
 // of the first would run the others on the source.
 func multiStatement(q string) bool {
-	toks, _ := lexSQL(q)
+	toks, why := lexSQL(q)
+	if why != "" {
+		// Not read whole: a ; past what was read may be missed.
+		return true
+	}
 	for i, t := range toks {
 		if t.kind == rtOp && t.text == ";" {
 			for _, u := range toks[i+1:] {
@@ -237,10 +242,17 @@ func (s *session) routeByCost(text string, generic bool) (d routeDecision, keep 
 		if srcErr.code == "57014" {
 			return failed, false, srcErr
 		}
-		// The statement's own (a name the source does not know, a syntax it
-		// refuses): it goes there, and the source answers it.
-		s.logger.Debug("pgshim: sent to the source", "reason", ReasonExplainFailed, "code", srcErr.code, "err", srcErr.msg)
-		return failed, true, nil
+		if strings.HasPrefix(srcErr.code, "42") {
+			// The statement's own (a name the source does not know, a syntax
+			// it refuses, GENERIC_PLAN before PostgreSQL 16): it goes there,
+			// and the source answers it.
+			s.logger.Debug("pgshim: sent to the source", "reason", ReasonExplainFailed, "code", srcErr.code, "err", srcErr.msg)
+			return failed, true, nil
+		}
+		// Anything else (a privilege, a lock, the source busy) may be the
+		// moment's: said, and not kept by a prepared statement.
+		s.logger.Warn("pgshim: the source did not give a statement's plan; it answers the statement", "code", srcErr.code, "err", srcErr.msg)
+		return failed, false, nil
 	}
 	pl, err := parsePGPlan(raw)
 	if err != nil {

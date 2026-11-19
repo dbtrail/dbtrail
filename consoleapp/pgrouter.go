@@ -377,7 +377,11 @@ func pgRouterCostFrom(cmd *cobra.Command) (pgshim.CostPolicy, error) {
 // pgCostRuleWords says when a statement goes to the copy by its plan, for
 // the startup lines.
 func pgCostRuleWords(pol pgshim.CostPolicy) string {
-	cost := fmt.Sprintf("its plan there (EXPLAIN) costs %s or more (--cost-threshold)", groupThousands(int64(math.Ceil(pol.CostThreshold))))
+	costWords := fmt.Sprintf("%g", pol.CostThreshold)
+	if pol.CostThreshold < 1e15 {
+		costWords = groupThousands(int64(math.Ceil(pol.CostThreshold)))
+	}
+	cost := fmt.Sprintf("its plan there (EXPLAIN) costs %s or more (--cost-threshold)", costWords)
 	scan := fmt.Sprintf("its plan there (EXPLAIN) has a sequential scan of %s rows or more (--scan-rows)", groupThousands(pol.ScanRows))
 	switch {
 	case pol.CostThreshold > 0 && pol.ScanRows > 0:

@@ -144,6 +144,7 @@ func TestMultiStatement(t *testing.T) {
 		"SELECT 1 /* ; SELECT 2 */":      false,
 		"SELECT 1; -- a comment":         false,
 		"SELECT 1; /* only a comment */": false,
+		"SELECT 'unterminated; SELECT 2": true,
 	} {
 		if got := multiStatement(q); got != want {
 			t.Errorf("multiStatement(%q) = %v, want %v", q, got, want)
@@ -393,6 +394,7 @@ var costPlans = map[string]string{
 	"FROM nosuch":   "error 42P01",
 	"FROM garbled":  `[{"Plan": "not a node"}]`,
 	"FROM canceled": "error 57014",
+	"FROM locked":   "error 55P03",
 }
 
 type costOutcome struct{ answer, code, side, reason string }
@@ -432,6 +434,7 @@ func TestRouteByCost_simple(t *testing.T) {
 		{"a scan of a small table", "SELECT sum(n) FROM hb", costOutcome{"42", "", RouteSource, ReasonCheapPlan}, "EXPLAIN (FORMAT JSON) SELECT sum(n) FROM hb"},
 		{"EXPLAIN refused: the source answers, with its error", "SELECT count(*) FROM nosuch", costOutcome{"", "42P01", RouteSource, ReasonExplainFailed}, "EXPLAIN (FORMAT JSON) SELECT count(*) FROM nosuch"},
 		{"a plan that cannot be read", "SELECT count(*) FROM garbled", costOutcome{"42", "", RouteSource, ReasonExplainFailed}, "EXPLAIN (FORMAT JSON) SELECT count(*) FROM garbled"},
+		{"a plan refused for the moment", "SELECT count(*) FROM locked", costOutcome{"42", "", RouteSource, ReasonExplainFailed}, "EXPLAIN (FORMAT JSON) SELECT count(*) FROM locked"},
 		{"cancelled while its plan was asked for: not run anywhere", "SELECT count(*) FROM canceled", costOutcome{"", "57014", RouteSource, ReasonExplainFailed}, "EXPLAIN (FORMAT JSON) SELECT count(*) FROM canceled"},
 		// Asked of nothing: the screen sends it to the source already.
 		{"a veto", "SELECT now()", costOutcome{"42", "", RouteSource, ReasonVeto}, ""},
