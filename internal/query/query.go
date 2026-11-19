@@ -1007,11 +1007,23 @@ func buildWhere(opts Options) ([]string, []any) {
 			// this form bounds both. No test pins that half; the integration
 			// test says why it declines to.
 			floor := CoarseSinceFloor(since)
+			if opts.sinceSettled && opts.SincePos.IsLSN() {
+				// A PostgreSQL anchor whose Since is PROVEN (SinceProven):
+				// the snapshot recorded that no change at or after its LSN
+				// committed before Since, and a PostgreSQL row's time is its
+				// commit's. The exact instant is then the bound, and the two
+				// requirements above do not apply. With the coarse floor a
+				// reader took every row of the table from up to two hours
+				// back and dropped it by position: on a busy source, minutes
+				// per table at every snapshot update, growing with the age of
+				// the index (a 200-row table took 79 s to update).
+				floor = since
+			}
 			where = append(where, "event_timestamp >= ?")
 			args = append(args, floor)
-			// Still deliberately NOT the exact Since instant — see SincePos.
-			// This is a restatement of the same coarse floor in a form the
-			// index can use, never a tightening of it.
+			// Otherwise still deliberately NOT the exact Since instant — see
+			// SincePos. This is a restatement of the same coarse floor in a
+			// form the index can use, never a tightening of it.
 		} else {
 			// The exact filter below is what bounds this branch; the
 			// hour-aligned TO_SECONDS literal beside it is inherited and, on
