@@ -544,18 +544,25 @@ func TestIntegrationPGTailSource(t *testing.T) {
 	// through it. It used to be built again from nothing, in the background,
 	// and that statement read the snapshot alone meanwhile.
 	t.Run("the table's file written again: the tail it had stands, pruned to the new cut", func(t *testing.T) {
-		tbl := r.table(nil, [2]string{"1", "one"}, [2]string{"2", "two"})
+		tbl := r.table(nil, [2]string{"1", "one"}, [2]string{"2", "two"}, [2]string{"5", "five"}, [2]string{"6", "six"})
+		// Before the new file's cut: a row deleted (the new file does not
+		// hold it, and the tail's record of the delete goes), a row changed
+		// (the new file holds the change), and a row changed that changes
+		// again after the cut.
+		r.change(tbl.Table, event.EventDelete, "5", "five", 0x9f0, 24*time.Minute)
+		r.change(tbl.Table, event.EventUpdate, "6", "SIX", 0x9f8, 24*time.Minute)
 		r.change(tbl.Table, event.EventUpdate, "1", "ONE", 0xa00, 24*time.Minute)
 		r.change(tbl.Table, event.EventInsert, "3", "three", 0xa10, 25*time.Minute)
-		r.checkpoint(0xa10)
-		if got, want := r.state(ctx, tbl), []string{"1=ONE", "2=two", "3=three"}; !reflect.DeepEqual(got, want) {
+		r.change(tbl.Table, event.EventUpdate, "6", "six again", 0xa18, 25*time.Minute)
+		r.checkpoint(0xa18)
+		if got, want := r.state(ctx, tbl), []string{"1=ONE", "2=two", "3=three", "6=six again"}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("before the update: state %v, want %v", got, want)
 		}
 		// The update: the table as of just after 0xa00, written again. One
 		// more change is captured meanwhile.
 		r.change(tbl.Table, event.EventDelete, "2", "two", 0xa20, 26*time.Minute)
 		r.checkpoint(0xa20)
-		next := r.rewritten(tbl, r.at.Add(20*time.Minute), 0xa01, nil, [2]string{"1", "ONE"}, [2]string{"2", "two"})
+		next := r.rewritten(tbl, r.at.Add(20*time.Minute), 0xa01, nil, [2]string{"1", "ONE"}, [2]string{"2", "two"}, [2]string{"6", "SIX"})
 		// ONE look, with no wait for a build: the tail is there.
 		got, err := r.k.refresh(ctx, []views.BaselineTable{next})
 		if err != nil {
@@ -565,19 +572,21 @@ func TestIntegrationPGTailSource(t *testing.T) {
 		if !ok {
 			t.Fatal("the first statement over the table's new file has no tail: it was built again from nothing")
 		}
-		if rows, want := merged(t, next, v), []string{"1=ONE", "3=three"}; !reflect.DeepEqual(rows, want) {
+		if rows, want := merged(t, next, v), []string{"1=ONE", "3=three", "6=six again"}; !reflect.DeepEqual(rows, want) {
 			t.Fatalf("over the new file: %v, want %v", rows, want)
 		}
 		// And it goes on taking changes.
 		r.change(tbl.Table, event.EventInsert, "4", "four", 0xa30, 27*time.Minute)
 		r.checkpoint(0xa30)
-		if rows, want := r.state(ctx, next), []string{"1=ONE", "3=three", "4=four"}; !reflect.DeepEqual(rows, want) {
+		if rows, want := r.state(ctx, next), []string{"1=ONE", "3=three", "4=four", "6=six again"}; !reflect.DeepEqual(rows, want) {
 			t.Fatalf("after one more change: %v, want %v", rows, want)
 		}
 	})
 
-	// A file of the same name whose table has another shape is another
-	// table to a tail: built again, as before.
+	// A file whose table records another shape is another base to a tail:
+	// built again, as before. The shape differs in what only the file says
+	// (a column's default), so nothing else refuses the table: it is the
+	// name of the base that sends it to a build.
 	t.Run("the table's file written again under another shape: the tail is built again", func(t *testing.T) {
 		tbl := r.table(nil, [2]string{"1", "one"})
 		r.change(tbl.Table, event.EventUpdate, "1", "ONE", 0xb00, 24*time.Minute)
@@ -585,10 +594,18 @@ func TestIntegrationPGTailSource(t *testing.T) {
 		if got, want := r.state(ctx, tbl), []string{"1=ONE"}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("before: state %v, want %v", got, want)
 		}
-		other, err := baseline.PGRelation{OID: 99123, Columns: []baseline.PGColumn{
-			{Name: "id", TypeOID: 25, TypeMod: -1, Type: "text", NotNull: true, Ordinal: 1},
-			{Name: "status", TypeOID: 25, TypeMod: -1, Type: "text", Ordinal: 2},
-		}, PrimaryKey: []string{"id"}}.Encode()
+		r.change(tbl.Table, event.EventInsert, "2", "two", 0xb10, 25*time.Minute)
+		r.checkpoint(0xb10)
+		old, err := baseline.ReadParquetMetadata(tbl.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rel, ok, err := baseline.ParsePGRelation(old.PGRelation)
+		if err != nil || !ok {
+			t.Fatalf("the table's recorded shape: %v, %v", ok, err)
+		}
+		rel.Columns[1].Default = "'new'::text"
+		other, err := rel.Encode()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -598,7 +615,31 @@ func TestIntegrationPGTailSource(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, ok := got[tailKey(next.Schema, next.Table)]; ok {
-			t.Fatal("a tail checked against one shape was laid over a file of another")
+			t.Fatal("a tail checked against one shape was laid over a file that records another")
+		}
+		// Built, not refused: once the build is in, the table has its tail.
+		if rows, want := r.state(ctx, next), []string{"1=ONE", "2=two"}; !reflect.DeepEqual(rows, want) {
+			t.Fatalf("after the build: %v, want %v", rows, want)
+		}
+	})
+
+	// The cursor has not reached the new file's cut (a full read ahead of
+	// capture): the tail it had does not hold what the file holds past the
+	// cursor, and is not laid over it.
+	t.Run("the table's file written again past the cursor: the old tail is not laid over it", func(t *testing.T) {
+		tbl := r.table(nil, [2]string{"1", "one"})
+		r.change(tbl.Table, event.EventUpdate, "1", "ONE", 0xc00, 24*time.Minute)
+		r.checkpoint(0xc00)
+		if got, want := r.state(ctx, tbl), []string{"1=ONE"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("before: state %v, want %v", got, want)
+		}
+		next := r.rewritten(tbl, r.at.Add(22*time.Minute), 0xc80, nil, [2]string{"1", "newer than the cursor"})
+		got, err := r.k.refresh(ctx, []views.BaselineTable{next})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v, ok := got[tailKey(next.Schema, next.Table)]; ok {
+			t.Fatalf("the old tail was laid over a file past the cursor: %v", merged(t, next, v))
 		}
 	})
 
