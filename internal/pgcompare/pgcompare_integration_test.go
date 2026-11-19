@@ -5,6 +5,7 @@ package pgcompare
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/dbtrail/dbtrail/internal/pgbaseline"
+	"github.com/dbtrail/dbtrail/internal/pgshim"
 	"github.com/dbtrail/dbtrail/internal/snapshotdir"
 	"github.com/dbtrail/dbtrail/internal/sqlcompare"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
@@ -26,6 +28,7 @@ const (
 	itOdd       = "pgcmp_odd"
 	itArrays    = "pgcmp_arrays"
 	itTimes     = "pgcmp_times"
+	itRound     = "pgcmp_round"
 	itPub       = "pgcmp_pub"
 	itSlot      = "pgcmp_slot"
 )
@@ -61,7 +64,7 @@ func TestIntegrationPGCompare(t *testing.T) {
 	dropAll := func() {
 		bg := context.Background()
 		_, _ = setup.Exec(bg, "DROP PUBLICATION IF EXISTS "+itPub)
-		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS "+itOrders+", "+itCustomers+", "+itOdd+", "+itArrays+", "+itTimes)
+		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS "+itOrders+", "+itCustomers+", "+itOdd+", "+itArrays+", "+itTimes+", "+itRound)
 		_, _ = setup.Exec(bg, "SELECT pg_drop_replication_slot($1) WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)", itSlot)
 	}
 	dropAll()
@@ -106,6 +109,8 @@ func TestIntegrationPGCompare(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open the copy: %v", err)
 	}
+	// Measured as the PostgreSQL port runs it.
+	cp.Rewrite = pgshim.RewriteForCopy
 	src, err := OpenSource(ctx, baseDSN, "public")
 	if err != nil {
 		t.Fatalf("open the source: %v", err)
@@ -223,8 +228,63 @@ func seedSQL() []string {
 			(4, '12:00:00.5',      '12:00:00+00',    '-3 days +01:00:00',                   NULL,       NULL),
 			(5, NULL,              NULL,             '100:00:00',                           '24:00:00', '24:00:00+00'),
 			(6, '06:00:00',        '06:00:00+02',    '-1 mons',                             NULL,       NULL)`,
-		`CREATE PUBLICATION ` + itPub + ` FOR TABLE ` + itCustomers + `, ` + itOrders + `, ` + itOdd + `, ` + itArrays + `, ` + itTimes,
+		`CREATE TABLE ` + itRound + ` (id int PRIMARY KEY, g int, n numeric(20,6), d numeric(12,3), i int)`,
+		`INSERT INTO ` + itRound + ` VALUES ` + roundRows(),
+		`CREATE PUBLICATION ` + itPub + ` FOR TABLE ` + itCustomers + `, ` + itOrders + `, ` + itOdd + `, ` + itArrays + `, ` + itTimes + `, ` + itRound,
 	}
+}
+
+// roundRows are the rows round(a / b, k) and round(avg(x), k) are measured
+// over (pgshim.RewriteForCopy): random numerators and divisors from a fixed
+// seed, both signs, and quotients that lie exactly on a half at each k from
+// 0 to 4, where rounding half away from zero and half to even part.
+func roundRows() string {
+	rng := rand.New(rand.NewSource(2961))
+	var rows []string
+	for id := 1; id <= 1500; id++ {
+		n := rng.Int63n(2_000_000_000_000_00) - 1_000_000_000_000_00 // +/- 1e8, 6 decimals
+		d := rng.Int63n(100_000_000) + 1                            // up to 1e5, 3 decimals
+		if rng.Intn(2) == 0 {
+			d = -d
+		}
+		i := rng.Intn(2000) - 1000
+		if i == 0 {
+			i = 7
+		}
+		rows = append(rows, fmt.Sprintf("(%d, %d, %s, %s, %d)", id, id%37, fixed(n, 6), fixed(d, 3), i))
+	}
+	id := 2000
+	for k := 0; k <= 4; k++ {
+		for _, m := range []int64{0, 1, 2, 7, 12, 99, 12345} {
+			for _, div := range []int64{1, 3, 7, 12} {
+				for _, sign := range []int64{1, -1} {
+					// q = m + 5 / 10^(k+1), n = q * div: k+1 decimals.
+					unit := int64(1)
+					for range k + 1 {
+						unit *= 10
+					}
+					q := sign * (m*unit + 5)
+					id++
+					rows = append(rows, fmt.Sprintf("(%d, %d, %s, %s, %d)", id, 100+k, fixed(q*div*1_000_000/unit, 6), fixed(div*1000, 3), div))
+				}
+			}
+		}
+	}
+	return strings.Join(rows, ",\n")
+}
+
+// fixed writes v / 10^scale with exactly scale decimals.
+func fixed(v int64, scale int) string {
+	neg := v < 0
+	if neg {
+		v = -v
+	}
+	s := fmt.Sprintf("%0*d", scale+1, v)
+	out := s[:len(s)-scale] + "." + s[len(s)-scale:]
+	if neg {
+		out = "-" + out
+	}
+	return out
 }
 
 func expectations() []expectation {
@@ -387,6 +447,28 @@ func expectations() []expectation {
 		eq(`SELECT id, abs(qty) FROM ` + o),
 		still("rows", "", route, `SELECT id, round(ratio) FROM `+o),
 		eq(`SELECT id, round(amount, 1) FROM ` + o),
+		// round(a / b, k) and round(avg(x), k), as the port writes them for
+		// the copy (pgshim.RewriteForCopy): PostgreSQL's numeric quotient,
+		// rounded half away from zero to exactly k decimals.
+		eq(`SELECT id, round(amount / 3, 2) FROM ` + o + ` ORDER BY id`),
+		eq(`SELECT customer_id, round(100.0 * sum(qty) / count(*), 2) AS pct FROM ` + o + ` GROUP BY customer_id ORDER BY customer_id`),
+		eq(`SELECT customer_id, round(avg(amount), 2), round(avg(qty), 3), round(100 * avg(amount), 1) FROM ` + o + ` GROUP BY customer_id ORDER BY customer_id`),
+		eq(`SELECT round(sum(amount) / nullif(sum(qty), 0), 4) FROM ` + o),
+		eq(`SELECT id, round(100.0 * amount / nullif(sum(amount) OVER (), 0), 2) FROM ` + o + ` ORDER BY id`),
+		eq(`SELECT round(avg(amount), 2), round(sum(amount) / nullif(count(*), 0), 2) FROM ` + o + ` WHERE id < 0`),
+		eq(`SELECT round(1.0 * count(*) / 7, 0), round(-1.0 * count(*) / 8, 1) FROM ` + o),
+		// Over 1,500 random quotients of both signs, and quotients exactly
+		// on a half at each k.
+		eq(`SELECT id, round(n / d, 0), round(n / d, 1), round(n / d, 2), round(n / d, 3) FROM ` + itRound + ` ORDER BY id`),
+		eq(`SELECT id, round(n / d, 4), round(n / d, 5), round(n / d, 6), round(n / i, 2) FROM ` + itRound + ` ORDER BY id`),
+		eq(`SELECT id, round(n / i, 0), round(n / i, 4), round(100.0 * d / i, 3) FROM ` + itRound + ` ORDER BY id`),
+		eq(`SELECT g, round(avg(n), 2), round(avg(d), 4), round(avg(i), 3), round(100 * avg(d), 2), round(1000.0 * avg(i), 1) FROM ` + itRound + ` GROUP BY g ORDER BY g`),
+		// What the copy cannot round as PostgreSQL does it refuses, and
+		// never answers otherwise.
+		{stmt: `SELECT id, round(amount / qty, 2) FROM ` + o, verdict: sqlcompare.SourceError},
+		{stmt: `SELECT id, round(ratio / 2, 1) FROM ` + o, verdict: sqlcompare.SourceError},
+		refused("both sides of the division are whole numbers", "by design: PostgreSQL divides them as whole numbers", `SELECT id, round(qty / 2, 1) FROM `+o),
+		refused("too close to a half", "by design: PostgreSQL may round it twice", `SELECT round(0.004999999999999999999 / 1, 2)`),
 		{stmt: `SELECT id, ratio::int FROM ` + o, verdict: sqlcompare.SourceError},
 		eq(`SELECT id, amount::int FROM ` + o),
 		eq(`SELECT id, qty::bigint FROM ` + o),

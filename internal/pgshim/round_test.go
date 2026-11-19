@@ -46,34 +46,34 @@ func TestRewriteForCopy_rounds(t *testing.T) {
 // source.
 func TestRewriteForCopy_leavesOtherShapes(t *testing.T) {
 	for _, in := range []string{
-		"SELECT round(x, 2)",                     // no division: another rounding
-		"SELECT round(a / b)",                    // round(numeric) is another rounding
-		"SELECT round(a / b, $1)",                // k must be written
-		"SELECT round(a / b, -1)",                // a negative k
-		"SELECT round(a / b, 2.0)",               // k must be a whole number
-		"SELECT round(a / b, 18)",                // a DECIMAL(38,18) answer
-		"SELECT round(a / b, 2, 3)",              // three arguments
-		"SELECT round(a / b * c, 2)",             // the division is not last
-		"SELECT round(a + b / c, 2)",             // nor here
-		"SELECT round(a / b / c, 2)",             // two divisions
-		"SELECT round(-a / b, 2)",                // a sign in front
-		"SELECT round(a % b / c, 2)",             // another operator
-		"SELECT round(a / b::numeric, 2)",        // a cast
+		"SELECT round(x, 2)",                          // no division: another rounding
+		"SELECT round(a / b)",                         // round(numeric) is another rounding
+		"SELECT round(a / b, $1)",                     // k must be written
+		"SELECT round(a / b, -1)",                     // a negative k
+		"SELECT round(a / b, 2.0)",                    // k must be a whole number
+		"SELECT round(a / b, 18)",                     // a DECIMAL(38,18) answer
+		"SELECT round(a / b, 2, 3)",                   // three arguments
+		"SELECT round(a / b * c, 2)",                  // the division is not last
+		"SELECT round(a + b / c, 2)",                  // nor here
+		"SELECT round(a / b / c, 2)",                  // two divisions
+		"SELECT round(-a / b, 2)",                     // a sign in front
+		"SELECT round(a % b / c, 2)",                  // another operator
+		"SELECT round(a / b::numeric, 2)",             // a cast
 		"SELECT round(CASE WHEN x THEN a END / b, 2)", // CASE at the top of a side
-		"SELECT round(a / 'x', 2)",               // a string
-		"SELECT round(a / $1, 2)",                // a parameter
-		"SELECT round(numeric '1.5' / b, 2)",     // a typed literal
-		"SELECT round(avg(x) OVER (), 2)",        // a window avg
+		"SELECT round(a / 'x', 2)",                    // a string
+		"SELECT round(a / $1, 2)",                     // a parameter
+		"SELECT round(numeric '1.5' / b, 2)",          // a typed literal
+		"SELECT round(avg(x) OVER (), 2)",             // a window avg
 		"SELECT round(avg(x) FILTER (WHERE y), 2)",
-		"SELECT round(avg(DISTINCT x), 2)",       // a macro takes no DISTINCT
+		"SELECT round(avg(DISTINCT x), 2)", // a macro takes no DISTINCT
 		"SELECT round(avg(x ORDER BY y), 2)",
 		"SELECT round(avg(x, y), 2)",
-		"SELECT round(3 * avg(x), 2)",            // a multiplier other than 10^j
+		"SELECT round(3 * avg(x), 2)", // a multiplier other than 10^j
 		"SELECT round(0.1 * avg(x), 2)",
 		"SELECT round(avg(x) * 100, 2)",
-		"SELECT pg_catalog.round(a / b, 2)",      // qualified
-		`SELECT "round"(a / b, 2)`,               // quoted
-		"SELECT round(1e2 / 3, 2)",               // the lexer refuses the statement
+		"SELECT pg_catalog.round(a / b, 2)", // qualified
+		`SELECT "round"(a / b, 2)`,          // quoted
+		"SELECT round(1e2 / 3, 2)",          // the lexer refuses the statement
 		"SELECT x FROM t",
 		"",
 	} {
@@ -148,10 +148,10 @@ FROM order_line GROUP BY ol_supply_w_id ORDER BY ol_supply_w_id LIMIT 10`,
 	// statement that names the copy's macros itself: PostgreSQL has no such
 	// function.
 	for q, says := range map[string]string{
-		"SELECT round(d_ytd, 1) FROM district":                                "round",
-		"SELECT round(avg(d_tax) OVER (), 2) FROM district":                   "round",
-		"SELECT _bintrail_pg_round_div(d_ytd, 2, 2, 0.01) FROM district":      "_bintrail_pg_round_div",
-		`SELECT "_bintrail_pg_round_avg"(d_tax, 2, 0.01) FROM district`:        "_bintrail_pg_round_avg",
+		"SELECT round(d_ytd, 1) FROM district":                           "round",
+		"SELECT round(avg(d_tax) OVER (), 2) FROM district":              "round",
+		"SELECT _bintrail_pg_round_div(d_ytd, 2, 2, 0.01) FROM district": "_bintrail_pg_round_div",
+		`SELECT "_bintrail_pg_round_avg"(d_tax, 2, 0.01) FROM district`:  "_bintrail_pg_round_avg",
 	} {
 		if veto := CopyScreen(q, types); !strings.Contains(veto, says) {
 			t.Errorf("%s: veto %q, want one naming %s", q, veto, says)

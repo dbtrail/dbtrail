@@ -20,6 +20,10 @@ type SnapshotCopy struct {
 	dir      string
 	viewsSQL string
 	schema   string
+	// Rewrite, when set, writes each statement as the PostgreSQL port hands
+	// it to the copy (pgshim.RewriteForCopy), so what is measured is what
+	// the port runs.
+	Rewrite func(string) string
 }
 
 // OpenSnapshotCopy prepares the copy held in snapshotDir (one complete
@@ -42,6 +46,9 @@ func OpenSnapshotCopy(ctx context.Context, runner *sqlsandbox.Runner, snapshotDi
 
 // Query runs one statement on the copy.
 func (c *SnapshotCopy) Query(ctx context.Context, stmt string, max int) (sqlcompare.Rows, bool, error) {
+	if c.Rewrite != nil {
+		stmt = c.Rewrite(stmt)
+	}
 	res, err := c.runner.Run(ctx, sqlsandbox.Job{
 		CopyDirs: []string{c.dir},
 		ViewsSQL: c.viewsSQL,
