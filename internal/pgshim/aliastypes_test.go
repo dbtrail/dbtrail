@@ -75,6 +75,9 @@ func TestCopyScreen_namesTheStatementDefines(t *testing.T) {
 		`WITH r AS (SELECT id, row_number() OVER (ORDER BY id) AS rnk FROM pgcmp_orders)
 		 SELECT r.id, r.rnk FROM r WHERE r.rnk <= 3 ORDER BY r.id, r.rnk`,
 		`SELECT max(o.qty) FROM pgcmp_orders o`,
+		`SELECT customer_id FROM pgcmp_orders WHERE note IS NOT NULL GROUP BY customer_id HAVING count(*) >= 2`,
+		`SELECT customer_id FROM pgcmp_orders WHERE note IS NOT NULL GROUP BY customer_id HAVING 2 <= count(*)`,
+		`SELECT customer_id FROM pgcmp_orders WHERE note IS NOT NULL GROUP BY customer_id HAVING sum(qty) BETWEEN 1 AND 9`,
 		`WITH f AS (SELECT id, CASE WHEN qty > 5 THEN 1 ELSE 0 END AS big FROM pgcmp_orders)
 		 SELECT f.id FROM f WHERE f.big >= 1`,
 		`WITH a AS (SELECT customer_id AS c, count(*) AS n FROM pgcmp_orders GROUP BY customer_id),
@@ -102,6 +105,9 @@ func TestCopyScreen_namesTheStatementDefines(t *testing.T) {
 		// reads the column in WHERE.
 		`WITH s AS (SELECT count(*) AS note FROM pgcmp_orders) SELECT o.id FROM pgcmp_orders o WHERE o.note > 'a'`: "text compared",
 		`SELECT max(o.note) FROM pgcmp_orders o`: "max() of text",
+		// A call that may answer text is still read as one.
+		`SELECT customer_id FROM pgcmp_orders GROUP BY customer_id HAVING max(note) >= 'a'`: "text",
+		`SELECT id FROM pgcmp_orders WHERE upper(note) > 'A'`:                              "upper",
 	} {
 		if veto := CopyScreen(q, routeTypes); !strings.Contains(veto, says) {
 			t.Errorf("veto %q, want one that says %q:\n%s", veto, says, q)

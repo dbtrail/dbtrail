@@ -831,6 +831,31 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 	timeCol := func(t rtToken) bool {
 		return t.kind == rtWord && all(t.text, func(ty string) bool { return ty == "TIMESTAMP" })
 	}
+	// endsNeverText: the ")" at j closes a call of a function whose answer
+	// is never text (count(*) >= 2).
+	endsNeverText := func(j int) bool {
+		if !isOpTok(toks, j, ")") {
+			return false
+		}
+		depth := 0
+		for k := j; k >= 0; k-- {
+			switch {
+			case isOpTok(toks, k, ")"):
+				depth++
+			case isOpTok(toks, k, "("):
+				depth--
+				if depth == 0 {
+					return k > 0 && toks[k-1].kind == rtWord && neverText[toks[k-1].text] && !isOpTok(toks, k-2, ".")
+				}
+			}
+		}
+		return false
+	}
+	// startsNeverText: the word at j calls a function whose answer is never
+	// text (2 <= count(*)).
+	startsNeverText := func(j int) bool {
+		return at(j).kind == rtWord && neverText[at(j).text] && isOpTok(toks, j+1, "(")
+	}
 	// operandText: an operand next to a comparison may be text.
 	operandText := func(t rtToken) bool {
 		if textish(t) {
@@ -919,7 +944,7 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 					// Two parameters, or a parameter and a string, compare
 					// as text on PostgreSQL: nothing else gives them a type.
 					bothUntyped := (prev.kind == rtParam || prev.kind == rtString) && (next.kind == rtParam || next.kind == rtString)
-					if !typedBy(prev, next) && !typedBy(next, prev) && (bothUntyped || operandText(prev) || operandText(next)) {
+					if !typedBy(prev, next) && !typedBy(next, prev) && (bothUntyped || operandText(prev) && !endsNeverText(i-1) || operandText(next) && !startsNeverText(i+1)) {
 						return "text compared by order (the source compares it by its collation)"
 					}
 				} else if !copyOps[t.text] {
@@ -946,7 +971,7 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 					}
 				}
 			case t.text == "between":
-				if !typedBy(prev, next) && (operandText(prev) || operandText(next)) {
+				if !typedBy(prev, next) && (operandText(prev) && !endsNeverText(i-1) || operandText(next) && !startsNeverText(i+1)) {
 					return "text compared with BETWEEN (the source compares it by its collation)"
 				}
 			case next.kind == rtOp && next.text == "(":
