@@ -45,12 +45,27 @@ func quoteCopyWords(q string) string {
 	return b.String()
 }
 
+// nameBefore are the words after which a name stands: a select item, a
+// table, a condition's operand.
+var nameBefore = map[string]bool{
+	"select": true, "distinct": true, "all": true, "as": true, "by": true, "from": true, "join": true,
+	"where": true, "and": true, "or": true, "not": true, "on": true, "having": true, "when": true,
+	"then": true, "else": true, "case": true, "in": true, "between": true, "is": true, "using": true,
+}
+
 // keepCopyWord reports whether the word at i is PostgreSQL's syntax there,
-// or a name the copy already reads.
+// a name the copy already reads, or not where a name stands: a word after
+// another value (FROM t QUALIFY x = 1, the copy's own clause, which
+// PostgreSQL refuses) or before JOIN (ASOF JOIN, ANTI JOIN) is left to be
+// refused as before.
 func keepCopyWord(toks []rtToken, i int) bool {
 	word := func(j int, w string) bool { return j >= 0 && j < len(toks) && toks[j].kind == rtWord && toks[j].text == w }
 	switch {
-	case isOpTok(toks, i-1, "."), isOpTok(toks, i+1, "("):
+	case isOpTok(toks, i-1, "."), isOpTok(toks, i+1, "("), word(i+1, "join"):
+		return true
+	case (toks[i].text == "show" || toks[i].text == "describe" || toks[i].text == "summarize") &&
+		isOpTok(toks, i-1, "(") && i+1 < len(toks) && toks[i+1].kind == rtWord:
+		// A statement in parentheses (SELECT * FROM (SHOW TABLES)).
 		return true
 	case toks[i].text == "by" && (word(i-1, "group") || word(i-1, "order") || word(i-1, "partition")):
 		return true
@@ -59,7 +74,19 @@ func keepCopyWord(toks []rtToken, i int) bool {
 	case (toks[i].text == "show" || toks[i].text == "describe" || toks[i].text == "summarize") && firstWordIndex(toks) == i:
 		return true
 	}
-	return false
+	// A name stands after a comma, an opening parenthesis, an operator or
+	// one of nameBefore; anywhere else the word is not a name here.
+	if i == 0 {
+		return true
+	}
+	prev := toks[i-1]
+	switch prev.kind {
+	case rtOp:
+		return prev.text == ")" || prev.text == "]"
+	case rtWord:
+		return !nameBefore[prev.text]
+	}
+	return true
 }
 
 // firstWordIndex is the index of the statement's first word, past any

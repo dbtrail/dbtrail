@@ -27,6 +27,15 @@ func TestQuoteCopyWords(t *testing.T) {
 		{"SELECT glob('x')", "SELECT glob('x')"},
 		{"SELECT 'at by pivot', \"at\" FROM t", "SELECT 'at by pivot', \"at\" FROM t"},
 		{"SELECT x FROM t -- at\nWHERE y", "SELECT x FROM t -- at\nWHERE y"},
+		// The copy's own clauses and joins, which PostgreSQL refuses, are
+		// left to be refused.
+		{"SELECT id FROM t QUALIFY r = 1", "SELECT id FROM t QUALIFY r = 1"},
+		{"SELECT * FROM a ASOF JOIN b ON a.t >= b.t", "SELECT * FROM a ASOF JOIN b ON a.t >= b.t"},
+		{"SELECT * FROM a ANTI JOIN b USING (id)", "SELECT * FROM a ANTI JOIN b USING (id)"},
+		{"SELECT * FROM (SHOW TABLES) AS d LIMIT 0", "SELECT * FROM (SHOW TABLES) AS d LIMIT 0"},
+		{"SELECT max(show) FROM t", `SELECT max("show") FROM t`},
+		{"SELECT x FROM t WHERE y = 1 AND at IS NULL", `SELECT x FROM t WHERE y = 1 AND "at" IS NULL`},
+		{"SELECT CASE WHEN at > 1 THEN by ELSE lambda END FROM t", `SELECT CASE WHEN "at" > 1 THEN "by" ELSE "lambda" END FROM t`},
 		{"SELECT 1", "SELECT 1"},
 		{"", ""},
 	} {
