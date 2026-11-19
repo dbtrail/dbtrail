@@ -469,7 +469,7 @@ func expectations() []expectation {
 		{stmt: `SELECT id, round(amount / qty, 2) FROM ` + o, verdict: sqlcompare.SourceError},
 		{stmt: `SELECT id, round(ratio / 2, 1) FROM ` + o, verdict: sqlcompare.SourceError},
 		refused("both sides of the division are whole numbers", "by design: PostgreSQL divides them as whole numbers", `SELECT id, round(qty / 2, 1) FROM `+o),
-		refused("too close to a half", "by design: PostgreSQL may round it twice", `SELECT round(0.00499999999999999 / 1, 2)`),
+		refused("too close to a half", "by design: PostgreSQL may round it twice", `SELECT round(1 / 200.000000000001, 2)`),
 		{stmt: `SELECT id, ratio::int FROM ` + o, verdict: sqlcompare.SourceError},
 		eq(`SELECT id, amount::int FROM ` + o),
 		eq(`SELECT id, qty::bigint FROM ` + o),
