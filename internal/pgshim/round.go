@@ -8,14 +8,18 @@ import (
 
 // copyText is text as this connection hands it to the copy: rewritten
 // (RewriteForCopy) when it can send a statement to its source, since a
-// round the copy then refuses goes there; as written otherwise, where the
-// copy answers every statement and a refusal would be an error the client
-// sees (a round of two whole numbers is a common one).
+// round the copy then refuses goes there; otherwise only the copy's own
+// words are quoted, since there the copy answers every statement and a
+// refusal would be an error the client sees (a round of two whole numbers
+// is a common one).
 func (s *session) copyText(text string) string {
 	if s.forwarding() {
 		return RewriteForCopy(text)
 	}
-	return text
+	// A word the copy keeps for itself and PostgreSQL reads as a name is
+	// quoted on every connection: that turns the copy's syntax error into
+	// PostgreSQL's answer, and refuses nothing it answered before.
+	return quoteCopyWords(text)
 }
 
 // RewriteForCopy writes stmt for the copy of a PostgreSQL source: each
@@ -28,7 +32,7 @@ func (s *session) copyText(text string) string {
 // so does the screen (CopyScreen, routeFree), so what is screened is what
 // runs.
 func RewriteForCopy(stmt string) string {
-	out, _ := rewriteRounds(stmt)
+	out, _ := rewriteRounds(quoteCopyWords(stmt))
 	return out
 }
 

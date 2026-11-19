@@ -153,7 +153,8 @@ func TestPort_answersAStatementFromTheBoundExecutor(t *testing.T) {
 	if strings.Join(names, ",") != "id,ok,at,note,tags" {
 		t.Fatalf("columns = %v", names)
 	}
-	if len(got) != 1 || got[0] != "SELECT id, ok, at, note, tags FROM t" {
+	// at is a word of the copy's own SQL, quoted for it (quoteCopyWords).
+	if len(got) != 1 || got[0] != `SELECT id, ok, "at", note, tags FROM t` {
 		t.Fatalf("the executor was given %q", got)
 	}
 	want := [][]string{

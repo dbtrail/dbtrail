@@ -1612,10 +1612,17 @@ double quotes (`"at"`, `FROM "pivot"`), the table with its schema
 (`FROM public.pivot`), or the column with its table (`t.at`). `SELECT *` is not
 affected.
 
-On the PostgreSQL port, a statement with `qualify`, `asof`, `anti`, `semi` or
-`positional` anywhere in it goes to your PostgreSQL when the server has a
-forwarding user, which answers it; without one, and for the other names, the
-client gets the copy's syntax error (SQLSTATE `42601`).
+On the PostgreSQL port each of these names, written without quotes where a
+name stands (a select item, a table after `FROM` or `JOIN`, an operand), is
+quoted before the copy reads it, with or without a forwarding user, so the
+statement answers as PostgreSQL does. Where PostgreSQL reads the word as its
+own syntax (`GROUP BY`, `ORDER BY`, `PARTITION BY`, `AT TIME ZONE`, `SHOW` at
+the start) it is left alone, and so is the copy's own syntax that PostgreSQL
+refuses (`QUALIFY` as a clause, `ASOF JOIN`): through a forwarding user that
+goes to your PostgreSQL, which refuses it. A name the port does not quote (an
+alias written right after a table, `FROM t at`) still gets the copy's syntax
+error (SQLSTATE `42601`), or goes to your PostgreSQL through a forwarding
+user.
 
 ## Extensions and custom types
 
