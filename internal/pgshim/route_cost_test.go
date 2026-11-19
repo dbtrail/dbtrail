@@ -610,3 +610,61 @@ func TestRouteByCost_unreachableSource(t *testing.T) {
 		t.Errorf("%d connections to the source were opened for one statement, want 1: it was sent there again", n)
 	}
 }
+
+// A statement first described in the middle of a batch that already went to
+// the source is not asked about there (a simple query cannot be sent in the
+// middle of it, and an error of the port's own would discard the client's
+// batch): it goes to the source for that batch, and is asked the next time.
+func TestRouteByCost_inAnOpenBatch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	src := startFakeSource(t, costPlans)
+	l := &costLogin{src: src}
+	c := costPortConn(t, ctx, l)
+	p := c.StartPipeline(ctx)
+	// A veto first: its batch is open on the source from its Bind on.
+	p.SendQueryParams("SELECT now()", nil, nil, nil, nil)
+	p.SendPrepare("report", "SELECT sum(n) FROM big", nil)
+	if err := p.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	var described *pgconn.StatementDescription
+	for done := false; !done; {
+		r, err := p.GetResults()
+		if err != nil {
+			t.Fatalf("the batch: %v", err)
+		}
+		switch x := r.(type) {
+		case *pgconn.ResultReader:
+			if res := x.Read(); res.Err != nil || len(res.Rows) != 1 || string(res.Rows[0][0]) != "42" {
+				t.Errorf("the veto: %v %q", res.Err, res.Rows)
+			}
+		case *pgconn.StatementDescription:
+			described = x
+		case *pgconn.PipelineSync:
+			done = true
+		}
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if described == nil || len(described.Fields) != 1 {
+		t.Fatalf("the report was described as %+v", described)
+	}
+	if asked := src.explained(); len(asked) != 0 {
+		t.Errorf("asked in the middle of a batch on the source: %q", asked)
+	}
+	// Its own batch: asked once, and answered by the copy.
+	for i := range 2 {
+		res := c.ExecPrepared(ctx, "report", nil, nil, nil).Read()
+		if res.Err != nil || len(res.Rows) != 1 || string(res.Rows[0][0]) != "7" {
+			t.Errorf("run %d: %v %q, want the copy's 7", i, res.Err, res.Rows)
+		}
+	}
+	if asked := src.explained(); len(asked) != 1 || asked[0] != "EXPLAIN (FORMAT JSON) SELECT sum(n) FROM big" {
+		t.Errorf("asked %q, want once in a batch of its own", asked)
+	}
+	if c.TxStatus() != 'I' {
+		t.Errorf("status %c", c.TxStatus())
+	}
+}
