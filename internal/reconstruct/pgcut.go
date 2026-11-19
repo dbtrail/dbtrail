@@ -75,7 +75,10 @@ func PGDeltaFloor(bmeta baseline.DumpMetadata) *query.BinlogPos {
 // coverage check holds the index to, so it stays short: an hour reached
 // before a new index's first partition and refused every snapshot taken in
 // its first hour.
-const PGDeltaMargin = time.Minute
+//
+// A full read records the same instant in its files (pgbaseline), so the two
+// are one value: baseline.PGDeltaMargin.
+const PGDeltaMargin = baseline.PGDeltaMargin
 
 // PGDeltaWindow is where a reader of a snapshot fetches the changes after it
 // from: since and from (SincePos), and whether since is a recorded or

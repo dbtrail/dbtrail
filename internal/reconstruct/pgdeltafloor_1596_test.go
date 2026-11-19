@@ -124,3 +124,41 @@ func TestFoldBeforeSnapshot(t *testing.T) {
 		t.Error("a TOAST marker was folded")
 	}
 }
+
+// A full read records its bound as baseline.PGDeltaMargin before its
+// snapshot's time. That is the window a reader gave the same file when it
+// recorded none: recording it moves no reader, in the file's own snapshot.
+// In a later one it keeps the file's window where a file with no bound would
+// be measured from the later time.
+func TestPGDeltaWindow_aFullReadsRecordedBoundIsTheOneAssumed(t *testing.T) {
+	taken := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+	bare := baseline.DumpMetadata{LSN: 42}
+	recorded := bare
+	recorded.PGDeltaSince = taken.Add(-baseline.PGDeltaMargin).Format(time.RFC3339)
+
+	s1, f1, p1, err := PGDeltaWindow(bare, taken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, f2, p2, err := PGDeltaWindow(recorded, taken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s1.Equal(s2) || f1.Pos != f2.Pos || p1 != p2 {
+		t.Fatalf("no bound: since %s from %d proven %v; recorded: since %s from %d proven %v", s1, f1.Pos, p1, s2, f2.Pos, p2)
+	}
+	later := taken.Add(time.Hour)
+	s3, _, _, err := PGDeltaWindow(recorded, later)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s3.Equal(s2) {
+		t.Fatalf("published again an hour later the file reads from %s, want its own %s", s3, s2)
+	}
+	if s4, _, _, _ := PGDeltaWindow(bare, later); s4.Equal(s2) {
+		t.Fatal("a file with no bound published an hour later reads from its first window: the premise of this test is gone")
+	}
+	if PGDeltaMargin != baseline.PGDeltaMargin {
+		t.Fatal("the margin a reader assumes and the one a full read records are two values")
+	}
+}

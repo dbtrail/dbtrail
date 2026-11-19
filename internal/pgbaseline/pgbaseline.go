@@ -452,7 +452,20 @@ func tableFooter(t tableInfo, tsStr string, deltaStartLSN, anchorLSN uint64) (ma
 	if _, _, err := baseline.ParsePGRelation(shape); err != nil {
 		return nil, fmt.Errorf("pgbaseline: %s.%s: %w", t.Schema, t.Table, err)
 	}
+	taken, err := time.Parse(time.RFC3339, tsStr)
+	if err != nil {
+		return nil, fmt.Errorf("pgbaseline: %s.%s: the snapshot's time %q cannot be read: %w", t.Schema, t.Table, tsStr, err)
+	}
 	return map[string]string{
+		// How far back the changes this file may be missing reach: the one
+		// it can miss is a commit that raced the snapshot's start
+		// (baseline.PGDeltaMargin). It is the instant a reader already
+		// assumed of a file that recorded none, measured from the snapshot's
+		// time. Recorded, it stays this file's own when the file is published
+		// again in a later snapshot, unchanged or with a table delta beside
+		// it: without it the file had to be written again in full by the
+		// first update after every full read.
+		baseline.MetaKeyPGDeltaSince: taken.Add(-baseline.PGDeltaMargin).UTC().Format(time.RFC3339),
 		baseline.MetaKeySnapshotTimestamp: tsStr,
 		"bintrail.source_database":        t.Schema,
 		"bintrail.source_table":           t.Table,
