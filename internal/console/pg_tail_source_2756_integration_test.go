@@ -814,10 +814,7 @@ func TestIntegrationPGTailSource(t *testing.T) {
 		name := tbl.Schema + "." + tbl.Table
 		after, before := time.Now().Add(time.Hour), time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 
-		ledger(after, name)
-		if got := r.state(ctx, tbl); !reflect.DeepEqual(got, noTail) {
-			t.Fatalf("a drop of this table after the snapshot: state %v, want no tail", got)
-		}
+		// The ones that keep the tail first: a tail that ends does not come back.
 		ledger(after, tbl.Schema+".another_table")
 		if got := r.state(ctx, tbl); !reflect.DeepEqual(got, want) {
 			t.Fatalf("a drop of another table only: state %v, want %v", got, want)
@@ -826,8 +823,21 @@ func TestIntegrationPGTailSource(t *testing.T) {
 		if got := r.state(ctx, tbl); !reflect.DeepEqual(got, want) {
 			t.Fatalf("a drop before the snapshot's read of the source, which the read covers: state %v, want %v", got, want)
 		}
-		ledger(after) // no table list: it may be any table
+		ledger(after, name)
 		if got := r.state(ctx, tbl); !reflect.DeepEqual(got, noTail) {
+			t.Fatalf("a drop of this table after the snapshot: state %v, want no tail", got)
+		}
+
+		// An entry that names no table may be any table.
+		testutil.MustExec(t, r.db, "UPDATE stream_state SET capture_skips = NULL WHERE id = 1")
+		other := r.table(nil, [2]string{"1", "one"})
+		r.change(other.Table, event.EventUpdate, "1", "paid", 0xa90, 25*time.Minute)
+		r.checkpoint(0xa90)
+		if got := r.state(ctx, other); !reflect.DeepEqual(got, want) {
+			t.Fatalf("second table: state %v, want %v", got, want)
+		}
+		ledger(after)
+		if got := r.state(ctx, other); !reflect.DeepEqual(got, noTail) {
 			t.Fatalf("a drop that names no table: state %v, want no tail", got)
 		}
 	})
