@@ -29,6 +29,7 @@ const (
 	itArrays    = "pgcmp_arrays"
 	itTimes     = "pgcmp_times"
 	itRound     = "pgcmp_round"
+	itWords     = "pgcmp_words"
 	itPub       = "pgcmp_pub"
 	itSlot      = "pgcmp_slot"
 )
@@ -64,7 +65,7 @@ func TestIntegrationPGCompare(t *testing.T) {
 	dropAll := func() {
 		bg := context.Background()
 		_, _ = setup.Exec(bg, "DROP PUBLICATION IF EXISTS "+itPub)
-		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS "+itOrders+", "+itCustomers+", "+itOdd+", "+itArrays+", "+itTimes+", "+itRound)
+		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS "+itOrders+", "+itCustomers+", "+itOdd+", "+itArrays+", "+itTimes+", "+itRound+", "+itWords+", pivot")
 		_, _ = setup.Exec(bg, "SELECT pg_drop_replication_slot($1) WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)", itSlot)
 	}
 	dropAll()
@@ -231,7 +232,13 @@ func seedSQL() []string {
 			(6, '06:00:00',        '06:00:00+02',    '-1 mons',                             NULL,       NULL)`,
 		`CREATE TABLE ` + itRound + ` (id int PRIMARY KEY, g int, n numeric(20,6), d numeric(12,3), i int)`,
 		`INSERT INTO ` + itRound + ` VALUES ` + roundRows(),
-		`CREATE PUBLICATION ` + itPub + ` FOR TABLE ` + itCustomers + `, ` + itOrders + `, ` + itOdd + `, ` + itArrays + `, ` + itTimes + `, ` + itRound,
+		// Names the copy's SQL keeps for itself (docs/postgres.md, "Names the
+		// copy reads as its own words").
+		`CREATE TABLE ` + itWords + ` (id int PRIMARY KEY, at timestamp, by int, qualify int, pivot text, glob text, lambda int, show boolean, describe text)`,
+		`INSERT INTO ` + itWords + ` VALUES (1, '2026-01-02 03:04:05', 2, 3, 'a', 'b', 4, true, 'x'), (2, NULL, 2, NULL, NULL, 'c', 5, false, NULL), (3, '2026-02-01 00:00:00', 7, 1, 'd', NULL, NULL, NULL, 'y')`,
+		`CREATE TABLE pivot (id int PRIMARY KEY, v int)`,
+		`INSERT INTO pivot VALUES (1, 10), (2, 20)`,
+		`CREATE PUBLICATION ` + itPub + ` FOR TABLE ` + itCustomers + `, ` + itOrders + `, ` + itOdd + `, ` + itArrays + `, ` + itTimes + `, ` + itRound + `, ` + itWords + `, pivot`,
 	}
 }
 
@@ -490,6 +497,15 @@ func expectations() []expectation {
 		eq(`SELECT to_timestamp(floor(extract(epoch from placed_at) / 3600) * 3600) AS p, count(*), sum(count(*)) OVER (ORDER BY to_timestamp(floor(extract(epoch from placed_at) / 3600) * 3600)) FROM ` + o + ` GROUP BY 1 ORDER BY 1`),
 		refused("not a timestamp", "by design: PostgreSQL reads a date or an interval otherwise", `SELECT id, extract(epoch from span) FROM `+tm),
 		refused("not a whole number of seconds", "by design: a fraction of a second is a double on PostgreSQL", `SELECT to_timestamp(extract(epoch from seen_at)) FROM `+o),
+		// A table or a column named like a word of the copy's own SQL, written
+		// without quotes: quoted by the port (quoteCopyWords), the name the
+		// copy reads is PostgreSQL's.
+		eq(`SELECT id, at, by, qualify, pivot, glob, lambda, show, describe FROM ` + itWords + ` ORDER BY id`),
+		eq(`SELECT by, count(*) FROM ` + itWords + ` GROUP BY by ORDER BY by`),
+		eq(`SELECT id FROM ` + itWords + ` WHERE describe IS NOT NULL AND at >= TIMESTAMP '2026-01-01 00:00:00' ORDER BY id`),
+		eq(`SELECT sum(by), max(lambda), count(qualify) FROM ` + itWords),
+		eq(`SELECT id, v FROM pivot ORDER BY id`),
+		eq(`SELECT p.id, p.v FROM pivot AS p JOIN ` + itWords + ` w ON w.id = p.id ORDER BY p.id`),
 		// ntile(n): the same buckets, even and uneven, partitioned, more
 		// buckets than rows.
 		eq(`SELECT id, ntile(3) OVER (ORDER BY id), ntile(5) OVER (ORDER BY id), ntile(20) OVER (ORDER BY id) FROM ` + o + ` ORDER BY id`),
