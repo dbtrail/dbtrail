@@ -885,10 +885,10 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 
 	for i, t := range toks {
 		next, prev := at(i+1), at(i-1)
-		if next.kind == rtWord && at(i+2).kind == rtOp && at(i+2).text == "." && (at(i+3).kind == rtWord || at(i+3).kind == rtQuoted) {
-			// A qualified name (t.col) is its column: the table's name says
-			// nothing of the value.
-			next = at(i + 3)
+		// A qualified name (t.col, s.t.col) is its column: the names before
+		// it say nothing of the value.
+		for j := i + 1; at(j).kind == rtWord && at(j+1).kind == rtOp && at(j+1).text == "." && (at(j+2).kind == rtWord || at(j+2).kind == rtQuoted); j += 2 {
+			next = at(j + 2)
 		}
 		switch t.kind {
 		case rtQuoted:

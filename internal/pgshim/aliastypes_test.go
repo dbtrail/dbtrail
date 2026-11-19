@@ -14,7 +14,7 @@ func TestNotTextType(t *testing.T) {
 }
 
 func TestExprNotText(t *testing.T) {
-	types := map[string][]string{"qty": {"INTEGER"}, "amount": {"DECIMAL(12,2)"}, "note": {"VARCHAR"}, "both": {"INTEGER", "VARCHAR"}}
+	types := map[string][]string{"qty": {"INTEGER"}, "amount": {"DECIMAL(12,2)"}, "note": {"VARCHAR"}, "both": {"INTEGER", "VARCHAR"}, "attrs": {"VARCHAR"}}
 	for expr, want := range map[string]bool{
 		"7":            true,
 		"qty":          true,
@@ -31,6 +31,11 @@ func TestExprNotText(t *testing.T) {
 		"row_number() OVER (PARTITION BY qty ORDER BY amount)": true,
 		"sum(amount) OVER ()":                           true,
 		"count(*) FILTER (WHERE qty > 1)":               true,
+		"(SELECT note FROM t WHERE t.qty = qty + 1)": false,
+		"(SELECT * FROM t)":                          false,
+		"attrs - 1":                                  false,
+		"amount - qty":                               true,
+		"(qty - 1) * 2":                              true,
 		"count(*) + 1":                                  true,
 		"qty * 2 - 1":                                   true,
 		"min(qty)":                                      true,
@@ -107,6 +112,14 @@ func TestCopyScreen_namesTheStatementDefines(t *testing.T) {
 		// reads the column in WHERE.
 		`WITH s AS (SELECT count(*) AS note FROM pgcmp_orders) SELECT o.id FROM pgcmp_orders o WHERE o.note > 'a'`: "text compared",
 		`SELECT max(o.note) FROM pgcmp_orders o`: "max() of text",
+		// A scalar subquery is what it selects, not what its WHERE adds.
+		`SELECT (SELECT name FROM pgcmp_customers c WHERE c.id = o.customer_id + 1) AS x FROM pgcmp_orders o ORDER BY x`: "text sorted",
+		// A name a column list gives (AS b(n)) is not read as a definition:
+		// nothing the statement defines is known then.
+		`WITH d AS (SELECT count(*) AS n FROM pgcmp_orders) SELECT b.n FROM d, (SELECT note FROM pgcmp_orders) AS b(n) ORDER BY b.n`: "text sorted",
+		`WITH c(n) AS (SELECT note FROM pgcmp_orders), d AS (SELECT count(*) AS n FROM pgcmp_orders) SELECT c.n FROM c, d ORDER BY c.n`: "text sorted",
+		// A name of three parts is its last.
+		`SELECT id FROM public.pgcmp_orders WHERE 'm' < public.pgcmp_orders.note`: "text compared",
 		// A call that may answer text is still read as one.
 		`SELECT customer_id FROM pgcmp_orders GROUP BY customer_id HAVING max(note) >= 'a'`: "text",
 		`SELECT id FROM pgcmp_orders WHERE upper(note) > 'A'`:                               "upper",

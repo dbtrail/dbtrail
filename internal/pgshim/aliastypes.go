@@ -28,6 +28,12 @@ func withAliasTypes(toks []rtToken, types map[string][]string) map[string][]stri
 	if types == nil || len(defs) == 0 {
 		return types
 	}
+	if columnList(toks) {
+		// Names given in a column list (AS b(n), WITH c(n) AS) are not
+		// among the definitions read here, so one of them may share a name
+		// with a definition that is: nothing defined is known then.
+		return mergeAliasTypes(types, defs, nil)
+	}
 	notText := map[string]bool{}
 	cur := mergeAliasTypes(types, defs, notText)
 	for range len(defs) + 1 {
@@ -69,6 +75,24 @@ func mergeAliasTypes(types map[string][]string, defs map[string][][]rtToken, not
 		}
 	}
 	return out
+}
+
+// columnList reports whether the statement names columns in a list: a FROM
+// item's (AS b(n), ) b(n)) or a WITH's (c(n) AS (...)).
+func columnList(toks []rtToken) bool {
+	for i, t := range toks {
+		if t.kind != rtWord || !isOpTok(toks, i+1, "(") {
+			continue
+		}
+		if i > 0 && (toks[i-1].kind == rtWord && toks[i-1].text == "as" || isOpTok(toks, i-1, ")")) {
+			return true
+		}
+		if end := closingParen(toks, i+1); end > 0 && end+1 < len(toks) && toks[end+1].kind == rtWord && toks[end+1].text == "as" &&
+			(isOpTok(toks, end+2, "(") || end+2 < len(toks) && toks[end+2].kind == rtWord && (toks[end+2].text == "materialized" || toks[end+2].text == "not")) {
+			return true
+		}
+	}
+	return false
 }
 
 // aliasDefinitions are the expressions each name the statement defines
@@ -176,6 +200,13 @@ func exprNotText(e []rtToken, types map[string][]string) bool {
 		}
 		return false
 	}
+	// A subquery's answer is whatever it selects, and its own conditions
+	// are no part of it.
+	for _, t := range e {
+		if t.kind == rtWord && (t.text == "select" || t.text == "from") {
+			return false
+		}
+	}
 	if e[0].kind == rtWord && e[0].text == "case" {
 		return caseNotText(e, types)
 	}
@@ -200,7 +231,26 @@ func exprNotText(e []rtToken, types map[string][]string) bool {
 		}
 	}
 	if arith {
-		return true
+		// Each operand must be known not to be text too: jsonb - 1 is a
+		// jsonb, which PostgreSQL orders by its text.
+		var operand []rtToken
+		depth = 0
+		for i, t := range e {
+			switch {
+			case isOpTok(e, i, "(") || isOpTok(e, i, "["):
+				depth++
+			case isOpTok(e, i, ")") || isOpTok(e, i, "]"):
+				depth--
+			case depth == 0 && t.kind == rtOp && (t.text == "+" || t.text == "-" || t.text == "*" || t.text == "/" || t.text == "%"):
+				if len(operand) > 0 && !exprNotText(operand, types) {
+					return false
+				}
+				operand = nil
+				continue
+			}
+			operand = append(operand, t)
+		}
+		return len(operand) > 0 && exprNotText(operand, types)
 	}
 	// A call: f(...), with OVER (...) or FILTER (...) after it and nothing
 	// else.
