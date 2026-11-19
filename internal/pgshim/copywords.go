@@ -59,7 +59,9 @@ var nameBefore = map[string]bool{
 // PostgreSQL refuses) or before JOIN (ASOF JOIN, ANTI JOIN) is left to be
 // refused as before.
 func keepCopyWord(toks []rtToken, i int) bool {
-	word := func(j int, w string) bool { return j >= 0 && j < len(toks) && toks[j].kind == rtWord && toks[j].text == w }
+	word := func(j int, w string) bool {
+		return j >= 0 && j < len(toks) && toks[j].kind == rtWord && toks[j].text == w
+	}
 	switch {
 	case isOpTok(toks, i-1, "."), isOpTok(toks, i+1, "("), word(i+1, "join"):
 		return true
