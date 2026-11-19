@@ -844,7 +844,8 @@ listener, its own workers, its own memory.
 
   An expression's type is the one the copy computes it with, which is not
   always PostgreSQL's: `avg()` of whole numbers is a `double precision` here
-  and a `numeric` there, and an aggregate or a literal of a `numeric` keeps its
+  and a `numeric` there (through a forwarding account, inside
+  `round(avg(x), k)` it is PostgreSQL's `numeric`, as below), and an aggregate or a literal of a `numeric` keeps its
   precision and scale here (`numeric(10,2)`) where PostgreSQL reports none. A
   `numeric` declared without precision is a `numeric(38,18)` here and is
   written with its 18 decimals (`12345.678000000000000000` where the source
@@ -1109,7 +1110,13 @@ The source answers:
   not at all.** The copy takes `count`, `sum`, `min`, `max`, `coalesce`,
   `nullif`, `greatest`, `least`, `length`, `substring`, `trim`, `position`,
   `concat`, `abs`, `bool_and`, `string_agg`, `row_number`, `rank`, `lag`, and
-  `extract`, `date_part` and `date_trunc` of a year, month or day; the
+  `extract`, `date_part` and `date_trunc` of a year, month or day;
+  `round(a / b, k)` and `round(avg(x), k)` (also `round(100 * avg(x), k)`, or
+  any other power of ten) where `k` is written as a whole number from 0 to 15 (counting the
+  power of ten of `avg`)
+  and `a`, `b` and `x` are numerics or whole numbers, rounded as PostgreSQL
+  rounds a `numeric`: half away from zero, to exactly `k` decimals (`50.00`);
+  the
   operators `=`, `<>`, `<`, `>`, `<=`, `>=`, `+`, `-`, `*`, `||`, `LIKE`
   (a pattern without a backslash), `IN`, `BETWEEN`, `IS [NOT] DISTINCT FROM`,
   `ANY`, `EXISTS`, an array subscript by a positive whole number; `::date` and `CAST(... AS date)`; `DATE`, `TIMESTAMP`, `TIME` and
@@ -1117,7 +1124,11 @@ The source answers:
   `INTERSECT`, `EXCEPT`, `WITH`, window functions, `FILTER`, `LIMIT` and
   `OFFSET`. Anything else goes to the source. Some of what the harness found
   answering otherwise, and why each one goes there: `avg()` and division of a
-  `numeric` (PostgreSQL keeps more decimals), `round()` of a
+  `numeric` outside that `round` (PostgreSQL keeps more decimals), a `round`
+  of a division of two whole numbers (PostgreSQL divides them as whole
+  numbers), a `round` whose quotient lands so close to a half that
+  PostgreSQL's own rounding of the division could reach it (the copy refuses
+  it, and it goes to the source), `round()` of a
   `double precision` (it rounds a half to even), a division by a column or by
   zero (the copy answers NULL where PostgreSQL fails), `~` and `SIMILAR TO`
   (the copy matched no row), `->` and `->>` (PostgreSQL answers `json`, and
