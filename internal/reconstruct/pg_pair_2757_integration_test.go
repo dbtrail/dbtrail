@@ -578,10 +578,10 @@ func TestReconstructTables_PGTablePairContinuesThePairBefore(t *testing.T) {
 func TestReconstructTables_PGTablePairEndsWithoutReadingItsChangesAgain(t *testing.T) {
 	type tc struct{ changes, byEngine bool }
 	for name, c := range map[string]tc{
-		"changes in the window, folded by the engine": {true, true},
+		"changes in the window, folded by the engine":   {true, true},
 		"no change in the window, folded by the engine": {false, true},
-		"changes in the window, row by row":           {true, false},
-		"no change in the window, row by row":         {false, false},
+		"changes in the window, row by row":             {true, false},
+		"no change in the window, row by row":           {false, false},
 	} {
 		changes := c.changes
 		t.Run(name, func(t *testing.T) {
@@ -651,7 +651,10 @@ func TestReconstructTables_PGTablePairEndsWithoutReadingItsChangesAgain(t *testi
 				t.Fatal(err)
 			}
 			if onMD.LSN != offMD.LSN || onMD.PGDeltaSince != offMD.PGDeltaSince || onMD.PGDeltaSince == "" || onMD.PGRelation != offMD.PGRelation ||
-				onMD.RenderGUCs != offMD.RenderGUCs || !onMD.SnapshotTimestamp.Equal(offMD.SnapshotTimestamp) || onMD.LockMode != offMD.LockMode || onMD.LockMode == "" {
+				onMD.RenderGUCs != offMD.RenderGUCs || onMD.LockMode != offMD.LockMode || onMD.LockMode == "" ||
+				// With no change the folder with deltas off carried its file,
+				// which keeps the time of the update that wrote it.
+				(changes && !onMD.SnapshotTimestamp.Equal(offMD.SnapshotTimestamp)) || !onMD.SnapshotTimestamp.Equal(at2) {
 				t.Fatalf("the rewritten file's footer: LSN %d since %q taken %s lock %q; with deltas off: LSN %d since %q taken %s lock %q",
 					onMD.LSN, onMD.PGDeltaSince, onMD.SnapshotTimestamp, onMD.LockMode, offMD.LSN, offMD.PGDeltaSince, offMD.SnapshotTimestamp, offMD.LockMode)
 			}
