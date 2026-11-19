@@ -89,7 +89,7 @@ func TestReconstructTables_PGUpdateWaitsForCaptureToPassAFullRead(t *testing.T) 
 		since string
 		carry bool
 	}{
-		"carrying is off":             {"recorded", false},
+		"carrying is off":           {"recorded", false},
 		"the file records no bound": {"", true},
 	} {
 		t.Run(name, func(t *testing.T) {
