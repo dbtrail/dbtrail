@@ -244,7 +244,7 @@ func roundRows() string {
 	var rows []string
 	for id := 1; id <= 1500; id++ {
 		n := rng.Int63n(2_000_000_000_000_00) - 1_000_000_000_000_00 // +/- 1e8, 6 decimals
-		d := rng.Int63n(100_000_000) + 1                            // up to 1e5, 3 decimals
+		d := rng.Int63n(100_000_000) + 1                             // up to 1e5, 3 decimals
 		if rng.Intn(2) == 0 {
 			d = -d
 		}
