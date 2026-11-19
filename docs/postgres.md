@@ -1116,6 +1116,8 @@ The source answers:
   power of ten of `avg`)
   and `a`, `b` and `x` are numerics or whole numbers, rounded as PostgreSQL
   rounds a `numeric`: half away from zero, to exactly `k` decimals (`50.00`);
+  `floor(a / b)` of numerics, as PostgreSQL takes it (`95`, not `95.0`);
+  `ntile(n)`;
   the
   operators `=`, `<>`, `<`, `>`, `<=`, `>=`, `+`, `-`, `*`, `||`, `LIKE`
   (a pattern without a backslash), `IN`, `BETWEEN`, `IS [NOT] DISTINCT FROM`,

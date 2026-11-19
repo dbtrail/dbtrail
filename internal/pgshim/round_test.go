@@ -86,8 +86,8 @@ func TestRewriteForCopy_leavesOtherShapes(t *testing.T) {
 		"SELECT floor()",
 		"SELECT floor(date_part('day', d) / 7.0)",
 		"SELECT pg_catalog.floor(a / b)", // qualified
-		`SELECT "round"(a / b, 2)`,          // quoted
-		"SELECT round(1e2 / 3, 2)",          // the lexer refuses the statement
+		`SELECT "round"(a / b, 2)`,       // quoted
+		"SELECT round(1e2 / 3, 2)",       // the lexer refuses the statement
 		"SELECT x FROM t",
 		"",
 	} {
