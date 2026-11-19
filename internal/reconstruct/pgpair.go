@@ -178,16 +178,13 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 	if err != nil {
 		return full("could not count the table file's rows", err)
 	}
-	// With a pair before, its keys and the window's: some are the same
-	// ones, so this ends the pair at most one update early.
-	var prevKeys int64
-	if prev != nil {
-		prevKeys = prev.keys
-	}
-	if (int64(len(fold.Changes))+prevKeys)*pgPairMaxShare > baseRows {
+	tooMany := func(changes int64) (bool, error) {
 		slog.Info("PostgreSQL table delta not written: the changes since the table file was written are too many beside it; the table is written in full",
-			"schema", in.Schema, "table", in.Table, "changes", int64(len(fold.Changes))+prevKeys, "file_rows", baseRows)
+			"schema", in.Schema, "table", in.Table, "changes", changes, "file_rows", baseRows)
 		return false, nil
+	}
+	if int64(len(fold.Changes))*pgPairMaxShare > baseRows {
+		return tooMany(int64(len(fold.Changes)))
 	}
 	baseID, err := pgdelta.BaseID(bmeta, fi.Size(), baseRows)
 	if err != nil {
@@ -296,7 +293,7 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 	if prev != nil {
 		md[pgPairMetaKeyFrom] = prev.run
 	}
-	dead, rows, _, err := pgdelta.WritePair(pgdelta.PairInput{
+	dead, rows, pairKeys, err := pgdelta.WritePair(pgdelta.PairInput{
 		BasePath: dst, Seq: 0, Base: baseID, Run: run,
 		Columns: colNames, KeyColumns: keyCols,
 		Positions: positions, CarriedDead: carriedDead, Changes: changes,
@@ -312,6 +309,15 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 	}
 	if err != nil {
 		return full("the delta could not be written", err)
+	}
+	// A pair written from the one before holds that pair's keys too, and
+	// how many of them the window named again is known only now. Nothing
+	// reads this folder yet: the pair is taken back and the table written
+	// in full, from every change since its file.
+	if prev != nil && pairKeys*pgPairMaxShare > baseRows {
+		os.Remove(dead)
+		os.Remove(rows)
+		return tooMany(pairKeys)
 	}
 	// From here the table is published or the table fails: the file is in
 	// the new folder, and a full merge would write through it.
