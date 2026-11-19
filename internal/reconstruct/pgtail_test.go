@@ -624,7 +624,7 @@ func TestPGTail_HoldsItsRowsPacked(t *testing.T) {
 		t.Fatal("the row of a change that was replaced is still held for its key")
 	}
 	var refused *TailRefusal
-	if _, err := stale.WriteFile(filepath.Join(dir, "9-orders.parquet")); !asTailRefusal(err, &refused) || !strings.Contains(refused.Reason, "is missing from a change") {
+	if _, err := stale.WriteFile(filepath.Join(dir, "9-orders.parquet")); !asTailRefusal(err, &refused) || !strings.Contains(refused.Reason, "missing from change") {
 		t.Fatalf("a change with a column missing, after one whose row was put away: %v", err)
 	}
 
