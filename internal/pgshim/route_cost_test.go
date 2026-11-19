@@ -106,19 +106,19 @@ func TestCostPolicy_toCopy(t *testing.T) {
 		want bool
 	}{
 		// The measured statements (TPC-C, PostgreSQL 16).
-		{def, pgPlan{cost: 1}, false},                                      // a read by the primary key
-		{def, pgPlan{cost: 12}, false},                                     // an order's lines by an index
-		{def, pgPlan{cost: 712}, false},                                    // the stock level join
-		{def, pgPlan{cost: 15059}, false},                                  // count(*) of one warehouse's orders by an index
-		{def, pgPlan{cost: 4202, maxSeqScanRows: 201680}, false},           // max(ts) of a small table
-		{def, pgPlan{cost: 177}, false},                                    // a report cheap on PostgreSQL too
-		{def, pgPlan{cost: 98367, maxSeqScanRows: 2400000}, true},          // the cheapest expensive report
-		{def, pgPlan{cost: 13351258, maxSeqScanRows: 61000000}, true},      // the most expensive one
-		{def, pgPlan{cost: 50000}, true},                                   // the cost exactly at the threshold
-		{def, pgPlan{cost: 49999.99}, false},                               // just under it
-		{def, pgPlan{cost: 30000, maxSeqScanRows: 1000000}, true},          // a scan exactly at its threshold, whatever the cost
-		{def, pgPlan{cost: 30000, maxSeqScanRows: 999999}, false},          // just under it
-		{CostPolicy{ScanRows: 10}, pgPlan{cost: 1e9}, false},               // the cost rule off
+		{def, pgPlan{cost: 1}, false},                                                // a read by the primary key
+		{def, pgPlan{cost: 12}, false},                                               // an order's lines by an index
+		{def, pgPlan{cost: 712}, false},                                              // the stock level join
+		{def, pgPlan{cost: 15059}, false},                                            // count(*) of one warehouse's orders by an index
+		{def, pgPlan{cost: 4202, maxSeqScanRows: 201680}, false},                     // max(ts) of a small table
+		{def, pgPlan{cost: 177}, false},                                              // a report cheap on PostgreSQL too
+		{def, pgPlan{cost: 98367, maxSeqScanRows: 2400000}, true},                    // the cheapest expensive report
+		{def, pgPlan{cost: 13351258, maxSeqScanRows: 61000000}, true},                // the most expensive one
+		{def, pgPlan{cost: 50000}, true},                                             // the cost exactly at the threshold
+		{def, pgPlan{cost: 49999.99}, false},                                         // just under it
+		{def, pgPlan{cost: 30000, maxSeqScanRows: 1000000}, true},                    // a scan exactly at its threshold, whatever the cost
+		{def, pgPlan{cost: 30000, maxSeqScanRows: 999999}, false},                    // just under it
+		{CostPolicy{ScanRows: 10}, pgPlan{cost: 1e9}, false},                         // the cost rule off
 		{CostPolicy{CostThreshold: 10}, pgPlan{cost: 1, maxSeqScanRows: 1e9}, false}, // the scan rule off
 		{CostPolicy{CostThreshold: 10}, pgPlan{cost: 10}, true},
 	} {
@@ -133,16 +133,16 @@ func TestCostPolicy_toCopy(t *testing.T) {
 
 func TestMultiStatement(t *testing.T) {
 	for q, want := range map[string]bool{
-		"SELECT 1":                      false,
-		"SELECT 1;":                     false,
-		"SELECT 1 ;; ;":                 false,
-		"SELECT 1; SELECT 2":            true,
-		"SELECT 1;SELECT 2;":            true,
-		"SELECT ';' FROM t":             false,
-		`SELECT ";" FROM t`:             false,
-		"SELECT 1 -- ; SELECT 2":        false,
-		"SELECT 1 /* ; SELECT 2 */":     false,
-		"SELECT 1; -- a comment":        false,
+		"SELECT 1":                       false,
+		"SELECT 1;":                      false,
+		"SELECT 1 ;; ;":                  false,
+		"SELECT 1; SELECT 2":             true,
+		"SELECT 1;SELECT 2;":             true,
+		"SELECT ';' FROM t":              false,
+		`SELECT ";" FROM t`:              false,
+		"SELECT 1 -- ; SELECT 2":         false,
+		"SELECT 1 /* ; SELECT 2 */":      false,
+		"SELECT 1; -- a comment":         false,
 		"SELECT 1; /* only a comment */": false,
 	} {
 		if got := multiStatement(q); got != want {
