@@ -51,7 +51,7 @@ func TestPGRoundMacros(t *testing.T) {
 		{"epoch of a timestamptz", "_bintrail_pg_epoch(CAST('2026-11-18 10:00:00.5+00' AS TIMESTAMPTZ))", "1794996000.500000", "DECIMAL(38,6)"},
 		{"epoch of a timestamp", "_bintrail_pg_epoch(CAST('2026-11-18 10:00:00' AS TIMESTAMP))", "1794996000.000000", "DECIMAL(38,6)"},
 		{"epoch before 1970", "_bintrail_pg_epoch(CAST('1969-12-31 23:59:59.5' AS TIMESTAMP))", "-0.500000", "DECIMAL(38,6)"},
-		{"epoch of NULL", "_bintrail_pg_epoch(CAST(NULL AS TIMESTAMP))", "<nil>", "DECIMAL(38,6)"},
+		{"epoch of NULL", "(SELECT _bintrail_pg_epoch(x) FROM (VALUES (CAST(NULL AS TIMESTAMP))) v(x))", "<nil>", "DECIMAL(38,6)"},
 		// Ten-minute buckets, as the HTAP bench's reports write them.
 		{"a ten-minute bucket", "CAST(_bintrail_pg_to_timestamp(_bintrail_pg_floor_div(_bintrail_pg_epoch(CAST('2026-11-18 10:07:30.25+00' AS TIMESTAMPTZ)), 600) * 600) AS VARCHAR)", "2026-11-18 10:00:00+00", "VARCHAR"},
 		{"a bucket before 1970", "CAST(_bintrail_pg_to_timestamp(_bintrail_pg_floor_div(_bintrail_pg_epoch(CAST('1969-12-31 23:55:00+00' AS TIMESTAMPTZ)), 600) * 600) AS VARCHAR)", "1969-12-31 23:50:00+00", "VARCHAR"},
