@@ -458,7 +458,7 @@ func TestReconstructTables_PGTablePairContinuesThePairBefore(t *testing.T) {
 	onRoot, offRoot := t.TempDir(), t.TempDir()
 	taken := f.at(10 * time.Minute)
 	for _, root := range []string{onRoot, offRoot} {
-		f.baseline(root, taken, 0x500, taken.Add(-baseline.PGDeltaMargin).Format(time.RFC3339), pairRows()...)
+		f.baseline(root, taken, 0x500, taken.Add(-time.Minute).Format(time.RFC3339), pairRows()...)
 	}
 	f.other(0x600, 12*time.Minute)
 	both := func(at time.Time) *reconstruct.TableReport {

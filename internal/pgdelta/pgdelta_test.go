@@ -804,7 +804,7 @@ func TestAPairFromThePairBefore(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "t.parquet")
 	writeBase(t, base, cols, []cell{v("1"), v("a")}, []cell{v("2"), v("b")}, []cell{v("3"), v("c")}, []cell{v("4"), v("d")}, []cell{v("5"), v("e")})
-	dead0, rows0 := pair(t, db, base, 0, cols, keyCols, up("2", null), change{key: "4", del: true}, up("9", v("new")), up("1|x", v("p")))
+	dead0, rows0 := pair(t, db, base, 0, cols, keyCols, up("2", null), change{key: "4", del: true}, up("9", v("new")), change{key: `1\|x`, row: []cell{v("1|x"), v("p")}})
 
 	gotDead, err := ReadDead(ctx, db, dead0)
 	if err != nil || !reflect.DeepEqual(gotDead, []int64{1, 3}) {
