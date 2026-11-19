@@ -2,7 +2,9 @@ package console
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -298,8 +300,34 @@ func (x *pgTailSource) Cut(t views.BaselineTable) (tailFloor, string) {
 	return tailFloor{anchor: reconstruct.PGTailPos(c.floor)}, ""
 }
 
-// BaseFile names t's base file as indexTailSource does.
-func (x *pgTailSource) BaseFile(t views.BaselineTable) string { return baseFileID(t.Path) }
+// BaseFile names what a tail of t was checked against. For a MySQL table
+// that is the base file itself (indexTailSource): a refresh links it into
+// each new snapshot, and a file written again may be another table. A
+// PostgreSQL table is written again at every snapshot update, by an update
+// from the recorded changes or by a full read, so by that rule its tail was
+// built again from nothing at each one: every change since the new cut read
+// back from the index, while statements waited three seconds and then read
+// the snapshot alone, as old as the update took (minutes on a large
+// database), a value going back on a connection that had read a newer one.
+//
+// What a PostgreSQL tail is checked against is the table's shape as its
+// file records it (NewPGTail: the relation with its key, the settings its
+// values were rendered under), and a file written again for the same table
+// records the same. So that is the name: two files of one table with one
+// shape are one base, and the keeper keeps the tail and prunes it to the
+// newer cut (standsFor, pruneTo), with every other condition it puts on
+// that, the cursor having reached the cut among them. A shape that changed
+// (a column, the key, the table made again under the same name: the
+// relation carries its OID) is another name, and the tail is built again as
+// before.
+func (x *pgTailSource) BaseFile(t views.BaselineTable) string {
+	md, err := x.s.copyCuts.footer(t.Path)
+	if err != nil || md.PGRelation == "" {
+		return baseFileID(t.Path)
+	}
+	sum := sha256.Sum256([]byte(t.Schema + "\x00" + t.Table + "\x00" + md.PGRelation + "\x00" + md.RenderGUCs))
+	return "pgshape:" + hex.EncodeToString(sum[:16])
+}
 
 // maxSnapshotID is the newest schema snapshot the index holds, 0 for none.
 func (x *pgTailSource) maxSnapshotID(ctx context.Context) (int64, error) {

@@ -153,6 +153,50 @@ func (r *pgTailRig) table(edit func(md map[string]string), rows ...[2]string) vi
 	return views.BaselineTable{Schema: "public", Table: name, Path: path}
 }
 
+// rewritten publishes tbl again as a snapshot update does: another file for
+// the same table, in the snapshot folder of at, whose rows are the table as
+// of floor (the next position after the last change it holds). edit changes
+// its footer, where the relation is.
+func (r *pgTailRig) rewritten(tbl views.BaselineTable, at time.Time, floor uint64, edit func(md map[string]string), rows ...[2]string) views.BaselineTable {
+	r.t.Helper()
+	old, err := baseline.ReadParquetMetadata(tbl.Path)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	stamp := at.Format(time.RFC3339)
+	// The bound of time (no change at or after floor committed before it) is
+	// the first file's: the rig's changes are stamped within the first half
+	// hour, so it holds for every later file.
+	md := map[string]string{
+		baseline.MetaKeySnapshotTimestamp: stamp,
+		baseline.MetaKeyLastDumpAt:        stamp,
+		baseline.MetaKeyLSN:               strconv.FormatUint(floor, 10),
+		baseline.MetaKeyPGDeltaSince:      r.at.Add(-time.Minute).Format(time.RFC3339),
+		baseline.MetaKeyPGRelation:        old.PGRelation,
+		baseline.MetaKeyRenderGUCs:        baseline.RenderGUCsPinned,
+		baseline.MetaKeyLockMode:          baseline.LockStampPGRepeatableRead,
+		baseline.MetaKeySnapshotProducer:  baseline.ProducerDump,
+	}
+	if edit != nil {
+		edit(md)
+	}
+	path := filepath.Join(r.root, reconstruct.SnapshotDirName(at), "public", tbl.Table+".parquet")
+	w, err := baseline.NewWriter(path, []baseline.Column{{Name: "id", RawText: true}, {Name: "status", RawText: true}},
+		baseline.WriterConfig{Compression: "none", RowGroupSize: 100, Metadata: md})
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	for _, row := range rows {
+		if err := w.WriteRow([]string{row[0], row[1]}, []bool{false, false}); err != nil {
+			r.t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		r.t.Fatal(err)
+	}
+	return views.BaselineTable{Schema: tbl.Schema, Table: tbl.Table, Path: path}
+}
+
 // change indexes one row of the transaction committed at lsn, d into the
 // hour: id's status becomes status. Its values are text, as PostgreSQL
 // capture writes them.
@@ -494,6 +538,111 @@ func TestIntegrationPGTailSource(t *testing.T) {
 		r.checkpoint(0x960)
 		if got, want := r.state(ctx, tbl), []string{"1=ONE", "2=two"}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("after its first change: state %v, want %v", got, want)
+		}
+	})
+
+	// A snapshot update writes a PostgreSQL table's file again. The tail it
+	// had holds every change after the new file's cut, so it is kept and
+	// pruned to that cut: the first statement over the new snapshot reads
+	// through it. It used to be built again from nothing, in the background,
+	// and that statement read the snapshot alone meanwhile.
+	t.Run("the table's file written again: the tail it had stands, pruned to the new cut", func(t *testing.T) {
+		tbl := r.table(nil, [2]string{"1", "one"}, [2]string{"2", "two"}, [2]string{"5", "five"}, [2]string{"6", "six"})
+		// Before the new file's cut: a row deleted (the new file does not
+		// hold it, and the tail's record of the delete goes), a row changed
+		// (the new file holds the change), and a row changed that changes
+		// again after the cut.
+		r.change(tbl.Table, event.EventDelete, "5", "five", 0x9f0, 24*time.Minute)
+		r.change(tbl.Table, event.EventUpdate, "6", "SIX", 0x9f8, 24*time.Minute)
+		r.change(tbl.Table, event.EventUpdate, "1", "ONE", 0xa00, 24*time.Minute)
+		r.change(tbl.Table, event.EventInsert, "3", "three", 0xa10, 25*time.Minute)
+		r.change(tbl.Table, event.EventUpdate, "6", "six again", 0xa18, 25*time.Minute)
+		r.checkpoint(0xa18)
+		if got, want := r.state(ctx, tbl), []string{"1=ONE", "2=two", "3=three", "6=six again"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("before the update: state %v, want %v", got, want)
+		}
+		// The update: the table as of just after 0xa00, written again. One
+		// more change is captured meanwhile.
+		r.change(tbl.Table, event.EventDelete, "2", "two", 0xa20, 26*time.Minute)
+		r.checkpoint(0xa20)
+		next := r.rewritten(tbl, r.at.Add(20*time.Minute), 0xa01, nil, [2]string{"1", "ONE"}, [2]string{"2", "two"}, [2]string{"6", "SIX"})
+		// ONE look, with no wait for a build: the tail is there.
+		got, err := r.k.refresh(ctx, []views.BaselineTable{next})
+		if err != nil {
+			t.Fatal(err)
+		}
+		v, ok := got[tailKey(next.Schema, next.Table)]
+		if !ok {
+			t.Fatal("the first statement over the table's new file has no tail: it was built again from nothing")
+		}
+		if rows, want := merged(t, next, v), []string{"1=ONE", "3=three", "6=six again"}; !reflect.DeepEqual(rows, want) {
+			t.Fatalf("over the new file: %v, want %v", rows, want)
+		}
+		// And it goes on taking changes.
+		r.change(tbl.Table, event.EventInsert, "4", "four", 0xa30, 27*time.Minute)
+		r.checkpoint(0xa30)
+		if rows, want := r.state(ctx, next), []string{"1=ONE", "3=three", "4=four", "6=six again"}; !reflect.DeepEqual(rows, want) {
+			t.Fatalf("after one more change: %v, want %v", rows, want)
+		}
+	})
+
+	// A file whose table records another shape is another base to a tail:
+	// built again, as before. The shape differs in what only the file says
+	// (a column's default), so nothing else refuses the table: it is the
+	// name of the base that sends it to a build.
+	t.Run("the table's file written again under another shape: the tail is built again", func(t *testing.T) {
+		tbl := r.table(nil, [2]string{"1", "one"})
+		r.change(tbl.Table, event.EventUpdate, "1", "ONE", 0xb00, 24*time.Minute)
+		r.checkpoint(0xb00)
+		if got, want := r.state(ctx, tbl), []string{"1=ONE"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("before: state %v, want %v", got, want)
+		}
+		r.change(tbl.Table, event.EventInsert, "2", "two", 0xb10, 25*time.Minute)
+		r.checkpoint(0xb10)
+		old, err := baseline.ReadParquetMetadata(tbl.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rel, ok, err := baseline.ParsePGRelation(old.PGRelation)
+		if err != nil || !ok {
+			t.Fatalf("the table's recorded shape: %v, %v", ok, err)
+		}
+		rel.Columns[1].Default = "'new'::text"
+		other, err := rel.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		next := r.rewritten(tbl, r.at.Add(21*time.Minute), 0xb01, func(md map[string]string) { md[baseline.MetaKeyPGRelation] = other }, [2]string{"1", "ONE"})
+		got, err := r.k.refresh(ctx, []views.BaselineTable{next})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := got[tailKey(next.Schema, next.Table)]; ok {
+			t.Fatal("a tail checked against one shape was laid over a file that records another")
+		}
+		// Built, not refused: once the build is in, the table has its tail.
+		if rows, want := r.state(ctx, next), []string{"1=ONE", "2=two"}; !reflect.DeepEqual(rows, want) {
+			t.Fatalf("after the build: %v, want %v", rows, want)
+		}
+	})
+
+	// The cursor has not reached the new file's cut (a full read ahead of
+	// capture): the tail it had does not hold what the file holds past the
+	// cursor, and is not laid over it.
+	t.Run("the table's file written again past the cursor: the old tail is not laid over it", func(t *testing.T) {
+		tbl := r.table(nil, [2]string{"1", "one"})
+		r.change(tbl.Table, event.EventUpdate, "1", "ONE", 0xc00, 24*time.Minute)
+		r.checkpoint(0xc00)
+		if got, want := r.state(ctx, tbl), []string{"1=ONE"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("before: state %v, want %v", got, want)
+		}
+		next := r.rewritten(tbl, r.at.Add(22*time.Minute), 0xc80, nil, [2]string{"1", "newer than the cursor"})
+		got, err := r.k.refresh(ctx, []views.BaselineTable{next})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v, ok := got[tailKey(next.Schema, next.Table)]; ok {
+			t.Fatalf("the old tail was laid over a file past the cursor: %v", merged(t, next, v))
 		}
 	})
 
