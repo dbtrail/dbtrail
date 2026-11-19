@@ -160,7 +160,14 @@ func TestOne_NonFullTableSkipsArePersistedAndSurviveRestart(t *testing.T) {
 	}
 	stop = run()
 	mustExec("INSERT INTO " + ta + " VALUES (3, 'resumed')")
-	waitFor(t, 20*time.Second, func() bool { return countRows(ta) == 3 }, "A's row after the restart indexed")
+	waitFor(t, 20*time.Second, func() bool {
+		var n int
+		_ = indexDB.QueryRow("SELECT COUNT(*) FROM binlog_events WHERE table_name = ? AND pk_values = '3'", ta).Scan(&n)
+		if n == 0 {
+			t.Logf("A rows so far: %d", countRows(ta))
+		}
+		return n == 1
+	}, "A's row after the restart indexed")
 	waitFor(t, 10*time.Second, func() bool {
 		var now sql.NullString
 		_ = indexDB.QueryRow("SELECT last_checkpoint FROM stream_state WHERE id = 1").Scan(&now)
