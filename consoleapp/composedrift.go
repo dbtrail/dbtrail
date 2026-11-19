@@ -58,7 +58,7 @@ import (
 // two together (TestComposeVersionMatchesTheBinary asserts they agree) and add
 // a composeVersionAdded entry saying what the new number buys, or the daemon
 // can only tell an operator that their file is old and not what it is missing.
-const bundledComposeVersion = 11
+const bundledComposeVersion = 12
 
 // composeVersionAdded names, per version, the wiring that version added. Only
 // versions ABOVE the operator's are read, so version 1 (the first numbered
@@ -74,6 +74,7 @@ var composeVersionAdded = map[int]string{
 	9:  "the pg-router service: the PostgreSQL port (5433), where PostgreSQL clients read the copy of a PostgreSQL server: with an older file nothing listens on 5433, and the port for SQL clients can be turned on in the web interface with nothing answering it",
 	10: "SQL_FRESH_WAIT in .env reaches the router: with an older file a statement in fresh mode cannot be made to wait for what the source had committed when it arrived",
 	11: "the option file: every DBTrail service reads ./dbtrail-config/dbtrail.cnf from the install folder as /etc/dbtrail/dbtrail.cnf: with an older file no service sees it, and what it sets does nothing",
+	12: "the PostgreSQL router's memory share (PG_ROUTER_MEMORY_SHARE in .env) and its optional memory ceiling per statement: with an older file it sizes itself from the whole machine whatever .env says, and a statement that outgrows its memory can take the whole PostgreSQL port down",
 }
 
 // composeIndexHost is the bundled index MySQL's service name in
