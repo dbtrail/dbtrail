@@ -506,3 +506,112 @@ func TestPGKeyParts(t *testing.T) {
 		}
 	}
 }
+
+// The tail holds each row as one run of bytes, not as the map its change
+// arrived with, and writes the row it was handed: a NULL and an empty text
+// apart, a long text, bytes of several kinds, a key changed again after its
+// row was put away, a key pruned. An image the tail cannot write as it is
+// stays as it arrived, for the write to refuse in its own words.
+func TestPGTail_HoldsItsRowsPacked(t *testing.T) {
+	dir := t.TempDir()
+	base, md := writePGTailBase(t, dir, nil, [2]string{"1", "one"}, [2]string{"2", "two"}, [2]string{"3", "three"}, [2]string{"4", "four"})
+	tail := newTestPGTail(t, md)
+	long := strings.Repeat("ñ€🙂|\\'\x00", 9000)
+	null := pgEv(21, 0x620, event.EventUpdate, pgImg("2", "before"), map[string]any{"id": "2", "status": nil})
+	withGenerated := pgEv(24, 0x650, event.EventInsert, nil, map[string]any{"id": "6", "status": "six", "doubled": "12"})
+	tail.generated["doubled"] = true
+	pages := [][]query.ResultRow{
+		{pgUpd(20, 0x610, "1", "1", ""), null},
+		{pgUpd(22, 0x630, "3", "3", long), pgIns(23, 0x640, "5", "five"), withGenerated},
+		{pgDel(25, 0x660, "4")},
+	}
+	for _, p := range pages {
+		if err := tail.Apply(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for k, ev := range tail.fold.Changes {
+		_, held := tail.packed[k]
+		switch {
+		case ev.EventType == event.EventDelete:
+			if held || ev.RowAfter != nil {
+				t.Errorf("key %q was deleted, and the tail holds a row for it", k)
+			}
+		case !held || !sameImage(ev.RowAfter, pgPackedImage) || len(ev.RowAfter) != 0:
+			t.Errorf("key %q: its row is not held packed (held %v, image %v)", k, held, ev.RowAfter)
+		}
+	}
+	if len(pgPackedImage) != 0 {
+		t.Fatal("the image that stands for a packed row was written to")
+	}
+	// What a tail holding the same changes as they arrived would count.
+	arrived := foldPGPages(t, pkColsIntID(), pages...)
+	whole, _ := sampledChangeBytes(arrived.Changes)
+	if got := tail.Bytes(); got <= 0 || got >= whole {
+		t.Fatalf("the tail counts %d bytes; the same changes as they arrived count %d", got, whole)
+	}
+
+	// A key changed again after its row was put away, and one pruned.
+	if err := tail.Apply([]query.ResultRow{pgUpd(26, 0x670, "5", "5", "five again")}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := tail.PruneThrough(PGTailPos(0x615), 0); err != nil || n != 1 {
+		t.Fatalf("PruneThrough dropped %d keys, %v; want the one changed at 610", n, err)
+	}
+	if _, held := tail.packed["1"]; held || len(tail.packed) != tail.Keys()-1 {
+		t.Fatalf("after the prune the tail holds %d rows for %d keys, one of them deleted", len(tail.packed), tail.Keys())
+	}
+	path := filepath.Join(dir, "1-orders.parquet")
+	if rows, err := tail.WriteFile(path); err != nil || rows != 5 {
+		t.Fatalf("WriteFile: %d rows, %v", rows, err)
+	}
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rs, err := db.Query("SELECT id, status IS NULL, coalesce(status, '') FROM (" +
+		baseline.TableTailStateSQL(pgPublished(base), lit(path), tail.PKColumns(), "") + ") ORDER BY 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rs.Close()
+	got := map[string]string{}
+	for rs.Next() {
+		var id, st string
+		var isNull bool
+		if err := rs.Scan(&id, &isNull, &st); err != nil {
+			t.Fatal(err)
+		}
+		if isNull {
+			st = "<NULL>"
+		}
+		got[id] = st
+	}
+	want := map[string]string{"1": "one", "2": "<NULL>", "3": long, "5": "five again", "6": "six"}
+	if !reflect.DeepEqual(got, want) {
+		for k := range want {
+			if got[k] != want[k] {
+				t.Errorf("row %q reads %.40q (%d bytes), want %.40q (%d bytes)", k, got[k], len(got[k]), want[k], len(want[k]))
+			}
+		}
+		t.Fatalf("the table has %d rows, want %d", len(got), len(want))
+	}
+
+	// Not what the tail writes as it is: a value that is no text, a column
+	// of the copy missing, a column the copy does not have. Each stays as it
+	// arrived and the write refuses it as it always did.
+	for name, img := range map[string]map[string]any{
+		"a value that is no text":       {"id": "7", "status": 7.5},
+		"a column of the copy missing":  {"id": "7"},
+		"a column the copy does not have": {"id": "7", "status": "s", "added": "x"},
+	} {
+		other := newTestPGTail(t, md)
+		if err := other.Apply([]query.ResultRow{pgEv(30, 0x700, event.EventInsert, nil, img)}); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if ev := other.fold.Changes["7"]; len(other.packed) != 0 || sameImage(ev.RowAfter, pgPackedImage) || !reflect.DeepEqual(ev.RowAfter, img) {
+			t.Errorf("%s: the image was put away (%v)", name, ev.RowAfter)
+		}
+	}
+}
