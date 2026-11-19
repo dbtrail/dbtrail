@@ -770,8 +770,8 @@ listener, its own workers, its own memory.
     10-million-row table took 0.4 to 0.6 seconds in fresh mode (0.13 to 0.35
     in fast), and 0.12 to 0.17 on the 2-million-row one (0.03 to 0.09).
   - **A statement that reads one row by its key reads the whole table too**:
-    the copy has no index. With a forwarding user such a statement can be
-    answered by the source (see
+    the copy has no index. With a forwarding user such a statement is
+    answered by the source, whose plan for it is cheap (see
     [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port)).
   - **How many statements it answers** is set by `--workers`, which is 4
     out of the box, with 256 clients connected at most
@@ -801,8 +801,8 @@ listener, its own workers, its own memory.
     arrive before it reads.
 - **The copy answers what it answers as PostgreSQL does.** With the server's
   forwarding user, each statement is decided on its own: the copy answers it
-  when everything in it is known to give PostgreSQL's answer there, and the
-  source otherwise, read-only (see
+  when everything in it is known to give PostgreSQL's answer there and its
+  plan on the source is expensive, and the source otherwise, read-only (see
   [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port)).
   A transaction block the client opens, and a catalog statement the copy does
   not answer, go to the source too (see
@@ -1167,6 +1167,57 @@ The source answers:
   `VALUES`, `TABLE`. A statement that writes is refused (`25006`). `SHOW
   TABLES` and `DESCRIBE`, the copy's own, stay on the copy.
 
+**Of what the copy can answer, only what is expensive on the source goes to
+the copy.** The copy has no index: a read by a primary key takes a
+millisecond on PostgreSQL, and on the copy it reads the whole table, behind
+every other statement waiting for a worker (measured: 15 seconds for one row
+of a table of 2 million). So before a statement the copy can answer goes
+there, the port asks the source for its plan, with `EXPLAIN (FORMAT JSON)` on
+the forwarding user's connection (the statement itself does not run), and
+sends it to the copy only when:
+
+- the **Total Cost** at the top of the plan is **50,000 or more**
+  (`--route-cost-threshold`, `BINTRAIL_PG_ROUTER_COST_THRESHOLD`), or
+- the plan has a **sequential scan** (a `Seq Scan` node, at any depth: in a
+  join, a subquery, a `WITH`) estimated at **1,000,000 rows or more**
+  (`--route-scan-rows`, `BINTRAIL_PG_ROUTER_SCAN_ROWS`), whatever its cost. A
+  scan run by parallel workers counts the rows of all of them.
+
+Anything else is answered by the source (`cheap_plan` in `/status`). 0 turns
+one rule off; both cannot be 0. In the compose `.env` they are
+`PG_ROUTER_COST_THRESHOLD` and `PG_ROUTER_SCAN_ROWS`. The defaults come from a
+TPC-C source of 97 million rows on PostgreSQL 16: reads by a primary key cost
+1 to 12, an order's lines by an index 12, the stock level join 712, a
+`count(*)` of one warehouse's orders by an index 15,059, and `max(ts)` of a
+heartbeat table 4,202 with a sequential scan of 201,680 rows; of 14
+analytics reports, two cost 177 and 699 on PostgreSQL (a table of 2,000 rows,
+an index range) and stay there, and the other twelve cost 98,367 to
+13,351,258, several with sequential scans of 2.4 to 61 million rows.
+
+What this costs and where it can go wrong:
+
+- **One round trip to the source** for each statement the copy could answer,
+  and a connection there for that moment (`--max-source-connections`), given
+  back as soon as the copy is chosen. With every one of them taken, or a
+  source that cannot be reached, the statement goes to the source and gets
+  that error (`53300`, `08001`), where the copy used to answer it.
+- **An `EXPLAIN` the source refuses** (a table it does not have, a syntax it
+  does not take) sends the statement to the source, which answers it with
+  its own error (`explain_failed` in `/status`). So does a text of more than
+  one statement, which is not asked about at all: `EXPLAIN` of the first
+  would run the others.
+- **The plan's numbers are estimates**, as fresh as the source's statistics
+  (`ANALYZE`), and a sequential scan's rows are the rows it is estimated to
+  return after its filter, not the rows it reads.
+- **A prepared statement is asked about once**, at its first Describe or
+  Bind, before any argument exists, and keeps that side. One with
+  parameters is asked with `EXPLAIN (GENERIC_PLAN, FORMAT JSON)`, which
+  PostgreSQL 16 and later take. **On PostgreSQL 15 a prepared statement with
+  parameters goes to the source**, however expensive: that `EXPLAIN` is
+  refused there. A statement first described in the middle of a batch that
+  already went to the source is sent there for that batch, and asked again
+  the next time.
+
 **A server that hides tables or columns sends nothing to its source**, not a
 statement the copy refuses, not a transaction block, not a catalog statement:
 the rules are applied by the copy's views, and a statement run on the source
@@ -1222,6 +1273,8 @@ The reasons, with the MySQL port's names where they mean the same:
 | copy | `copy_command` | a command of the copy's own (`SHOW TABLES`, `DESCRIBE`) |
 | copy | `no_forward_account` | the server has no forwarding user: the copy answers alone |
 | copy | `hidden_rules` | the server hides tables or columns: nothing is sent to its source |
+| source | `cheap_plan` | its plan on the source is under both thresholds: the source answers it, by its indexes |
+| source | `explain_failed` | its plan could not be had (the source refused the `EXPLAIN`, a text of more than one statement): the source answers it, its error included |
 | source | `in_transaction` | the client's transaction block |
 | source | `veto` | a construct the copy answers differently, or is not known to answer the same |
 | source | `session_differs` | a session setting the copy is not known to reproduce (`TimeZone`) |
@@ -1234,11 +1287,8 @@ The reasons, with the MySQL port's names where they mean the same:
 | source | `copy_queue_full`, `copy_wait_timeout` | the copy was busy |
 | refused | `read_only` | not a read |
 
-What the copy would answer and the source did not make faster is not decided
-here yet: every statement the copy can answer goes to the copy, however cheap
-it would be on the source. Deciding by the source's plan, as the MySQL port
-does, would cost a login to the source for each statement, since a connection
-holds one there only while something of its own lives on it.
+Here `answers_the_same` counts the statements the copy answered: the ones it
+answers as PostgreSQL does and whose plan on the source is expensive.
 
 ### Listing schemas, tables and columns on the PostgreSQL port
 

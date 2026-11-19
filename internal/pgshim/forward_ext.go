@@ -37,7 +37,25 @@ func (s *session) stmtRoute(st *preparedStatement) routeDecision {
 	}
 	// Classified with a stand-in for each argument, as Parse classifies it;
 	// screened as the client wrote it, each $n a value of its own type.
-	return s.route(s.classify(st.probeText()), st.query)
+	d := s.route(s.classify(st.probeText()), st.query)
+	if !byCostApplies(d) {
+		return d
+	}
+	// The source's plan, asked once for the statement, before any argument
+	// exists (route_cost.go): its Describe and every execution are answered
+	// by the same side.
+	if st.byCost.side != "" {
+		return st.byCost
+	}
+	d, keep, stop := s.routeByCost(st.query, len(st.paramOIDs) > 0)
+	if keep || stop != nil {
+		// A source that could not be reached is kept too: this is asked again
+		// by every message of the statement (its Bind, its note), and each
+		// would wait for the source to answer once more. It goes there, whose
+		// error the client gets.
+		st.byCost = d
+	}
+	return d
 }
 
 // cloneBind copies a Bind message, whose buffers the next message reuses.

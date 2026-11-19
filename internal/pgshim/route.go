@@ -24,6 +24,9 @@ import (
 // source before anything is said to the client, so a different answer never
 // reaches it in silence.
 //
+// Of what the screen lets through, only a statement whose plan on the source
+// is expensive goes to the copy (route_cost.go): the copy has no index.
+//
 // Without a forwarding account nothing here applies: every statement is
 // answered as before, by the copy or with its error.
 
@@ -54,6 +57,8 @@ const (
 	ReasonCopyWaitTimeout   = "copy_wait_timeout"   // it waited for a slot of the copy as long as it may
 	ReasonCopyColumnsDiffer = "copy_columns_differ" // the copy answered with a column it writes otherwise
 	ReasonCatalogNotOnCopy  = "catalog_not_on_copy" // a catalog statement the copy does not answer
+	ReasonCheapPlan         = "cheap_plan"          // the source's plan is below both thresholds (route_cost.go)
+	ReasonExplainFailed     = "explain_failed"      // the source's plan could not be had: EXPLAIN did not run, or was not asked
 
 	// Nobody ran it.
 	ReasonReadOnly = "read_only" // not a read, and the port is read-only toward the source

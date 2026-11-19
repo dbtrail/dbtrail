@@ -155,6 +155,16 @@ func (s *session) handleSimpleQuery(qstr string) error {
 	if s.abortedRefusal(qstr) == nil {
 		d = s.route(s.classify(qstr), qstr)
 	}
+	if byCostApplies(d) {
+		// The screen lets the copy answer it: the source's plan says
+		// whether the copy is worth it (route_cost.go).
+		var stop *pgErr
+		if d, _, stop = s.routeByCost(qstr, false); stop != nil {
+			s.fail(stop)
+			s.routeNote(qstr, d, time.Since(started), true)
+			return s.readyFlush()
+		}
+	}
 	if d.side == RouteSource || d.side == RouteRefused {
 		ok := s.forwardSimple(qstr)
 		s.routeNote(qstr, d, time.Since(started), !ok)

@@ -72,6 +72,9 @@ type preparedStatement struct {
 	// fallback is why the statement goes to the source since the copy
 	// could not answer it (route.go), "" while it has not been sent there.
 	fallback string
+	// byCost is the side the source's plan gave the statement
+	// (route_cost.go), kept once decided; zero while it was not.
+	byCost routeDecision
 }
 
 // portal is a statement with its arguments, ready to run.

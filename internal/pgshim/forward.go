@@ -65,6 +65,10 @@ type Forward struct {
 	// tables or columns a server's rules hide) from being read on the
 	// source, where those rules do not apply.
 	Barred func() string
+	// Cost is when a statement the copy answers as PostgreSQL does is sent
+	// there rather than to the source, by the source's plan (route_cost.go);
+	// nil for DefaultCostPolicy.
+	Cost *CostPolicy
 }
 
 // barred is why nothing may be sent to the source now, "" when it may.
@@ -395,7 +399,14 @@ const (
 	// the answer to a message the client already got the port's reply to
 	// (a Parse, a Bind).
 	relayErrors
+	// relayCapture keeps it, as relayQuiet does, and hands the done
+	// function every DataRow too: the port's own statements that read a
+	// row (routeByCost's EXPLAIN).
+	relayCapture
 )
+
+// quiet reports whether nothing read goes to the client.
+func (o relayOut) quiet() bool { return o == relayQuiet || o == relayCapture }
 
 // errSourceLost ends a read of the source that cannot go on.
 type errSourceLost struct{ why string }
@@ -466,11 +477,11 @@ func (s *session) relay(up *upstream, out relayOut, done func(pgproto3.BackendMe
 				up.unsafeWhy = "the source closed it: " + e.Message
 			}
 			perr = &pgErr{e.Code, e.Message}
-			if out != relayQuiet {
+			if !out.quiet() {
 				s.be.Send(&e)
 			}
 		case *pgproto3.NoticeResponse, *pgproto3.NotificationResponse:
-			if out != relayQuiet {
+			if !out.quiet() {
 				s.be.Send(m)
 			}
 			continue
@@ -495,7 +506,7 @@ func (s *session) relay(up *upstream, out relayOut, done func(pgproto3.BackendMe
 			if copyOut {
 				copyOut = false
 				perr = &pgErr{"0A000", "COPY is not served on this port: it reads rows with SELECT"}
-				if out != relayQuiet {
+				if !out.quiet() {
 					s.errorResponse(perr.code, perr.msg)
 				}
 				msg = &pgproto3.ErrorResponse{}
@@ -505,6 +516,9 @@ func (s *session) relay(up *upstream, out relayOut, done func(pgproto3.BackendMe
 				s.be.Send(m)
 			}
 		case *pgproto3.DataRow:
+			if out == relayCapture && done(msg) {
+				return perr, nil
+			}
 			if out == relayClient {
 				s.be.Send(m)
 				for _, v := range m.Values {

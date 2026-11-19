@@ -878,6 +878,13 @@ services:
       BINTRAIL_PG_ROUTER_WORKERS: ${PG_ROUTER_WORKERS:-}
       BINTRAIL_PG_ROUTER_THREADS: ${PG_ROUTER_THREADS:-}
       BINTRAIL_PG_ROUTER_MAX_CONNECTIONS: ${PG_ROUTER_MAX_CONNECTIONS:-}
+      # With a server's forwarding user, a statement the copy can answer goes
+      # to the copy only when its plan on the source costs at least
+      # PG_ROUTER_COST_THRESHOLD (50000 unless set) or has a sequential scan of
+      # at least PG_ROUTER_SCAN_ROWS rows (1000000); otherwise the source
+      # answers it by its indexes.
+      BINTRAIL_PG_ROUTER_COST_THRESHOLD: ${PG_ROUTER_COST_THRESHOLD:-}
+      BINTRAIL_PG_ROUTER_SCAN_ROWS: ${PG_ROUTER_SCAN_ROWS:-}
       # Fresh or fast, the same SQL_FRESH as the router's above: unset, each
       # server answers in its own mode, fresh unless fast is saved for it on
       # its Snapshots page. Fresh lays each table's newest captured changes
