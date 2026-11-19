@@ -116,7 +116,13 @@ func pgPairEligible(cfg FullTableConfig, srcPath string, bmeta baseline.DumpMeta
 // the window left alone, then the window's: one pair again, holding every
 // change since the file was written, without reading them again from the
 // index.
-func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *TableReport, prev *pgPrevPair) (written bool, err error) {
+//
+// end, when not "", is why no pair is left beside the file by this run: the
+// table is written in full instead, by the engine that reads the files
+// (pgFoldPairIntoFile), from the file and the pair this call would have left.
+// A pair that turns out too large for its file ends the same way, with end
+// set here. written is then true and the table is its one new file.
+func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *TableReport, prev *pgPrevPair, end string) (written bool, err error) {
 	src, bmeta := in.SourceBaseline.Path, in.SourceBaseline.Metadata
 	dst := filepath.Join(in.SnapshotDir, in.Schema, in.Table+".parquet")
 	full := func(why string, cause error) (bool, error) {
@@ -187,15 +193,20 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 	if err != nil {
 		return full("could not count the table file's rows", err)
 	}
-	// tooMany declines: what, counted as n, is too large a share of the
-	// file for a delta beside it.
-	tooMany := func(what string, n int64) (bool, error) {
-		slog.Info("PostgreSQL table delta not written: too much has changed beside the table file for a delta",
-			"schema", in.Schema, "table", in.Table, "what", what, "count", n, "file_rows", baseRows)
-		return false, nil
+	// tooMany ends the pair: what, counted as n, is too large a share of
+	// the file for a delta beside it.
+	tooMany := func(what string, n int64) {
+		if end == "" {
+			end = fmt.Sprintf("too much has changed beside the table file for a delta (%s: %d, of %d rows in the file)", what, n, baseRows)
+		}
 	}
 	if int64(len(fold.Changes))*pgPairMaxShare > baseRows {
-		return tooMany("keys changed in this window", int64(len(fold.Changes)))
+		tooMany("keys changed in this window", int64(len(fold.Changes)))
+	}
+	// No change in the window: only a run that ends the pair before gets
+	// here with none, and that pair is then the whole of what is folded.
+	if len(fold.Changes) == 0 && (prev == nil || end == "") {
+		return false, nil
 	}
 	baseID, err := pgdelta.BaseID(bmeta, fi.Size(), baseRows)
 	if err != nil {
@@ -232,7 +243,7 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 	// its pair and many dead rows in its file: those end the pair too.
 	deadRows := int64(pgDeadCount(positions, carriedDead))
 	if deadRows*pgPairMaxShare > baseRows {
-		return tooMany("rows of the file no longer in the table", deadRows)
+		tooMany("rows of the file no longer in the table", deadRows)
 	}
 
 	// puts, replaced and removed count the window's changes, as the merge
@@ -313,37 +324,90 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 	if prev != nil {
 		md[pgPairMetaKeyFrom] = prev.run
 	}
-	dead, rows, pairKeys, err := pgdelta.WritePair(pgdelta.PairInput{
-		BasePath: dst, Seq: 0, Base: baseID, Run: run,
-		Columns: colNames, KeyColumns: keyCols,
-		Positions: positions, CarriedDead: carriedDead, Changes: changes,
-		Metadata: md,
-	})
-	if errors.Is(err, pgdelta.ErrPairExists) {
-		// Never the full merge here: it would write the table's file beside
-		// a pair written for another one, and whatever reads the pair would
-		// take that file's rows away by the other's row numbers. The folder
-		// is this run's own and was empty, so a pair in it is not one this
-		// run can explain.
-		return false, fmt.Errorf("%s.%s: a table delta is already in this snapshot's folder: %w", in.Schema, in.Table, err)
+	// The pair this run leaves, or folds: with no change in the window it is
+	// the pair before, as it is.
+	var dead, rows string
+	wrote := false
+	if len(fold.Changes) == 0 {
+		dead, rows = prev.dead, prev.rows
+	} else {
+		var pairKeys int64
+		dead, rows, pairKeys, err = pgdelta.WritePair(pgdelta.PairInput{
+			BasePath: dst, Seq: 0, Base: baseID, Run: run,
+			Columns: colNames, KeyColumns: keyCols,
+			Positions: positions, CarriedDead: carriedDead, Changes: changes,
+			Metadata: md,
+		})
+		if errors.Is(err, pgdelta.ErrPairExists) {
+			// Never the full merge here: it would write the table's file beside
+			// a pair written for another one, and whatever reads the pair would
+			// take that file's rows away by the other's row numbers. The folder
+			// is this run's own and was empty, so a pair in it is not one this
+			// run can explain.
+			return false, fmt.Errorf("%s.%s: a table delta is already in this snapshot's folder: %w", in.Schema, in.Table, err)
+		}
+		if err != nil {
+			return full("the delta could not be written", err)
+		}
+		wrote = true
+		// A pair written from the one before holds that pair's keys too, and
+		// how many of them the window named again is known only now.
+		if prev != nil && pairKeys*pgPairMaxShare > baseRows {
+			tooMany("keys changed since the file was written", pairKeys)
+		}
 	}
-	if err != nil {
-		return full("the delta could not be written", err)
-	}
-	// A pair written from the one before holds that pair's keys too, and
-	// how many of them the window named again is known only now. Nothing
-	// reads this folder yet: the pair is taken back and the caller reads
-	// every change since the file again. A pair that cannot be taken back
-	// fails the table: the table's file written beside it would be read
-	// with another file's delta.
-	if prev != nil && pairKeys*pgPairMaxShare > baseRows {
+	// takeBack removes the pair this call wrote. Nothing reads this folder
+	// yet. A pair that cannot be taken back fails the table: a table file
+	// written beside it would be read with another file's delta.
+	takeBack := func() error {
+		if !wrote {
+			return nil
+		}
 		for _, f := range []string{dead, rows} {
 			if rerr := os.Remove(f); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-				return false, fmt.Errorf("%s.%s: take back a table delta that holds too many keys: %w", in.Schema, in.Table, rerr)
+				return fmt.Errorf("%s.%s: take back a table delta: %w", in.Schema, in.Table, rerr)
 			}
 		}
-		return tooMany("keys changed since the file was written", pairKeys)
+		return nil
 	}
+
+	// The pair has ended: the table is written in full from its file and
+	// this pair, by the engine. When that fails nothing of the table is left
+	// in the folder and the caller writes it the slower way; the pair before
+	// is as good as it was.
+	if end != "" {
+		if in.SpaceCheck != nil {
+			if serr := in.SpaceCheck(in.SnapshotDir, fi.Size()); serr != nil {
+				if terr := takeBack(); terr != nil {
+					return false, terr
+				}
+				return false, serr
+			}
+		}
+		total, ferr := pgFoldPair(ctx, duck, src, dead, rows, dst, md)
+		if terr := takeBack(); terr != nil {
+			return false, terr
+		}
+		if ferr != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				return false, cerr
+			}
+			slog.Warn("a table's delta could not be folded into its file by the engine; the table is written row by row instead",
+				"schema", in.Schema, "table", in.Table, "reason", end, "error", ferr)
+			return false, nil
+		}
+		rep.BaselineRows = total - int64(puts)
+		rep.UpdatesApplied, rep.InsertsEmitted, rep.DeletesSkipped = int64(replaced), int64(puts-replaced), int64(removed)
+		rep.RowsWritten = total
+		rep.Files = []string{filepath.Join(in.Schema, in.Table+".parquet")}
+		rep.DeltaCompacted = end
+		slog.Info("table written in full from its previous file and its delta",
+			"schema", in.Schema, "table", in.Table, "reason", end,
+			"lsn", lsnText(in.PGCutLSN), "file_lsn", lsnText(bmeta.LSN), "rows", total,
+			"changed_keys", len(keys), "continued_the_delta_before", prev != nil)
+		return true, nil
+	}
+
 	// From here the table is published or the table fails: the file is in
 	// the new folder, and a full merge would write through it.
 	linked, err := carryForward(ctx, src, in.SnapshotDir, in.Schema, in.Table)
@@ -371,6 +435,72 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		"file_rows", baseRows, "changed_keys", len(keys), "dead_rows", deadRows,
 		"kept_from_previous_delta", kept, "from_previous_delta", prev != nil)
 	return true, nil
+}
+
+// pgFoldPair is pgFoldPairIntoFile, a seam: a test makes it fail to reach
+// the row-by-row way a table is written when the engine cannot.
+var pgFoldPair = pgFoldPairIntoFile
+
+// pgFoldPairIntoFile writes, at dst, the table a file and the pair beside it
+// leave (pgdelta.StateSQL), with md as its footer, and returns how many rows
+// it holds. The engine reads the three files and writes the new one; no row
+// passes through this process, which is what makes writing a table of tens
+// of millions of rows in full a matter of seconds where the merge takes
+// minutes. The technique is CompactTableDeltaMinor's: the footer handed to
+// the engine as it is, a name of its own until the file is whole and synced.
+//
+// The file is held to its count: the base's rows, less the ones the pair
+// takes away, plus the rows the pair puts. A pair that does not add up (a
+// row number the base does not have, a key twice) leaves no file.
+func pgFoldPairIntoFile(ctx context.Context, duck *sql.DB, base, dead, rows, dst string, md map[string]string) (int64, error) {
+	if _, err := os.Lstat(dst); err == nil {
+		return 0, fmt.Errorf("%s is already there", dst)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return 0, err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return 0, err
+	}
+	lit := func(v string) string { return "'" + strings.ReplaceAll(v, "'", "''") + "'" }
+	keys := make([]string, 0, len(md))
+	for k := range md {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	kv := make([]string, 0, len(keys))
+	for _, k := range keys {
+		kv = append(kv, lit(k)+": "+lit(md[k]))
+	}
+	tmp := dst + ".tmp-fold"
+	fail := func(err error) (int64, error) {
+		os.Remove(tmp)
+		return 0, err
+	}
+	q := fmt.Sprintf("COPY (%s) TO %s (FORMAT PARQUET, COMPRESSION '%s', KV_METADATA {%s})",
+		pgdelta.StateSQL(base, []string{dead}, []string{rows}), lit(tmp), ParquetWriterCompression, strings.Join(kv, ", "))
+	if _, err := duck.ExecContext(ctx, q); err != nil {
+		return fail(fmt.Errorf("fold the delta into its file: %w", localWriteErr(err)))
+	}
+	one := func(path, where string) string {
+		return "(SELECT count(*) FROM read_parquet(" + lit(pgdelta.GlobLiteral(path)) + ", hive_partitioning=false)" + where + ")"
+	}
+	var got, had, gone, put int64
+	err := duck.QueryRowContext(ctx, "SELECT "+one(tmp, "")+", "+one(base, "")+", "+one(dead, "")+", "+
+		one(rows, " WHERE "+pgdelta.OpColumn+" = '"+pgdelta.OpPut+"'")).Scan(&got, &had, &gone, &put)
+	if err != nil {
+		return fail(fmt.Errorf("count the rows of the folded file: %w", err))
+	}
+	if got != had-gone+put {
+		return fail(fmt.Errorf("the folded file has %d rows, and the file's %d less the %d its delta takes away plus the %d it puts is %d",
+			got, had, gone, put, had-gone+put))
+	}
+	if err := fsyncFile(tmp); err != nil {
+		return fail(err)
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		return fail(err)
+	}
+	return got, nil
 }
 
 // pgPairMetaKeyFrom is, on a pair written from the pair before it and the
