@@ -61,7 +61,7 @@
 # instead of leaving you to diff two files (#1529). It is passed to the
 # console service below through the YAML anchor, so there is one number to
 # bump: raise it whenever this file gains wiring a running stack would need.
-x-bintrail-compose-version: &compose_version 11
+x-bintrail-compose-version: &compose_version 12
 
 volumes:
   bintrail-index-data:    # MySQL 8.4 datadir — the forensic record (NEW volume:
@@ -319,7 +319,8 @@ services:
     # this container's own, and nowhere else; the container gains no other
     # privilege. Needs Docker Engine 28 or later: an older Docker refuses to
     # start the stack when it reads it (Podman was not tried), which is why
-    # it is off here. Settings, MySQL clients, Memory for SQL on the copy says
+    # it is off in this file; the installer turns it on for a fresh install
+    # once this Docker has started DBTrail's image with it. Settings, MySQL clients, Memory for SQL on the copy says
     # whether it is in effect. After a statement is stopped this way
     # `docker inspect` reports OOMKilled=true for this container although it
     # kept running. The same setting gives each Explain on the check page a
@@ -865,6 +866,13 @@ services:
       # Memory each statement on the copy may use: the same setting as
       # `bintrail`, from the same .env.
       BINTRAIL_CONSOLE_SQL_MEMORY: ${SQL_MEMORY:-}
+      # The fraction of this machine's memory the PostgreSQL router plans with
+      # (#2513): its statements and the recent changes it keeps in fresh
+      # mode come out of that one number. Empty (the default) is the whole
+      # machine, which it shares with capture and the index MySQL. Set
+      # PG_ROUTER_MEMORY_SHARE in .env beside DAEMON_MEMORY_SHARE on a host
+      # where the kernel stops DBTrail's processes for memory.
+      BINTRAIL_MEMORY_SHARE: ${PG_ROUTER_MEMORY_SHARE:-}
       # How many statements run at once, with how many threads each, and how
       # many clients may be connected. Unset, the small defaults above.
       BINTRAIL_PG_ROUTER_WORKERS: ${PG_ROUTER_WORKERS:-}
@@ -893,6 +901,14 @@ services:
       BINTRAIL_PG_ROUTER_TLS_KEY: ${PG_ROUTER_TLS_KEY:-}
     # 0 = no ceiling. See PG_ROUTER_MEMORY / PG_ROUTER_CPUS above.
     mem_limit: ${PG_ROUTER_MEMORY:-0}
+    # Optional: a memory ceiling of its own for each statement on the copy,
+    # as on the router above: a statement that outgrows its memory is stopped
+    # alone, before this machine runs out and the system chooses what to stop
+    # (which can be this service, and every client connected to it). Needs
+    # Docker Engine 28 or later; the installer turns it on when this Docker
+    # accepts it.
+    # security_opt:
+    #   - writable-cgroups=true
     cpus: ${PG_ROUTER_CPUS:-0}
     volumes:
       - ./dbtrail-config:/etc/dbtrail-config   # the option file (#2671), see the bintrail service

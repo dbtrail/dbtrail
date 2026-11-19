@@ -612,6 +612,33 @@ step "Downloading the images (the first run can take a minute)"
 # here still run, and the message says so.
 $COMPOSE pull || warn "could not download the images; starting with the ones already on this machine, which may be a different version."
 
+# A memory ceiling of its own for each SQL statement (writable-cgroups): a
+# statement that outgrows its memory is then stopped alone, before the machine
+# runs out and the system stops something else (a router and its clients, or
+# the index MySQL). Docker before 28 refuses to start a stack that asks for
+# it, so it ships commented out and is turned on here only after this Docker
+# has started DBTrail's own image with it. Only in a freshly downloaded file:
+# one that was kept is the operator's.
+if [ -n "${FRESH:-}" ] && grep -q '^    #   - writable-cgroups=true' docker-compose.yml; then
+  img=$($COMPOSE config --images 2>/dev/null | grep 'bintrail-console' | head -n 1)
+  if [ -z "$img" ]; then
+    say "${DIM}    left the memory ceiling per SQL statement off: could not tell which image to try it with${RST}"
+  elif docker run --rm --security-opt writable-cgroups=true --entrypoint true "$img" >/dev/null 2>&1; then
+    cp docker-compose.yml docker-compose.yml.cgroups
+    sed -e 's|^    # security_opt:$|    security_opt:|' -e 's|^    #   - writable-cgroups=true$|      - writable-cgroups=true|' \
+      docker-compose.yml.cgroups > docker-compose.yml
+    if $COMPOSE config -q >/dev/null 2>&1; then
+      rm -f docker-compose.yml.cgroups
+      say "${DIM}    each SQL statement on the copy runs under a memory ceiling of its own${RST}"
+    else
+      mv docker-compose.yml.cgroups docker-compose.yml
+      say "${DIM}    left the memory ceiling per SQL statement off: the compose file did not read back with it${RST}"
+    fi
+  else
+    say "${DIM}    this Docker does not give each SQL statement a memory ceiling of its own (it needs Docker Engine 28 or later), so a statement that outgrows its memory can make the system stop something else${RST}"
+  fi
+fi
+
 step "Starting containers"
 $COMPOSE up -d || die "\`$COMPOSE up -d\` failed. Check the output above.
     Says \"invalid IP address in add-host\"? Your engine does not understand

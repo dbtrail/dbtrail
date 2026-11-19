@@ -113,3 +113,34 @@ func TestMemoryBudgetWords(t *testing.T) {
 		}
 	}
 }
+
+// In a container, a process that sizes itself from the whole machine says
+// that the machine is shared, and how to share it out (the PostgreSQL HTAP bench of 2026-11-18: the
+// PostgreSQL router was stopped by the kernel for memory). Outside a
+// container, or with a share set, it says nothing more.
+func TestLogMemoryBudget_saysTheMachineIsSharedInAContainer(t *testing.T) {
+	saved, savedCap := memoryInContainer, memoryCappedHere
+	defer func() { memoryInContainer, memoryCappedHere = saved, savedCap }()
+	for _, c := range []struct {
+		inContainer, capped bool
+		share               float64
+		want                bool
+	}{{true, false, 1, true}, {false, false, 1, false}, {true, false, 0.3, false}, {true, true, 1, false}} {
+		memoryInContainer = func() bool { return c.inContainer }
+		memoryCappedHere = func() bool { return c.capped }
+		var buf strings.Builder
+		l := slog.New(slog.NewTextHandler(&buf, nil))
+		logMemoryBudget(l, 8<<30, c.share, memoryBudgetFor(8<<30, c.share))
+		got := strings.Contains(buf.String(), "level=WARN") && strings.Contains(buf.String(), "PG_ROUTER_MEMORY_SHARE")
+		if got != c.want {
+			t.Errorf("container=%v capped=%v share=%v: warned=%v\n%s", c.inContainer, c.capped, c.share, got, buf.String())
+		}
+	}
+	// No host memory: nothing is sized, nothing to say.
+	memoryInContainer, memoryCappedHere = func() bool { return true }, func() bool { return false }
+	var buf strings.Builder
+	logMemoryBudget(slog.New(slog.NewTextHandler(&buf, nil)), 0, 1, 0)
+	if strings.Contains(buf.String(), "level=WARN") {
+		t.Errorf("warned with no host memory:\n%s", buf.String())
+	}
+}

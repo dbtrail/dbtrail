@@ -17,7 +17,9 @@ import (
 // (STUB_DOCKER_DOWN) or a missing Compose (STUB_NO_COMPOSE) when asked;
 // `docker info --format` prints STUB_MEM_TOTAL, the memory Docker reports;
 // `docker compose pull` also writes down the BINTRAIL_TAG line .env holds at
-// that moment, so a test sees what the pull was run with.
+// that moment, so a test sees what the pull was run with. `docker compose
+// config --images` prints STUB_IMAGES; `docker compose config -q` fails with
+// STUB_CONFIG_FAIL; `docker run` fails with STUB_RUN_FAIL.
 //
 // curl writes every URL it is asked for to CURL_LOG and answers GitHub's
 // newest-release lookup with STUB_RELEASE_BODY (by default releaseBody), or
@@ -33,7 +35,10 @@ esac
 case "$1 $2" in
   "compose pull") [ -f .env ] && grep BINTRAIL_TAG .env | sed 's/^/pull sees /' >> "$STUB_LOG"
                   [ -n "$STUB_PULL_FAIL" ] && exit 1 ;;
+  "compose config") [ "$3" = --images ] && [ -n "$STUB_IMAGES" ] && printf '%s\n' "$STUB_IMAGES"
+                    [ "$3" = -q ] && [ -n "$STUB_CONFIG_FAIL" ] && exit 1 ;;
 esac
+[ "$1" = run ] && [ -n "$STUB_RUN_FAIL" ] && exit 1
 exit 0
 `,
 	"lsof": `#!/bin/sh

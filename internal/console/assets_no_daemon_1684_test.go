@@ -41,6 +41,7 @@ var daemonHiddenGo = []struct{ file, fragment, why string }{
 	{"baseline_refresh_loop.go", "daemon flag or environment", "provenance written to a log line"},
 	{"composedrift.go", "a daemon that starts with no saved settings", "startup warning written to the log"},
 	{"notify.go", "(see the daemon log)", "webhook notification, not the web interface"},
+	{"memory_share.go", "DAEMON_MEMORY_SHARE (capture", "startup warning written to the log, naming the .env variable"},
 }
 
 // TestNoDaemonInScreenText fails when "daemon" is in a string the web
