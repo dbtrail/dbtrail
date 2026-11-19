@@ -81,6 +81,9 @@ func TestCopyScreen_namesTheStatementDefines(t *testing.T) {
 		`SELECT o.id, o.note FROM pgcmp_orders o JOIN pgcmp_orders p ON o.qty >= p.qty - 5`,
 		`WITH r AS (SELECT id, row_number() OVER (ORDER BY id) AS rnk FROM pgcmp_orders)
 		 SELECT r.id, r.rnk FROM r WHERE r.rnk <= 3 ORDER BY r.id, r.rnk`,
+		// ) OVER ( is no column list (AS b(n)): the names are still read.
+		`WITH r AS (SELECT id, note, row_number() OVER (ORDER BY id) AS rnk, sum(qty) FILTER (WHERE qty > 0) AS s FROM pgcmp_orders)
+		 SELECT r.id, r.note FROM r WHERE r.rnk <= 3 ORDER BY r.rnk, r.s`,
 		`SELECT max(o.qty) FROM pgcmp_orders o`,
 		`SELECT customer_id FROM pgcmp_orders WHERE note IS NOT NULL GROUP BY customer_id HAVING count(*) >= 2`,
 		`SELECT customer_id FROM pgcmp_orders WHERE note IS NOT NULL GROUP BY customer_id HAVING 2 <= count(*)`,

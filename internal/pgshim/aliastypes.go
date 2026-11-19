@@ -81,7 +81,8 @@ func mergeAliasTypes(types map[string][]string, defs map[string][][]rtToken, not
 // item's (AS b(n), ) b(n)) or a WITH's (c(n) AS (...)).
 func columnList(toks []rtToken) bool {
 	for i, t := range toks {
-		if t.kind != rtWord || !isOpTok(toks, i+1, "(") {
+		if t.kind != rtWord || !isOpTok(toks, i+1, "(") || parenWords[t.text] || t.text == "over" || t.text == "within" {
+			// ) OVER (, ) FILTER (, ) AND (: keywords, not a FROM item's name.
 			continue
 		}
 		if i > 0 && (toks[i-1].kind == rtWord && toks[i-1].text == "as" || isOpTok(toks, i-1, ")")) {
