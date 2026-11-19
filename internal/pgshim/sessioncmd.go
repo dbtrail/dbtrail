@@ -93,6 +93,17 @@ type funcCall struct {
 	missingOK bool
 }
 
+// unknownSetting says whether a cmdFunc reads, without missing_ok, a
+// parameter this port does not take.
+func (c *sessionCmd) unknownSetting() bool {
+	for _, f := range c.fns {
+		if f.fn == "current_setting" && !f.missingOK && gucs[f.param] == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // setVal is one value of a SET.
 type setVal struct {
 	kind tokKind

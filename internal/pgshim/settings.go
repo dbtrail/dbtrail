@@ -721,8 +721,9 @@ func (s *session) localColumns(c *sessionCmd) ([]string, []colType, *pgErr) {
 			case "pg_backend_pid":
 				types[i] = colType{oid: oidInt4, size: 4, typmod: -1}
 			case "current_setting":
-				// An unknown parameter is refused when it is described, as
-				// PostgreSQL refuses it when it plans the statement.
+				// An unknown parameter reaches here only where nothing
+				// else can answer it (classify sends it on otherwise), and
+				// is refused as SHOW refuses it.
 				if _, perr := lookupGUC(f.param); perr != nil && !f.missingOK {
 					return nil, nil, perr
 				}

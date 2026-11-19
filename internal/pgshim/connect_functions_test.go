@@ -52,13 +52,28 @@ func TestConnectFunctions_answeredByThePort(t *testing.T) {
 	if err := conn.QueryRow(ctx, "select current_setting('Application_Name')").Scan(&app); err != nil || app != "tplytics" {
 		t.Errorf("application_name = %q, %v", app, err)
 	}
-	// An unknown parameter: refused as PostgreSQL refuses it, or NULL with
-	// missing_ok.
-	var pgErr *pgconn.PgError
-	err = conn.QueryRow(ctx, "SELECT current_setting('no_such_setting')").Scan(&app)
-	if !errors.As(err, &pgErr) || pgErr.Code != "42704" {
-		t.Errorf("an unknown parameter: %v", err)
+	// An unknown parameter is not the port's to answer: it goes where a SHOW
+	// of it goes (the copy here, the source for a forwarding role). NULL
+	// with missing_ok, answered here.
+	l.mu.Lock()
+	before := len(l.ran)
+	l.mu.Unlock()
+	_ = conn.QueryRow(ctx, "SELECT current_setting('no_such_setting')").Scan(&app)
+	l.mu.Lock()
+	went := len(l.ran) > before
+	l.mu.Unlock()
+	if !went {
+		t.Error("current_setting of an unknown parameter did not go on to the copy")
 	}
+	// A prepared current_setting($1): its Describe reads a placeholder in
+	// place of $1, which is no parameter, and must not be refused as one.
+	var pgErr *pgconn.PgError
+	if err := conn.QueryRow(ctx, "select current_setting($1)", "application_name").Scan(&app); errors.As(err, &pgErr) && pgErr.Code == "42704" {
+		t.Errorf("a prepared current_setting($1) was refused as an unknown parameter: %v", err)
+	}
+	l.mu.Lock()
+	ranBefore = len(l.ran)
+	l.mu.Unlock()
 	var missing *string
 	if err := conn.QueryRow(ctx, "SELECT current_setting('no_such_setting', true)").Scan(&missing); err != nil || missing != nil {
 		t.Errorf("missing_ok: %v %v", missing, err)
@@ -88,5 +103,21 @@ func TestConnectFunctions_columns(t *testing.T) {
 	got := r.query("SELECT pg_backend_pid(), current_setting('server_version')")
 	if len(got) == 0 || got[0] != "Columns pg_backend_pid:23,current_setting:25" {
 		t.Errorf("columns: %q", got)
+	}
+}
+
+// On the time-travel port nothing else can answer it, so an unknown
+// parameter is refused there as SHOW refuses it.
+func TestConnectFunctions_unknownSettingOnTheTimeTravelPort(t *testing.T) {
+	c := &sessionCmd{kind: cmdFunc, fns: []funcCall{{fn: "current_setting", param: "no_such_setting"}}}
+	if !c.unknownSetting() {
+		t.Fatal("not unknown")
+	}
+	if _, _, perr := (&session{}).localColumns(c); perr == nil || perr.code != "42704" {
+		t.Errorf("refusal: %v", perr)
+	}
+	c.fns[0].missingOK = true
+	if c.unknownSetting() {
+		t.Error("missing_ok is not unknown")
 	}
 }

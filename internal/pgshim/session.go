@@ -375,6 +375,12 @@ func (s *session) classify(qstr string) classified {
 		case ok && cmd.kind == cmdShow && !cmd.all && gucs[cmd.param] == nil && s.bound != nil:
 			// Not a parameter: the copy's own SHOW (SHOW TABLES), as before.
 			return classified{kind: kindFree}
+		case ok && cmd.kind == cmdFunc && cmd.unknownSetting() && s.bound != nil:
+			// current_setting of a parameter this port does not take goes on,
+			// as its SHOW does: to the source for a forwarding role, and so
+			// does a prepared current_setting($1), which a Describe reads with
+			// a placeholder value in place of the argument.
+			return classified{kind: kindFree}
 		case ok && cmd.returnsRows():
 			return classified{kind: kindLocal, cmd: cmd}
 		case ok:
