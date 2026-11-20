@@ -19,6 +19,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/cliutil"
+	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
@@ -777,6 +778,17 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 					}, warnings...)
 					break // out of the switch → plain recover below
 				}
+				// A change whose earlier row was not captured (a PostgreSQL
+				// table below REPLICA IDENTITY FULL) cannot be undone, whether it
+				// is the parent or a synthesized child: the plain path would
+				// refuse the parent the same way, or hand back a parent-only
+				// script under a warning that blames the synthesis. Refuse the
+				// request as the plain path does (422, the refusal's own text).
+				var nce *event.NotCapturedError
+				if errors.As(cerr, &nce) {
+					writeRecoverError(w, cerr)
+					return
+				}
 				// Cascade synthesis is an ENHANCEMENT of the plain recover, not a
 				// precondition — the base rows were already fetched. A synthesis
 				// failure must not deny the recover the operator can still get;
@@ -1339,6 +1351,15 @@ func writeRecoverError(w http.ResponseWriter, err error) {
 				"for large recoveries; it runs outside DBTrail's shared process and supports "+
 				"--max-script-bytes to raise or disable this budget.",
 			float64(be.EstimatedBytes)/(1<<20), float64(be.Budget)/(1<<20)))
+		return
+	}
+	// A change whose earlier row was not captured (a PostgreSQL table below
+	// REPLICA IDENTITY FULL) is a refusal about the data, not a server fault:
+	// 422 with the refusal's own words (table, key, columns, the ALTER TABLE
+	// that makes later changes undoable; no CLI flag in it).
+	var nce *event.NotCapturedError
+	if errors.As(err, &nce) {
+		writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 	writeJSONError(w, http.StatusInternalServerError, err.Error())
