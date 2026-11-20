@@ -647,6 +647,11 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// On a PostgreSQL index a changed_column filter must also return the
+	// UPDATEs whose changed columns are unknown (query.Options.PostgresHistory),
+	// or the script would silently skip them; they then meet the generator's
+	// not-captured refusal. Decided as the Events view decides it, with no read.
+	opts.PostgresHistory = s.historyIsPostgres(b)
 	if !applyEventAnchor(w, &opts, body.Event) {
 		return
 	}
