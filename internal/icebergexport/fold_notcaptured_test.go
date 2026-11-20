@@ -126,7 +126,7 @@ func TestFold_pg_unchangedLargeValueWithoutSourceRefuses(t *testing.T) {
 
 func TestFold_pg_markerWhereTheCaptureNeverPutsItRefuses(t *testing.T) {
 	cases := map[string]query.ResultRow{
-		"not-captured in a new row":         ev(1, event.EventInsert, "1", nil, docRow("1", ncm(), "x")),
+		"not-captured in a new row":         ev(1, event.EventInsert, "1", nil, docRow("1", "new", ncm())),
 		"not-captured key of a DELETE":      ev(1, event.EventDelete, "1", map[string]any{"id": ncm(), "doc": ncm()}, nil),
 		"unchanged large value in a before": ev(1, event.EventDelete, "1", docRow("1", "x", um()), nil),
 	}
