@@ -580,6 +580,28 @@ func pubAddEvent(oid uint32, n relName, again bool, low *bound, high bound, pubA
 	return e
 }
 
+// PublicationLeftEvent records that t is no longer in the publication: it was
+// taken out, or dropped. The change stream cannot say so (it just stops
+// carrying the table), so this is not inferred from a shape but handed over
+// by whoever compared two readings of the publication (QueryPublishedTables):
+// the table was in it at the low reading and out at the high one.
+//
+// The row carries the gap a table added back carries (pubAddEvent): from
+// some moment in the bracket on, changes of the table are not captured. A
+// snapshot from before the bracket's end is then no longer the table, and
+// the guard that reads this row (reconstruct.CheckDestructiveDDL) refuses to
+// build on it; a new full read, which no longer holds the table, clears it.
+func PublicationLeftEvent(t PublishedTable, lowLSN uint64, lowAt time.Time, highLSN uint64, highAt time.Time) event.Event {
+	n := relName{schema: t.Schema, table: t.Table}
+	low, high := bound{lsn: pglogrepl.LSN(lowLSN), at: lowAt}, bound{lsn: pglogrepl.LSN(highLSN), at: highAt}
+	text := fmt.Sprintf("ALTER PUBLICATION ... DROP TABLE %s: the table is no longer in the publication (taken out of it, or dropped); "+
+		"changes made to it since are not captured", n)
+	e := ddlEvent(event.DDLAlterPublication, t.OID, n, nil, text, &low, high, nil)
+	head := fmt.Sprintf("%s oid=%d; ", event.InferredDDLPrefix, t.OID)
+	e.DDLQuery = head + "gap=" + event.InferredGapUncaptured + "; " + strings.TrimPrefix(e.DDLQuery, head)
+	return e
+}
+
 func renameEvent(oid uint32, from, to relName, note string, low *bound, high bound, exact *time.Time) event.Event {
 	text := fmt.Sprintf("RENAME TABLE %s TO %s", from, to)
 	if from.schema != to.schema {

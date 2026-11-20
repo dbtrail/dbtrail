@@ -375,6 +375,100 @@ type sourceHealthJSON struct {
 	// reading — the slot fields are absent/zero. Persisted so the console shows an
 	// explicit "probe failing" state instead of a blank panel (see buildProbeErrorJSON).
 	ProbeError string `json:"probe_error,omitempty"`
+	// Published is the publication's tables at the last reading of them, and
+	// PublishedAt / PublishedLSN when and where that was: what the next
+	// reading is compared with, also by a capture that starts again
+	// (publicationWatch). Absent until one was read.
+	Published    *[]publishedTableJSON `json:"published,omitempty"`
+	PublishedAt  string                `json:"published_at,omitempty"`
+	PublishedLSN uint64                `json:"published_lsn,omitempty"`
+}
+
+type publishedTableJSON struct {
+	OID    uint32 `json:"oid"`
+	Schema string `json:"schema"`
+	Table  string `json:"table"`
+}
+
+// publicationWatch notices a table that leaves the publication, by comparing
+// each reading of its tables with the one before: MySQL's capture sees a
+// DROP TABLE in the binary log, and PostgreSQL's change stream says nothing
+// when a table is taken out of the publication or dropped. Its snapshot file
+// would then be carried from update to update as a table with no change,
+// and its tail, empty, taken for up to date: answers as of the day it left,
+// with nothing to say so.
+//
+// The reading it compares with is kept in stream_state.source_health, so a
+// table that left while capture was down is noticed at the first reading
+// after it starts.
+type publicationWatch struct {
+	known  bool
+	tables []pgcapture.PublishedTable
+	at     time.Time
+	lsn    uint64
+}
+
+// loadPublicationWatch reads the last reading a capture of this index saved.
+func loadPublicationWatch(db *sql.DB) publicationWatch {
+	ctx, cancel := context.WithTimeout(context.Background(), indexer.WriteTimeout)
+	defer cancel()
+	var raw sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT source_health FROM stream_state WHERE id = 1`).Scan(&raw); err != nil || !raw.Valid {
+		return publicationWatch{}
+	}
+	var h sourceHealthJSON
+	if json.Unmarshal([]byte(raw.String), &h) != nil || h.Published == nil {
+		return publicationWatch{}
+	}
+	at, err := time.Parse(time.RFC3339Nano, h.PublishedAt)
+	if err != nil {
+		return publicationWatch{}
+	}
+	w := publicationWatch{known: true, at: at, lsn: h.PublishedLSN}
+	for _, t := range *h.Published {
+		w.tables = append(w.tables, pgcapture.PublishedTable{OID: t.OID, Schema: t.Schema, Table: t.Table})
+	}
+	return w
+}
+
+// left is the tables of the reading before that now does not hold, by OID: a
+// renamed table is still in the publication.
+func (w publicationWatch) left(now []pgcapture.PublishedTable) []pgcapture.PublishedTable {
+	if !w.known {
+		return nil
+	}
+	in := make(map[uint32]bool, len(now))
+	for _, t := range now {
+		in[t.OID] = true
+	}
+	var out []pgcapture.PublishedTable
+	for _, t := range w.tables {
+		if !in[t.OID] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// stamp writes the watch's reading into a source-health document.
+func (w publicationWatch) stamp(healthJSON []byte) []byte {
+	if !w.known {
+		return healthJSON
+	}
+	var h sourceHealthJSON
+	if json.Unmarshal(healthJSON, &h) != nil {
+		return healthJSON
+	}
+	list := make([]publishedTableJSON, 0, len(w.tables))
+	for _, t := range w.tables {
+		list = append(list, publishedTableJSON{OID: t.OID, Schema: t.Schema, Table: t.Table})
+	}
+	h.Published, h.PublishedAt, h.PublishedLSN = &list, w.at.UTC().Format(time.RFC3339Nano), w.lsn
+	out, err := json.Marshal(h)
+	if err != nil {
+		return healthJSON
+	}
+	return out
 }
 
 // buildSourceHealthJSON marshals a probe result + the wall-clock it was taken into the
@@ -500,6 +594,9 @@ func streamLoopPG(
 	var proof caughtUpProof
 	var caughtUpMoment, caughtUpSourceAt time.Time
 	flushedUnread := false
+	// The publication's tables as last read, by this run or the one before.
+	watch := loadPublicationWatch(indexDB)
+	publishedUnread := false
 	pollHealth := func() {
 		pctx, cancel := context.WithTimeout(ctx, healthPollTimeout)
 		defer cancel()
@@ -521,7 +618,7 @@ func streamLoopPG(
 			// panel absent and the staleness net has nothing to age — the silent-failure
 			// the visibility feature must not have. buildProbeErrorJSON cannot fail.
 			if errJSON, mErr := buildProbeErrorJSON(err.Error(), time.Now()); mErr == nil {
-				saveSourceHealth(indexDB, state.serverID, errJSON, logger)
+				saveSourceHealth(indexDB, state.serverID, watch.stamp(errJSON), logger)
 			}
 			return
 		}
@@ -545,12 +642,39 @@ func streamLoopPG(
 				logger.Info("pgstreamrun: the source's flushed WAL position is read again")
 			}
 		}
+		// A table that left the publication since the reading before
+		// (publicationWatch). Recorded before the reading is saved: a table
+		// whose record could not be written stays in the saved reading, and
+		// is found gone again at the next one.
+		if failing := snap.PublishedErr != nil; failing != publishedUnread && ctx.Err() == nil && pctx.Err() == nil {
+			publishedUnread = failing
+			if failing {
+				logger.Warn("pgstreamrun: could not list the publication's tables; until it can be read, a table taken out of the publication is not noticed",
+					"error", snap.PublishedErr)
+			}
+		}
+		if snap.PublishedErr == nil {
+			highLSN := max(snap.FlushedLSN, pendingSent, state.lsn)
+			next := append([]pgcapture.PublishedTable(nil), snap.Published...)
+			for _, t := range watch.left(snap.Published) {
+				ev := pgcapture.PublicationLeftEvent(t, watch.lsn, watch.at, highLSN, time.Now())
+				if werr := indexer.InsertSchemaChange(indexDB, ev, nil); werr != nil {
+					logger.Error("pgstreamrun: a table left the publication and that could not be recorded; it is tried again at the next reading",
+						"schema", t.Schema, "table", t.Table, "error", werr)
+					next = append(next, t)
+					continue
+				}
+				logger.Warn("pgstreamrun: a table is no longer in the publication (taken out of it, or dropped): its changes are not captured from here on, and its snapshot is not updated until a new full read",
+					"schema", t.Schema, "table", t.Table, "oid", t.OID)
+			}
+			watch = publicationWatch{known: true, tables: next, at: asked, lsn: highLSN}
+		}
 		healthJSON, err := buildSourceHealthJSON(snap, time.Now())
 		if err != nil {
 			logger.Warn("pgstreamrun: marshal source-health snapshot", "error", err)
 			return
 		}
-		saveSourceHealth(indexDB, state.serverID, healthJSON, logger)
+		saveSourceHealth(indexDB, state.serverID, watch.stamp(healthJSON), logger)
 	}
 
 	// The last complete transaction's commit LSN. A resumed run starts from
