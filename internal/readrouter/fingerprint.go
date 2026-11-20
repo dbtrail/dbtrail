@@ -164,14 +164,3 @@ func fingerprintNumberEnd(s string, i int) int {
 }
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
-
-// stringPrefix reports whether tok, the word written against a string's
-// opening quote, is one of the prefixes a string takes: x, b, n, or a
-// character set introducer (_utf8mb4).
-func stringPrefix(tok string) bool {
-	switch strings.ToLower(tok) {
-	case "x", "b", "n":
-		return true
-	}
-	return strings.HasPrefix(tok, "_")
-}
