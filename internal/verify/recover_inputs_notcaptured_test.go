@@ -36,8 +36,13 @@ func TestRecoverChains_notCaptured_isNotAMismatch(t *testing.T) {
 		riEvent(5, event.EventUpdate, "2", riRow(2, "x", 1), riRow(2, "y", 1)),
 	}))
 	t.Logf("detail as shown: %s", out.Detail)
-	if out.Status != StatusMatch {
-		t.Fatalf("status = %s, want match (a partial change is not a mismatch): %s", out.Status, out.Detail)
+	// Not a mismatch, and not a match either: recover refuses the whole
+	// window, so a gate on this check must not read it as safe.
+	if out.Status != StatusInconclusive || out.InconclusiveKind != InconclusiveUnproven {
+		t.Fatalf("status = %s/%s, want inconclusive/unproven: %s", out.Status, out.InconclusiveKind, out.Detail)
+	}
+	if !strings.Contains(out.Detail, "settled 1 comparison(s) between one change and the next, all matched") {
+		t.Errorf("the clean comparison must stay in the detail:\n%s", out.Detail)
 	}
 	if out.NotCaptured != 1 {
 		t.Errorf("NotCaptured = %d, want 1", out.NotCaptured)
@@ -71,7 +76,7 @@ func TestRecoverChains_notCaptured_deleteThenReinsert(t *testing.T) {
 		riEvent(3, event.EventInsert, "1", nil, riRow(1, "b", 1)),
 		riEvent(4, event.EventUpdate, "1", riRow(1, "b", 1), riRow(1, "c", 1)),
 	}))
-	if out.Status != StatusMatch || out.NotCaptured != 1 || out.Assertions != 1 {
+	if out.Status != StatusInconclusive || out.NotCaptured != 1 || out.Assertions != 1 {
 		t.Fatalf("status=%s NotCaptured=%d Assertions=%d: %s", out.Status, out.NotCaptured, out.Assertions, out.Detail)
 	}
 }
@@ -182,5 +187,21 @@ func TestRecoverChains_notCaptured_noLongerWindowHint(t *testing.T) {
 	}))
 	if !strings.Contains(midWindow.Detail, "a longer window") {
 		t.Errorf("a row starting mid-window keeps the hint:\n%s", midWindow.Detail)
+	}
+}
+
+// A real mismatch still wins, and the not-captured note is not lost from it.
+func TestRecoverChains_notCaptured_noteSurvivesAMismatch(t *testing.T) {
+	out := checkRecoverChains(riInput([]query.ResultRow{
+		riEvent(1, event.EventInsert, "1", nil, riRow(1, "a", 1)),
+		riEvent(2, event.EventUpdate, "1", keyOnly(1), riRow(1, "b", 2)),
+		riEvent(3, event.EventInsert, "2", nil, riRow(2, "x", 1)),
+		riEvent(4, event.EventUpdate, "2", riRow(2, "WRONG", 1), riRow(2, "y", 1)),
+	}))
+	if out.Status != StatusMismatch {
+		t.Fatalf("status = %s, want mismatch: %s", out.Status, out.Detail)
+	}
+	if !strings.Contains(out.Detail, "separately, 1 change(s) could not be checked") {
+		t.Errorf("the note must survive the mismatch:\n%s", out.Detail)
 	}
 }

@@ -63,8 +63,8 @@ func TestVerifyRecoverInputs_NotCapturedIsCountedNotAMismatch(t *testing.T) {
 		t.Fatalf("VerifyRecoverInputs: %v", err)
 	}
 	t.Logf("detail as shown: %s", res.Detail)
-	if res.Status != StatusMatch {
-		t.Fatalf("status = %s, want match: %s", res.Status, res.Detail)
+	if res.Status != StatusInconclusive || res.InconclusiveKind != InconclusiveUnproven {
+		t.Fatalf("status = %s/%s, want inconclusive/unproven (recover refuses this window): %s", res.Status, res.InconclusiveKind, res.Detail)
 	}
 	if res.ChangesNotCaptured != 1 {
 		t.Errorf("ChangesNotCaptured = %d, want 1", res.ChangesNotCaptured)

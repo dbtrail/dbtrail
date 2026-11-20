@@ -546,7 +546,8 @@ bintrail verify --index-dsn "$IDX" --baseline-dir /data/baselines --format json
   earlier row, because the PostgreSQL table was not at `REPLICA IDENTITY FULL`
   when they were made. They cannot be checked, and `recover` cannot undo them;
   they are never counted as a mismatch, and each row's history starts over
-  after one.
+  after one. A table holding one is reported inconclusive (`unproven`), never
+  as a match, because `recover` refuses every window that contains it.
 - `explain[]` — present only with `--explain`: per mismatched table, the capped
   list of differing rows (`pk`, `kind`, and per-column `recovery` vs `baseline`
   values), `total_differing_rows`, `overflow_by_kind` for the rows beyond the

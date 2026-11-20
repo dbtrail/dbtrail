@@ -653,6 +653,9 @@ func recoverChainVerdict(out recoverChainOutcome, mismatchCount int, firstMismat
 	// the events that WERE walked are real, and recover would consume them.
 	if mismatchCount > 0 {
 		detail := fmt.Sprintf("the stored history does not hold together in %d place(s), out of %s read; first: %s", mismatchCount, scope, firstMismatch)
+		if out.notCapturedNote != "" {
+			detail += "; separately, " + out.notCapturedNote
+		}
 		return StatusMismatch, detail, ""
 	}
 	if truncated {
@@ -716,6 +719,13 @@ func recoverChainVerdict(out recoverChainOutcome, mismatchCount int, firstMismat
 	detail := fmt.Sprintf("checked %s; settled %d comparison(s) between one change and the next, all matched", scope, out.Assertions)
 	if len(notes) > 0 {
 		detail += "; " + strings.Join(notes, "; ")
+	}
+	// A change whose earlier row was not captured is not one more unproven
+	// corner: recover refuses the WHOLE window that holds it. A match here
+	// would read as "safe to recover" to anything gating on this check, so
+	// the table stays unproven, its clean comparisons kept in the detail.
+	if out.NotCaptured > 0 {
+		return StatusInconclusive, detail, InconclusiveUnproven
 	}
 	return StatusMatch, detail, ""
 }
