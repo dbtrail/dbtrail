@@ -1,8 +1,8 @@
 package pgcapture
 
 import (
-	"errors"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
