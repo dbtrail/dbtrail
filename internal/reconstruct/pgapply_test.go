@@ -98,7 +98,7 @@ func TestApplyAt_PGLeavesTheEventsAsTheyWere(t *testing.T) {
 func TestApplyAt_notPostgresAnswersAsBefore(t *testing.T) {
 	for name, ev := range map[string]query.ResultRow{
 		"an earlier row with a column that was not captured": upd3(1, 0x700, "t", "x"),
-		"an unsent value":                                    upd3(1, 0x700, "t", unsent()),
+		"an unsent value": upd3(1, 0x700, "t", unsent()),
 	} {
 		ev.BinlogFile, ev.StartPos = "binlog.000001", 4
 		ev.EventTimestamp = foldBase.Add(time.Second)
