@@ -90,6 +90,16 @@ type session struct {
 	// slotWaitCap, when set, bounds the wait for a connection to the source
 	// (source), below the statement's own.
 	slotWaitCap time.Duration
+	// stmtCtx is the context of the message being handled (beginMessage),
+	// nil between messages.
+	stmtCtx context.Context
+	// sourceRead: the source sent this connection rows or a statement's
+	// end (markSourceRead), so the copy must not answer it with less.
+	// knownLSN is the source's WAL position read after the last such answer
+	// on this connection, valid while knownValid.
+	sourceRead bool
+	knownLSN   uint64
+	knownValid bool
 }
 
 // initSettings sets a connection's settings before its start-up message is

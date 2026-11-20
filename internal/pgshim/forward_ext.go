@@ -1,6 +1,8 @@
 package pgshim
 
 import (
+	"fmt"
+
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
@@ -508,5 +510,29 @@ func (s *session) syncOnSource() {
 		return
 	}
 	s.followSourceStatus(up, tx)
+	if s.sourceRead && !s.knownValid && s.bound.CopyWait != nil && !up.unsafe {
+		// The batch sent the client the source's rows: where the source
+		// stands now, once the batch is over (#2985, knownLSN).
+		if _, perr, lost := s.positionAfter(up); lost != nil {
+			s.loseSource(lost.why)
+		} else if perr != nil {
+			s.logger.Debug("pgshim: the source did not say its WAL position after a batch", "code", perr.code, "err", perr.msg)
+		}
+	}
 	s.afterSource(up)
+}
+
+// positionAfter reads the source's WAL position on up, outside any batch,
+// and keeps it as the connection's known one.
+func (s *session) positionAfter(up *upstream) (uint64, *pgErr, *errSourceLost) {
+	cell, perr, lost := s.cellOnSource(up, sourceWALPositionSQL)
+	if lost != nil || perr != nil {
+		return 0, perr, lost
+	}
+	lsn, ok := parseLSN(string(cell))
+	if !ok {
+		return 0, &pgErr{"XX000", fmt.Sprintf("%q is not a WAL position", cell)}, nil
+	}
+	s.knownLSN, s.knownValid = lsn, true
+	return lsn, nil, nil
 }

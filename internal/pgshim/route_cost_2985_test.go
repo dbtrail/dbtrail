@@ -151,9 +151,9 @@ func (k *copyAgeKnob) age() CopyAge {
 	}
 }
 
-// Once the source answered a connection, the copy does not answer it with
-// data older than that answer: the statement goes to the source
-// (copy_too_old), and comes back to the copy once the copy has caught up.
+// Once the source answered a connection, a host that cannot make the copy
+// wait (no CopyWait) gets the copy only for a run that read no table: no
+// clock of the source is trusted to say the copy caught up (#2985).
 func TestRouteByCost_2985_noReadGoesBackAfterTheSource(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -181,7 +181,7 @@ func TestRouteByCost_2985_noReadGoesBackAfterTheSource(t *testing.T) {
 		{"the copy a second behind the source's answer", func() { knob.at(time.Now().Add(-time.Second)) }, tooOld},
 		{"a snapshot alone, whose reach is not known", func() { knob.set(snapshotAlone) }, tooOld},
 		{"a run that read no table", func() { knob.set(noTable) }, onCopy},
-		{"the copy caught up", func() { knob.at(time.Now().Add(time.Second)) }, onCopy},
+		{"the copy's commit time ahead of the answer: no clock is trusted", func() { knob.at(time.Now().Add(time.Second)) }, tooOld},
 	} {
 		tc.set()
 		if got := costSimple(ctx, c, l, report); got != tc.want {
@@ -213,9 +213,9 @@ func TestRouteByCost_2985_noReadGoesBackAfterTheSource(t *testing.T) {
 	if n := l.last(); n.Side != RouteSource || n.Reason != ReasonCopyTooOld {
 		t.Errorf("prepared, the copy behind: noted %s/%s", n.Side, n.Reason)
 	}
-	knob.at(time.Now().Add(time.Hour))
+	knob.set(noTable)
 	if res := c.ExecPrepared(ctx, "rep", nil, nil, nil).Read(); res.Err != nil || len(res.Rows) != 1 || string(res.Rows[0][0]) != "7" {
-		t.Errorf("prepared, the copy caught up: %v %q, want the copy's 7", res.Err, res.Rows)
+		t.Errorf("prepared, a run that read no table: %v %q, want the copy's 7: the statement was kept on the source", res.Err, res.Rows)
 	}
 	if c.TxStatus() != 'I' {
 		t.Errorf("status %c", c.TxStatus())
@@ -272,7 +272,9 @@ func TestRouteByCost_2985_remembersAShape(t *testing.T) {
 		"SELECT n FROM t WHERE id = 1", "SELECT n FROM t WHERE id = 2", "select n from t where id = '3'", "SELECT n FROM t WHERE id = 4", "SELECT n FROM t WHERE id=5"))
 	asked("a value not compared with =", 2, runs(cheap, "SELECT n FROM t WHERE id = 1 LIMIT 5", "SELECT n FROM t WHERE id = 1 LIMIT 5"))
 	asked("a plan expensive by a margin under ten", 2, runs(onCopy, "SELECT sum(n) FROM big", "SELECT sum(n) FROM big"))
-	asked("a plan ten times over", 1, runs(onCopy, "SELECT sum(n) FROM huge", "SELECT sum(n) FROM huge"))
+	// A verdict for the copy is never kept: its table may be dropped and made
+	// again on the source while the copy still holds the old rows.
+	asked("a plan ten times over, for the copy", 2, runs(onCopy, "SELECT sum(n) FROM huge", "SELECT sum(n) FROM huge"))
 	asked("a plan refused for the moment", 2, runs(costOutcome{"42", "", RouteSource, ReasonExplainFailed}, "SELECT count(*) FROM locked", "SELECT count(*) FROM locked"))
 	asked("a statement the source refuses", 2, runs(costOutcome{"", "42P01", RouteSource, ReasonExplainFailed}, "SELECT count(*) FROM nosuch", "SELECT count(*) FROM nosuch"))
 	asked("the remembered shape again", 0, runs(cheap, "SELECT n FROM t WHERE id = 9"))
@@ -446,7 +448,7 @@ func TestRouteByCost_2985_theCopyWaits(t *testing.T) {
 		t.Errorf("the wait's deadline was %v away, want within %v", deadline, copyWaitLimit)
 	}
 	if d := l.opened.Load() - opened; d != 1 {
-		t.Errorf("%d connections to the source for one report, want 1: its position is read where its plan was", d)
+		t.Errorf("%d connections to the source for one report, want 1: its position is the one known from the source's last answer", d)
 	}
 
 	// Reached, but the run read a snapshot alone: still the source.
@@ -477,8 +479,8 @@ func TestRouteByCost_2985_theCopyWaits(t *testing.T) {
 		t.Errorf("nothing to wait on, the copy behind: %+v after %d runs, want %+v after one", got, l.runs.Load()-runs, tooOld)
 	}
 	knob.at(time.Now().Add(time.Hour))
-	if got := costSimple(ctx, c, l, report); got != onCopy {
-		t.Errorf("nothing to wait on, the copy past it: %+v, want %+v", got, onCopy)
+	if got := costSimple(ctx, c, l, report); got != tooOld {
+		t.Errorf("nothing to wait on, the copy's commit time past it: %+v, want %+v: no clock is trusted", got, tooOld)
 	}
 	w.mu.Lock()
 	w.none = false
@@ -496,8 +498,8 @@ func TestRouteByCost_2985_theCopyWaits(t *testing.T) {
 	}
 	knob.at(time.Now().Add(-time.Hour))
 
-	// A prepared statement waits at each execution: the first with the
-	// position read where its plan was, the next with one read on its own.
+	// A prepared statement waits at each execution, for the position known
+	// after the source's last answer, read with that answer: none read again.
 	w.set(true, false)
 	if _, err := c.Prepare(ctx, "rep2", report, nil); err != nil {
 		t.Fatal(err)
@@ -511,8 +513,8 @@ func TestRouteByCost_2985_theCopyWaits(t *testing.T) {
 		if after, _, _ := w.asked(); after != before+1 {
 			t.Errorf("prepared, run %d: waited %d times, want once", i, after-before)
 		}
-		if i == 1 && src.positionsRead() != positions+1 {
-			t.Errorf("prepared, run %d: read the position %d times, want once", i, src.positionsRead()-positions)
+		if src.positionsRead() != positions {
+			t.Errorf("prepared, run %d: read the position %d times, want none: it is known", i, src.positionsRead()-positions)
 		}
 	}
 
@@ -548,6 +550,171 @@ func TestParseLSN(t *testing.T) {
 	for _, in := range []string{"", "42", "/1", "1/", "G/1", "100000000/0", "1/2/3"} {
 		if _, ok := parseLSN(in); ok {
 			t.Errorf("parseLSN(%q) read a position", in)
+		}
+	}
+}
+
+// An answer of the source that sent rows and then an error counts as a read
+// of the source: the copy waits after it (#2985).
+func TestRouteByCost_2985_rowsThenAnErrorCount(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	knob := &copyAgeKnob{}
+	knob.at(time.Now().Add(-time.Hour))
+	w := &copyWaitKnob{reach: true}
+	src := startFakeSource(t, costPlans)
+	l := &costLogin{src: src, age: knob.age, wait: w.wait}
+	c := costPortConn(t, ctx, l)
+	got := costSimple(ctx, c, l, "SELECT n FROM rowsthenfail")
+	if got.code != "22012" || got.side != RouteSource {
+		t.Fatalf("rows then an error: %+v", got)
+	}
+	if got := costSimple(ctx, c, l, "SELECT sum(n) FROM big"); got.side != RouteCopy {
+		t.Fatalf("the report: %+v", got)
+	}
+	if n, _, _ := w.asked(); n != 1 {
+		t.Errorf("the copy waited %d times after the source sent rows and then an error, want once", n)
+	}
+	// An error with no row before it is not a read: nothing to go back from.
+	d := costPortConn(t, ctx, l)
+	if got := costSimple(ctx, d, l, "SELECT count(*) FROM nosuch"); got.code != "42P01" {
+		t.Fatalf("a table neither side has: %+v", got)
+	}
+	before, _, _ := w.asked()
+	if got := costSimple(ctx, d, l, "SELECT sum(n) FROM big"); got != (costOutcome{"7", "", RouteCopy, ReasonAnswersTheSame}) {
+		t.Errorf("after an error alone: %+v", got)
+	}
+	if n, _, _ := w.asked(); n != before {
+		t.Errorf("the copy waited after an error alone")
+	}
+}
+
+// When the source's position after its last answer cannot be learned, the
+// source answers: the copy runs nothing, unproven (#2985).
+func TestRouteByCost_2985_anUnknownPositionGoesToTheSource(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	knob := &copyAgeKnob{}
+	knob.at(time.Now().Add(time.Hour))
+	w := &copyWaitKnob{reach: true}
+	src := startFakeSourceWith(t, &fakeSource{plans: costPlans, noPosition: true})
+	l := &costLogin{src: src, age: knob.age, wait: w.wait}
+	c := costPortConn(t, ctx, l)
+	if got := costSimple(ctx, c, l, "SELECT n FROM t WHERE id = 1"); got.side != RouteSource || got.code != "" {
+		t.Fatalf("the read by key: %+v", got)
+	}
+	runs := l.runs.Load()
+	if got := costSimple(ctx, c, l, "SELECT sum(n) FROM big"); got != (costOutcome{"42", "", RouteSource, ReasonCopyTooOld}) {
+		t.Errorf("no position known: %+v, want the source's 42 as copy_too_old", got)
+	}
+	if d := l.runs.Load() - runs; d != 0 {
+		t.Errorf("the copy ran %d statements with no position to wait for", d)
+	}
+	if n, _, _ := w.asked(); n != 0 {
+		t.Errorf("waited %d times with no position", n)
+	}
+	if src.positionsRead() == 0 {
+		t.Error("the position was never asked for")
+	}
+}
+
+// A cancel request stops a statement that waits for a connection to the
+// source, with no statement_timeout set (#2985).
+func TestRouteByCost_2985_aCancelStopsTheSlotWait(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	src := startFakeSource(t, costPlans)
+	l := &costLogin{src: src, slots: make(chan struct{}, 1)}
+	addr := serveAddrCfg(t, Config{Login: l.login})
+	a, err := pgconn.Connect(ctx, costDSN(addr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close(context.Background())
+	b, err := pgconn.Connect(ctx, costDSN(addr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close(context.Background())
+	if _, err := a.Exec(ctx, "BEGIN").ReadAll(); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		_ = b.CancelRequest(context.Background())
+	}()
+	start := time.Now()
+	_, err = b.Exec(ctx, "SELECT n FROM t WHERE id = 1").ReadAll()
+	var pe *pgconn.PgError
+	if !errors.As(err, &pe) || pe.Code != "57014" {
+		t.Errorf("cancelled while it waited for a connection: %v, want 57014", err)
+	}
+	if took := time.Since(start); took > 10*time.Second {
+		t.Errorf("the cancel took %v to stop the wait", took)
+	}
+	_, _ = a.Exec(ctx, "ROLLBACK").ReadAll()
+}
+
+// The waits of one statement share its statement_timeout: the wait for a
+// connection and the copy's wait together end at it (#2985).
+func TestRouteByCost_2985_oneDeadlineForTheStatement(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	knob := &copyAgeKnob{}
+	knob.at(time.Now())
+	w := &copyWaitKnob{block: true}
+	src := startFakeSource(t, costPlans)
+	l := &costLogin{src: src, slots: make(chan struct{}, 1), age: knob.age, wait: w.wait}
+	addr := serveAddrCfg(t, Config{Login: l.login})
+	a, err := pgconn.Connect(ctx, costDSN(addr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close(context.Background())
+	b, err := pgconn.Connect(ctx, costDSN(addr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close(context.Background())
+	// b read the source, so its report waits for the copy.
+	if _, err := b.Exec(ctx, "SELECT n FROM t WHERE id = 1").ReadAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Exec(ctx, "SET statement_timeout = '500ms'").ReadAll(); err != nil {
+		t.Fatal(err)
+	}
+	// a holds the one connection for 300 ms: b's report waits for it, then
+	// waits for the copy, which never reaches the position.
+	if _, err := a.Exec(ctx, "BEGIN").ReadAll(); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		_, _ = a.Exec(context.Background(), "COMMIT").ReadAll()
+	}()
+	start := time.Now()
+	_, err = b.Exec(ctx, "SELECT sum(n) FROM big").ReadAll()
+	took := time.Since(start)
+	var pe *pgconn.PgError
+	if !errors.As(err, &pe) || pe.Code != "57014" {
+		t.Errorf("the report: %v, want 57014 at its statement_timeout", err)
+	}
+	if took > 900*time.Millisecond {
+		t.Errorf("the report took %v: its waits did not share its 500ms", took)
+	}
+}
+
+func TestReadsCatalog(t *testing.T) {
+	for q, want := range map[string]bool{
+		"SELECT table_name FROM information_schema.tables":  true,
+		"SELECT relname FROM pg_catalog.pg_class":           true,
+		"SELECT n FROM t":                                   false,
+		"SELECT 'information_schema' FROM t":                false,
+		`SELECT n FROM "information_schema_copy"`:           false,
+		"SELECT count(*) FROM INFORMATION_SCHEMA.COLUMNS":   true,
+	} {
+		if got := readsCatalog(q); got != want {
+			t.Errorf("readsCatalog(%q) = %v, want %v", q, got, want)
 		}
 	}
 }

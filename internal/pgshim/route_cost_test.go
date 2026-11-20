@@ -159,8 +159,10 @@ func TestMultiStatement(t *testing.T) {
 type fakeSource struct {
 	plans map[string]string
 	addr  string
-	// delay, when set, is how long it takes to answer each simple query.
-	delay time.Duration
+	// delay, when set, is how long it takes to answer each simple query;
+	// noPosition, when set, refuses the read of its WAL position.
+	delay      time.Duration
+	noPosition bool
 
 	mu       sync.Mutex
 	explains []string
@@ -187,11 +189,17 @@ func startFakeSource(t *testing.T, plans map[string]string) *fakeSource {
 // delay.
 func startFakeSourceSlow(t *testing.T, plans map[string]string, delay time.Duration) *fakeSource {
 	t.Helper()
+	return startFakeSourceWith(t, &fakeSource{plans: plans, delay: delay})
+}
+
+// startFakeSourceWith serves f, its fields set before any connection.
+func startFakeSourceWith(t *testing.T, f *fakeSource) *fakeSource {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fakeSource{plans: plans, addr: ln.Addr().String(), delay: delay}
+	f.addr = ln.Addr().String()
 	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		for {
@@ -280,6 +288,10 @@ func (f *fakeSource) serve(c net.Conn) {
 				f.mu.Lock()
 				f.positions++
 				f.mu.Unlock()
+				if f.noPosition {
+					be.Send(&pgproto3.ErrorResponse{Severity: "ERROR", Code: "42501", Message: "permission denied for function pg_current_wal_lsn"})
+					break
+				}
 				be.Send(&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{{Name: []byte("lsn"), DataTypeOID: 3220, DataTypeSize: 8, TypeModifier: -1}}})
 				be.Send(&pgproto3.DataRow{Values: [][]byte{[]byte(fakeWALPosition)}})
 				be.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")})
@@ -295,6 +307,13 @@ func (f *fakeSource) serve(c net.Conn) {
 				f.mu.Lock()
 				f.queries = append(f.queries, q)
 				f.mu.Unlock()
+				if strings.Contains(q, "rowsthenfail") {
+					// Rows, then an error, as SELECT c FROM t; SELECT 1/0.
+					be.Send(rowShape)
+					row()
+					be.Send(&pgproto3.ErrorResponse{Severity: "ERROR", Code: "22012", Message: "division by zero"})
+					break
+				}
 				if strings.Contains(q, "nosuch") {
 					be.Send(&pgproto3.ErrorResponse{Severity: "ERROR", Code: "42P01", Message: `relation "nosuch" does not exist`})
 					break
@@ -644,9 +663,9 @@ func TestRouteByCost_prepared(t *testing.T) {
 	}
 }
 
-// A source that cannot be reached is tried once for a simple query, whose
-// client gets the error the source would have given: the statement is not
-// sent there to wait for it a second time.
+// A source that cannot be reached is tried once for a simple query, and the
+// copy answers it (#2985): routing by plan is off while the source cannot be
+// asked.
 func TestRouteByCost_unreachableSource(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -666,9 +685,10 @@ func TestRouteByCost_unreachableSource(t *testing.T) {
 	t.Cleanup(func() { _ = ln.Close() })
 	l := &costLogin{src: &fakeSource{addr: ln.Addr().String()}}
 	c := costPortConn(t, ctx, l)
+	// The copy answers it, as before routing by plan, with a notice (#2985).
 	got := costSimple(ctx, c, l, "SELECT sum(n) FROM big")
-	if got.answer != "" || got.code != "08001" || got.side != RouteSource || got.reason != ReasonExplainFailed {
-		t.Errorf("an unreachable source: %+v", got)
+	if got != (costOutcome{"7", "", RouteCopy, ReasonSourceUnreachable}) {
+		t.Errorf("an unreachable source: %+v, want the copy's 7 as source_unreachable", got)
 	}
 	if n := l.opened.Load(); n != 1 {
 		t.Errorf("%d connections to the source were opened for one statement, want 1: it was sent there again", n)

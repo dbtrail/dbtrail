@@ -366,17 +366,26 @@ func commandLoop(be *pgproto3.Backend, sess *session) {
 		// Flush.
 		switch m := msg.(type) {
 		case *pgproto3.Query:
-			if err := sess.handleSimpleQuery(m.String); err != nil {
+			end := sess.beginMessage()
+			err := sess.handleSimpleQuery(m.String)
+			end()
+			if err != nil {
 				return
 			}
 		case *pgproto3.Parse:
 			sess.handleParse(m)
 		case *pgproto3.Bind:
+			end := sess.beginMessage()
 			sess.handleBind(m)
+			end()
 		case *pgproto3.Describe:
+			end := sess.beginMessage()
 			sess.handleDescribe(m)
+			end()
 		case *pgproto3.Execute:
+			end := sess.beginMessage()
 			sess.handleExecute(m)
+			end()
 		case *pgproto3.Close:
 			sess.handleClose(m)
 		case *pgproto3.Sync:

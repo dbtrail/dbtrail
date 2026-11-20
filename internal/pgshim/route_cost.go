@@ -256,6 +256,9 @@ func (s *session) routeByCostPlan(text string, generic bool) (d routeDecision, k
 	}
 	up, perr := s.prepareSource()
 	if perr != nil {
+		if sourceUnreachable(perr) {
+			return s.copyWhileUnreachable(perr.code + ": " + perr.msg), false, nil, nil
+		}
 		return failed, false, perr, nil
 	}
 	opts := "FORMAT JSON"
@@ -265,7 +268,7 @@ func (s *session) routeByCostPlan(text string, generic bool) (d routeDecision, k
 	raw, srcErr, lost := s.explainOnSource(up, "EXPLAIN ("+opts+") "+text)
 	if lost != nil {
 		s.loseSource(lost.why)
-		return failed, false, s.lostError(lost), nil
+		return s.copyWhileUnreachable("the connection to the source was lost: " + lost.why), false, nil, nil
 	}
 	if srcErr != nil {
 		if srcErr.code == "57014" {
@@ -294,7 +297,7 @@ func (s *session) routeByCostPlan(text string, generic bool) (d routeDecision, k
 		return routeDecision{RouteSource, ReasonCheapPlan}, true, nil, &pl
 	}
 	s.logger.Debug("pgshim: sent to the copy", "plan", why)
-	if !s.sourceAnsweredAt.IsZero() && s.bound != nil && s.bound.CopyWait != nil {
+	if s.sourceRead && !s.knownValid && s.bound != nil && s.bound.CopyWait != nil {
 		// The copy will wait for the source's position (waitForCopy): read
 		// on this connection while it is open, not on one opened again.
 		if cell, perr, lost := s.cellOnSource(up, sourceWALPositionSQL); lost != nil {
@@ -307,6 +310,30 @@ func (s *session) routeByCostPlan(text string, generic bool) (d routeDecision, k
 	// now, not when the copy has answered, which can be minutes.
 	s.releaseIdleSource()
 	return routeDecision{RouteCopy, ReasonAnswersTheSame}, true, nil, &pl
+}
+
+// sourceUnreachable reports whether a failure to reach the source is the
+// source's or the port's for the moment (it cannot be reached, it refused
+// the forwarding user, its connection was lost, every connection to it is
+// taken), not something of the statement's.
+func sourceUnreachable(perr *pgErr) bool {
+	switch perr.code {
+	case "08001", "08004", "08006", "53300":
+		return true
+	}
+	return false
+}
+
+// copyWhileUnreachable is the decision for a statement the copy answers as
+// PostgreSQL does when its plan cannot be asked because the source cannot be
+// reached: the copy answers it, as before routing by plan existed, and the
+// client is told so (#2985). A connection the source answered still gets
+// the copy only after it waited for the position known after that answer,
+// which needs no source (waitForCopy).
+func (s *session) copyWhileUnreachable(why string) routeDecision {
+	s.logger.Debug("pgshim: the source cannot be asked for a plan; the copy answers", "why", why)
+	s.notice("Answered by the copy: the source could not be asked whether this statement is cheaper there (" + why + "), so routing by its plan is off for the moment.")
+	return routeDecision{RouteCopy, ReasonSourceUnreachable}
 }
 
 // A connection remembers the source's verdict on a statement shape for a
@@ -401,7 +428,12 @@ func (s *session) routeByCostRemembered(text string) (routeDecision, *pgErr) {
 		}
 	}
 	d, keep, stop, pl := s.routeByCostPlan(text, false)
-	if key != "" && stop == nil && keep && pl != nil && pol.clear(*pl) && valuesOnlyEqualed(text) {
+	// Only a verdict for the source is kept: the source answers by its own
+	// tables whatever happened to them since, while a kept verdict for the
+	// copy would send the shape there after its table was dropped and made
+	// again on the source, its old rows still on the copy (#2985); asking
+	// costs little next to a statement expensive enough for the copy.
+	if key != "" && stop == nil && keep && pl != nil && d.side == RouteSource && pol.clear(*pl) && valuesOnlyEqualed(text) {
 		if s.costVerdicts == nil || len(s.costVerdicts) >= costVerdictsMax {
 			s.costVerdicts = map[string]costVerdict{}
 		}
@@ -433,6 +465,12 @@ func (s *session) cellOnSource(up *upstream, sql string) (plan []byte, perr *pgE
 	if err := up.send(&pgproto3.Query{String: sql}); err != nil {
 		return nil, nil, &errSourceLost{"it could not be written to: " + err.Error()}
 	}
+	return s.readCell(up)
+}
+
+// readCell reads the answer of one simple query of the port's own already
+// sent, as cellOnSource does.
+func (s *session) readCell(up *upstream) (plan []byte, perr *pgErr, lost *errSourceLost) {
 	// A simple query ends the source's unnamed statement.
 	delete(up.stmts, "")
 	k := &statusKeeper{}

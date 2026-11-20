@@ -15,6 +15,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
+
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
 
 // Forwarding to the source (#2771): a statement the copy is not to answer is
@@ -91,6 +93,10 @@ var (
 	sourceCancelGrace = 10 * time.Second
 	// sourceWriteTimeout bounds sending one batch of messages.
 	sourceWriteTimeout = 30 * time.Second
+	// sourceSlotWait bounds the wait for a connection to the source when
+	// the port holds as many as it opens: the copy's line
+	// (sqlsandbox.DefaultMaxWait).
+	sourceSlotWait = sqlsandbox.DefaultMaxWait
 )
 
 // maxSourceMessage is the largest message the port relays from the source:
@@ -201,19 +207,18 @@ func (s *session) source() (*upstream, *pgErr) {
 		// the plan of most), so a client waits for a slot a statement gives
 		// back, a few milliseconds away, instead of being refused while it is
 		// taken (#2985).
-		var ctx context.Context
-		var cancel context.CancelFunc
-		d := s.set.stmtTimeout
-		if c := s.slotWaitCap; c > 0 && (d <= 0 || c < d) {
+		// Within the statement's own context (its statement_timeout and a
+		// cancel request, already counting what it spent before), and never
+		// longer than sourceSlotWait, or slotWaitCap when one is set.
+		base, finish := s.statementContext()
+		d := sourceSlotWait
+		if c := s.slotWaitCap; c > 0 && c < d {
 			d = c
 		}
-		if d > 0 {
-			ctx, cancel = context.WithTimeout(s.connContext(), d)
-		} else {
-			ctx, cancel = context.WithCancel(s.connContext())
-		}
+		ctx, cancel := context.WithTimeout(base, d)
 		r, ok := f.Acquire(ctx)
 		cancel()
+		finish()
 		if !ok {
 			return nil, &pgErr{"53300", fmt.Sprintf("the port already holds %d connections to sources, the most it opens (--max-source-connections), and none was given back while this statement waited; try again in a moment", f.Limit)}
 		}
@@ -297,6 +302,36 @@ func (s *session) closeSource() {
 	_ = up.fe.Flush()
 	_ = up.conn.Close()
 	up.release()
+}
+
+// markSourceRead notes that the source just sent the client a row or a
+// statement's end: from now on the copy may not answer this connection with
+// less (waitForCopy), and the position known for it is from before this
+// answer until the next one is read. Rows before an error count too.
+func (s *session) markSourceRead() {
+	s.sourceRead = true
+	s.knownValid = false
+	s.sourceAnsweredAt = time.Now()
+}
+
+// readKnownPosition reads the answer of the position query sent behind a
+// statement (forwardSimple) or after a batch (syncOnSource): kept as the
+// connection's known position when the source gave one. Only a lost
+// connection is returned; any other failure leaves no known position, and
+// the copy then asks for one or the source answers.
+func (s *session) readKnownPosition(up *upstream) *errSourceLost {
+	cell, perr, lost := s.readCell(up)
+	if lost != nil {
+		return lost
+	}
+	if perr != nil {
+		s.logger.Debug("pgshim: the source did not say its WAL position after an answer", "code", perr.code, "err", perr.msg)
+		return nil
+	}
+	if lsn, ok := parseLSN(string(cell)); ok {
+		s.knownLSN, s.knownValid = lsn, true
+	}
+	return nil
 }
 
 // releaseIdleSource gives the connection to the source back when nothing of
@@ -533,6 +568,7 @@ func (s *session) relay(up *upstream, out relayOut, done func(pgproto3.BackendMe
 			}
 			if out == relayClient {
 				s.be.Send(m)
+				s.markSourceRead()
 			}
 		case *pgproto3.DataRow:
 			if out == relayCapture && done(msg) {
@@ -540,6 +576,7 @@ func (s *session) relay(up *upstream, out relayOut, done func(pgproto3.BackendMe
 			}
 			if out == relayClient {
 				s.be.Send(m)
+				s.markSourceRead()
 				for _, v := range m.Values {
 					sent += len(v)
 				}
@@ -778,7 +815,16 @@ func (s *session) forwardSimple(qstr string) (ok bool) {
 	defer done()
 	up.ctx = ctx
 	defer func() { up.ctx = nil }()
-	if err := up.send(&pgproto3.Query{String: qstr}); err != nil {
+	// The source's WAL position goes in the same write, behind the client's
+	// statement: the source runs it once that one has ended, so it is at or
+	// past every commit the answer could show, and costs no round trip of
+	// its own (#2985, knownLSN).
+	msgs := []pgproto3.FrontendMessage{&pgproto3.Query{String: qstr}}
+	position := s.bound.CopyWait != nil
+	if position {
+		msgs = append(msgs, &pgproto3.Query{String: sourceWALPositionSQL})
+	}
+	if err := up.send(msgs...); err != nil {
 		s.loseSource("it could not be written to: " + err.Error())
 		s.fail(s.lostError(&errSourceLost{"it could not be written to"}))
 		return false
@@ -786,6 +832,9 @@ func (s *session) forwardSimple(qstr string) (ok bool) {
 	delete(up.stmts, "")
 	k := &statusKeeper{}
 	srcErr, lost := s.relay(up, relayClient, k.done)
+	if lost == nil && position {
+		lost = s.readKnownPosition(up)
+	}
 	if lost != nil {
 		s.loseSource(lost.why)
 		if srcErr != nil {
