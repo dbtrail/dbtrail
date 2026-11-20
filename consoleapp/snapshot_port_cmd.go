@@ -54,7 +54,11 @@ port (5433), and the server's name is the database:
 
   psql "host=127.0.0.1 port=5433 dbname=shop user=app sslmode=require"
 
-There, routing, mode and max-behind do not apply: the copy answers alone.`,
+There, routing and max-behind do not apply, and mode is read by the
+PostgreSQL router. Until a server has a forwarding user, the copy answers it
+alone; once one is set (bintrail-console server forward-user), what the copy
+is not known to answer as PostgreSQL does goes to your PostgreSQL as that
+user, read-only.`,
 }
 
 var (
