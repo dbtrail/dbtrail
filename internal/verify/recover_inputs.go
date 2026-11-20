@@ -406,6 +406,10 @@ type recoverChainOutcome struct {
 	// notCapturedNote is the sentence the verdict carries for them.
 	NotCaptured     int
 	notCapturedNote string
+	// noPredecessorWiderHelps is ChainsNoPredecessor without the keys whose
+	// only missing earlier state is a not-captured change: the keys a longer
+	// window may help.
+	noPredecessorWiderHelps int
 	// InconclusiveKind subdivides StatusInconclusive (#1416). One bucket was
 	// carrying three meanings and rendering them identically, so a healthy
 	// run over a server full of append-only tables read as a page of
@@ -472,6 +476,13 @@ func checkRecoverChains(in recoverChainInput) recoverChainOutcome {
 	var firstUnresolved string
 	var firstNotCaptured string
 	noPredecessor := make(map[string]struct{})
+	// Keys whose chain was restarted by a not-captured change, and the keys
+	// that reached a change with no earlier state for any OTHER reason. Only
+	// the second kind can be helped by a longer window: right after a table
+	// moves to FULL, the first fully captured change of a row follows a
+	// not-captured one, and reaching further back finds nothing to compare.
+	notCapturedReset := make(map[string]struct{})
+	noPredecessorWiderHelps := make(map[string]struct{})
 
 	for i := range in.Events {
 		ev := &in.Events[i]
@@ -526,6 +537,7 @@ func checkRecoverChains(in recoverChainInput) recoverChainOutcome {
 					firstNotCaptured = fmt.Sprintf("event %d (pk=%s), column(s) %s", ev.EventID, ev.PKValues, strings.Join(cols, ", "))
 				}
 				out.NotCaptured++
+				notCapturedReset[ev.PKValues] = struct{}{}
 				*st = chainState{}
 				continue
 			}
@@ -538,7 +550,10 @@ func checkRecoverChains(in recoverChainInput) recoverChainOutcome {
 			continue
 		}
 
-		// (3) The before-image chaining assertion.
+		// (3) The before-image chaining assertion. A not-captured restart
+		// explains only the change right after it (see notCapturedReset).
+		_, afterNotCaptured := notCapturedReset[ev.PKValues]
+		delete(notCapturedReset, ev.PKValues)
 		switch ev.EventType {
 		case event.EventInsert:
 			// Nothing to assert: recovery reverses an INSERT using only
@@ -559,6 +574,9 @@ func checkRecoverChains(in recoverChainInput) recoverChainOutcome {
 				}
 			case chainNoPredecessor:
 				noPredecessor[ev.PKValues] = struct{}{}
+				if !afterNotCaptured {
+					noPredecessorWiderHelps[ev.PKValues] = struct{}{}
+				}
 			case chainAsserted:
 				out.Assertions++
 			}
@@ -595,6 +613,7 @@ func checkRecoverChains(in recoverChainInput) recoverChainOutcome {
 	// rows must not report events "checked" that were never walked.
 	out.Events = len(in.Events) - out.UnwalkableEvents
 	out.ChainsNoPredecessor = len(noPredecessor)
+	out.noPredecessorWiderHelps = len(noPredecessorWiderHelps)
 	if out.NotCaptured > 0 {
 		out.notCapturedNote = notCapturedNote(in.Schema, in.Table, out.NotCaptured, firstNotCaptured)
 	}
@@ -688,7 +707,7 @@ func recoverChainVerdict(out recoverChainOutcome, mismatchCount int, firstMismat
 			if len(notes) > 0 {
 				detail += "; " + strings.Join(notes, "; ")
 			}
-			if out.ChainsNoPredecessor > 0 {
+			if out.noPredecessorWiderHelps > 0 {
 				detail += "; a longer window may reach the older history these rows may need (CLI: --lookback)"
 			}
 			return StatusInconclusive, detail, InconclusiveUnproven

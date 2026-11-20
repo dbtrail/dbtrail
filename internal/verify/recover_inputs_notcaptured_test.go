@@ -157,3 +157,30 @@ func TestRecoverChains_notCaptured_mysqlLookalikeIsData(t *testing.T) {
 		t.Fatalf("NotCaptured=%d Assertions=%d status=%s: %s", out.NotCaptured, out.Assertions, out.Status, out.Detail)
 	}
 }
+
+// Right after a table moves to FULL, a row's first fully captured change
+// follows a not-captured one: nothing earlier can be compared, and a longer
+// window would find nothing more. The detail must not send the operator to
+// widen it. A row that starts mid-window still gets the hint.
+func TestRecoverChains_notCaptured_noLongerWindowHint(t *testing.T) {
+	afterSwitch := checkRecoverChains(riInput([]query.ResultRow{
+		riEvent(1, event.EventInsert, "1", nil, riRow(1, "a", 1)),
+		riEvent(2, event.EventUpdate, "1", keyOnly(1), riRow(1, "b", 2)),
+		riEvent(3, event.EventUpdate, "1", riRow(1, "b", 2), riRow(1, "c", 3)),
+	}))
+	t.Logf("detail as shown: %s", afterSwitch.Detail)
+	if afterSwitch.ChainsNoPredecessor != 1 || afterSwitch.Assertions != 0 {
+		t.Fatalf("premise: NoPredecessor=%d Assertions=%d", afterSwitch.ChainsNoPredecessor, afterSwitch.Assertions)
+	}
+	if strings.Contains(afterSwitch.Detail, "a longer window") {
+		t.Errorf("a longer window cannot help here:\n%s", afterSwitch.Detail)
+	}
+
+	midWindow := checkRecoverChains(riInput([]query.ResultRow{
+		riEvent(1, event.EventUpdate, "1", keyOnly(1), riRow(1, "b", 2)),
+		riEvent(2, event.EventUpdate, "2", riRow(2, "x", 1), riRow(2, "y", 1)),
+	}))
+	if !strings.Contains(midWindow.Detail, "a longer window") {
+		t.Errorf("a row starting mid-window keeps the hint:\n%s", midWindow.Detail)
+	}
+}

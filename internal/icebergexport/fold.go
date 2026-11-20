@@ -218,10 +218,25 @@ func (f *fold) carryUnchanged(ev *query.ResultRow, row map[string]any) error {
 	if len(missing) == 0 {
 		return nil
 	}
+	// FULL comes first because it is the only lasting fix: the export cannot
+	// yet read the value back from the table it already wrote, so below FULL
+	// every later change that leaves a large value untouched on a row exported
+	// earlier lands here again. The reload gets past this one change only.
 	return fmt.Errorf("cannot export %s.%s (pk=%s): column(s) %s kept an unchanged large value that PostgreSQL did not resend "+
-		"(the table was not at REPLICA IDENTITY FULL when the change was captured), and no earlier change of this row in the "+
-		"export window holds it. %s. Running ALTER TABLE %s REPLICA IDENTITY FULL on the source makes later changes carry the value",
-		f.schema, f.table, ev.PKValues, strings.Join(missing, ", "), f.reloadRemedy(), pgQuoted(f.schema, f.table))
+		"(the table was not at REPLICA IDENTITY FULL when the change was captured), no earlier change of this row in the "+
+		"export window holds it, and the export cannot read it back from the table it already wrote. The fix is ALTER TABLE %s "+
+		"REPLICA IDENTITY FULL on the source; until then, every later change that leaves a large value untouched on a row "+
+		"exported earlier is refused the same way. To get past this change once: %s",
+		f.schema, f.table, ev.PKValues, strings.Join(missing, ", "), pgQuoted(f.schema, f.table), lowerFirst(f.reloadRemedy()))
+}
+
+// lowerFirst lowercases the first letter of an ASCII sentence, to splice it
+// after a colon.
+func lowerFirst(s string) string {
+	if s == "" || s[0] < 'A' || s[0] > 'Z' {
+		return s
+	}
+	return string(s[0]+('a'-'A')) + s[1:]
 }
 
 // markerMisplacedErr refuses a marker where the capture never writes one: the

@@ -111,7 +111,9 @@ func TestFold_pg_unchangedLargeValueWithoutSourceRefuses(t *testing.T) {
 				"column(s) doc",
 				"unchanged large value",
 				"cursor stays before this change",
-				"REPLICA IDENTITY FULL",
+				`The fix is ALTER TABLE "public"."orders" REPLICA IDENTITY FULL`,
+				"refused the same way",
+				"To get past this change once: the table's cursor",
 			} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("message missing %q:\n%s", want, err)
