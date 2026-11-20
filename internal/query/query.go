@@ -469,15 +469,19 @@ type Options struct {
 	// (or query.MisfiledArchiveHours) by callers that prune archives by time.
 	ExtraArchiveHours []time.Time
 	ChangedColumn     string // column name; matched via JSON_CONTAINS
-	// PostgresHistory is set only by the history surfaces (query, the
+	// PostgresHistory is set by the history surfaces (query, the
 	// console's Events view, the MCP query tool), and only when the index was
 	// written by PostgreSQL capture (SourceFlavor == "postgres"). It does two
 	// things, both inert on a MySQL index: ChangedColumn also matches the
 	// UPDATEs whose changed columns are unknown because the table was not at
 	// REPLICA IDENTITY FULL (see ChangedColumnsUnknown), so the filter misses
 	// nothing; and Run renders the partly captured rows (FormatHistory).
-	// Recover, cascade and verify never set it. A flavor flag, not a row
-	// check, because a MySQL JSON column can hold the marker object exactly.
+	// The console's recover sets it too, so its changed_column filter does
+	// not silently leave such an UPDATE out of a script (the generator then
+	// refuses it: it cannot be undone); the CLI and MCP recover have no
+	// changed-column filter. Cascade and verify never set it. A flavor flag,
+	// not a row check, because a MySQL JSON column can hold the marker object
+	// exactly.
 	PostgresHistory bool
 	// QueryHash restricts results to the events produced by ONE statement
 	// digest: the 64-char hex STATEMENT_DIGEST() stored in

@@ -181,6 +181,11 @@ func runRecoverCascade(cmd *cobra.Command, args []string) error {
 	if err := indexer.EnsureSchema(db); err != nil {
 		return indexer.WrapSchemaMigrationErr(err)
 	}
+	// A PostgreSQL index cannot have its cascades rebuilt yet: refuse before
+	// anything is fetched or a --output file is opened.
+	if err := cascadeFlavorGate(query.SourceFlavorDetail(db))(rcSchema); err != nil {
+		return err
+	}
 
 	// Resolver enables PK-only WHERE clauses. Best-effort for the CASCADE path
 	// (INSERTs fall back to full row images), but REQUIRED for SET NULL restores
@@ -572,4 +577,24 @@ func archiveReadHint(err error) string {
 		return " (pass --no-archive to search the live index only; the output is then flagged incomplete)"
 	}
 	return ""
+}
+
+// cascadeFlavorGate decides, from the index's recorded source flavor
+// (query.SourceFlavorDetail), whether recover-cascade may run. A PostgreSQL
+// index is refused (cascaderecover.PostgresCascadeRefusal). A flavor that could
+// not be read (not a missing stream_state row, which is a file-indexed
+// MySQL-family index) keeps the MySQL behaviour this command always had, with a
+// warning: the read is best-effort everywhere else too, and refusing every
+// cascade recovery on a transient read error would block MySQL users.
+func cascadeFlavorGate(flavor string, noStream bool) func(schema string) error {
+	return func(schema string) error {
+		if flavor == "postgres" {
+			return cascaderecover.PostgresCascadeRefusal(cascaderecover.SurfaceCLI, schema)
+		}
+		if flavor == "" && !noStream {
+			slog.Warn("could not read whether this index holds PostgreSQL changes (stream_state); continuing as MySQL. " +
+				"If it does, this cascade recovery will miss the children: PostgreSQL capture does not record foreign keys")
+		}
+		return nil
+	}
 }
