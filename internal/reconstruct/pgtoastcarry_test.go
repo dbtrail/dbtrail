@@ -163,7 +163,7 @@ func TestPGCarry_refusesOnceTheChangesAreOnDisk(t *testing.T) {
 				if res.Spill == nil {
 					t.Fatal("the changes did not move to disk")
 				}
-				t.Cleanup(func() { res.Spill.Close() })
+				t.Cleanup(func() { _ = res.Spill.remove() })
 			}
 		}
 		if err == nil {
