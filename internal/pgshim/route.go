@@ -42,10 +42,10 @@ const (
 	RouteRefused = "refused"
 
 	// The copy answered.
-	ReasonAnswersTheSame   = "answers_the_same"   // everything in it answers on the copy as on PostgreSQL
-	ReasonNoForwardAccount = "no_forward_account" // the server has no forwarding account: the copy answers alone
-	ReasonHiddenRules      = "hidden_rules"       // the server hides tables or columns: nothing is sent to its source
-	ReasonCopyCommand      = "copy_command"       // a command of the copy's own (SHOW TABLES, DESCRIBE)
+	ReasonAnswersTheSame    = "answers_the_same"   // everything in it answers on the copy as on PostgreSQL
+	ReasonNoForwardAccount  = "no_forward_account" // the server has no forwarding account: the copy answers alone
+	ReasonHiddenRules       = "hidden_rules"       // the server hides tables or columns: nothing is sent to its source
+	ReasonCopyCommand       = "copy_command"       // a command of the copy's own (SHOW TABLES, DESCRIBE)
 	ReasonSourceUnreachable = "source_unreachable" // its plan could not be asked: the source cannot be reached (route_cost.go)
 
 	// The source answered.
@@ -377,18 +377,6 @@ func (s *session) waitForCopy(ctx context.Context, qstr string) (waited bool, st
 	s.logger.Debug("pgshim: the copy did not reach the source's position in time; the source answers", "why", why)
 	s.fallTo(ReasonCopyTooOld)
 	return false, &pgErr{"55000", "the copy did not reach what the source already answered this connection: " + why}
-}
-
-// readsCatalog reports whether a statement names the catalog
-// (information_schema, pg_catalog), which the copy answers with its own.
-func readsCatalog(q string) bool {
-	toks, _ := lexSQL(q)
-	for _, t := range toks {
-		if t.kind == rtWord && (t.text == "information_schema" || t.text == "pg_catalog") {
-			return true
-		}
-	}
-	return false
 }
 
 // sourceWALPosition reads where the source's WAL stands now, on this

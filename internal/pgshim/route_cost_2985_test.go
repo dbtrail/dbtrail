@@ -703,18 +703,3 @@ func TestRouteByCost_2985_oneDeadlineForTheStatement(t *testing.T) {
 		t.Errorf("the report took %v: its waits did not share its 500ms", took)
 	}
 }
-
-func TestReadsCatalog(t *testing.T) {
-	for q, want := range map[string]bool{
-		"SELECT table_name FROM information_schema.tables":  true,
-		"SELECT relname FROM pg_catalog.pg_class":           true,
-		"SELECT n FROM t":                                   false,
-		"SELECT 'information_schema' FROM t":                false,
-		`SELECT n FROM "information_schema_copy"`:           false,
-		"SELECT count(*) FROM INFORMATION_SCHEMA.COLUMNS":   true,
-	} {
-		if got := readsCatalog(q); got != want {
-			t.Errorf("readsCatalog(%q) = %v, want %v", q, got, want)
-		}
-	}
-}
