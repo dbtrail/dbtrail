@@ -138,7 +138,14 @@ func foldPage(
 				continue
 			}
 		}
-		if err := checkEventToast(*ev); err != nil {
+		// A PostgreSQL change is held to PostgreSQL's own check, which takes
+		// an earlier row captured with its key only (checkPGEventMarkers);
+		// every other change to the one it always was.
+		if opts.pg {
+			if err := checkPGEventMarkers(ev, pkCols); err != nil {
+				return err
+			}
+		} else if err := checkEventToast(*ev); err != nil {
 			return err
 		}
 		var halves []query.ResultRow
