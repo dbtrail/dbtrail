@@ -196,6 +196,17 @@ func TestIntegrationPGRouterRoutesByPlan(t *testing.T) {
 		if byKey != `[amount] ["1000"]` {
 			t.Errorf("mode %v, the read by key: %s, want the source's row", mode, byKey)
 		}
+		// The same prepared sum once the source showed this connection the
+		// row: the source's sum, or PostgreSQL's own words for a statement
+		// whose columns changed side; never the copy's older sum (#2985).
+		after := pgxAnswer(ctx, conn, "SELECT sum(amount) FROM "+pgCostTable+" WHERE amount < $1", 999999)
+		switch {
+		case after == `[sum] ["`+strconv.Itoa(pgCostRows+1000)+`"]`:
+		case strings.Contains(after, "cached plan must not change result type"):
+		default:
+			t.Errorf("mode %v, the sum after the read by key: %s, want %d with the source's row", mode, after, pgCostRows+1000)
+		}
+		t.Logf("mode %v, the prepared sum after the source's answer: %s", mode, after)
 		conn.Close(ctx)
 	}
 	if c.TxStatus() != 'I' {
