@@ -117,8 +117,17 @@ func TestOne_NonFullTableSkipsArePersistedAndSurviveRestart(t *testing.T) {
 		}
 		return skips, st
 	}
+	// Polled before the first checkpoint, when stream_state has no row yet:
+	// that is "nothing persisted so far", not a failure.
 	persistedSkips := func() int64 {
-		skips, _ := ledger()
+		st, err := status.LoadStreamState(ctx, indexDB)
+		if err != nil {
+			t.Fatalf("LoadStreamState: %v", err)
+		}
+		if st == nil {
+			return 0
+		}
+		skips, _ := st.ParseCaptureSkips()
 		return skips[pgcapture.SkipReplicaIdentityNotFull].Count
 	}
 
