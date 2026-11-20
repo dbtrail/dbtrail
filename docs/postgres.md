@@ -30,7 +30,7 @@ and set REPLICA IDENTITY; bintrail reads — it never writes to your source.
 | **PostgreSQL 15+** | Yes (declared) | 15/16/17/18 tested in CI. 13 and 14 may work but are past end of life, best-effort only. On 18, a table with a `VIRTUAL` generated column cannot be captured, and a table with a `STORED` one needs `publish_generated_columns = stored` on the publication ([why](#3-set-replica-identity-full-on-every-captured-table)). |
 | **`wal_level = logical`** | **Yes** | Server-wide; needs a **restart**. Validated at startup — bintrail-pg refuses to start otherwise. |
 | **A role with `REPLICATION`** | **Yes** | Used for the replication stream and to create the slot. |
-| **`REPLICA IDENTITY FULL`** on each captured table | **Yes** | The PostgreSQL analog of MySQL's `binlog_row_image = FULL`. Validated per table; refuses to start otherwise. |
+| **`REPLICA IDENTITY FULL`** on each captured table | **Yes** | The PostgreSQL analog of MySQL's `binlog_row_image = FULL`. Checked per table by `doctor`. A table that is not FULL does not stop capture: its changes are skipped and reported as degraded capture ([details](#3-set-replica-identity-full-on-every-captured-table)). |
 | **Primary keys that are not `DEFERRABLE`** | **Yes** | The copy is kept by key, and a deferrable key lets two rows share one inside a transaction. Validated at startup and in `doctor`: a captured table with one is refused, with what to do. |
 | **A `PUBLICATION`** covering those tables | **Yes — you create it** | bintrail-pg validates it exists and covers your tables; it does **not** create it. |
 | **A replication slot** | No — created for you | bintrail-pg creates the logical slot on first run and reuses it on restart. |
@@ -228,9 +228,29 @@ ALTER TABLE shop.customers REPLICA IDENTITY FULL;
 -- repeat for every table you want to capture
 ```
 
-bintrail-pg validates this for every table in the publication at startup **and**
-re-checks each table live as it appears in the stream, so a table added later
-without `REPLICA IDENTITY FULL` fails loud rather than silently losing data.
+`bintrail-pg doctor` (and the console's check when you add a server) fails on
+any table in the publication that is not at `REPLICA IDENTITY FULL`, so fix it
+before you start.
+
+Capture itself checks every table again as it appears in the stream: at
+startup, and for a table added to the publication later. A table that is not at
+`REPLICA IDENTITY FULL` does **not** stop capture, because one such table would
+otherwise stop every other table with it. Instead:
+
+- **Its changes are not captured.** They are dropped, never indexed with a
+  partial before-image, and each one is counted.
+- **The other tables keep being captured** normally.
+- **The log says so**, once each time PostgreSQL describes the table, with the
+  exact statement to run, for example
+  `ALTER TABLE "shop"."items" REPLICA IDENTITY FULL`.
+- **`status` shows capture as DEGRADED** under the reason
+  `replica_identity_not_full` and names the table. The count is kept across
+  restarts, like the MySQL path's skip counts.
+- **After you run the `ALTER TABLE`**, PostgreSQL describes the table again and
+  capture of it resumes by itself, with no restart. Changes made before the
+  `ALTER` stay missing from the index: PostgreSQL re-sends them exactly as they
+  were written, without the full before-image, so they are skipped again on
+  every re-read.
 
 > This is the direct counterpart of the MySQL/MariaDB `binlog_row_image = FULL`
 > requirement.
@@ -259,8 +279,10 @@ CREATE PUBLICATION bintrail_pub FOR TABLE shop.orders, shop.customers
 CREATE PUBLICATION bintrail_pub FOR ALL TABLES;
 ```
 
-To add a table later: `ALTER PUBLICATION bintrail_pub ADD TABLE shop.items;`
-(then set its `REPLICA IDENTITY FULL` too).
+To add a table later, set its `REPLICA IDENTITY FULL` **first**, then add it:
+`ALTER TABLE shop.items REPLICA IDENTITY FULL;` and
+`ALTER PUBLICATION bintrail_pub ADD TABLE shop.items;`. In the other order,
+the changes written in between are skipped (see step 3).
 
 ### 5. The replication slot — created for you
 
@@ -365,8 +387,8 @@ bintrail-pg stream \
   --schemas     shop
 ```
 
-That command: validates `wal_level`, the publication, and per-table
-`REPLICA IDENTITY FULL`; creates the slot `bintrail_shop` if absent; bootstraps
+That command: validates `wal_level` and the publication, and warns about any
+table not at `REPLICA IDENTITY FULL` (its changes are skipped); creates the slot `bintrail_shop` if absent; bootstraps
 the index tables if needed; then streams every row change into `binlog_events`.
 Send `SIGINT`/`SIGTERM` for a graceful shutdown (it flushes the batch and writes
 a final checkpoint).

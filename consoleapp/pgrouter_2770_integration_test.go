@@ -90,9 +90,13 @@ func TestIntegrationPGRouterRouting(t *testing.T) {
 			{count, "3"},
 			{count + " WHERE now() IS NOT NULL", "4"},
 			{"SELECT count(*) FROM " + pgRouteSource, "1"},
-			// at is a reserved word on the copy: refused there, answered by the
-			// source.
-			{"SELECT min(at) FROM " + pgRouteTable, "0"},
+			// at is a reserved word on the copy, which the port quotes there
+			// (#2973): the copy answers it, from its rows.
+			{"SELECT min(at) FROM " + pgRouteTable, "1"},
+			// An array written as a string: PostgreSQL reads it as the
+			// column's type, the copy cannot and fails, and the source
+			// answers it with its fourth row (the copy would say 2).
+			{"SELECT count(*) FROM " + pgRouteTable + " WHERE id = ANY('{1,2,4}')", "3"},
 			// A numeric without precision: written as PostgreSQL writes it.
 			{"SELECT free FROM " + pgRouteTable + " WHERE id = 1", "1.5"},
 			{"SELECT avg(amount) FROM " + pgRouteTable, one(ctx, source, "SELECT avg(amount) FROM "+pgRouteTable)},
@@ -138,7 +142,7 @@ func TestIntegrationPGRouterRouting(t *testing.T) {
 				{"SELECT count(*) AS n FROM " + pgRouteTable + " WHERE id > $1", `[n] ["3"]`},
 				{"SELECT count(*) AS n FROM " + pgRouteTable + " WHERE now() IS NOT NULL AND id > $1", `[n] ["4"]`},
 				{"SELECT count(*) AS n FROM " + pgRouteSource + " WHERE id > $1", `[n] ["1"]`},
-				{"SELECT min(at) AS m FROM " + pgRouteTable + " WHERE id > $1", `[m] ["0"]`},
+				{"SELECT min(at) AS m FROM " + pgRouteTable + " WHERE id > $1", `[m] ["1"]`},
 				{"SELECT free FROM " + pgRouteTable + " WHERE id = $1", `[free] ["1.5"]`},
 			} {
 				arg := 0
@@ -157,13 +161,13 @@ func TestIntegrationPGRouterRouting(t *testing.T) {
 	})
 
 	t.Run("psql, psycopg and JDBC", func(t *testing.T) {
-		const want = "copy=3 source=4 missing=1 at=0 free=1.5"
+		const want = "copy=3 source=4 missing=1 at=1 free=1.5"
 		if psql, err := exec.LookPath("psql"); err == nil {
 			out, err := exec.CommandContext(ctx, psql, "-X", "-At", "-v", "ON_ERROR_STOP=1",
 				"-c", count, "-c", count+" WHERE now() IS NOT NULL", "-c", "SELECT count(*) FROM "+pgRouteSource,
 				"-c", "SELECT min(at) FROM "+pgRouteTable, "-c", "SELECT free FROM "+pgRouteTable+" WHERE id = 1",
 				env.portDSN()).CombinedOutput()
-			if got := strings.Join(strings.Fields(string(out)), " "); err != nil || got != "3 4 1 0 1.5" {
+			if got := strings.Join(strings.Fields(string(out)), " "); err != nil || got != "3 4 1 1 1.5" {
 				t.Errorf("psql: %v %q", err, out)
 			}
 		} else {

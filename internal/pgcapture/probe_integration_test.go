@@ -72,4 +72,41 @@ func TestProbeHealth_Integration(t *testing.T) {
 			t.Errorf("a REPLICA IDENTITY FULL table must not be reported not-FULL: %v", snap.ReplicaIdentityNotFull)
 		}
 	}
+
+	// The publication's tables, by OID: a rename keeps a table's, and a
+	// table taken out of the publication, or dropped, is no longer listed.
+	names := func(ts []pgcapture.PublishedTable) string {
+		var out []string
+		for _, pt := range ts {
+			out = append(out, pt.Schema+"."+pt.Table)
+		}
+		return strings.Join(out, " ")
+	}
+	oidOf := func(ts []pgcapture.PublishedTable, table string) uint32 {
+		for _, pt := range ts {
+			if pt.Table == table {
+				return pt.OID
+			}
+		}
+		return 0
+	}
+	if snap.PublishedErr != nil || len(snap.Published) != 2 || oidOf(snap.Published, "probe_full") == 0 || oidOf(snap.Published, "probe_nofull") == 0 {
+		t.Fatalf("Published = %q, %v; want the publication's two tables with their OIDs", names(snap.Published), snap.PublishedErr)
+	}
+	was := oidOf(snap.Published, "probe_nofull")
+	mustExec("ALTER TABLE probe_nofull RENAME TO probe_renamed")
+	t.Cleanup(func() { _, _ = conn.Exec(context.Background(), "DROP TABLE IF EXISTS probe_renamed") })
+	renamed, err := pgcapture.QueryPublishedTables(ctx, conn, pub)
+	if err != nil || len(renamed) != 2 || oidOf(renamed, "probe_renamed") != was {
+		t.Fatalf("after a rename: %q, %v; want the same OID %d under the new name", names(renamed), err, was)
+	}
+	mustExec("ALTER PUBLICATION " + pub + " DROP TABLE probe_renamed")
+	out, err := pgcapture.QueryPublishedTables(ctx, conn, pub)
+	if err != nil || len(out) != 1 || out[0].Table != "probe_full" {
+		t.Fatalf("after the table was taken out: %q, %v; want probe_full alone", names(out), err)
+	}
+	mustExec("DROP TABLE probe_full")
+	if out, err = pgcapture.QueryPublishedTables(ctx, conn, pub); err != nil || out == nil || len(out) != 0 {
+		t.Fatalf("after the last table was dropped: %q, %v; want none, and not an unread list", names(out), err)
+	}
 }

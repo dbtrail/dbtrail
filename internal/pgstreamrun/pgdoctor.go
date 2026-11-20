@@ -100,7 +100,7 @@ func BuildPGReport(ctx context.Context, cfg PGDoctorConfig) *doctor.Report {
 			Name:        "REPLICA IDENTITY FULL",
 			Status:      doctor.StatusFail,
 			Detail:      err.Error(),
-			Remediation: "Run ALTER TABLE <t> REPLICA IDENTITY FULL on every replicated table, so before-images (and de-TOASTed unchanged values) are complete — otherwise recovery silently loses columns.",
+			Remediation: "Run ALTER TABLE <t> REPLICA IDENTITY FULL on every replicated table, so before-images (and de-TOASTed unchanged values) are complete. Until a table is at FULL, capture does not record its changes: each one is skipped and counted, and status reports capture as degraded under replica_identity_not_full. Capture of the table resumes by itself after the ALTER; the changes skipped before it stay missing.",
 		})
 	} else {
 		r.Add(doctor.CheckResult{Name: "REPLICA IDENTITY FULL", Status: doctor.StatusPass})

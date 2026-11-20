@@ -335,8 +335,13 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 	// A table that changed, as its previous file and a delta beside it
 	// (#2757, off unless PGTableDeltaEnv says so). After every refusal above,
 	// like the carry; when it declines, the merge below writes the table.
-	if fromPair == "" && pgPairEligible(cfg, p.baselinePath, bmeta, fileSince, fold, capGap) {
-		written, perr := writePGPair(ctx, in, fold, rep, prev)
+	// A pair that has ended is folded into its file by the engine when this
+	// window's changes are in memory and none was lost (writePGPair's end);
+	// otherwise, and when the engine cannot, the merge below does it.
+	tryPair := fromPair == "" && pgPairEligible(cfg, p.baselinePath, bmeta, fileSince, fold, capGap)
+	foldPair := prev != nil && fromPair != "" && fold.Spill == nil && capGap == nil
+	if tryPair || foldPair {
+		written, perr := writePGPair(ctx, in, fold, rep, prev, fromPair)
 		if perr != nil {
 			return nil, "", perr
 		}
@@ -344,7 +349,7 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 			rep.Duration = time.Since(start)
 			return rep, "", nil
 		}
-		if prev != nil {
+		if prev != nil && fromPair == "" {
 			fromPair = "the delta was not written (the line before this one says why)"
 		}
 	}

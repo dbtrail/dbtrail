@@ -69,6 +69,15 @@ func TestPGCaptureComparable(t *testing.T) {
 	lost := func(at time.Time) func(*status.StreamStateInfo) {
 		return func(st *status.StreamStateInfo) { st.GapLostAt = sql.NullTime{Time: at, Valid: true} }
 	}
+	// The last full read of the source: before the snapshot's anchor, as an
+	// update after a full read leaves it.
+	sourceRead := anchor.Add(-2 * time.Hour)
+	dropped := func(doc string) func(*status.StreamStateInfo) {
+		return func(st *status.StreamStateInfo) { st.CaptureSkips = sql.NullString{String: doc, Valid: true} }
+	}
+	skipAt := func(at time.Time) string {
+		return `{"replica_identity_not_full":{"count":2,"last_at":"` + at.UTC().Format(time.RFC3339Nano) + `","tables":["public.b"]}}`
+	}
 	for _, tc := range []struct {
 		name   string
 		st     *status.StreamStateInfo
@@ -80,8 +89,14 @@ func TestPGCaptureComparable(t *testing.T) {
 		{name: "a loss at the snapshot's own instant", st: state(lost(anchor)), detail: captureDetailPGLost},
 		{name: "a loss before the snapshot, which the snapshot's full read covers", st: state(lost(anchor.Add(-time.Minute))), ok: true},
 		{name: "no capture on record", st: nil, detail: captureDetailNoCapture},
-		{name: "no ledger of dropped rows, which a PostgreSQL capture never writes", st: state(func(st *status.StreamStateInfo) { st.CaptureSkips = sql.NullString{} }), ok: true},
-		{name: "a ledger that does not parse is not read at all", st: state(func(st *status.StreamStateInfo) { st.CaptureSkips = sql.NullString{String: "{", Valid: true} }), ok: true},
+		{name: "no ledger of dropped rows, as a PostgreSQL capture from before the ledger leaves it", st: state(func(st *status.StreamStateInfo) { st.CaptureSkips = sql.NullString{} }), ok: true},
+		{name: "an empty ledger", st: state(dropped(`{}`)), ok: true},
+		{name: "a ledger that does not parse cannot be read", st: state(func(st *status.StreamStateInfo) { st.CaptureSkips = sql.NullString{String: "{", Valid: true} }), detail: captureDetailPGNoLossRecord},
+		{name: "a change dropped after the source was last read", st: state(dropped(skipAt(sourceRead.Add(time.Minute)))), detail: captureDetailPGLost},
+		{name: "a change dropped at the source read's own instant", st: state(dropped(skipAt(sourceRead))), detail: captureDetailPGLost},
+		{name: "a change dropped before the source was last read, which that read covers", st: state(dropped(skipAt(sourceRead.Add(-time.Minute)))), ok: true},
+		{name: "a drop on record with no time", st: state(dropped(`{"replica_identity_not_full":{"count":1}}`)), detail: captureDetailPGLost},
+		{name: "a reason with a zero count", st: state(dropped(`{"replica_identity_not_full":{"count":0,"last_at":"` + anchor.Add(time.Hour).Format(time.RFC3339) + `"}}`)), ok: true},
 		{name: "an index with no loss record", st: state(func(st *status.StreamStateInfo) { st.GapColumnsPresent = false }), detail: captureDetailPGNoLossRecord},
 		{name: "position mode, which a PostgreSQL capture never saves",
 			st: state(func(st *status.StreamStateInfo) { st.Mode = "position" }), detail: captureDetailPositionMode},
@@ -89,7 +104,7 @@ func TestPGCaptureComparable(t *testing.T) {
 			st: state(func(st *status.StreamStateInfo) { st.GTIDSet = sql.NullString{} }), detail: captureDetailNoCheckpoint},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ok, detail := pgCaptureComparable(tc.st, anchor)
+			ok, detail := pgCaptureComparable(tc.st, anchor, sourceRead)
 			if ok != tc.ok || detail != tc.detail {
 				t.Fatalf("got %v, %q; want %v, %q", ok, detail, tc.ok, tc.detail)
 			}

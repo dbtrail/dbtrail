@@ -28,6 +28,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/parser"
 	"github.com/dbtrail/dbtrail/internal/pgcapture"
 )
 
@@ -149,6 +150,13 @@ type pgStreamState struct {
 	// again after a restart stay above it until that delivery is whole.
 	checkpointEvent uint64
 	stampEvent      bool
+	// skips is the capture-skip ledger (the MySQL path's #1034 counters): the
+	// capturer records each change it drops (a table not at REPLICA IDENTITY
+	// FULL) and every checkpoint persists it to stream_state.capture_skips, so
+	// `status` reports degraded capture and names the table. Seeded from the
+	// persisted document at start. nil writes NULL, which the save keeps as
+	// whatever is there.
+	skips *parser.SkipCounters
 	// metrics is where the loop publishes its Prometheus metrics (#2762);
 	// nil publishes none (metrics.go).
 	metrics *pgMetrics
@@ -243,6 +251,20 @@ func One(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	// The capture-skip ledger, as the MySQL capture keeps it (streamrun): seeded
+	// from what the previous run persisted, so a restart never zeroes the
+	// degraded verdict `status` shows. A document that does not parse is not
+	// replaced by fresh counters: SeedPreserving records that fact under
+	// unreadable_previous_ledger, so the next checkpoint does not write a clean
+	// "{}" over possible evidence of loss. Never a reason not to start.
+	skips := parser.NewSkipCounters(logger)
+	if raw, err := loadCaptureSkipsPG(indexDB); err != nil {
+		logger.Warn("pgstreamrun: could not load the persisted capture-skip counters; starting from zero", "error", err)
+	} else if err := skips.SeedPreserving(raw); err != nil {
+		logger.Error("pgstreamrun: could not parse the persisted capture-skip counters; the previous ledger may have recorded permanent loss, so that is kept under reason unreadable_previous_ledger", "error", err)
+	}
+	state.skips = skips
+
 	cap := pgcapture.New(pgcapture.Config{
 		ReplDSN:            cfg.ReplDSN,
 		QueryDSN:           cfg.QueryDSN,
@@ -259,6 +281,7 @@ func One(ctx context.Context, cfg Config) error {
 		// run and says so at ERROR level; it never stops capture.
 		LoadKnownShapes: func(from uint64) (pgcapture.KnownState, error) { return loadKnownState(indexDB, from) },
 		LastChange:      lastIndexedChange(indexDB),
+		Skips:           skips,
 	})
 	idx := indexer.New(indexDB, cfg.BatchSize)
 
@@ -375,6 +398,100 @@ type sourceHealthJSON struct {
 	// reading — the slot fields are absent/zero. Persisted so the console shows an
 	// explicit "probe failing" state instead of a blank panel (see buildProbeErrorJSON).
 	ProbeError string `json:"probe_error,omitempty"`
+	// Published is the publication's tables at the last reading of them, and
+	// PublishedAt / PublishedLSN when and where that was: what the next
+	// reading is compared with, also by a capture that starts again
+	// (publicationWatch). Absent until one was read.
+	Published    *[]publishedTableJSON `json:"published,omitempty"`
+	PublishedAt  string                `json:"published_at,omitempty"`
+	PublishedLSN uint64                `json:"published_lsn,omitempty"`
+}
+
+type publishedTableJSON struct {
+	OID    uint32 `json:"oid"`
+	Schema string `json:"schema"`
+	Table  string `json:"table"`
+}
+
+// publicationWatch notices a table that leaves the publication, by comparing
+// each reading of its tables with the one before: MySQL's capture sees a
+// DROP TABLE in the binary log, and PostgreSQL's change stream says nothing
+// when a table is taken out of the publication or dropped. Its snapshot file
+// would then be carried from update to update as a table with no change,
+// and its tail, empty, taken for up to date: answers as of the day it left,
+// with nothing to say so.
+//
+// The reading it compares with is kept in stream_state.source_health, so a
+// table that left while capture was down is noticed at the first reading
+// after it starts.
+type publicationWatch struct {
+	known  bool
+	tables []pgcapture.PublishedTable
+	at     time.Time
+	lsn    uint64
+}
+
+// loadPublicationWatch reads the last reading a capture of this index saved.
+func loadPublicationWatch(db *sql.DB) publicationWatch {
+	ctx, cancel := context.WithTimeout(context.Background(), indexer.WriteTimeout)
+	defer cancel()
+	var raw sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT source_health FROM stream_state WHERE id = 1`).Scan(&raw); err != nil || !raw.Valid {
+		return publicationWatch{}
+	}
+	var h sourceHealthJSON
+	if json.Unmarshal([]byte(raw.String), &h) != nil || h.Published == nil {
+		return publicationWatch{}
+	}
+	at, err := time.Parse(time.RFC3339Nano, h.PublishedAt)
+	if err != nil {
+		return publicationWatch{}
+	}
+	w := publicationWatch{known: true, at: at, lsn: h.PublishedLSN}
+	for _, t := range *h.Published {
+		w.tables = append(w.tables, pgcapture.PublishedTable{OID: t.OID, Schema: t.Schema, Table: t.Table})
+	}
+	return w
+}
+
+// left is the tables of the reading before that now does not hold, by OID: a
+// renamed table is still in the publication.
+func (w publicationWatch) left(now []pgcapture.PublishedTable) []pgcapture.PublishedTable {
+	if !w.known {
+		return nil
+	}
+	in := make(map[uint32]bool, len(now))
+	for _, t := range now {
+		in[t.OID] = true
+	}
+	var out []pgcapture.PublishedTable
+	for _, t := range w.tables {
+		if !in[t.OID] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// stamp writes the watch's reading into a source-health document.
+func (w publicationWatch) stamp(healthJSON []byte) []byte {
+	if !w.known {
+		return healthJSON
+	}
+	var h sourceHealthJSON
+	if json.Unmarshal(healthJSON, &h) != nil {
+		return healthJSON
+	}
+	list := make([]publishedTableJSON, 0, len(w.tables))
+	for _, t := range w.tables {
+		list = append(list, publishedTableJSON{OID: t.OID, Schema: t.Schema, Table: t.Table})
+	}
+	h.Published, h.PublishedAt, h.PublishedLSN = &list, w.at.UTC().Format(time.RFC3339Nano), w.lsn
+	out, err := json.Marshal(h)
+	if err != nil {
+		return healthJSON
+	}
+	return out
 }
 
 // buildSourceHealthJSON marshals a probe result + the wall-clock it was taken into the
@@ -500,6 +617,13 @@ func streamLoopPG(
 	var proof caughtUpProof
 	var caughtUpMoment, caughtUpSourceAt time.Time
 	flushedUnread := false
+	// The publication's tables as last read, by this run or the one before.
+	// Only a loop that probes the source reads them.
+	var watch publicationWatch
+	if probe != nil {
+		watch = loadPublicationWatch(indexDB)
+	}
+	publishedUnread := false
 	pollHealth := func() {
 		pctx, cancel := context.WithTimeout(ctx, healthPollTimeout)
 		defer cancel()
@@ -521,7 +645,7 @@ func streamLoopPG(
 			// panel absent and the staleness net has nothing to age — the silent-failure
 			// the visibility feature must not have. buildProbeErrorJSON cannot fail.
 			if errJSON, mErr := buildProbeErrorJSON(err.Error(), time.Now()); mErr == nil {
-				saveSourceHealth(indexDB, state.serverID, errJSON, logger)
+				saveSourceHealth(indexDB, state.serverID, watch.stamp(errJSON), logger)
 			}
 			return
 		}
@@ -545,12 +669,39 @@ func streamLoopPG(
 				logger.Info("pgstreamrun: the source's flushed WAL position is read again")
 			}
 		}
+		// A table that left the publication since the reading before
+		// (publicationWatch). Recorded before the reading is saved: a table
+		// whose record could not be written stays in the saved reading, and
+		// is found gone again at the next one.
+		if failing := snap.PublishedErr != nil; failing != publishedUnread && ctx.Err() == nil && pctx.Err() == nil {
+			publishedUnread = failing
+			if failing {
+				logger.Warn("pgstreamrun: could not list the publication's tables; until it can be read, a table taken out of the publication is not noticed",
+					"error", snap.PublishedErr)
+			}
+		}
+		if snap.PublishedErr == nil {
+			highLSN := max(snap.FlushedLSN, pendingSent, state.lsn)
+			next := append([]pgcapture.PublishedTable(nil), snap.Published...)
+			for _, t := range watch.left(snap.Published) {
+				ev := pgcapture.PublicationLeftEvent(t, watch.lsn, watch.at, highLSN, time.Now())
+				if werr := indexer.InsertSchemaChange(indexDB, ev, nil); werr != nil {
+					logger.Error("pgstreamrun: a table left the publication and that could not be recorded; it is tried again at the next reading",
+						"schema", t.Schema, "table", t.Table, "error", werr)
+					next = append(next, t)
+					continue
+				}
+				logger.Warn("pgstreamrun: a table is no longer in the publication (taken out of it, or dropped): its changes are not captured from here on, and its snapshot is not updated until a new full read",
+					"schema", t.Schema, "table", t.Table, "oid", t.OID)
+			}
+			watch = publicationWatch{known: true, tables: next, at: asked, lsn: highLSN}
+		}
 		healthJSON, err := buildSourceHealthJSON(snap, time.Now())
 		if err != nil {
 			logger.Warn("pgstreamrun: marshal source-health snapshot", "error", err)
 			return
 		}
-		saveSourceHealth(indexDB, state.serverID, healthJSON, logger)
+		saveSourceHealth(indexDB, state.serverID, watch.stamp(healthJSON), logger)
 	}
 
 	// The last complete transaction's commit LSN. A resumed run starts from
@@ -882,6 +1033,22 @@ func deleteEventsPastCheckpointPG(ctx context.Context, db *sql.DB, lsn uint64) (
 	return res.RowsAffected()
 }
 
+// loadCaptureSkipsPG reads the persisted capture-skip counters (the PostgreSQL
+// twin of streamrun's loadCaptureSkips), so a restarting capture resumes the
+// monotonic tallies. Runs after EnsureSchema, so the column exists; no row, or a
+// NULL column, returns "" (nothing persisted yet).
+func loadCaptureSkipsPG(db *sql.DB) (string, error) {
+	var raw sql.NullString
+	err := db.QueryRow(`SELECT capture_skips FROM stream_state WHERE id = 1`).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return raw.String, nil
+}
+
 // newestEventThrough is the newest event of the index whose position is at
 // or before lsn, 0 when it holds none. The rows above it are what was made
 // visible past lsn (a transaction still arriving in parts), so the walk back
@@ -947,6 +1114,18 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 	if state.stampEvent && state.checkpointEvent != 0 {
 		checkpointEvent = state.checkpointEvent
 	}
+	// capture_skips: the ledger rides every checkpoint, as on the MySQL path
+	// (streamrun.saveCheckpoint). A nil ledger writes NULL, which the update
+	// arm's COALESCE turns into "keep what is there", so no writer of a bare
+	// state wipes counters a capture persisted.
+	var captureSkips any
+	if state.skips != nil {
+		snap, err := state.skips.Snapshot()
+		if err != nil {
+			return fmt.Errorf("pgstreamrun: serialize capture-skip counters: %w", err)
+		}
+		captureSkips = snap
+	}
 	// pg_sent_through_at gets the same UTC_TIMESTAMP() as last_checkpoint
 	// (one statement, one value). Verify trusts pg_sent_through_lsn only while
 	// the two are equal, so a save by any writer that does not set it (an
@@ -956,9 +1135,9 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 			(id, mode, binlog_file, binlog_position, gtid_set, flavor,
 			 events_indexed, last_event_time, last_checkpoint, server_id,
 			 pg_sent_through_lsn, pg_sent_through_at, caught_up_at, pg_capture_from_lsn,
-			 pg_caught_up_source_at, pg_checkpoint_event_id)
+			 pg_caught_up_source_at, pg_checkpoint_event_id, capture_skips)
 		VALUES (1, 'gtid', ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, UTC_TIMESTAMP(),
-			UTC_TIMESTAMP(6) - INTERVAL ? MICROSECOND, ?, ?, ?)
+			UTC_TIMESTAMP(6) - INTERVAL ? MICROSECOND, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			binlog_file     = VALUES(binlog_file),
 			binlog_position = VALUES(binlog_position),
@@ -973,9 +1152,11 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 			caught_up_at = COALESCE(VALUES(caught_up_at), caught_up_at),
 			pg_caught_up_source_at = COALESCE(VALUES(pg_caught_up_source_at), pg_caught_up_source_at),
 			pg_capture_from_lsn = IF(?, pg_capture_from_lsn, VALUES(pg_capture_from_lsn)),
-			pg_checkpoint_event_id = IF(?, VALUES(pg_checkpoint_event_id), pg_checkpoint_event_id)`,
+			pg_checkpoint_event_id = IF(?, VALUES(pg_checkpoint_event_id), pg_checkpoint_event_id),
+			capture_skips = COALESCE(VALUES(capture_skips), capture_skips)`,
 		lsnStr, commitLSN, lsnStr, pgFlavor, state.eventsIndexed, lastEventTime, state.serverID,
-		state.sentThrough, caughtUpAgo, captureFrom, caughtUpSourceAt, checkpointEvent, state.resumed, state.stampEvent)
+		state.sentThrough, caughtUpAgo, captureFrom, caughtUpSourceAt, checkpointEvent, captureSkips,
+		state.resumed, state.stampEvent)
 	if err != nil {
 		return fmt.Errorf("pgstreamrun: save checkpoint at %s: %w", lsnStr, err)
 	}

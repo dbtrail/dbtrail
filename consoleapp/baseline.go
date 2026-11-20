@@ -1531,9 +1531,29 @@ func (s *baselineSupervisor) executePG(req console.BaselineRequest) (dumpOutcome
 	if err != nil {
 		return dumpOutcome{}, err
 	}
+	// The snapshot folder this run alone writes, as execute keeps it for a
+	// MySQL read (#1938, #2180): journaled when it is vacant as the read is
+	// about to create it, so a kill leaves it for the next start to clean
+	// up, and removed when the read fails and lives, which nothing else
+	// would ever do (prune never touches an _INCOMPLETE folder). A folder
+	// that already holds files is not this run's alone, and stays.
+	ownSnapshot := ""
+	cfg.DirStarting = func(root, name string) {
+		if vacant, verr := reconstruct.SnapshotDirVacant(filepath.Join(root, name)); verr == nil && vacant {
+			journalDir(req, root, name)
+			ownSnapshot = name
+		}
+	}
 	pgStats, err := pgBaselineRun(s.ctx, cfg)
 	if err != nil {
-		return dumpOutcome{}, fmt.Errorf("pg baseline: %w", err)
+		readErr := err
+		err = fmt.Errorf("pg baseline: %w", err)
+		if ownSnapshot != "" {
+			if said := discardFailedSnapshot(outputDir, ownSnapshot, req.ServerID, readErr); said != "" {
+				err = fmt.Errorf("%w. %s", err, said)
+			}
+		}
+		return dumpOutcome{}, err
 	}
 	out := dumpOutcome{stats: baseline.Stats{
 		TablesProcessed: pgStats.TablesProcessed,

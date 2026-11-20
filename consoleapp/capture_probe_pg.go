@@ -2,6 +2,7 @@ package consoleapp
 
 import (
 	"context"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -53,9 +54,8 @@ func probeCapturePGFromDBs(ctx context.Context, indexDSN, sourceDSN string, anch
 
 // capturePGFromDBs reads the capture's record and its position from the
 // index, then the source's position, and compares them.
-// sourceRead is not used: it dates dropped rows, which a PostgreSQL capture
-// does not record.
-func capturePGFromDBs(ctx context.Context, indexDSN, sourceDSN string, anchor, _ time.Time, indexRead *atomic.Bool) captureProbeResult {
+// sourceRead dates dropped changes (pgCaptureComparable).
+func capturePGFromDBs(ctx context.Context, indexDSN, sourceDSN string, anchor, sourceRead time.Time, indexRead *atomic.Bool) captureProbeResult {
 	idx, err := config.Connect(probeDSN(indexDSN))
 	if err != nil {
 		return captureProbeResult{detail: captureDetailIndexSilent, cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
@@ -66,7 +66,7 @@ func capturePGFromDBs(ctx context.Context, indexDSN, sourceDSN string, anchor, _
 		return captureProbeResult{detail: captureDetailCheckpointUnread, cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
 	}
 	// No connection to production for a verdict the index already settles.
-	if ok, detail := pgCaptureComparable(st, anchor); !ok {
+	if ok, detail := pgCaptureComparable(st, anchor, sourceRead); !ok {
 		indexRead.Store(true)
 		return captureProbeResult{detail: detail}
 	}
@@ -91,13 +91,21 @@ func capturePGFromDBs(ctx context.Context, indexDSN, sourceDSN string, anchor, _
 // the index's own record of the capture says before the source is asked.
 // Pure.
 //
+// Two records of loss: gap_lost_at, which a lost replication slot stamps,
+// and the ledger of dropped changes (stream_state.capture_skips), where a
+// capture records each change of a table below REPLICA IDENTITY FULL that it
+// drops while the other tables keep flowing. A drop is dated against the
+// last read of the SOURCE, as on MySQL (captureComparable): an update is
+// built from the index and never brings a dropped change back.
+//
 // Not captureComparable itself, for one reason that a real PostgreSQL index
-// showed: a PostgreSQL capture keeps no ledger of dropped rows
-// (stream_state.capture_skips stays NULL), and captureComparable reads a
-// ledger that is not there as one that cannot be read, which takes a full
-// read. Here the loss record is the whole of it: gap_lost_at, which a lost
-// replication slot stamps.
-func pgCaptureComparable(st *status.StreamStateInfo, anchor time.Time) (ok bool, detail string) {
+// showed: an index written by a PostgreSQL capture from before the ledger has
+// capture_skips NULL, and captureComparable reads a ledger that is not there
+// as one that cannot be read, which takes a full read. Here a NULL ledger is
+// no drop (those captures stopped instead of dropping); one that is there and
+// does not parse is a record that cannot be read. Both answers are "cannot
+// be asked", like every answer of this probe: see the top of this file.
+func pgCaptureComparable(st *status.StreamStateInfo, anchor, sourceRead time.Time) (ok bool, detail string) {
 	switch {
 	case st == nil:
 		return false, captureDetailNoCapture
@@ -105,6 +113,17 @@ func pgCaptureComparable(st *status.StreamStateInfo, anchor time.Time) (ok bool,
 		return false, captureDetailPGNoLossRecord
 	case st.GapLostAt.Valid && !st.GapLostAt.Time.Before(anchor):
 		return false, captureDetailPGLost
+	}
+	if st.CaptureSkips.Valid && strings.TrimSpace(st.CaptureSkips.String) != "" {
+		skips, readable := st.ParseCaptureSkips()
+		if !readable {
+			return false, captureDetailPGNoLossRecord
+		}
+		for _, sk := range skips {
+			if sk.Count > 0 && (sourceRead.IsZero() || sk.LastAt.IsZero() || !sk.LastAt.Before(sourceRead)) {
+				return false, captureDetailPGLost
+			}
+		}
 	}
 	// A PostgreSQL capture saves mode 'gtid' with its LSN as the set, so
 	// this passes once it has saved a checkpoint.
