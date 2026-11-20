@@ -4,7 +4,6 @@ package pgstreamrun
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"log/slog"
 	"strings"
@@ -143,5 +142,4 @@ func TestIntegrationPGTableLeavingThePublicationIsRecorded(t *testing.T) {
 	if got := markers("things"); len(got) != 2 {
 		t.Fatalf("out, in and out again: %d rows, want 2", len(got))
 	}
-	_ = sql.ErrNoRows
 }

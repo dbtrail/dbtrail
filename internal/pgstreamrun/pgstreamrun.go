@@ -595,7 +595,11 @@ func streamLoopPG(
 	var caughtUpMoment, caughtUpSourceAt time.Time
 	flushedUnread := false
 	// The publication's tables as last read, by this run or the one before.
-	watch := loadPublicationWatch(indexDB)
+	// Only a loop that probes the source reads them.
+	var watch publicationWatch
+	if probe != nil {
+		watch = loadPublicationWatch(indexDB)
+	}
 	publishedUnread := false
 	pollHealth := func() {
 		pctx, cancel := context.WithTimeout(ctx, healthPollTimeout)
