@@ -404,6 +404,42 @@ func TestInstaller_leavesTheDbtrailCommand(t *testing.T) {
 	}
 }
 
+// The end text a stranger needed on 2026-11-20 and did not get: the SQL
+// for DBTrail's user before server add, a PostgreSQL server with its flag
+// and the page that prepares it, the link that makes a bare dbtrail work
+// (what the command itself suggests next), and the tunnel for a remote
+// machine, with the chosen port on both sides.
+func TestInstaller_endTextCoversTheTerminalPostgresAndARemoteMachine(t *testing.T) {
+	for _, port := range []string{"8090", "8091"} {
+		t.Run(port, func(t *testing.T) {
+			var env []string
+			if port != "8090" {
+				env = append(env, "DBTRAIL_PORT="+port)
+			}
+			r := install(t, env...)
+			if r.failed {
+				t.Fatalf("install failed:\n%s", r.out)
+			}
+			for _, s := range []string{
+				"dbtrail server add --help shows the SQL",
+				"/dbtrail server add --flavor postgres -h <host> -u dbtrail -p -d <db> --publication <name>",
+				"https://www.dbtrail.com/docs/postgres/",
+				"SELECT on your tables",
+				`sudo ln -s "` + r.dir + `/dbtrail" /usr/local/bin/dbtrail`,
+				"ssh -L " + port + ":127.0.0.1:" + port + " <user>@",
+			} {
+				if !strings.Contains(r.out, s) {
+					t.Errorf("the end text lacks %q:\n%s", s, r.out)
+				}
+			}
+			// The steps come first, then the terminal, then PostgreSQL.
+			if i, j := strings.Index(r.out, "5. Heavy query."), strings.Index(r.out, "--flavor postgres"); i < 0 || j < i {
+				t.Errorf("PostgreSQL is not after the five steps:\n%s", r.out)
+			}
+		})
+	}
+}
+
 func TestInstaller_withoutTheDbtrailCommandStillInstalls(t *testing.T) {
 	r := install(t, "STUB_NO_CLI=1")
 	if r.failed {
@@ -415,8 +451,11 @@ func TestInstaller_withoutTheDbtrailCommandStillInstalls(t *testing.T) {
 	if !strings.Contains(r.out, "could not download the dbtrail command") {
 		t.Errorf("the failed download is not said:\n%s", r.out)
 	}
-	if strings.Contains(r.out, "/dbtrail server add") || strings.Contains(r.out, "./dbtrail user") {
+	if strings.Contains(r.out, "/dbtrail server add") || strings.Contains(r.out, "./dbtrail user") || strings.Contains(r.out, "ln -s") {
 		t.Errorf("the end text shows commands that are not there:\n%s", r.out)
+	}
+	if !strings.Contains(r.out, "https://www.dbtrail.com/docs/postgres/") {
+		t.Errorf("without the command, the end text no longer names the PostgreSQL page:\n%s", r.out)
 	}
 	if !strings.Contains(r.out, "bintrail-console user set-password") {
 		t.Errorf("the way to reset the login is gone:\n%s", r.out)

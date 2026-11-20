@@ -33,6 +33,7 @@ RELEASE_API="https://api.github.com/repos/dbtrail/dbtrail/releases/latest"
 HEALTH_URL="http://127.0.0.1:${PORT}/api/healthz"
 CONSOLE_URL="http://127.0.0.1:${PORT}"
 START_PAGE="https://www.dbtrail.com/docs/quickstart/"
+START_PG="https://www.dbtrail.com/docs/postgres/"
 # The promise, word for word the headline of the README's header and of the
 # dbtrail.com home page (#2637); test/installer pins it.
 PROMISE="Heavy MySQL queries, from minutes to seconds."
@@ -693,6 +694,10 @@ say "and ${B}a MySQL login that can create users${RST} and grant them privileges
 say ""
 say "${B}Next steps${RST}"
 say "  ${B}1. Sign in.${RST} Open ${B}${CONSOLE_URL}${RST} and create a username and password."
+say "     Installed on a remote machine, such as a cloud server? That address answers"
+say "     on that machine only. Open a tunnel from your own computer, then open the"
+say "     same address in your browser there:"
+say "       ssh -L ${PORT}:127.0.0.1:${PORT} <user>@<this machine's address>"
 say "  ${B}2. Connect.${RST} Click + Add server, fill in"
 say "     the host and port of your MySQL server and press Find it. The form then"
 say "     shows the SQL that creates a user for DBTrail: run it on your MySQL with"
@@ -713,13 +718,30 @@ say "     over one of your big tables. DBTrail answers it from the copy, without
 say "     slowing down your MySQL. The start page below has one to try."
 say ""
 if [ -n "$CLI" ]; then
-  say "${B}Or from this terminal${RST}, with no browser. The same steps as commands:"
+  say "${B}Or from this terminal${RST}, with no browser. The same steps as commands."
+  say "First create the dbtrail user on your MySQL: ${DIR}/dbtrail server add --help shows the SQL."
   say "  ${DIR}/dbtrail server add -h <host> -u dbtrail -p   ${DIM}# connect your MySQL; turns the MySQL port on${RST}"
   say "  ${DIR}/dbtrail snapshot run <name>                  ${DIM}# first copy${RST}"
   say "  ${DIR}/dbtrail port status                          ${DIM}# the mysql line to query it${RST}"
   say "  ${DIR}/dbtrail --help"
+  case "$DIR" in
+    /*) say "To type just dbtrail instead, link it once:" ;;
+    *)  say "The commands above work from the folder you ran this installer in. To type just"
+        say "dbtrail from any folder, link it once:" ;;
+  esac
+  say "  sudo ln -s \"$PWD/dbtrail\" /usr/local/bin/dbtrail"
   say ""
 fi
+say "${B}A PostgreSQL server instead?${RST} This installation then takes PostgreSQL servers only."
+say "Prepare it first (logical replication, a publication, and the dbtrail user with"
+say "SELECT on your tables): ${START_PG}"
+if [ -n "$CLI" ]; then
+  say "Then add it with + Add server (Open the full form, and pick PostgreSQL), or from this terminal:"
+  say "  ${DIR}/dbtrail server add --flavor postgres -h <host> -u dbtrail -p -d <db> --publication <name>"
+else
+  say "Then add it with + Add server: Open the full form, and pick PostgreSQL."
+fi
+say ""
 say "Your change history lives on this machine, in this stack's Docker volumes,"
 say "with your login and your saved servers. Back them up. To keep the history on"
 say "a MySQL server of your own instead, set INDEX_DSN in ${DIR}/.env."

@@ -129,7 +129,10 @@ the same ones the core binary exposes, working over the same index.
 ## PostgreSQL-side setup
 
 Run these once on the source, as a superuser (or the managed-database master
-user). Replace `shop` / table names with yours.
+user). The examples use a database named `shop` whose tables are in the
+`public` schema, which is where PostgreSQL puts a table created without a
+schema name. Replace `shop` with your database and `public` with the schema
+your tables live in (`\dt *.*` in `psql` lists them with their schema).
 
 ### 1. Enable logical decoding (`wal_level = logical`)
 
@@ -161,16 +164,31 @@ reads.
 ```sql
 CREATE ROLE dbtrail WITH LOGIN REPLICATION PASSWORD <choose a password>;
 GRANT CONNECT ON DATABASE shop TO dbtrail;
+-- Connected to shop: the first copy of the tables reads them.
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO dbtrail;
 ```
 
 Put a password of your own in quotes where it says `<choose a password>`. As
 written, PostgreSQL refuses the line on purpose, so no role is created with a
 password copied from this page.
 
-- The role does **not** need to be a superuser, and does **not** need `SELECT`
-  on your tables to stream changes (logical replication delivers the row data
-  over the WAL). It does read system catalogs (publications, replica identity,
-  primary keys) — readable by any role by default.
+- The role does **not** need to be a superuser.
+- **Capturing changes needs no `SELECT`**: logical replication delivers the
+  row data over the WAL. **The first copy does.** It reads every table of the
+  publication with `COPY (SELECT ...)`, as this role, so without `SELECT` the
+  checks of `server add` pass and the first snapshot then fails with
+  `permission denied for table ...` (`42501`). The same goes for a table added
+  to the publication later, which is read in full once.
+- `GRANT SELECT ON ALL TABLES IN SCHEMA` covers the tables that exist when it
+  runs. For the ones created later, run once
+  `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO dbtrail;`
+  as the role that creates them: default privileges apply only to tables that
+  role creates.
+- For a schema other than `public`, the role also needs
+  `GRANT USAGE ON SCHEMA <schema> TO dbtrail;` (every role has it on `public`
+  by default).
+- It also reads system catalogs (publications, replica identity, primary
+  keys), which any role can read by default.
 - **Managed PostgreSQL:** the master user already has the replication privilege
   (e.g. AWS grants `rds_replication`); you can capture as the master user, or
   create a dedicated role and grant it the provider's replication role
@@ -208,7 +226,7 @@ password copied from this page.
 > - A table that belongs to **another** publication as well is refused if that
 >   one does not publish the column, whatever DBTrail's publication does.
 > - **If your application is already refused**, this lets it write again at
->   once: `ALTER TABLE shop.orders REPLICA IDENTITY DEFAULT;`
+>   once: `ALTER TABLE public.orders REPLICA IDENTITY DEFAULT;`
 >
 > `bintrail-pg doctor`, the web interface's checks when a server is added, and
 > the capture when it starts all look for this and stop with the statements to
@@ -223,8 +241,8 @@ text/bytea/json column) is only present in the before-image under
 recovery would be wrong.
 
 ```sql
-ALTER TABLE shop.orders   REPLICA IDENTITY FULL;
-ALTER TABLE shop.customers REPLICA IDENTITY FULL;
+ALTER TABLE public.orders   REPLICA IDENTITY FULL;
+ALTER TABLE public.customers REPLICA IDENTITY FULL;
 -- repeat for every table you want to capture
 ```
 
@@ -242,7 +260,7 @@ otherwise stop every other table with it. Instead:
 - **The other tables keep being captured** normally.
 - **The log says so**, once each time PostgreSQL describes the table, with the
   exact statement to run, for example
-  `ALTER TABLE "shop"."items" REPLICA IDENTITY FULL`.
+  `ALTER TABLE "public"."items" REPLICA IDENTITY FULL`.
 - **`status` shows capture as DEGRADED** under the reason
   `replica_identity_not_full` and names the table. The count is kept across
   restarts, like the MySQL path's skip counts.
@@ -268,11 +286,11 @@ changes.
 
 ```sql
 -- Specific tables (recommended — you control exactly what is captured):
-CREATE PUBLICATION bintrail_pub FOR TABLE shop.orders, shop.customers;
+CREATE PUBLICATION bintrail_pub FOR TABLE public.orders, public.customers;
 
 -- On PostgreSQL 18, when a captured table has a STORED generated column
 -- (see the note in step 3):
-CREATE PUBLICATION bintrail_pub FOR TABLE shop.orders, shop.customers
+CREATE PUBLICATION bintrail_pub FOR TABLE public.orders, public.customers
   WITH (publish_generated_columns = stored);
 
 -- …or everything (requires superuser):
@@ -280,8 +298,8 @@ CREATE PUBLICATION bintrail_pub FOR ALL TABLES;
 ```
 
 To add a table later, set its `REPLICA IDENTITY FULL` **first**, then add it:
-`ALTER TABLE shop.items REPLICA IDENTITY FULL;` and
-`ALTER PUBLICATION bintrail_pub ADD TABLE shop.items;`. In the other order,
+`ALTER TABLE public.items REPLICA IDENTITY FULL;` and
+`ALTER PUBLICATION bintrail_pub ADD TABLE public.items;`. In the other order,
 the changes written in between are skipped (see step 3).
 
 ### 5. The replication slot — created for you
@@ -404,7 +422,7 @@ a final checkpoint).
 | `--publication` | yes | Publication name covering the tables to capture (env `BINTRAIL_PG_PUBLICATION`). |
 | `--server-id` | yes | A unique number identifying this source in the index — must differ from every other source (env `BINTRAIL_SERVER_ID`). |
 | `--schemas` | no | Only index these schemas (comma-separated). |
-| `--tables` | no | Only index these tables (comma-separated, e.g. `shop.orders`). |
+| `--tables` | no | Only index these tables (comma-separated, e.g. `public.orders`). |
 | `--start-lsn` | no | Explicit start LSN; **first run only**, ignored once a checkpoint exists. |
 | `--batch-size` | no | Events per batch insert (default 1000). |
 | `--checkpoint` | no | Checkpoint interval in seconds (default 5). |
@@ -768,6 +786,15 @@ listener, its own workers, its own memory.
   does not disconnect anyone here.
 - **PostgreSQL servers only.** A MySQL or MariaDB server is refused with an
   error that names it; its copy is read through the MySQL port.
+- **Who answers depends on the server's forwarding user.** `server add` does
+  not set one for a PostgreSQL, so at first the copy answers every statement,
+  nothing is sent to your PostgreSQL, and a statement the copy cannot answer
+  gets an error. Once one is set
+  (`bintrail-console server forward-user <server> -u <user> -p`, or the
+  server's Forwarding user in the web interface), a statement the copy is not
+  known to answer as PostgreSQL does, and a client's transaction block, run
+  on your PostgreSQL as that user, read-only
+  ([the forwarding user](#transactions-on-the-source-the-forwarding-user)).
 - **Fresh or fast, per server, as on the MySQL port.** In fresh mode, the
   default, each table's newest changes captured from PostgreSQL are laid over
   its snapshot, so a row written a moment ago shows without waiting for the
@@ -1424,8 +1451,8 @@ you (it works for both `SERIAL` and `IDENTITY` columns):
 
 ```sql
 SELECT setval(
-  pg_get_serial_sequence('shop.orders', 'id'),
-  COALESCE((SELECT MAX(id) FROM shop.orders), 0) + 1,
+  pg_get_serial_sequence('public.orders', 'id'),
+  COALESCE((SELECT MAX(id) FROM public.orders), 0) + 1,
   false
 );
 ```

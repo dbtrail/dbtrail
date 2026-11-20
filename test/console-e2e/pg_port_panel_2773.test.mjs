@@ -109,7 +109,7 @@ test("drawn for a PostgreSQL server: on", () => {
   const on = { enabled: true, can_manage: true, password_created_at: "2026-11-15T10:00:00Z" };
   const text = draw({ servers: [pg("shop")], fb: on, reveal: "bfp_secret" });
   for (const want of ['psql "host=dbtrail.example port=5433 dbname=shop user=app sslmode=require"', "Database", "5433",
-    "the PostgreSQL router's usual number", "bfp_secret", "Nothing is sent to your PostgreSQL", "The user can be anything"]) {
+    "the PostgreSQL router's usual number", "bfp_secret", "Until the server has a forwarding user, nothing is sent to your PostgreSQL", "The user can be anything"]) {
     assert.ok(text.includes(want), "lacks " + JSON.stringify(want) + ":\n" + text);
   }
   for (const not of ["mysql -h", "3309", "Engine Routing", "forwarding account", "_flashback", "MySQL"]) {
