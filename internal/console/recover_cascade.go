@@ -163,6 +163,17 @@ func (s *Server) handleRecoverCascade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The index's dialect, read once per request (it was read before this
+	// change too, just later, to build the generator below). A PostgreSQL
+	// index is refused before anything is fetched: its capture does not record
+	// foreign keys, so the script would bring back the parent alone.
+	dialect := recovery.DialectForIndex(b.db)
+	if dialect == recovery.PostgresDialect {
+		writeJSONError(w, http.StatusUnprocessableEntity,
+			cascaderecover.PostgresCascadeRefusal(cascaderecover.SurfaceConsole, body.Schema).Error())
+		return
+	}
+
 	// A MariaDB UUID/INET parent key typed as text is stored as its bytes:
 	// spell it that way, as /api/recover does, or no parent is found.
 	keyOpts := query.Options{Schema: body.Schema, Table: body.Table, PKValues: body.PK, PKValuesIn: body.PKs,
@@ -206,7 +217,7 @@ func (s *Server) handleRecoverCascade(w http.ResponseWriter, r *http.Request) {
 	// Per-bundle dialect (matches handleRecover). For a MySQL/MariaDB index — the
 	// only flavor cascade recovery supports — this is byte-identical to the CLI's
 	// recovery.New(MySQL).
-	gen := recovery.NewForDialect(b.db, b.resolver, recovery.DialectForIndex(b.db))
+	gen := recovery.NewForDialect(b.db, b.resolver, dialect)
 	// #849: same shared-daemon budget as handleRecover (see recoverMaxScriptBytes
 	// in api.go) — EmitSQL calls gen.CheckScriptBudget before writing a byte.
 	gen.SetMaxScriptBytes(recoverMaxScriptBytes)
