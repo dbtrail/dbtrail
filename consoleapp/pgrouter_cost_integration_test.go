@@ -219,6 +219,10 @@ func TestIntegrationPGRouterRoutesByPlan(t *testing.T) {
 	// source never answered, the next sum must be the new table's, from the
 	// source, whose plan for one row is cheap: a verdict for the copy kept
 	// from before the drop would have answered the old rows.
+	// Rows on the source only, so its plan is ten times over the threshold:
+	// the one verdict for the copy a connection could otherwise have kept.
+	exec1("INSERT INTO " + pgCostTable + " SELECT g, 0 FROM generate_series(10001, 20000) g")
+	exec1("ANALYZE " + pgCostTable)
 	e := pgClient(t, ctx, env.portDSN(), nil)
 	if got := one(ctx, e, scan); got != strconv.Itoa(pgCostRows) {
 		t.Fatalf("the sum before the drop: %q, want the copy's %d", got, pgCostRows)
