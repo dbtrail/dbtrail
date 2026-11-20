@@ -568,8 +568,8 @@ func TestBuildPlan_aRangeInAnotherZone(t *testing.T) {
 		t.Fatalf("in UTC: %d gaps, %d MySQL ranges; this test needs a range with none and one", len(want.GapHours), len(want.MySQLRanges))
 	}
 	for name, loc := range map[string]*time.Location{
-		"minus five":         time.FixedZone("", -5*3600),
-		"plus five and half": time.FixedZone("", 5*3600+1800),
+		"minus five":          time.FixedZone("", -5*3600),
+		"plus five and half":  time.FixedZone("", 5*3600+1800),
 		"UTC by another name": time.FixedZone("UTC", 0),
 	} {
 		got := buildPlan(live, archived, h(5, 8).In(loc), h(5, 13).In(loc), false)
