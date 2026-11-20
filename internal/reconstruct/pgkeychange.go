@@ -199,17 +199,14 @@ func splitPGKeyChange(ev *query.ResultRow, schema, table string, pkCols []metada
 // returned; a new row with no NULL outside the key holds only values
 // PostgreSQL sent, whatever the old row was.
 func pgOldRowMayBeKeyOnly(ev *query.ResultRow, pkCols []metadata.ColumnMeta) string {
-	// An old row that SAYS it was captured with its key only (the
-	// not-captured marker in its other columns) is not the case this looks
-	// for: with that capture a large value that was not sent is its own
-	// marker in the new row, never a NULL, so a NULL there is a NULL.
-	if len(event.NotCapturedColumns(ev.RowBefore)) > 0 {
-		return ""
-	}
 	isKey := make(map[string]bool, len(pkCols))
 	for _, c := range pkCols {
 		isKey[c.Name] = true
 	}
+	// An old row that SAYS it was captured with its key only holds the
+	// not-captured marker outside the key, which is a value here: that
+	// capture stores a large value that was not sent as its own marker in
+	// the new row, never as NULL, so a NULL there is a NULL.
 	for col, v := range ev.RowBefore {
 		if !isKey[col] && v != nil {
 			return ""
@@ -520,10 +517,20 @@ func pgRowLink(leaves, needs pgRowState) string {
 		// A row on both sides, and one of them known by its key alone
 		// (a table below REPLICA IDENTITY FULL): there is nothing to
 		// compare the other with. An INSERT followed by an UPDATE in one
-		// transaction is the ordinary case. What this gives up: it no
-		// longer shows that the row a change started from is the row the
-		// change before it left, which is what caught a deferrable key
-		// (pgKeyTxn); capture refuses a table with one.
+		// transaction is the ordinary case. Two things are given up, for
+		// such a table only:
+		//   - that the row a change started from is the row the change
+		//     before it left, which is what showed a deferrable key
+		//     (pgKeyTxn). Capture refuses a table with one when it starts
+		//     (pgcapture.CheckDeferrableKeys), not one made so while it
+		//     runs;
+		//   - a transaction delivered a second time whose changes of the
+		//     key are all UPDATEs is not seen as one: its first change
+		//     links like any other. The whole delivery ends in the same
+		//     row; a delivery cut short would not, and capture leaves none
+		//     in the index since it deletes, when it resumes, what it had
+		//     indexed past its saved position (pgstreamrun), which is
+		//     also as far as a fold or a tail is fed.
 		return ""
 	case leaves == needs:
 		return ""

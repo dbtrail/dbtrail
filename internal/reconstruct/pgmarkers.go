@@ -54,8 +54,9 @@ func checkPGEventMarkers(ev *query.ResultRow, pkCols []metadata.ColumnMeta) erro
 // fold needs. It says what a fold cannot do, not what undo cannot: the
 // reader is rebuilding a table.
 func pgNotCapturedErr(ev *query.ResultRow, what string) error {
-	return fmt.Errorf("%s.%s (pk=%s): %s: the table was not at REPLICA IDENTITY FULL when the change was captured, "+
+	target := pgQuoteIdent(ev.SchemaName) + "." + pgQuoteIdent(ev.TableName)
+	return fmt.Errorf("%s (pk=%s): %s: the table was not at REPLICA IDENTITY FULL when the change was captured, "+
 		"and PostgreSQL sent at most the row's key. The table cannot be rebuilt through this change; "+
-		"take a new snapshot of it, and run ALTER TABLE ... REPLICA IDENTITY FULL on the source for later changes to be captured whole",
-		ev.SchemaName, ev.TableName, ev.PKValues, what)
+		"take a new snapshot of it, and run ALTER TABLE %s REPLICA IDENTITY FULL on the source for later changes to be captured whole",
+		target, ev.PKValues, what, target)
 }

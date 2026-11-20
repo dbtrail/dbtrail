@@ -2,9 +2,12 @@ package reconstruct
 
 import (
 	"errors"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
@@ -166,9 +169,85 @@ func TestPGRowLink_aRowKnownByItsKeyAlone(t *testing.T) {
 		"two different rows, both known whole":                     {row, other, false},
 		"the same row, known whole":                                {row, row, true},
 		"an image that cannot be compared":                         {pgRowState{Kind: pgStateUnknown}, partial, false},
+		"a row known by its key, then an image that cannot be compared": {partial, pgRowState{Kind: pgStateUnknown}, false},
+		"no record, then a row known by its key": {pgRowState{}, partial, false},
+		"a row known by its key, then no record": {partial, pgRowState{}, false},
 	} {
 		if why := pgRowLink(c.leaves, c.needs); (why == "") != c.links {
 			t.Errorf("%s: %q, want links=%v", name, why, c.links)
 		}
+	}
+}
+
+// On what the index holds today (no column marked as not captured) a
+// PostgreSQL fold refuses exactly what it refused, in the same words: the
+// check it runs now answers as the one it ran before.
+func TestCheckPGEventMarkers_answersAsBeforeWithoutTheMarker(t *testing.T) {
+	toast := map[string]any{event.UnchangedToastKey: true}
+	withToast := func(cols ...string) map[string]any {
+		img := map[string]any{"id": "1", "status": "s", "note": "n"}
+		for _, c := range cols {
+			img[c] = toast
+		}
+		return img
+	}
+	for name, ev := range map[string]query.ResultRow{
+		"nothing marked":                       pgEv(1, 0x700, event.EventUpdate, pgImg("1", "a"), pgImg("1", "b")),
+		"an insert":                            pgIns(1, 0x700, "1", "a"),
+		"a delete":                             pgEv(1, 0x700, event.EventDelete, pgImg("1", "a"), nil),
+		"an unchanged large value, row after":  pgEv(1, 0x700, event.EventUpdate, withToast(), withToast("note")),
+		"an unchanged large value, row before": pgEv(1, 0x700, event.EventUpdate, withToast("status"), withToast()),
+		"in both rows, different columns":      pgEv(1, 0x700, event.EventUpdate, withToast("status"), withToast("note")),
+		"in the row a delete removed":          pgEv(1, 0x700, event.EventDelete, withToast("note", "status"), nil),
+		"in the row an insert added":           pgEv(1, 0x700, event.EventInsert, nil, withToast("note")),
+		"in the key":                           pgEv(1, 0x700, event.EventUpdate, withToast("id"), withToast()),
+	} {
+		was, is := checkEventToast(ev), checkPGEventMarkers(&ev, pkColsIntID())
+		if (was == nil) != (is == nil) || (was != nil && was.Error() != is.Error()) {
+			t.Errorf("%s: the check answers %v, and answered %v", name, is, was)
+		}
+	}
+}
+
+// A key of two columns: the earlier row must hold both to be filed.
+func TestCheckPGEventMarkers_aKeyOfTwoColumns(t *testing.T) {
+	after := map[string]any{"a": "1", "b": "2", "status": "x"}
+	ev := pgEv(1, 0x700, event.EventUpdate, map[string]any{"a": "1", "b": "2", "status": notCaptured()}, after)
+	if err := checkPGEventMarkers(&ev, pkColsIntTwo()); err != nil {
+		t.Fatalf("an earlier row with its whole key: %v", err)
+	}
+	for _, typ := range []event.EventType{event.EventUpdate, event.EventDelete} {
+		ev := pgEv(1, 0x700, typ, map[string]any{"a": "1", "b": notCaptured(), "status": notCaptured()}, after)
+		if typ == event.EventDelete {
+			ev.RowAfter = nil
+		}
+		err := checkPGEventMarkers(&ev, pkColsIntTwo())
+		if err == nil || !strings.Contains(err.Error(), "key column(s) b") || !strings.Contains(err.Error(), `ALTER TABLE "mydb"."orders" REPLICA IDENTITY FULL`) {
+			t.Errorf("%s with half its key: %v", typ, err)
+		}
+	}
+}
+
+// A fresh-mode tail takes changes whose earlier row was captured with its
+// key only, and writes the rows they leave.
+func TestPGTail_takesAnEarlierRowCapturedWithItsKeyOnly(t *testing.T) {
+	dir := t.TempDir()
+	base, md := writePGTailBase(t, dir, nil, [2]string{"1", "one"}, [2]string{"2", "two"})
+	tail := newTestPGTail(t, md)
+	if err := tail.Apply([]query.ResultRow{
+		pgEv(10, 0x700, event.EventUpdate, keyOnly("1"), pgImg("1", "uno")),
+		pgEv(11, 0x700, event.EventUpdate, keyOnly("1"), pgImg("1", "eins")),
+		pgEv(12, 0x710, event.EventDelete, keyOnly("2"), nil),
+		pgIns(13, 0x720, "3", "three"),
+		pgEv(14, 0x720, event.EventUpdate, keyOnly("3"), pgImg("3", "drei")),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "1-orders.parquet")
+	if _, err := tail.WriteFile(file); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := readPGState(t, baseline.TableTailStateSQL(pgPublished(base), lit(file), tail.PKColumns(), "")), []string{"1=eins", "3=drei"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("state %v, want %v", got, want)
 	}
 }
