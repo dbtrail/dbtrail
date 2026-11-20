@@ -120,6 +120,21 @@ func (t *PGTail) held(key string, ev *query.ResultRow) ([]byte, bool) {
 	return p.row, true
 }
 
+// imageOf is the row of key's change cur for the fold to read and change
+// (pgCarry): a packed row is taken out again and is cur's own until the page
+// is folded, when pack puts it away.
+func (t *PGTail) imageOf(key string, cur *query.ResultRow) (map[string]any, error) {
+	if row, ok := t.held(key, cur); ok {
+		img, err := t.unpackImage(key, row)
+		if err != nil {
+			return nil, err
+		}
+		cur.RowAfter = img
+		delete(t.packed, key)
+	}
+	return cur.RowAfter, nil
+}
+
 // pack puts the image of key's change away as its packed row and lets the
 // image go. Only an image tailRow would write as it is: every column of the
 // copy present, each a text or NULL, and no other column but a generated
@@ -325,7 +340,7 @@ func (t *PGTail) Apply(page []query.ResultRow) error {
 	opts := foldOptions{pg: true, touched: func(key string) {
 		t.dirty[key] = struct{}{}
 		touched = append(touched, key)
-	}}
+	}, pgImage: t.imageOf}
 	if err := foldPage(own, t.schema, t.table, t.pkCols, nil, opts, &t.fold); err != nil {
 		return err
 	}
@@ -366,6 +381,7 @@ func (t *PGTail) PruneThrough(anchor query.BinlogPos, afterID uint64) (int, erro
 	for _, k := range drop {
 		delete(t.fold.Changes, k)
 		delete(t.fold.pgTxn, k)
+		delete(t.fold.pgSrc, k)
 		delete(t.dirty, k)
 		delete(t.packed, k)
 	}
@@ -548,6 +564,10 @@ func (t *PGTail) tailRow(key string, ev *query.ResultRow) (map[string]any, error
 			v, ok := after[c]
 			if !ok {
 				return refuse("column %s of its copy is missing from a change after the copy's cut", c)
+			}
+			if event.IsUnchangedToastMarker(v) {
+				return refuse("the change of key %q left the large value of column %s as it was, PostgreSQL did not send it "+
+					"(the table was not at REPLICA IDENTITY FULL), and no change since the copy's cut holds it", key, c)
 			}
 			row[c] = v
 		}

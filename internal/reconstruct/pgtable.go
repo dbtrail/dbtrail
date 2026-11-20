@@ -338,6 +338,9 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 	// A pair that has ended is folded into its file by the engine when this
 	// window's changes are in memory and none was lost (writePGPair's end);
 	// otherwise, and when the engine cannot, the merge below does it.
+	if left, n := fold.pgResidualToast(1); n > 0 {
+		return nil, "", pgToastResidueErr(schema, table, left[0], n-1)
+	}
 	tryPair := fromPair == "" && pgPairEligible(cfg, p.baselinePath, bmeta, fileSince, fold, capGap)
 	foldPair := prev != nil && fromPair != "" && fold.Spill == nil && capGap == nil
 	if tryPair || foldPair {

@@ -119,8 +119,8 @@ func TestFoldPGPage_refusesWhatItCannotBuildFrom(t *testing.T) {
 			pgEv(1, 0x700, event.EventUpdate, keyOnly("1"), map[string]any{"id": "1", "status": notCaptured()}), "as the change left it"},
 		"the earlier row has no key": {
 			pgEv(1, 0x700, event.EventUpdate, map[string]any{"id": notCaptured(), "status": notCaptured()}, pgImg("1", "x")), "key column(s) id"},
-		"an unchanged large value in the row after the change": {
-			pgEv(1, 0x700, event.EventUpdate, keyOnly("1"), map[string]any{"id": "1", "status": toast}), "unchanged"},
+		"an unchanged large value in the row an insert adds": {
+			pgEv(1, 0x700, event.EventInsert, nil, map[string]any{"id": "1", "status": toast}), "unchanged"},
 		"an unchanged large value in the earlier row": {
 			pgEv(1, 0x700, event.EventUpdate, map[string]any{"id": "1", "status": toast}, pgImg("1", "x")), "unchanged"},
 		"a change of key whose new row holds an unchanged large value": {
@@ -195,9 +195,8 @@ func TestCheckPGEventMarkers_answersAsBeforeWithoutTheMarker(t *testing.T) {
 		"nothing marked":                       pgEv(1, 0x700, event.EventUpdate, pgImg("1", "a"), pgImg("1", "b")),
 		"an insert":                            pgIns(1, 0x700, "1", "a"),
 		"a delete":                             pgEv(1, 0x700, event.EventDelete, pgImg("1", "a"), nil),
-		"an unchanged large value, row after":  pgEv(1, 0x700, event.EventUpdate, withToast(), withToast("note")),
 		"an unchanged large value, row before": pgEv(1, 0x700, event.EventUpdate, withToast("status"), withToast()),
-		"in both rows, different columns":      pgEv(1, 0x700, event.EventUpdate, withToast("status"), withToast("note")),
+		"in both rows of an update":            pgEv(1, 0x700, event.EventUpdate, withToast("status"), withToast("note")),
 		"in the row a delete removed":          pgEv(1, 0x700, event.EventDelete, withToast("note", "status"), nil),
 		"in the row an insert added":           pgEv(1, 0x700, event.EventInsert, nil, withToast("note")),
 		"in the key":                           pgEv(1, 0x700, event.EventUpdate, withToast("id"), withToast()),

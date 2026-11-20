@@ -447,7 +447,8 @@ const (
 	pgStateUnknown                  // an image that cannot be compared
 	// pgStateRowAny is a row whose contents are not all known: an earlier
 	// row captured with its key only (event.NotCapturedKey in its other
-	// columns). It says a row was there, and not which. After the others,
+	// columns), or a row left with a large value that was not sent
+	// (event.UnchangedToastKey). It says a row was there, and not which. After the others,
 	// which are written to disk by their number (pgRunDigest).
 	pgStateRowAny
 )
@@ -483,13 +484,18 @@ func pgImageState(img map[string]any) pgRowState {
 		case string:
 			put('s', v)
 		default:
-			if !event.IsNotCapturedMarker(v) {
+			// A column that was not sent, or a large value left as it was:
+			// each its own tag, so the image never hashes as one that holds
+			// a NULL or an empty text there.
+			switch {
+			case event.IsNotCapturedMarker(v):
+				put('x', "")
+			case event.IsUnchangedToastMarker(v):
+				put('u', "")
+			default:
 				return pgRowState{Kind: pgStateUnknown}
 			}
-			// A column that was not sent: its own tag, so the image never
-			// hashes as one that holds a NULL or an empty text there.
 			partial = true
-			put('x', "")
 		}
 	}
 	sum := h.Sum(nil)
@@ -710,6 +716,9 @@ func pgSameTxnErr(schema, table, key string, t pgKeyTxn) error {
 // records still in memory; the ones that went to disk are checked when their
 // group is read back.
 func (r *foldResult) pgTxnEnd(schema, table string) error {
+	if r.pgUSeen && r.Spill != nil {
+		return pgToastSpillErr(schema, table)
+	}
 	return pgTxnOpenRepeat(r.pgTxn, schema, table)
 }
 

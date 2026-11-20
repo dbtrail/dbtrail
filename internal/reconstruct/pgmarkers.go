@@ -25,8 +25,11 @@ import (
 //     built from;
 //   - the marker in a key column of the earlier row: the change could not be
 //     filed under the row it changed;
-//   - an unchanged large value (the unchanged-TOAST marker) in either row,
-//     as before: nothing here resolves one yet.
+//   - an unchanged large value (the unchanged-TOAST marker) in the earlier
+//     row, or in the row an INSERT adds. In the row an UPDATE leaves it is
+//     taken: the fold carries the value from the row's earlier change
+//     (pgCarry), and a change of key with one is refused where it is split
+//     (splitPGKeyChange).
 func checkPGEventMarkers(ev *query.ResultRow, pkCols []metadata.ColumnMeta) error {
 	if cols := event.NotCapturedColumns(ev.RowAfter); len(cols) > 0 {
 		return pgNotCapturedErr(ev, "the row as the change left it has no value for column(s) "+strings.Join(cols, ", "))
@@ -42,10 +45,14 @@ func checkPGEventMarkers(ev *query.ResultRow, pkCols []metadata.ColumnMeta) erro
 			return pgNotCapturedErr(ev, "the row as it was before the change has no value for its key column(s) "+strings.Join(keys, ", "))
 		}
 	}
-	for _, img := range []map[string]any{ev.RowBefore, ev.RowAfter} {
-		if cols := event.UnresolvedToastColumns(img); len(cols) > 0 {
-			return event.UnresolvedToastError(ev.SchemaName, ev.TableName, ev.PKValues, cols)
-		}
+	if cols := event.UnresolvedToastColumns(ev.RowBefore); len(cols) > 0 {
+		return event.UnresolvedToastError(ev.SchemaName, ev.TableName, ev.PKValues, cols)
+	}
+	// In the row an UPDATE leaves it is a value the row already had, which
+	// the fold carries from the row's earlier change (pgCarry). An INSERT
+	// has no earlier row to have it from.
+	if cols := event.UnresolvedToastColumns(ev.RowAfter); len(cols) > 0 && ev.EventType != event.EventUpdate {
+		return event.UnresolvedToastError(ev.SchemaName, ev.TableName, ev.PKValues, cols)
 	}
 	return nil
 }
