@@ -311,7 +311,7 @@ func TestValuesOnlyEqualed(t *testing.T) {
 		"SELECT n FROM t WHERE k LIKE 'a%'":               false,
 		"SELECT n FROM t WHERE k = $$x$$":                 false,
 		"SELECT n FROM t WHERE id = 1 OFFSET 5":           false,
-		"SELECT n FROM t WHERE id = 1 AND d = now() - 1": false,
+		"SELECT n FROM t WHERE id = 1 AND d = now() - 1":  false,
 	} {
 		if got := valuesOnlyEqualed(q); got != want {
 			t.Errorf("valuesOnlyEqualed(%q) = %v, want %v", q, got, want)
