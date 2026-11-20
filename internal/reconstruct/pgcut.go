@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
@@ -189,6 +191,50 @@ type pgRunEnd struct {
 	// index, and may have committed before the stamp. On an index with no
 	// change at all it also needs no archive to exist (see resolvePGRunEnd).
 	allIn bool
+	// shapes holds the shapes the stream recorded, read once for each floor
+	// the run's tables start from (pgRunShapes). nil: every table reads its
+	// own, as a run with one table always did.
+	shapes *pgRunShapes
+}
+
+// pgRunShapes is the stream's recorded shapes, kept for one run. Every table
+// of a PostgreSQL fold checks its own shape against them, and reading them
+// is one grouping over every shape the index holds, which grows with each
+// restart of capture and each table: a run of several hundred tables read
+// that list several hundred times, each read bounded at 15 seconds, and a
+// read past the bound failed its table. The tables of one snapshot nearly
+// always start from one floor, so one read answers them all.
+//
+// What a table is checked against is the shapes seen below the run's cut,
+// and the cut was placed before any table began: a shape recorded while the
+// run goes on is past it, and no table looks at it.
+type pgRunShapes struct {
+	mu      sync.Mutex
+	byFloor map[uint64][]metadata.PGShape
+}
+
+// from is the shapes seen at or after floor, with the newest before it, read
+// by load the first time a floor is asked for. A failed read is not kept:
+// the next table tries again. The list handed over is shared and must not be
+// changed.
+func (c *pgRunShapes) from(floor uint64, load func() ([]metadata.PGShape, error)) ([]metadata.PGShape, error) {
+	if c == nil {
+		return load()
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if shapes, ok := c.byFloor[floor]; ok {
+		return shapes, nil
+	}
+	shapes, err := load()
+	if err != nil {
+		return nil, err
+	}
+	if c.byFloor == nil {
+		c.byFloor = map[uint64][]metadata.PGShape{}
+	}
+	c.byFloor[floor] = shapes
+	return shapes, nil
 }
 
 // readPGCaughtUpAt reads stream_state.pg_caught_up_source_at. Zero when

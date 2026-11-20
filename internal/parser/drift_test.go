@@ -435,3 +435,31 @@ func TestSchemaGapTracker_recordCountsAllEscalatesOnce(t *testing.T) {
 		t.Fatal("nil tracker record must return false")
 	}
 }
+
+// An event carries its second and no fraction. One in the snapshot's own
+// second may have happened after it, so it does not count as older.
+func TestEventPredatesSnapshot_theSnapshotsOwnSecond(t *testing.T) {
+	snap := time.Date(2026, 1, 1, 12, 0, 0, 600_000_000, time.UTC)
+	at := func(d time.Duration) *replication.BinlogEvent {
+		return &replication.BinlogEvent{Header: &replication.EventHeader{Timestamp: uint32(snap.Truncate(time.Second).Add(d).Unix())}}
+	}
+	r := timedOrdersResolver(snap)
+	for name, c := range map[string]struct {
+		ev   *replication.BinlogEvent
+		want bool
+	}{
+		"the second before":         {at(-time.Second), true},
+		"the snapshot's own second": {at(0), false},
+		"the second after":          {at(time.Second), false},
+		"an hour before":            {at(-time.Hour), true},
+	} {
+		if got := eventPredatesSnapshot(c.ev, r); got != c.want {
+			t.Errorf("%s: predates = %v, want %v", name, got, c.want)
+		}
+	}
+	// A snapshot on a whole second: the second before it is wholly older.
+	whole := timedOrdersResolver(snap.Truncate(time.Second))
+	if !eventPredatesSnapshot(at(-time.Second), whole) || eventPredatesSnapshot(at(0), whole) {
+		t.Error("a snapshot on a whole second: the second before must predate it and its own second must not")
+	}
+}

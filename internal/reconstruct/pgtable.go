@@ -158,7 +158,7 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 			"schema", schema, "table", table, "linked", linked, "reason", why)
 		return rep, "", nil
 	}
-	shapes, err := metadata.LoadPGShapes(ctx, db, floor)
+	shapes, err := cfg.pgRun.shapes.from(floor, func() ([]metadata.PGShape, error) { return metadata.LoadPGShapes(ctx, db, floor) })
 	if err != nil {
 		return nil, "", fmt.Errorf("%s.%s: %w", schema, table, err)
 	}

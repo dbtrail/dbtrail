@@ -1003,6 +1003,7 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 		if err != nil {
 			return nil, err
 		}
+		run.shapes = &pgRunShapes{}
 		cfg.pgRun = &run
 		// Capture behind the point: the snapshot holds the tables as of the
 		// newest change the index has, under the point's name. The next fold

@@ -589,7 +589,15 @@ func decodeBinaryArg(i int, oid uint32, raw []byte) (arg, *pgErr) {
 		case math.MinInt64:
 			return arg{kind: argTyped, text: "-infinity", cast: typedCast[oid]}, nil
 		}
-		ts := pgEpoch.Add(time.Duration(us/1e6) * time.Second).Add(time.Duration(us%1e6) * time.Microsecond)
+		// Seconds and microseconds apart: a time.Duration holds only about
+		// 292 years, so pgEpoch.Add of the whole count wraps around for a
+		// year before 1708 or after 2292 and lands on a wrong date with no
+		// error.
+		secs, frac := us/1e6, us%1e6
+		if frac < 0 {
+			secs, frac = secs-1, frac+1e6
+		}
+		ts := time.Unix(pgEpoch.Unix()+secs, frac*1e3).UTC()
 		if ts.Year() < 1 || ts.Year() > 9999 {
 			return arg{}, &pgErr{"22008", fmt.Sprintf("timestamp out of range for this port in bind parameter %d (years 1 to 9999)", i+1)}
 		}
