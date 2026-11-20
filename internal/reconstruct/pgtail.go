@@ -154,7 +154,8 @@ func (t *PGTail) packImage(ev *query.ResultRow) ([]byte, bool) {
 	for _, c := range t.names {
 		switch v := img[c].(type) {
 		case string:
-			size += len(v) + binary.MaxVarintLen32
+			var n [binary.MaxVarintLen64]byte
+			size += len(v) + binary.PutUvarint(n[:], uint64(len(v))+1)
 		case nil:
 			if _, present := img[c]; !present {
 				return nil, false
@@ -384,7 +385,7 @@ func (t *PGTail) Bytes() int64 {
 	for k, ev := range t.fold.Changes {
 		sum += approxChangeBytes(ev)
 		if row, ok := t.held(k, ev); ok {
-			sum += pgPackedEntryBytes + int64(len(k)+len(row))
+			sum += pgPackedEntryBytes + int64(len(k)+cap(row))
 		}
 		if seen++; seen == changeSampleRows {
 			break
@@ -463,11 +464,13 @@ func (t *PGTail) write(path string, keys []string) (rows int64, retErr error) {
 	if err != nil {
 		return 0, &TailRefusal{fmt.Sprintf("%s.%s: %v", t.schema, t.table, err)}
 	}
-	// Every row before the file: a refusal leaves nothing behind.
+	// Every row before the file: a refusal leaves nothing behind. Each is
+	// made again when it is written, not kept: held all at once they are
+	// the maps the tail no longer holds, for every key, while a whole file
+	// is written.
 	sort.Strings(keys)
-	out := make([]map[string]any, len(keys))
-	for i, k := range keys {
-		if out[i], err = t.tailRow(k, t.fold.Changes[k]); err != nil {
+	for _, k := range keys {
+		if _, err = t.tailRow(k, t.fold.Changes[k]); err != nil {
 			return 0, err
 		}
 	}
@@ -484,7 +487,11 @@ func (t *PGTail) write(path string, keys []string) (rows int64, retErr error) {
 			_ = os.Remove(tmp)
 		}
 	}()
-	for _, row := range out {
+	for _, k := range keys {
+		row, rerr := t.tailRow(k, t.fold.Changes[k])
+		if rerr != nil {
+			return 0, rerr
+		}
 		if err := w.WriteRow(row, t.schema, t.table); err != nil {
 			return 0, err
 		}
