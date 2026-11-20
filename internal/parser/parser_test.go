@@ -581,6 +581,9 @@ func TestStatementDML(t *testing.T) {
 		{"/*+ INSERTED */ SELECT 1", ""},
 		{"/* INSERT INTO t VALUES (1) */", ""},
 		{"/*!", ""},
+		{"# note\n/*! INSERT INTO t VALUES (1) */", "INSERT"},
+		{"--not-a-comment INSERT", ""},
+		{"-- only a comment", ""},
 		// TRUNCATE never produces row events — must NOT match here, even with a
 		// leading trace comment that slips past parseDDL (#776 false positive).
 		{"TRUNCATE TABLE orders", ""},

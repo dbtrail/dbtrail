@@ -1339,26 +1339,27 @@ func firstStatementText(queryStr string) string {
 	s := queryStr
 	for {
 		s = strings.TrimLeft(s, " \t\r\n\f\v")
-		body, ok := executableCommentBody(s)
-		if ok {
-			s = body
-			continue
-		}
-		// One plain comment at a time, so an executable one after it is
+		// One comment at a time, so an executable one after a plain one is
 		// still seen as what it is.
-		if strings.HasPrefix(s, "/*") {
+		switch body, ok := executableCommentBody(s); {
+		case ok:
+			s = body
+		case strings.HasPrefix(s, "/*"):
 			end := strings.Index(s[2:], "*/")
 			if end < 0 {
-				return ""
+				return "" // unterminated: no statement follows
 			}
 			s = s[2+end+2:]
-			continue
-		}
-		rest := stripLeadingSQLComments(s)
-		if rest == s {
+		case strings.HasPrefix(s, "--") && (len(s) == 2 || isSQLSpace(s[2])), strings.HasPrefix(s, "#"):
+			// "--" is a comment only when whitespace or the end follows it.
+			nl := strings.IndexByte(s, '\n')
+			if nl < 0 {
+				return ""
+			}
+			s = s[nl+1:]
+		default:
 			return s
 		}
-		s = rest
 	}
 }
 
