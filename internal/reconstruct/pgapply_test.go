@@ -158,7 +158,9 @@ func TestApplyPGEvent_answersAsBeforeOnWholeRows(t *testing.T) {
 // Changes stamped before a snapshot's time are folded into its row.
 func TestFoldBeforeSnapshot_PGBelowFull(t *testing.T) {
 	snap := foldBase.Add(time.Hour)
-	part := func(id any) map[string]any { return map[string]any{"id": id, "status": notCaptured(), "note": notCaptured()} }
+	part := func(id any) map[string]any {
+		return map[string]any{"id": id, "status": notCaptured(), "note": notCaptured()}
+	}
 	given := row3("1", "s", "big")
 	after := upd3(3, 0x720, "late", "later")
 	after.EventTimestamp = snap.Add(time.Second)
