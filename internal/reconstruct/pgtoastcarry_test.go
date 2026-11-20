@@ -89,6 +89,19 @@ func TestPGCarry_takesTheValueOfTheNewestEarlierChange(t *testing.T) {
 		"and the insert after it gives the row's own": {
 			[][]query.ResultRow{{ins3(1, 0x700, "s", "first")}, {upd3(4, 0x730, "t", u)}, {del3(2, 0x710)}, {ins3(3, 0x720, "s", "second")}},
 			want{status: "t", note: "second"}},
+		"the delete arrives first, then the update that leaves the value": {
+			[][]query.ResultRow{{del3(2, 0x710)}, {upd3(4, 0x730, "t", u)}},
+			want{status: "t", note: u, left: []string{"note"}, gone: []string{"note"}}},
+		"the change before it has no such column": {
+			[][]query.ResultRow{{pgEv(1, 0x700, event.EventInsert, nil, map[string]any{"id": "1", "status": "s"})}, {upd3(2, 0x710, "t", u)}},
+			want{status: "t", note: u, left: []string{"note"}, gone: []string{"note"}}},
+		"a change with no such column arrives late, between the two": {
+			[][]query.ResultRow{{ins3(1, 0x700, "s", "old")}, {upd3(3, 0x720, "t", u)},
+				{pgEv(2, 0x710, event.EventUpdate, map[string]any{"id": "1", "status": notCaptured()}, map[string]any{"id": "1", "status": "x"})}},
+			want{status: "t", note: u, left: []string{"note"}, gone: []string{"note"}}},
+		"a row that arrived under the key by a change of key gives it": {
+			[][]query.ResultRow{{pgEv(1, 0x700, event.EventUpdate, row3("9", "s", "moved"), row3("1", "s", "moved"))}, {upd3(2, 0x710, "t", u)}},
+			want{status: "t", note: "moved"}},
 		"no change of the window holds it": {
 			[][]query.ResultRow{{upd3(2, 0x710, "t", u)}, {upd3(3, 0x720, "v", u)}},
 			want{status: "v", note: u, left: []string{"note"}}},
@@ -175,6 +188,22 @@ func TestPGCarry_refusesOnceTheChangesAreOnDisk(t *testing.T) {
 	}
 }
 
+// The move to disk on the fold's last page: nothing is folded after it, and
+// the end of the fold refuses.
+func TestPGCarry_refusesAMoveToDiskAfterTheLastPage(t *testing.T) {
+	res := &foldResult{Changes: map[string]*query.ResultRow{}}
+	if err := foldPage([]query.ResultRow{ins3(1, 0x700, "s", "big"), upd3(2, 0x710, "t", unsent())}, "mydb", "orders", pkColsIntID(), nil, foldOptions{pg: true}, res); err != nil {
+		t.Fatal(err)
+	}
+	if err := res.admit(0, 1, 1, true); err != nil || res.Spill == nil {
+		t.Fatalf("the changes did not move to disk: %v", err)
+	}
+	t.Cleanup(func() { _ = res.Spill.remove() })
+	if err := res.pgTxnEnd("mydb", "orders"); err == nil || !strings.Contains(err.Error(), "too many to hold in memory") {
+		t.Fatalf("the end of a fold on disk that met an unsent value: %v", err)
+	}
+}
+
 // A fresh-mode tail carries the value into the row it writes, also when the
 // row it takes it from was already packed; and what it cannot give ends the
 // tail with a refusal, never a row with a NULL.
@@ -210,10 +239,13 @@ func TestPGTail_carriesAnUnchangedLargeValue(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := filepath.Join(dir, "2-orders.parquet")
-	if _, err := tail.WriteFile(second); err != nil {
+	if tail.Dirty() != 1 {
+		t.Fatalf("%d keys changed after a value arrived late, want the one", tail.Dirty())
+	}
+	if _, err := tail.WriteDelta(second); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := state(tail, second), []string{"1=eins", "2=two"}; !reflect.DeepEqual(got, want) {
+	if got, want := readPGState(t, baseline.TableTailChainStateSQL(pgPublished(base), []string{lit(first), lit(second)}, tail.PKColumns(), "")), []string{"1=eins", "2=two"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("state %v, want %v", got, want)
 	}
 

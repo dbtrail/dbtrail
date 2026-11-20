@@ -51,7 +51,12 @@ func checkPGEventMarkers(ev *query.ResultRow, pkCols []metadata.ColumnMeta) erro
 	// In the row an UPDATE leaves it is a value the row already had, which
 	// the fold carries from the row's earlier change (pgCarry). An INSERT
 	// has no earlier row to have it from.
-	if cols := event.UnresolvedToastColumns(ev.RowAfter); len(cols) > 0 && ev.EventType != event.EventUpdate {
+	// Only beside an earlier row that says it was captured with its key
+	// only: that is the capture that leaves the marker on purpose. A marker
+	// from before it (#531) sits beside rows where a value that was not
+	// sent may have been stored as NULL, and is refused as it always was.
+	if cols := event.UnresolvedToastColumns(ev.RowAfter); len(cols) > 0 &&
+		(ev.EventType != event.EventUpdate || len(event.NotCapturedColumns(ev.RowBefore)) == 0) {
 		return event.UnresolvedToastError(ev.SchemaName, ev.TableName, ev.PKValues, cols)
 	}
 	return nil

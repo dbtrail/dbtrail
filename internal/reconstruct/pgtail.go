@@ -111,6 +111,10 @@ type pgPackedRow struct {
 // bytes: its key in the map of packed rows, the slice and the map's slot.
 const pgPackedEntryBytes = 96
 
+// pgSrcBytes is about what the fold holds for a key whose change carried a
+// large value (foldResult.pgSrc): the key, a map and an entry or two.
+const pgSrcBytes = 256
+
 // held is the packed row of key's change ev, when ev's image was put away.
 func (t *PGTail) held(key string, ev *query.ResultRow) ([]byte, bool) {
 	p, ok := t.packed[key]
@@ -411,7 +415,7 @@ func (t *PGTail) Bytes() int64 {
 	if seen > 0 {
 		rows = max(1, sum/seen) * int64(len(t.fold.Changes))
 	}
-	return rows + int64(len(t.fold.pgTxn))*pgTxnBytes
+	return rows + int64(len(t.fold.pgTxn))*pgTxnBytes + int64(len(t.fold.pgSrc))*pgSrcBytes
 }
 
 // Dirty is how many keys changed since the last file was written.

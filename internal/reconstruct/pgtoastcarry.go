@@ -43,8 +43,9 @@ type pgColSrc struct {
 	LSN, ID uint64
 	// Have reports that the last change now holds the value.
 	Have bool
-	// Gone reports that the change at (LSN, ID) deleted the row: the value
-	// is not in the table's copy either, only in a change after the DELETE.
+	// Gone reports that the change at (LSN, ID) deleted the row, or that
+	// the row had no such column then: the value is not in the table's copy
+	// either, only in a change after that one.
 	Gone bool
 }
 
@@ -108,12 +109,18 @@ func (r *foldResult) pgCarry(ev *query.ResultRow, image func(key string, cur *qu
 				at.Gone = true
 			} else {
 				got, ok := ev.RowAfter[c]
-				if !ok || event.IsUnchangedToastMarker(got) {
-					// It says nothing about the column: what is known
-					// from before it stands.
+				switch {
+				case event.IsUnchangedToastMarker(got):
+					// It left the value as it was too: what is known from
+					// before it stands.
 					continue
+				case !ok:
+					// The row had no such column then: nothing from before
+					// it is this column's value.
+					at.Gone = true
+				default:
+					v, at.Have = got, true
 				}
-				v, at.Have = got, true
 			}
 			if img == nil {
 				var err error
@@ -156,8 +163,11 @@ func (r *foldResult) pgCarry(ev *query.ResultRow, image func(key string, cur *qu
 			v, ok := img[c]
 			switch {
 			case !ok:
-				// The change before it has no such column.
-				srcs[c] = pgColSrc{}
+				// The row had no such column at the change before it:
+				// nothing from before that change is this column's value.
+				at := pgSrcAt(cur)
+				at.Gone = true
+				srcs[c] = at
 			case event.IsUnchangedToastMarker(v):
 				srcs[c] = was[c]
 			default:
@@ -234,7 +244,7 @@ func pgToastResidueErr(schema, table string, res pgToastResidue, more int) error
 	target := pgQuoteIdent(schema) + "." + pgQuoteIdent(table)
 	why := "no earlier change of the row since the table's copy was written holds it"
 	if len(res.Gone) > 0 {
-		why = "the row was deleted before that change and no change after the delete holds it"
+		why = "before that change the row was deleted, or had no such column, and no change after that holds it"
 	}
 	others := ""
 	if more > 0 {

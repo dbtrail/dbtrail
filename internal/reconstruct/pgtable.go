@@ -243,6 +243,23 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 		return nil, "", err
 	}
 	defer fold.close()
+	// A large value an UPDATE left as it was (pgCarry). Carried from an
+	// earlier change it is that change's value only when no change between
+	// the two was lost, so a known loss in the window refuses the table. A
+	// value no change of the window gave is in what the window started
+	// from: read from a pair's end, the window is read again from the file,
+	// whose changes may hold it; from the file, nothing here can give it.
+	if fold.pgUSeen && capGap != nil {
+		return nil, "", fmt.Errorf("%s.%s: a change left a large value as it was without PostgreSQL sending it "+
+			"(the table was not at REPLICA IDENTITY FULL), and capture lost changes in the same window, "+
+			"so the value an earlier change holds may not be the row's. Take a new snapshot of the table", schema, table)
+	}
+	if left, n := fold.pgResidualToast(1); n > 0 {
+		if prev != nil {
+			return nil, "a change leaves a large value as it was and no change since the delta holds it", nil
+		}
+		return nil, "", pgToastResidueErr(schema, table, left[0], n-1)
+	}
 	if noShape != nil {
 		// A change of a table the index has no shape of was captured under
 		// a shape this run cannot read: refused as it always was.
@@ -338,9 +355,6 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 	// A pair that has ended is folded into its file by the engine when this
 	// window's changes are in memory and none was lost (writePGPair's end);
 	// otherwise, and when the engine cannot, the merge below does it.
-	if left, n := fold.pgResidualToast(1); n > 0 {
-		return nil, "", pgToastResidueErr(schema, table, left[0], n-1)
-	}
 	tryPair := fromPair == "" && pgPairEligible(cfg, p.baselinePath, bmeta, fileSince, fold, capGap)
 	foldPair := prev != nil && fromPair != "" && fold.Spill == nil && capGap == nil
 	if tryPair || foldPair {

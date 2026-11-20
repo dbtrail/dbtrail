@@ -123,6 +123,10 @@ func TestFoldPGPage_refusesWhatItCannotBuildFrom(t *testing.T) {
 			pgEv(1, 0x700, event.EventInsert, nil, map[string]any{"id": "1", "status": toast}), "unchanged"},
 		"an unchanged large value in the earlier row": {
 			pgEv(1, 0x700, event.EventUpdate, map[string]any{"id": "1", "status": toast}, pgImg("1", "x")), "unchanged"},
+		"an unchanged large value beside an earlier row captured whole": {
+			pgEv(1, 0x700, event.EventUpdate, pgImg("1", "a"), map[string]any{"id": "1", "status": toast}), "unchanged"},
+		"an unchanged large value and no earlier row": {
+			pgEv(1, 0x700, event.EventUpdate, nil, map[string]any{"id": "1", "status": toast}), "unchanged"},
 		"a change of key whose new row holds an unchanged large value": {
 			pgEv(1, 0x700, event.EventUpdate, keyOnly("1"), map[string]any{"id": "2", "status": toast}), "unchanged"},
 	} {
@@ -197,6 +201,7 @@ func TestCheckPGEventMarkers_answersAsBeforeWithoutTheMarker(t *testing.T) {
 		"a delete":                             pgEv(1, 0x700, event.EventDelete, pgImg("1", "a"), nil),
 		"an unchanged large value, row before": pgEv(1, 0x700, event.EventUpdate, withToast("status"), withToast()),
 		"in both rows of an update":            pgEv(1, 0x700, event.EventUpdate, withToast("status"), withToast("note")),
+		"an unchanged large value, row after":  pgEv(1, 0x700, event.EventUpdate, withToast(), withToast("note")),
 		"in the row a delete removed":          pgEv(1, 0x700, event.EventDelete, withToast("note", "status"), nil),
 		"in the row an insert added":           pgEv(1, 0x700, event.EventInsert, nil, withToast("note")),
 		"in the key":                           pgEv(1, 0x700, event.EventUpdate, withToast("id"), withToast()),
