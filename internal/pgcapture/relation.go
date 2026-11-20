@@ -60,9 +60,10 @@ type relationInfo struct {
 //
 // It must source the PK from the catalog (pg_index.indisprimary), NOT from the
 // RelationMessage's per-column "key" flag: under REPLICA IDENTITY FULL — the mode
-// bintrail requires (#531) — pgoutput sends an empty key bitmap, so the flag would
-// yield an empty PK for every table; under REPLICA IDENTITY USING INDEX it can mark
-// a non-PK unique index.
+// bintrail requires (#531) — pgoutput flags EVERY column as key, so the flag would
+// make every table's PK the whole row; under REPLICA IDENTITY USING INDEX it marks
+// the index's columns, which need not be the PK; under NOTHING it marks none
+// (pinned on a live server by TestPgoutputReplicaIdentityWire_Integration).
 //
 // A relation with no primary key returns an empty slice — the event still indexes
 // under an empty PK string, mirroring the MySQL path. A genuine lookup failure must
