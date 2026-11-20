@@ -555,3 +555,26 @@ func TestBuildPlanComputesArchivesBelowLive(t *testing.T) {
 		})
 	}
 }
+
+// A range given in another zone finds the same hours as in UTC: the hours it
+// is looked up among are UTC, and a time.Time is a map key by its zone too.
+// A --since written with an offset read every hour of its range as a gap,
+// which made recover refuse a recovery its index covered.
+func TestBuildPlan_aRangeInAnotherZone(t *testing.T) {
+	live := []time.Time{h(5, 10), h(5, 11), h(5, 12)}
+	archived := []time.Time{h(5, 8), h(5, 9)}
+	want := buildPlan(live, archived, h(5, 8), h(5, 13), false)
+	if len(want.GapHours) != 0 || len(want.MySQLRanges) != 1 {
+		t.Fatalf("in UTC: %d gaps, %d MySQL ranges; this test needs a range with none and one", len(want.GapHours), len(want.MySQLRanges))
+	}
+	for name, loc := range map[string]*time.Location{
+		"minus five":          time.FixedZone("", -5*3600),
+		"plus five and half":  time.FixedZone("", 5*3600+1800),
+		"UTC by another name": time.FixedZone("UTC", 0),
+	} {
+		got := buildPlan(live, archived, h(5, 8).In(loc), h(5, 13).In(loc), false)
+		if len(got.GapHours) != 0 || len(got.MySQLRanges) != len(want.MySQLRanges) || got.SkipMySQL() != want.SkipMySQL() {
+			t.Errorf("%s: %d gaps (%v), %d MySQL ranges; in UTC none and %d", name, len(got.GapHours), got.GapHours, len(got.MySQLRanges), len(want.MySQLRanges))
+		}
+	}
+}

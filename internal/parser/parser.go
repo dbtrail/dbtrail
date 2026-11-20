@@ -622,8 +622,12 @@ func eventPredatesSnapshot(binlogEv *replication.BinlogEvent, resolver *metadata
 	if binlogEv.Header.Timestamp == 0 || snapTime.IsZero() {
 		return false
 	}
+	// An event's time is its second, with no fraction: it happened somewhere
+	// in that second. It predates the snapshot only when the whole second
+	// does; an event in the snapshot's own second may be after it, and is
+	// held to the strict path like any other that is not known to be older.
 	eventTime := time.Unix(int64(binlogEv.Header.Timestamp), 0).UTC()
-	return eventTime.Before(snapTime)
+	return !eventTime.Add(time.Second).After(snapTime)
 }
 
 // snapshotExcludedSchemas are the system schemas metadata.TakeSnapshot always
