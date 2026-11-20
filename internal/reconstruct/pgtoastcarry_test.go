@@ -2,6 +2,7 @@ package reconstruct
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/dbtrail/dbtrail/internal/event"
+	"github.com/dbtrail/dbtrail/internal/pgdelta"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
@@ -281,43 +283,87 @@ func TestPGTail_carriesAnUnchangedLargeValue(t *testing.T) {
 }
 
 // What no change of the window holds is read from the row the table's copy
-// has under the key: its text, a NULL as a NULL. A key the copy does not
-// have, and a value lost behind a DELETE, are left to be refused.
+// has under the key. Left to be refused: a key the copy does not have, a
+// value lost behind a DELETE, and a column the copy holds as an empty text
+// or a NULL, which is never a value PostgreSQL leaves unsent.
 func TestPGFillFromBase(t *testing.T) {
 	dir := t.TempDir()
-	base, _ := writePGTailBase(t, dir, nil, [2]string{"1", "one"}, [2]string{"2", ""}, [2]string{"4", "four"})
-	leaves := func(id, lsn uint64, key string) query.ResultRow {
-		return pgEv(id, lsn, event.EventUpdate, map[string]any{"id": key, "status": notCaptured()}, map[string]any{"id": key, "status": unsent()})
-	}
-	res := foldPGPages(t, pkColsIntID(),
-		[]query.ResultRow{leaves(1, 0x700, "1"), leaves(2, 0x710, "2"), leaves(3, 0x720, "3")},
-		// Key 4: deleted, then a change that leaves the value. The copy's
-		// row is the deleted one.
-		[]query.ResultRow{pgEv(4, 0x730, event.EventDelete, map[string]any{"id": "4", "status": notCaptured()}, nil), leaves(5, 0x740, "4")},
-		// Key 1 again, twice: still one value to read.
-		[]query.ResultRow{leaves(6, 0x750, "1")},
-	)
-	given, err := res.pgFillFromBase(context.Background(), base, pkColsIntID(), duckdbutil.Tuning{})
+	base := filepath.Join(dir, "orders.parquet")
+	w, err := baseline.NewWriter(base, rawTextColumns([]string{"id", "status", "note"}), baseline.WriterConfig{Compression: "none", RowGroupSize: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if given != 2 || res.Changes["1"].RowAfter["status"] != "one" || res.Changes["2"].RowAfter["status"] != "" {
-		t.Fatalf("%d values given; key 1 holds %v and key 2 %v, want the copy's", given, res.Changes["1"].RowAfter["status"], res.Changes["2"].RowAfter["status"])
-	}
-	left, n := res.pgResidualToast(0)
-	if n != 2 || left[0].Key != "3" || left[0].Gone != nil || left[1].Key != "4" || !reflect.DeepEqual(left[1].Gone, []string{"status"}) {
-		t.Fatalf("left after the copy was read: %+v", left)
-	}
-	for _, key := range []string{"3", "4"} {
-		if !event.IsUnchangedToastMarker(res.Changes[key].RowAfter["status"]) {
-			t.Fatalf("key %s was given %v", key, res.Changes[key].RowAfter["status"])
+	for _, r := range []struct {
+		id, status, note string
+		noNote           bool
+	}{{"1", "one", "note one", false}, {"2", "", "note two", false}, {"4", "four", "x", false}, {"5", "five", "", true}, {"6", "six", "note six", false}} {
+		if err := w.WriteRow([]string{r.id, r.status, r.note}, []bool{false, false, r.noNote}); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if err := pgToastResidueErr("mydb", "orders", left[0], n-1); !strings.Contains(err.Error(), `"mydb"."orders" (pk=3) (and 1 more rows)`) || !strings.Contains(err.Error(), "no row under that key") {
-		t.Fatalf("the refusal: %v", err)
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
 	}
-	// A second read finds nothing left to give and does not open the file.
-	if given, err := res.pgFillFromBase(context.Background(), filepath.Join(dir, "gone.parquet"), pkColsIntID(), duckdbutil.Tuning{}); err == nil || given != 0 {
-		t.Fatalf("keys still without a value must be looked for: %d, %v", given, err)
+	part := func(key string) map[string]any {
+		return map[string]any{"id": key, "status": notCaptured(), "note": notCaptured()}
+	}
+	leaves := func(id, lsn uint64, key string, status, note any) query.ResultRow {
+		return pgEv(id, lsn, event.EventUpdate, part(key), map[string]any{"id": key, "status": status, "note": note})
+	}
+	u := unsent()
+	res := foldPGPages(t, pkColsIntID(),
+		[]query.ResultRow{leaves(1, 0x700, "1", u, u), leaves(2, 0x710, "2", u, "n"), leaves(3, 0x720, "3", u, "n")},
+		// Key 4: deleted, then a change that leaves the value. The copy's
+		// row is the deleted one.
+		[]query.ResultRow{pgEv(4, 0x730, event.EventDelete, part("4"), nil), leaves(5, 0x740, "4", u, "n")},
+		// Key 1 again: still its two values to read.
+		[]query.ResultRow{leaves(6, 0x750, "1", u, u), leaves(7, 0x760, "5", "s", u)},
+		// Key 6: one value carried from a change, the other only in the copy.
+		[]query.ResultRow{leaves(8, 0x770, "6", "sent", u), leaves(9, 0x780, "6", u, u)},
+	)
+	given, err := res.pgFillFromBase(context.Background(), base, pkColsIntID(), duckdbutil.Tuning{}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := func(key string) map[string]any { return res.Changes[key].RowAfter }
+	if given != 3 || row("1")["status"] != "one" || row("1")["note"] != "note one" {
+		t.Fatalf("%d values given; key 1 holds %v, want the copy's two", given, row("1"))
+	}
+	if row("6")["status"] != "sent" || row("6")["note"] != "note six" {
+		t.Fatalf("key 6 holds %v, want the change's status and the copy's note", row("6"))
+	}
+	left, n := res.pgResidualToast(0)
+	type l struct {
+		key            string
+		gone, notLarge []string
+	}
+	var got []l
+	for _, r := range left {
+		got = append(got, l{r.Key, r.Gone, r.NotLarge})
+	}
+	want := []l{{"2", nil, []string{"status"}}, {"3", nil, nil}, {"4", []string{"status"}, nil}, {"5", nil, []string{"note"}}}
+	if n != 4 || !reflect.DeepEqual(got, want) {
+		t.Fatalf("left after the copy was read: %+v, want %+v", got, want)
+	}
+	for key, col := range map[string]string{"2": "status", "3": "status", "4": "status", "5": "note"} {
+		if !event.IsUnchangedToastMarker(row(key)[col]) {
+			t.Fatalf("key %s was given %v", key, row(key)[col])
+		}
+	}
+	for i, says := range []string{"a NULL or an empty text", "no row under that key", "the row was deleted", "a NULL or an empty text"} {
+		if err := pgToastResidueErr("mydb", "orders", left[i], 0); !strings.Contains(err.Error(), says) || !strings.Contains(err.Error(), `"mydb"."orders" (pk=`+left[i].Key+`)`) {
+			t.Errorf("the refusal of key %s: %v; want it to say %q", left[i].Key, err, says)
+		}
+	}
+
+	// No more text than allowed.
+	again := foldPGPages(t, pkColsIntID(), []query.ResultRow{leaves(1, 0x700, "1", u, u)})
+	if _, err := again.pgFillFromBase(context.Background(), base, pkColsIntID(), duckdbutil.Tuning{}, 4); !errors.Is(err, pgdelta.ErrBaseValuesTooLarge) {
+		t.Fatalf("values larger than allowed: %v", err)
+	}
+	// Nothing left to give: the file is not opened.
+	whole := foldPGPages(t, pkColsIntID(), []query.ResultRow{leaves(1, 0x700, "1", "a", "b"), leaves(2, 0x710, "1", u, u)})
+	if given, err := whole.pgFillFromBase(context.Background(), filepath.Join(dir, "none.parquet"), pkColsIntID(), duckdbutil.Tuning{}, 0); err != nil || given != 0 {
+		t.Fatalf("nothing left to give: %d, %v", given, err)
 	}
 }
