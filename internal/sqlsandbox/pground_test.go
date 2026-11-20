@@ -58,6 +58,47 @@ func TestPGRoundMacros(t *testing.T) {
 		// The same buckets as the port writes them since: from microseconds.
 		{"a ten-minute bucket from microseconds", "CAST(_bintrail_pg_to_timestamp(_bintrail_pg_floor_epoch(CAST('2026-11-18 10:07:30.25+00' AS TIMESTAMPTZ), 600) * 600) AS VARCHAR)", "2026-11-18 10:00:00+00", "VARCHAR"},
 		{"a bucket before 1970 from microseconds", "CAST(_bintrail_pg_to_timestamp(_bintrail_pg_floor_epoch(CAST('1969-12-31 23:55:00+00' AS TIMESTAMPTZ), 600) * 600) AS VARCHAR)", "1969-12-31 23:50:00+00", "VARCHAR"},
+		// round(x, k) of a numeric or a whole number: exactly k decimals, as
+		// PostgreSQL 16 writes them (measured: round(500.00, 2) is 500.00,
+		// round(500, 2) is 500.00, round(12.50, 3) is 12.500).
+		{"a whole value keeps its decimals", "_bintrail_pg_round_k(CAST(500 AS DECIMAL(10,2)), 2, 0.01)", "500.00", "DECIMAL(38,2)"},
+		{"a whole number gets them", "_bintrail_pg_round_k(CAST(500 AS INTEGER), 2, 0.01)", "500.00", "DECIMAL(38,2)"},
+		{"zero", "_bintrail_pg_round_k(0, 2, 0.01)", "0.00", "DECIMAL(38,2)"},
+		{"zero with one decimal", "_bintrail_pg_round_k(CAST(0.0 AS DECIMAL(2,1)), 2, 0.01)", "0.00", "DECIMAL(38,2)"},
+		{"more decimals than the column", "_bintrail_pg_round_k(CAST(12.50 AS DECIMAL(10,2)), 3, 0.001)", "12.500", "DECIMAL(38,3)"},
+		{"fewer, half away from zero", "_bintrail_pg_round_k(CAST(-12.345 AS DECIMAL(5,3)), 2, 0.01)", "-12.35", "DECIMAL(38,2)"},
+		{"a negative that rounds to zero", "_bintrail_pg_round_k(CAST(-0.004 AS DECIMAL(4,3)), 2, 0.01)", "0.00", "DECIMAL(38,2)"},
+		{"no decimals", "_bintrail_pg_round_k(CAST(12.5 AS DECIMAL(3,1)), 0, 1)", "13", "DECIMAL(38,0)"},
+		{"a sum's 38 digits", "_bintrail_pg_round_k(CAST(1234567890123456789012345678901234.67 AS DECIMAL(38,2)), 3, 0.001)", "1234567890123456789012345678901234.670", "DECIMAL(38,3)"},
+		{"a bigint's sum, a numeric there", "_bintrail_pg_round_k(CAST(39 AS HUGEINT), 2, 0.01)", "39.00", "DECIMAL(38,2)"},
+		{"NULL", "(SELECT _bintrail_pg_round_k(x, 2, 0.01) FROM (VALUES (CAST(NULL AS DECIMAL(10,2)))) v(x))", "<nil>", "DECIMAL(38,2)"},
+		// A negative k: to tens, hundreds... with no decimals. The engine's
+		// own round answers -5.0 to tens as 0 and overflows a bigint; the
+		// macro answers as PostgreSQL does.
+		{"to tens", "_bintrail_pg_round_neg(15, -1)", "20", "DECIMAL(38,0)"},
+		{"to tens, negative", "_bintrail_pg_round_neg(-15, -1)", "-20", "DECIMAL(38,0)"},
+		{"to tens, negative, odd", "_bintrail_pg_round_neg(-25, -1)", "-30", "DECIMAL(38,0)"},
+		{"to tens, under the half", "_bintrail_pg_round_neg(CAST(14.99 AS DECIMAL(4,2)), -1)", "10", "DECIMAL(38,0)"},
+		{"a half with a decimal", "_bintrail_pg_round_neg(CAST(-5.0 AS DECIMAL(2,1)), -1)", "-10", "DECIMAL(38,0)"},
+		{"a half and a bit", "_bintrail_pg_round_neg(CAST(-15.5 AS DECIMAL(3,1)), -1)", "-20", "DECIMAL(38,0)"},
+		{"just under a half", "_bintrail_pg_round_neg(CAST(-4.0 AS DECIMAL(2,1)), -1)", "0", "DECIMAL(38,0)"},
+		{"the largest bigint", "_bintrail_pg_round_neg(CAST(9223372036854775807 AS BIGINT), -1)", "9223372036854775810", "DECIMAL(38,0)"},
+		{"past every digit", "_bintrail_pg_round_neg(CAST(1234.5 AS DECIMAL(5,1)), -5)", "0", "DECIMAL(38,0)"},
+		// round(x) of a numeric: no decimals, half away from zero.
+		{"round of a numeric", "_bintrail_pg_round_whole(CAST(12.5 AS DECIMAL(3,1)))", "13", "DECIMAL(3,0)"},
+		{"round of a negative numeric", "_bintrail_pg_round_whole(CAST(-12.5 AS DECIMAL(3,1)))", "-13", "DECIMAL(3,0)"},
+		{"round of a small negative", "_bintrail_pg_round_whole(CAST(-0.4 AS DECIMAL(2,1)))", "0", "DECIMAL(2,0)"},
+		{"round of a negative half", "_bintrail_pg_round_whole(CAST(-0.5 AS DECIMAL(2,1)))", "-1", "DECIMAL(2,0)"},
+		// A CASE's values, each with the copy's one type: a value whose own
+		// decimals are the type's is answered.
+		{"a CASE value with the type's decimals", "_bintrail_pg_unpack(CASE WHEN 1 = 1 THEN _bintrail_pg_pack(CAST(1.50 AS DECIMAL(3,2))) ELSE _bintrail_pg_pack(0) END)", "1.50", "DECIMAL(12,2)"},
+		{"a CASE value of NULL", "_bintrail_pg_unpack(CASE WHEN 1 = 1 THEN _bintrail_pg_pack(CAST(NULL AS DECIMAL(3,2))) ELSE _bintrail_pg_pack(0) END)", "<nil>", "DECIMAL(12,2)"},
+		{"a CASE with no ELSE", "(SELECT _bintrail_pg_unpack(CASE WHEN x > 2 THEN _bintrail_pg_pack(x) END) FROM (VALUES (CAST(1.50 AS DECIMAL(3,2)))) v(x))", "<nil>", "DECIMAL(3,2)"},
+		{"a COALESCE of the first", "_bintrail_pg_unpack(coalesce(_bintrail_pg_packn(CAST(1.50 AS DECIMAL(3,2))), _bintrail_pg_packn(0)))", "1.50", "DECIMAL(12,2)"},
+		{"a COALESCE of whole numbers", "_bintrail_pg_unpack(coalesce(_bintrail_pg_packn(CAST(NULL AS DECIMAL(3,0))), _bintrail_pg_packn(7)))", "7", "DECIMAL(10,0)"},
+		{"a CASE of floats", "_bintrail_pg_unpack(CASE WHEN 1 = 2 THEN _bintrail_pg_pack(CAST(1.50 AS DECIMAL(3,2))) ELSE _bintrail_pg_pack(CAST(2 AS DOUBLE)) END)", "2", "DOUBLE"},
+		// avg of a float stays the engine's.
+		{"avg of floats", "(SELECT _bintrail_pg_avg(x) FROM (VALUES (CAST(0.5 AS DOUBLE)), (0.25)) v(x))", "0.375", "DOUBLE"},
 	}
 	items := make([]string, len(cases))
 	for i, c := range cases {
@@ -104,6 +145,23 @@ func TestPGRoundMacros(t *testing.T) {
 		{"to_timestamp of a fraction", "_bintrail_pg_to_timestamp(1.5)", "not a whole number of seconds"},
 		{"to_timestamp of a float", "_bintrail_pg_to_timestamp(CAST(15 AS DOUBLE))", "not a whole number of seconds"},
 		{"too large for 128 bits", "_bintrail_pg_round_div(CAST(99999999999999999999999999999999999999 AS DECIMAL(38,0)), CAST(0.3 AS DECIMAL(2,1)), 2, 0.01)", "Overflow"},
+		// round(double precision, k) does not exist on PostgreSQL, and its
+		// round(double precision) rounds a half to even; round(integer) is a
+		// double precision there (9.007199254740992e+15 for 2^53 + 1).
+		{"round to k of a float", "_bintrail_pg_round_k(CAST(2.5 AS DOUBLE), 2, 0.01)", "double precision"},
+		{"round to tens of a float", "_bintrail_pg_round_neg(CAST(25 AS DOUBLE), -1)", "double precision"},
+		{"round of a float", "_bintrail_pg_round_whole(CAST(2.5 AS DOUBLE))", "double precision"},
+		{"round of a whole number", "_bintrail_pg_round_whole(5)", "whole number"},
+		{"round of text", "_bintrail_pg_round_k('5', 2, 0.01)", "not a numeric or a whole number"},
+		{"more digits than the copy holds", "_bintrail_pg_round_k(CAST(123456789012345678901234567890123456.78 AS DECIMAL(38,2)), 3, 0.001)", "out of range"},
+		// avg of a numeric or a whole number: PostgreSQL writes as many
+		// decimals as each value needs (500.0000000000000000, 0.50000000000000000000).
+		{"avg of whole numbers", "(SELECT _bintrail_pg_avg(x) FROM (VALUES (0), (1)) v(x))", "avg()"},
+		{"avg of numerics", "(SELECT _bintrail_pg_avg(x) FROM (VALUES (CAST(5.00 AS DECIMAL(3,2))), (10.00)) v(x))", "avg()"},
+		// A CASE value whose own decimals are not the type's: PostgreSQL
+		// writes 0 where the copy would write 0.00.
+		{"a CASE value with other decimals", "_bintrail_pg_unpack(CASE WHEN 1 = 2 THEN _bintrail_pg_pack(CAST(1.50 AS DECIMAL(3,2))) ELSE _bintrail_pg_pack(0) END)", "different numbers of decimals"},
+		{"a COALESCE of the second", "_bintrail_pg_unpack(coalesce(_bintrail_pg_packn(CAST(NULL AS DECIMAL(3,2))), _bintrail_pg_packn(0)))", "different numbers of decimals"},
 	} {
 		job := f.job("SELECT " + c.expr)
 		job.Session = Session{PostgresRules: true}
@@ -128,9 +186,31 @@ func TestPGRoundMacros(t *testing.T) {
 		t.Errorf("headed %v, want round, round and floor", res.Columns)
 	}
 
+	// Headed as PostgreSQL heads the call each macro stands for: a CASE by
+	// its ELSE, or "case"; a COALESCE "coalesce".
+	job = f.job(`SELECT _bintrail_pg_round_k(x, 2, 0.01), _bintrail_pg_round_neg(x, -1), _bintrail_pg_round_whole(x),
+		_bintrail_pg_avg(y), _bintrail_pg_unpack(CASE WHEN x > 0 THEN _bintrail_pg_pack(x) ELSE _bintrail_pg_pack(x) END),
+		_bintrail_pg_unpack(CASE WHEN x > 0 THEN _bintrail_pg_pack(x) ELSE _bintrail_pg_pack(1) END),
+		_bintrail_pg_unpack(coalesce(_bintrail_pg_packn(x), _bintrail_pg_packn(x)))
+		FROM (VALUES (CAST(1.5 AS DECIMAL(2,1)), CAST(1 AS DOUBLE))) v(x, y) GROUP BY x`)
+	job.Session = Session{PostgresRules: true, PostgresNames: true}
+	res, err = r.Run(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, c := range res.Columns {
+		names = append(names, c.Name)
+	}
+	if got := strings.Join(names, ","); got != "round,round,round,avg,x,case,coalesce" {
+		t.Errorf("headed %s", got)
+	}
+
 	// A session for MySQL has none of them.
-	job = f.job("SELECT _bintrail_pg_round_div(1.0, 3, 2, 0.01)")
-	if _, err := r.Run(context.Background(), job); err == nil {
-		t.Error("a session without PostgresRules has the PostgreSQL ROUND")
+	for _, macro := range []string{"_bintrail_pg_round_div(1.0, 3, 2, 0.01)", "_bintrail_pg_round_k(1.5, 2, 0.01)", "_bintrail_pg_round_whole(1.5)", "_bintrail_pg_unpack(_bintrail_pg_pack(1))"} {
+		job = f.job("SELECT " + macro)
+		if _, err := r.Run(context.Background(), job); err == nil {
+			t.Errorf("a session without PostgresRules has %s", macro)
+		}
 	}
 }

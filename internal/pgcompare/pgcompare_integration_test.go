@@ -55,7 +55,10 @@ type expectation struct {
 // PostgreSQL source.
 func TestIntegrationPGCompare(t *testing.T) {
 	baseDSN := testutil.SkipIfNoPostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	// Under -race, as CI runs it, the list and the numeric statements again
+	// without a forwarding account take about six minutes; under the ten
+	// go test gives the package.
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 
 	setup, err := pgx.Connect(ctx, baseDSN)
@@ -119,7 +122,7 @@ func TestIntegrationPGCompare(t *testing.T) {
 	}
 	t.Cleanup(func() { src.Close(context.Background()) })
 
-	want := expectations()
+	want := append(expectations(), numericForward()...)
 	stmts := make([]string, len(want))
 	for i, e := range want {
 		stmts[i] = e.stmt
@@ -150,6 +153,14 @@ func TestIntegrationPGCompare(t *testing.T) {
 	}
 
 	checkRouting(t, ctx, cp, rep, want)
+
+	// The numeric statements again, as a connection with no forwarding
+	// account runs them: answered as PostgreSQL answers them, or refused.
+	alone, err := OpenSnapshotCopy(ctx, runner, snapshot, "public")
+	if err != nil {
+		t.Fatalf("open the copy: %v", err)
+	}
+	checkNumericAlone(t, ctx, src, alone)
 
 	// The read-only transaction is the lock behind IsQuery and ReadOnlyVeto.
 	// Straight to the source, past both: a statement that turns the session
@@ -357,7 +368,7 @@ func expectations() []expectation {
 		eq(`(SELECT id FROM ` + o + ` ORDER BY id)`),
 		// Numbers.
 		eq(`SELECT sum(qty), min(qty), max(qty) FROM ` + o),
-		still("precision", "", dialect, `SELECT sum(amount), avg(amount) FROM `+o),
+		refused("avg()", "by design: avg() of a numeric has PostgreSQL's own decimals", `SELECT sum(amount), avg(amount) FROM `+o),
 		eq(`SELECT max(amount) FROM ` + o),
 		eq(`SELECT id FROM ` + o + ` WHERE qty > 9`),
 		eq(`SELECT id FROM ` + o + ` WHERE amount BETWEEN 5 AND 50`),
@@ -460,7 +471,7 @@ func expectations() []expectation {
 		eq(`SELECT upper('é'), lower('É')`),
 		eq(`SELECT lower(name) FROM ` + c),
 		{stmt: `SELECT id, amount / qty FROM ` + o + ` WHERE id = 6`, verdict: sqlcompare.SourceError},
-		still("precision", "", route, `SELECT avg(qty) FROM `+o),
+		refused("avg()", "by design: avg() of whole numbers is a numeric with PostgreSQL's own decimals", `SELECT avg(qty) FROM `+o),
 		still("rows", "", route, `SELECT id FROM `+o+` WHERE status ~ '^p'`),
 		still("rows", "", route, `SELECT id FROM `+o+` WHERE status SIMILAR TO 'p%'`),
 		refused("syntax error", route, `SELECT id FROM `+o+` WHERE attrs ? 'n'`),
@@ -469,7 +480,7 @@ func expectations() []expectation {
 		eq(`SELECT id, qty % 3 FROM ` + o),
 		eq(`SELECT id, -qty % 3 FROM ` + o),
 		eq(`SELECT id, abs(qty) FROM ` + o),
-		still("rows", "", route, `SELECT id, round(ratio) FROM `+o),
+		refused("half to even", "by design: PostgreSQL rounds a double precision half to even", `SELECT id, round(ratio) FROM `+o),
 		eq(`SELECT id, round(amount, 1) FROM ` + o),
 		// round(a / b, k) and round(avg(x), k), as the port writes them for
 		// the copy (pgshim.RewriteForCopy): PostgreSQL's numeric quotient,
