@@ -16476,7 +16476,7 @@ function sqlClientPanel(servers, fb, reveal, live, rt, split) {
         "The user can be anything: the password is what opens the port."),
       reveal ? null : el("p", { class: "form-hint", text: "Password: the one shown when it was created" +
         (fb.password_created_at ? ", " + utcLabel(fb.password_created_at) : "") + ". It cannot be shown again." }),
-      el("p", { class: "form-hint", text: "This password reads the copy of every server in the sidebar. It is not an account on your PostgreSQL: DBTrail made it, and it opens only this port. Nothing is sent to your PostgreSQL, and a statement that is not a read is refused." }),
+      el("p", { class: "form-hint", text: "This password reads the copy of every server in the sidebar. It is not an account on your PostgreSQL: DBTrail made it, and it opens only this port. A statement that is not a read is refused. Until the server has a forwarding user, nothing is sent to your PostgreSQL: the copy answers every statement." }),
       el("p", { class: "form-hint", text: "5433 is the port the PostgreSQL router listens on unless it was started with another (BINTRAIL_PG_ROUTER_LISTEN). It answers on this machine only unless that setting says otherwise; for another machine, open a tunnel to it. Keep sslmode=require in the line: the login never sends the password, and the port does not refuse a client that asks for no encryption." })));
     return done("card");
   }

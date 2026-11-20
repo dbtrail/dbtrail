@@ -856,7 +856,7 @@ var docs = map[string]Doc{
 	"BINTRAIL_SQL_TAIL_MAX_KEYS": {
 		Group:   "sqlports",
 		Text:    "In fresh mode, the most changed rows (distinct keys) kept in memory per table for the copy, before the table falls back to reading the snapshot until the next refresh. A whole number above 0; a bad value prints a warning and the default is used.",
-		Default: "500000 per table",
+		Default: "500000 per table for a MySQL or MariaDB server; 2000000 for a PostgreSQL server whose tails have a memory bound (sql-tail-max-bytes)",
 		Example: "1000000",
 		ReadBy:  "router, pg-router",
 	},
