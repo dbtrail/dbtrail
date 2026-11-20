@@ -248,17 +248,30 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 	// the two was lost, so a known loss in the window refuses the table. A
 	// value no change of the window gave is in what the window started
 	// from: read from a pair's end, the window is read again from the file,
-	// whose changes may hold it; from the file, nothing here can give it.
+	// where every change since the file is in hand and the file's row has
+	// the value (below, once the file is here).
 	if fold.pgUSeen && capGap != nil {
 		return nil, "", fmt.Errorf("%s.%s: a change left a large value as it was without PostgreSQL sending it "+
 			"(the table was not at REPLICA IDENTITY FULL), and capture lost changes in the same window, "+
 			"so the value an earlier change holds may not be the row's. Take a new snapshot of the table", schema, table)
 	}
-	if left, n := fold.pgResidualToast(1); n > 0 {
+	if left, n := fold.pgResidualToast(0); n > 0 {
 		if prev != nil {
 			return nil, "a change leaves a large value as it was and no change since the delta holds it", nil
 		}
-		return nil, "", pgToastResidueErr(schema, table, left[0], n-1)
+		// Before the file is fetched: a value lost behind a DELETE is not
+		// in the file either, and a file that may not hold the row the
+		// change was made to is not read for it.
+		for i, res := range left {
+			if len(res.Gone) > 0 {
+				return nil, "", pgToastResidueErr(schema, table, left[i], n-1)
+			}
+		}
+		if why := pgBaseNotTheRow(cfg, bmeta, b); why != "" {
+			return nil, "", fmt.Errorf("%s.%s: %d rows were changed leaving a large value as it was, which PostgreSQL did not send "+
+				"(the table was not at REPLICA IDENTITY FULL), and no change since the table's copy holds it. "+
+				"It is not read from the copy: %s. Take a new snapshot of the table", schema, table, n, why)
+		}
 	}
 	if noShape != nil {
 		// A change of a table the index has no shape of was captured under
@@ -355,6 +368,19 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 	// A pair that has ended is folded into its file by the engine when this
 	// window's changes are in memory and none was lost (writePGPair's end);
 	// otherwise, and when the engine cannot, the merge below does it.
+	// The values the window did not hold, from the file's rows; before the
+	// pair or the merge reads the changes.
+	if given, ferr := fold.pgFillFromBase(ctx, localPath, pkCols, cfg.DuckDBTuning, scaledEventThreshold(fc.MaxChangeBytes, fc.Parallelism)); ferr != nil {
+		return nil, "", fmt.Errorf("%s.%s: its changes left large values as they were, which PostgreSQL did not send "+
+			"(the table was not at REPLICA IDENTITY FULL), and they could not be read from the table's copy: %w. "+
+			"Take a new snapshot of the table", schema, table, ferr)
+	} else if given > 0 {
+		slog.Info("large values the changes left as they were, read from the table's copy",
+			"schema", schema, "table", table, "values", given)
+	}
+	if left, n := fold.pgResidualToast(1); n > 0 {
+		return nil, "", pgToastResidueErr(schema, table, left[0], n-1)
+	}
 	tryPair := fromPair == "" && pgPairEligible(cfg, p.baselinePath, bmeta, fileSince, fold, capGap)
 	foldPair := prev != nil && fromPair != "" && fold.Spill == nil && capGap == nil
 	if tryPair || foldPair {
@@ -419,6 +445,29 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 		"deletes_skipped", rep.DeletesSkipped,
 		"duration_ms", rep.Duration.Milliseconds())
 	return rep, "", nil
+}
+
+// pgBaseNotTheRow says why the table's file cannot be read for a large value
+// a change left as it was, "" when it can. The file's row is the row the
+// change was made to only when every change between the two is in hand:
+//
+//   - not in a run told to go on over missing changes (AllowGaps): the
+//     change that set the value may be among the missing;
+//   - not over a file that was itself written over changes capture lost;
+//   - not over a full read of the source this run does not reach
+//     (pgHeldForFullRead, where the file cannot be published as it is): the
+//     file's row may be newer than the change, and the two together a row
+//     the source never held.
+func pgBaseNotTheRow(cfg FullTableConfig, bmeta baseline.DumpMetadata, b pgFoldBounds) string {
+	switch anchor := bmeta.PGAnchorLSN; {
+	case cfg.AllowGaps:
+		return "this run was told to go on over missing changes, and the change that set the value may be one of them"
+	case bmeta.CaptureGap != "":
+		return "the copy was itself written over changes capture lost"
+	case anchor != 0 && (b.Until == nil || b.Until.Pos < anchor):
+		return fmt.Sprintf("the copy is a full read of the source at LSN %s and this update holds the changes up to an earlier one, so its rows may be newer than the change", lsnText(anchor))
+	}
+	return ""
 }
 
 // pgHeldForFullRead says why a table's file is published as it is instead of

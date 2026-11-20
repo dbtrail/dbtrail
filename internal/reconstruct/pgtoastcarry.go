@@ -1,12 +1,18 @@
 package reconstruct
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"maps"
 	"sort"
 	"strings"
 
+	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
+	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/dbtrail/dbtrail/internal/event"
+	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/pgdelta"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
@@ -31,8 +37,8 @@ import (
 // same in every order of arrival.
 //
 // What the window does not hold stays as the marker, with no source: the
-// value is in the table's copy, and whoever writes the table resolves it
-// there or refuses (pgResidualToast). It is never written as NULL.
+// value is in the table's copy. A snapshot update reads it there
+// (pgFillFromBase); a tail refuses. It is never written as NULL.
 
 // pgColSrc is where the value of one column of a key's last change came
 // from, for a column that change did not carry itself.
@@ -43,6 +49,11 @@ type pgColSrc struct {
 	LSN, ID uint64
 	// Have reports that the last change now holds the value.
 	Have bool
+	// NotLarge reports that the table's copy holds a NULL or an empty text
+	// for the column under the key: not a value PostgreSQL stores out of
+	// line, so not what the change left as it was. The copy's row is not
+	// the row the change was made to.
+	NotLarge bool
 	// Gone reports that the change at (LSN, ID) deleted the row, or that
 	// the row had no such column then: the value is not in the table's copy
 	// either, only in a change after that one.
@@ -197,6 +208,8 @@ func (r *foldResult) pgCarry(ev *query.ResultRow, image func(key string, cur *qu
 type pgToastResidue struct {
 	Key     string
 	Columns []string // sorted
+	// NotLarge names the columns the table's copy holds as NULL or empty.
+	NotLarge []string
 	// Gone names the columns whose value is not in the table's copy either:
 	// the window holds a DELETE of the row before the change, and no change
 	// between the two that gives the value.
@@ -221,6 +234,9 @@ func (r *foldResult) pgResidualToast(limit int) ([]pgToastResidue, int) {
 			if s.Gone {
 				res.Gone = append(res.Gone, c)
 			}
+			if s.NotLarge {
+				res.NotLarge = append(res.NotLarge, c)
+			}
 		}
 		if len(res.Columns) == 0 {
 			continue
@@ -228,6 +244,7 @@ func (r *foldResult) pgResidualToast(limit int) ([]pgToastResidue, int) {
 		res.Key = key
 		sort.Strings(res.Columns)
 		sort.Strings(res.Gone)
+		sort.Strings(res.NotLarge)
 		out = append(out, res)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
@@ -238,13 +255,97 @@ func (r *foldResult) pgResidualToast(limit int) ([]pgToastResidue, int) {
 	return out, n
 }
 
+// pgFillFromBase gives every unchanged large value the window did not hold
+// the value of its row in basePath, the file the window's changes go over.
+// It is right only for a window that holds every change since that file
+// (the caller says when it is not: pgBaseNotTheRow): no change of the row in
+// it gave the column a value, so the row holds the file's. A value after a
+// DELETE (Gone) is not looked for: the file's row is the deleted one. Left
+// for the caller to refuse: a key the file has no row for, and a column the
+// file holds as NULL or as an empty text (NotLarge), which PostgreSQL never
+// leaves unsent, so that row is not the one the change was made to.
+//
+// Two reads of the file, its key columns and then the named columns of the
+// rows found; nothing is read when nothing is left to give. maxBytes (0: no
+// limit) is how much text it may bring in. It returns how many values it
+// gave.
+func (r *foldResult) pgFillFromBase(ctx context.Context, basePath string, pkCols []metadata.ColumnMeta, tuning duckdbutil.Tuning, maxBytes int64) (int, error) {
+	var keys []string
+	colSet := map[string]bool{}
+	for key, srcs := range r.pgSrc {
+		if _, ok := r.Changes[key]; !ok {
+			continue
+		}
+		wants := false
+		for c, s := range srcs {
+			if !s.Have && !s.Gone {
+				colSet[c], wants = true, true
+			}
+		}
+		if wants {
+			keys = append(keys, key)
+		}
+	}
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	sort.Strings(keys)
+	cols := make([]string, 0, len(colSet))
+	for c := range colSet {
+		cols = append(cols, c)
+	}
+	sort.Strings(cols)
+	keyCols := make([]string, len(pkCols))
+	for i, c := range pkCols {
+		keyCols[i] = c.Name
+	}
+	if err := baselineintegrity.ValidateLocalFileOnce(basePath); err != nil {
+		return 0, err
+	}
+	duck, err := sql.Open("duckdb", "")
+	if err != nil {
+		return 0, fmt.Errorf("open duckdb: %w", err)
+	}
+	defer duck.Close()
+	applyDuckDBTuning(ctx, duck, tuning)
+	rows, err := pgdelta.BaseValuesOf(ctx, duck, basePath, keyCols, keys, cols, maxBytes)
+	if err != nil {
+		return 0, err
+	}
+	given := 0
+	for _, key := range keys {
+		row, ok := rows[key]
+		if !ok {
+			continue
+		}
+		img, srcs := r.Changes[key].RowAfter, r.pgSrc[key]
+		for c, s := range srcs {
+			if s.Have || s.Gone {
+				continue
+			}
+			if v := row[c]; v == nil || *v == "" {
+				s.NotLarge = true
+			} else {
+				img[c] = *v
+				s.Have = true
+				given++
+			}
+			srcs[c] = s
+		}
+	}
+	return given, nil
+}
+
 // pgToastResidueErr is the refusal of a table one of whose changes holds an
 // unchanged large value nothing here can give.
 func pgToastResidueErr(schema, table string, res pgToastResidue, more int) error {
 	target := pgQuoteIdent(schema) + "." + pgQuoteIdent(table)
-	why := "no earlier change of the row since the table's copy was written holds it"
+	why := "no earlier change of the row since the table's copy was written holds it, and the copy has no row under that key"
 	if len(res.Gone) > 0 {
 		why = "before that change the row was deleted, or had no such column, and no change after that holds it"
+	}
+	if len(res.NotLarge) > 0 {
+		why = "the table's copy holds no large value there for that key (a NULL or an empty text), so its row is not the one the change was made to"
 	}
 	others := ""
 	if more > 0 {
