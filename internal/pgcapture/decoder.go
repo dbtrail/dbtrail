@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/parser"
 )
 
 // UnchangedToastKey is the single key of the structurally-distinct marker the
@@ -56,6 +58,24 @@ type Decoder struct {
 	// stream: a busy hypertable has many chunk relations, and one warning per chunk
 	// would flood the log.
 	timescaleWarned bool
+
+	// skips is the capture-skip ledger (WithSkipCounters): every dropped change of
+	// a relation not at REPLICA IDENTITY FULL is recorded there, and every emitted
+	// row breaks the consecutive-skip run. nil records nothing (all methods are
+	// nil-safe).
+	skips *parser.SkipCounters
+}
+
+// SkipReplicaIdentityNotFull is the capture-skip reason (parser.SkipCounters,
+// persisted in stream_state.capture_skips) for a row change dropped because its
+// table was not at REPLICA IDENTITY FULL when PostgreSQL decoded it. A stable
+// string: `status` shows it verbatim, and renaming it would split its history.
+const SkipReplicaIdentityNotFull = "replica_identity_not_full"
+
+// WithSkipCounters wires the capture-skip ledger the decoder records into. The
+// capturer passes Config.Skips; tests pass their own.
+func WithSkipCounters(s *parser.SkipCounters) DecoderOption {
+	return func(d *Decoder) { d.skips = s }
 }
 
 // DecoderOption configures optional Decoder dependencies without churning the
@@ -133,6 +153,13 @@ func (d *Decoder) Decode(msg pglogrepl.Message) (event.Event, bool, error) {
 	case *pglogrepl.RelationMessage:
 		if err := d.cacheRelation(m); err != nil {
 			return event.Event{}, false, err
+		}
+		// A relation below REPLICA IDENTITY FULL is cached as skipped and produces
+		// nothing: no schema snapshot (no row will reference it) and no DDL
+		// inference (the FULL description that resumes it is then its first
+		// observed shape, the same as a table entering capture).
+		if d.relations[m.RelationID].skipped {
+			return event.Event{}, false, nil
 		}
 		// Inferred DDL first (#2441): the consumer writes each event in order,
 		// and a schema-change row written before the new shape's snapshot
@@ -263,17 +290,38 @@ func (d *Decoder) cacheRelation(m *pglogrepl.RelationMessage) error {
 		d.timescaleWarned = true
 	}
 
-	// REPLICA IDENTITY FULL enforcement at the LIVE boundary, not just startup: a
-	// table added to a FOR ALL TABLES publication after Run started (or any mid-stream
-	// new relation) arrives here as a fresh RelationMessage at PostgreSQL's default
-	// identity ('d'), which the one-shot startup validator (validateReplicaIdentity)
-	// never re-checks. Without FULL the before-image is partial — an unchanged
-	// out-of-line TOAST value is gone — so fail loud here too rather than index
-	// unrecoverable rows (whose recovery WHERE would carry the unchanged-TOAST marker
-	// and match nothing). 'f' = FULL; 'd' default, 'i' using-index, 'n' nothing.
+	// REPLICA IDENTITY FULL at the LIVE boundary, not just startup: a table added to
+	// the publication after Run started (or any mid-stream new relation) arrives here
+	// as a fresh RelationMessage at PostgreSQL's default identity ('d'). Without FULL
+	// the before-image is partial — an unchanged out-of-line TOAST value is gone — so
+	// its rows are never indexed (their recovery WHERE would carry the unchanged-TOAST
+	// marker and match nothing). 'f' = FULL; 'd' default, 'i' using-index, 'n' nothing.
+	//
+	// The table is SKIPPED, not fatal. Failing the stream here stopped capture of
+	// EVERY table, and for good: PostgreSQL decodes the WAL with the catalog as it was
+	// when the change was written, so the slot re-sends the same 'd' description on
+	// every restart, even after the ALTER. The MySQL path does the same for a table it
+	// cannot read: drop its rows, warn, record an attributed skip in the ledger that
+	// `status` reports as degraded capture. After ALTER TABLE ... REPLICA IDENTITY
+	// FULL, PostgreSQL describes the relation again at 'f' (cache invalidation), which
+	// lands below as a normal entry: capture of the table resumes by itself.
 	if m.ReplicaIdentity != 'f' {
-		return fmt.Errorf("pgcapture: relation %s.%s is not at REPLICA IDENTITY FULL (replica identity %q) — before-images would be partial; run ALTER TABLE %s.%s REPLICA IDENTITY FULL",
-			m.Namespace, m.RelationName, string(rune(m.ReplicaIdentity)), m.Namespace, m.RelationName)
+		d.relations[m.RelationID] = &relationInfo{
+			oid:             m.RelationID,
+			schema:          m.Namespace,
+			table:           m.RelationName,
+			skipped:         true,
+			replicaIdentity: m.ReplicaIdentity,
+		}
+		// A table the operator filtered out is dropped anyway: no warning, and no
+		// skip is recorded for it (recordSkip is only reached for in-scope rows).
+		if d.filters.Matches(m.Namespace, m.RelationName) {
+			d.logger.Warn("pgcapture: table is not at REPLICA IDENTITY FULL; its changes are NOT captured (each one is counted as skipped in capture health) until it is, the other tables keep flowing. On PostgreSQL 18, run `bintrail-pg doctor` first: a generated column the publication does not publish makes the source refuse UPDATE and DELETE on a FULL table",
+				"table", m.Namespace+"."+m.RelationName,
+				"replica_identity", replicaIdentityName(m.ReplicaIdentity),
+				"fix", replicaIdentityFix(m.Namespace, m.RelationName))
+		}
+		return nil
 	}
 
 	cols := make([]relColumn, len(m.Columns))
@@ -349,6 +397,44 @@ func (d *Decoder) cacheRelation(m *pglogrepl.RelationMessage) error {
 	return nil
 }
 
+// replicaIdentityFix is the statement that puts a table at REPLICA IDENTITY FULL,
+// with both names quoted so a mixed-case or unusual name works as printed.
+func replicaIdentityFix(schema, table string) string {
+	return "ALTER TABLE " + pgx.Identifier{schema, table}.Sanitize() + " REPLICA IDENTITY FULL"
+}
+
+// replicaIdentityName renders a pg_class.relreplident code for a person: the code
+// itself (what the catalog shows) and its meaning.
+func replicaIdentityName(code uint8) string {
+	meaning := "unknown"
+	switch code {
+	case 'd':
+		meaning = "default: primary key only"
+	case 'i':
+		meaning = "using index"
+	case 'n':
+		meaning = "nothing"
+	case 'f':
+		meaning = "full"
+	}
+	return fmt.Sprintf("'%c' (%s)", rune(code), meaning)
+}
+
+// recordSkip records one dropped change of a skipped relation, attributed to the
+// table and to the transaction's commit LSN (in the shape the PostgreSQL
+// checkpoint uses: the LSN text as the file, its number as the position).
+func (d *Decoder) recordSkip(rel *relationInfo) {
+	lsn := d.txn.commitLSN
+	d.skips.RecordSkipAttributed(SkipReplicaIdentityNotFull, parser.SkipAttribution{
+		File:   lsn.String(),
+		Pos:    uint64(lsn),
+		Schema: rel.schema,
+		Table:  rel.table,
+		Detail: fmt.Sprintf("replica identity %s, not FULL; fix: %s",
+			replicaIdentityName(rel.replicaIdentity), replicaIdentityFix(rel.schema, rel.table)),
+	})
+}
+
 // isTimescaleChunk reports whether a relation is a TimescaleDB hypertable chunk — the
 // internal physical tables (_hyper_<id>_<n>_chunk, or _dist_hyper_* for distributed
 // hypertables) under the _timescaledb_internal schema that pgoutput streams in place
@@ -419,6 +505,12 @@ func (d *Decoder) decodeInsert(m *pglogrepl.InsertMessage) (event.Event, bool, e
 	if !d.filters.Matches(rel.schema, rel.table) {
 		return event.Event{}, false, nil
 	}
+	if rel.skipped {
+		// Before any tuple is decoded: a weaker identity's old tuple can carry the
+		// unchanged-TOAST datum, which decodeTuple refuses.
+		d.recordSkip(rel)
+		return event.Event{}, false, nil
+	}
 	// INSERT carries only a new tuple, fully written — pgoutput never emits 'u' in
 	// an INSERT, so there is no before-image to resolve from.
 	after, err := d.decodeTuple(rel, m.Tuple, roleAfter, nil)
@@ -434,6 +526,12 @@ func (d *Decoder) decodeUpdate(m *pglogrepl.UpdateMessage) (event.Event, bool, e
 		return event.Event{}, false, err
 	}
 	if !d.filters.Matches(rel.schema, rel.table) {
+		return event.Event{}, false, nil
+	}
+	if rel.skipped {
+		// Before any tuple is decoded: a weaker identity's old tuple can carry the
+		// unchanged-TOAST datum, which decodeTuple refuses.
+		d.recordSkip(rel)
 		return event.Event{}, false, nil
 	}
 	// OldTuple is the full old tuple ('O') under REPLICA IDENTITY FULL, a key-only
@@ -466,6 +564,12 @@ func (d *Decoder) decodeDelete(m *pglogrepl.DeleteMessage) (event.Event, bool, e
 		return event.Event{}, false, err
 	}
 	if !d.filters.Matches(rel.schema, rel.table) {
+		return event.Event{}, false, nil
+	}
+	if rel.skipped {
+		// Before any tuple is decoded: a weaker identity's old tuple can carry the
+		// unchanged-TOAST datum, which decodeTuple refuses.
+		d.recordSkip(rel)
 		return event.Event{}, false, nil
 	}
 	// A DELETE's before-image is the ONLY source for its reversal INSERT. pgoutput
@@ -595,6 +699,9 @@ func (d *Decoder) rowEvent(rel *relationInfo, typ event.EventType, before, after
 	if d.infer != nil {
 		d.infer.noteChange(rel.oid, d.txn)
 	}
+	// A captured row breaks the ledger's consecutive-skip run, so a busy skipped
+	// table beside captured ones does not read as "capture stopped".
+	d.skips.RecordCaptured()
 	lsn := d.txn.commitLSN.String()
 	return event.Event{
 		BinlogFile: lsn,

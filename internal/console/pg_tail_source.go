@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -108,7 +109,7 @@ type pgBrokenMemo struct {
 
 // pgBrokenKey is what a table's answer to Broken depends on: its file's
 // floor, the newest schema snapshot and schema change the index holds, and
-// the loss capture recorded.
+// the loss and the dropped changes capture recorded.
 type pgBrokenKey struct {
 	base        string // the file itself (baseFileID): two files can share a floor
 	gapColumns  bool   // the record of a loss is readable at all
@@ -119,6 +120,9 @@ type pgBrokenKey struct {
 	lostAt      time.Time
 	lostKnown   bool
 	stateKnown  bool
+	// skips is the capture's ledger of dropped changes as stored: a new drop
+	// changes it, so an answer made before the drop is asked again.
+	skips string
 }
 
 func newPGTailSource(s *Server, b *bundle) *pgTailSource {
@@ -765,6 +769,9 @@ func (x *pgTailSource) Broken(ctx context.Context, tables []views.BaselineTable)
 	if st != nil && st.GapColumnsPresent && st.GapLostAt.Valid {
 		base.lostAt, base.lostKnown = st.GapLostAt.Time.UTC(), true
 	}
+	if st != nil && st.CaptureSkips.Valid {
+		base.skips = "v" + st.CaptureSkips.String
+	}
 
 	// The memo is read and written under the lock; the index is asked
 	// outside it, so a slow read holds up no other reader of this source.
@@ -860,7 +867,7 @@ func (x *pgTailSource) shapesFrom(ctx context.Context, snapshotID int64, from ui
 // pgTailBroken is one table's answer to Broken, "" when its tail can go on.
 func pgTailBroken(ctx context.Context, db *sql.DB, t views.BaselineTable, c pgCut, st *status.StreamStateInfo, shapes []metadata.PGShape) (string, error) {
 	name := t.Schema + "." + t.Table
-	if why := pgTailCaptureLoss(st, baseline.SourceReadOf(c.md).At); why != "" {
+	if why := pgTailCaptureLoss(st, baseline.SourceReadOf(c.md).At, t.Schema, t.Table); why != "" {
 		return why, nil
 	}
 	rel, ok, err := baseline.ParsePGRelation(c.md.PGRelation)
@@ -904,11 +911,26 @@ func sameStringSet(a, b []string) bool {
 	return true
 }
 
-// pgTailCaptureLoss is tailCaptureLoss for a PostgreSQL capture, which keeps
-// no record of dropped events (capture_skips is MySQL's): a loss on record
-// since the table's rows were read from the source refuses, and so does a
-// record that cannot be read. An acknowledged loss still refuses.
-func pgTailCaptureLoss(st *status.StreamStateInfo, sourceRead time.Time) string {
+// pgTailCaptureLoss is tailCaptureLoss for a PostgreSQL capture and one
+// table: a loss on record (a lost slot) since the table's rows were read from
+// the source refuses, and so does a record that cannot be read. An
+// acknowledged loss still refuses.
+//
+// Dropped changes refuse too. A PostgreSQL capture records them in
+// capture_skips (a table below REPLICA IDENTITY FULL has its changes dropped
+// while the other tables keep flowing), and a tail built from the index would
+// serve such a table with old rows. The rule is the MySQL one
+// (tailCaptureLoss): a drop dated at or after the source read. Unlike it,
+// this answers for one table: an entry that names the table, or that does not
+// say which tables it covers (no list, or a list cut short), refuses it. An
+// entry's time is its newest drop of any table it names, so a table named
+// with an old drop beside a newer one of another table is refused as well:
+// over-refusing sends the table to a full read, never serves it stale.
+//
+// A NULL ledger is no drop: PostgreSQL captures from before the ledger never
+// wrote one, and they stopped instead of dropping. One that is there and does
+// not parse refuses.
+func pgTailCaptureLoss(st *status.StreamStateInfo, sourceRead time.Time, schema, table string) string {
 	switch {
 	case st == nil:
 		return "the capture's state is not recorded in the index"
@@ -918,6 +940,22 @@ func pgTailCaptureLoss(st *status.StreamStateInfo, sourceRead time.Time) string 
 		return "the snapshot does not say when its rows were read from the source"
 	case st.GapLostAt.Valid && !st.GapLostAt.Time.Before(sourceRead):
 		return "capture lost events since the snapshot's rows were read from the source"
+	}
+	if !st.CaptureSkips.Valid || strings.TrimSpace(st.CaptureSkips.String) == "" {
+		return ""
+	}
+	skips, readable := st.ParseCaptureSkips()
+	if !readable {
+		return "the capture's record of dropped changes is not readable"
+	}
+	name := schema + "." + table
+	for reason, sk := range skips {
+		if sk.Count == 0 || (!sk.LastAt.IsZero() && sk.LastAt.Before(sourceRead)) {
+			continue
+		}
+		if len(sk.Tables) == 0 || sk.TablesTruncated || slices.Contains(sk.Tables, name) {
+			return fmt.Sprintf("capture dropped changes of %s (%s) since the snapshot's rows were read from the source", name, reason)
+		}
 	}
 	return ""
 }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/parser"
 )
 
 // defaultStandbyInterval is used when StandbyInterval is unset and wal_sender_timeout
@@ -63,6 +64,12 @@ type Config struct {
 	// change to a table before an LSN. Both nil = inference off.
 	LoadKnownShapes func(fromLSN uint64) (KnownState, error)
 	LastChange      func(schema, table string, beforeLSN uint64) (lsn uint64, at time.Time, ok bool, err error)
+	// Skips is the capture-skip ledger: each change of a table that is not at
+	// REPLICA IDENTITY FULL is dropped and recorded there under
+	// SkipReplicaIdentityNotFull, and each captured row breaks its run of
+	// consecutive skips. The consumer persists it with its checkpoints. nil
+	// records nothing (the changes are still dropped, with the warning).
+	Skips *parser.SkipCounters
 }
 
 // Capturer decodes a PostgreSQL logical-replication stream into event.Event. It
@@ -169,8 +176,18 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 	if err := CheckDeferrableKeys(startupCtx, queryConn, c.cfg.Publication); err != nil {
 		return err
 	}
-	if err := validateReplicaIdentity(startupCtx, queryConn, c.cfg.Publication); err != nil {
+	// A table below REPLICA IDENTITY FULL no longer stops capture: the decoder
+	// skips its changes (and records each one), so one such table does not take
+	// every other table down with it. Said here once, at start, for the tables
+	// already in the publication; the decoder says it again for each description
+	// of the table it receives.
+	notFull, err := validateReplicaIdentity(startupCtx, queryConn, c.cfg.Publication, c.cfg.Filters)
+	if err != nil {
 		return err
+	}
+	if len(notFull) > 0 {
+		c.logger.Warn("pgcapture: published table(s) not at REPLICA IDENTITY FULL; their changes are NOT captured (each one is counted as skipped in capture health) until each is altered with ALTER TABLE <t> REPLICA IDENTITY FULL, the other tables are captured normally",
+			"tables", strings.Join(notFull, ", "))
 	}
 
 	// Non-fatal capture-coverage warnings (#555 UNLOGGED, #556 FK cascade child): tables
@@ -230,7 +247,7 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 		defer cancel()
 		return queryColumnAttrs(qctx, queryConn, relationID)
 	}
-	opts := []DecoderOption{WithAttrResolver(attrResolver)}
+	opts := []DecoderOption{WithAttrResolver(attrResolver), WithSkipCounters(c.cfg.Skips)}
 	stampsClose := func() {}
 	defer func() { stampsClose() }()
 	if c.cfg.LastChange != nil && c.cfg.LoadKnownShapes != nil {

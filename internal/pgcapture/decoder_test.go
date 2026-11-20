@@ -343,20 +343,20 @@ func TestDecode_PKColumnDriftFailsLoud(t *testing.T) {
 	}
 }
 
-func TestDecode_NonFullReplicaIdentityRelationFailsLoud(t *testing.T) {
+func TestDecode_NonFullReplicaIdentityRelationIsSkippedNotFatal(t *testing.T) {
 	// A relation that arrives NOT at REPLICA IDENTITY FULL — e.g. a table added to a
-	// FOR ALL TABLES publication after startup, which the one-shot startup validator
-	// never re-checks — must fail loud here at the RelationMessage (the live gate),
-	// not silently index partial before-images.
+	// publication after startup — must not stop the stream: its RelationMessage is
+	// consumed (no EventRelation, no error) and its rows are dropped. The rest of
+	// this behavior is pinned in decoder_skip_ri_test.go.
 	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil)
 	rel := relMsg(1, "public", "t", "id", "v")
 	rel.ReplicaIdentity = 'd' // default, not FULL
-	_, _, err := d.Decode(rel)
-	if err == nil {
-		t.Fatal("expected error for a relation not at REPLICA IDENTITY FULL")
+	ev, emit, err := d.Decode(rel)
+	if err != nil {
+		t.Fatalf("a relation not at REPLICA IDENTITY FULL must not fail the stream: %v", err)
 	}
-	if !strings.Contains(err.Error(), "REPLICA IDENTITY FULL") {
-		t.Errorf("unexpected error: %v", err)
+	if emit {
+		t.Errorf("a skipped relation must not emit an EventRelation, got %+v", ev)
 	}
 }
 
@@ -810,24 +810,24 @@ func TestDecode_TimescaleChunk_WarnsOnce(t *testing.T) {
 	}
 }
 
-// TestDecode_TimescaleChunk_WarnsBeforeReplicaIdentityAbort locks the warn-BEFORE-RI
-// ordering (#559): a chunk relation that is NOT at REPLICA IDENTITY FULL must still emit
-// the out-of-scope warning before cacheRelation's RI-FULL check aborts decoding. The
-// warn is placed first deliberately so the operator gets the TimescaleDB signal even
-// when the chunk is rejected; a future refactor moving the warn below the RI check would
-// silently regress this, so pin it.
-func TestDecode_TimescaleChunk_WarnsBeforeReplicaIdentityAbort(t *testing.T) {
+// TestDecode_TimescaleChunk_WarnsWhenNotFull locks that the TimescaleDB signal (#559)
+// survives a chunk relation that is NOT at REPLICA IDENTITY FULL: such a chunk is
+// skipped (its rows dropped and counted), and the operator must still be told the
+// captured target is the chunk, alongside the replica-identity warning.
+func TestDecode_TimescaleChunk_WarnsWhenNotFull(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	d := pgcapture.NewDecoder(pkResolver("ts"), event.Filters{}, logger)
 
 	rel := relMsg(10, "_timescaledb_internal", "_hyper_1_1_chunk", "ts", "v")
-	rel.ReplicaIdentity = 'd' // NOT full → cacheRelation will abort
-	_, _, err := d.Decode(rel)
-	if err == nil {
-		t.Fatal("expected a REPLICA IDENTITY FULL error for a non-FULL chunk relation")
+	rel.ReplicaIdentity = 'd' // NOT full → skipped
+	if _, _, err := d.Decode(rel); err != nil {
+		t.Fatalf("a non-FULL chunk relation must be skipped, not fail the stream: %v", err)
 	}
 	if !strings.Contains(buf.String(), "TimescaleDB hypertable chunk detected") {
-		t.Fatalf("the TimescaleDB warning must fire BEFORE the RI-FULL abort, got:\n%s", buf.String())
+		t.Fatalf("the TimescaleDB warning must fire for a non-FULL chunk too, got:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "REPLICA IDENTITY FULL") {
+		t.Fatalf("the replica-identity warning must fire for a non-FULL chunk, got:\n%s", buf.String())
 	}
 }

@@ -41,6 +41,14 @@ type relationInfo struct {
 	table   string
 	columns []relColumn           // ordinal order, matching the tuple column order
 	pkCols  []metadata.ColumnMeta // primary-key columns in table-ordinal order (cacheRelation reorders the PKResolver's key-order result so pk_values aligns with the offline resolver)
+
+	// skipped marks a relation described at a replica identity weaker than FULL:
+	// its row changes are dropped and recorded in the capture-skip ledger instead
+	// of indexed. Only oid/schema/table/replicaIdentity are set for it (no
+	// columns, no PK: nothing of it is decoded). The next RelationMessage for the
+	// same OID replaces the entry, so a table altered to FULL resumes by itself.
+	skipped         bool
+	replicaIdentity uint8
 }
 
 // PKResolver returns the primary-key columns of a relation, in primary-key (indkey)

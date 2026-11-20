@@ -36,10 +36,14 @@ PostgreSQL requires two connections, which cannot be the same:
 
 Prerequisites on the source (validated at startup, fails loud otherwise):
   - wal_level = logical
-  - every replicated table at REPLICA IDENTITY FULL (so the WAL carries the full
-    before-image and de-TOASTed unchanged values — without it recovery silently
-    loses columns)
   - a PUBLICATION covering the tables you want indexed (--publication)
+
+Every replicated table must also be at REPLICA IDENTITY FULL (so the WAL carries
+the full before-image and de-TOASTed unchanged values; without it recovery would
+lose columns). A table that is not, at startup or added later, does not stop the
+stream: its changes are skipped, the log names it with the ALTER TABLE to run,
+and 'status' reports capture as degraded under replica_identity_not_full. After
+the ALTER TABLE, capture of the table resumes by itself.
 
 The replication slot (--slot) is created on first run if absent and reused on
 restart. The durable checkpoint is the last committed LSN, persisted to
