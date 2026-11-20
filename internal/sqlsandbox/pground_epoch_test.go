@@ -85,7 +85,7 @@ func TestPGFloorEpochValues(t *testing.T) {
 		{"a microsecond before that edge", "TIMESTAMP '1969-12-31 23:49:59.999999'", "600", "-2"},
 		{"a timestamptz", "TIMESTAMPTZ '2026-11-18 10:07:30+00'", "600", "2991660"},
 		{"whole seconds", "TIMESTAMP '1969-12-31 23:59:59.5'", "1", "-1"},
-		{"NULL", "CAST(NULL AS TIMESTAMP)", "600", "<nil>"},
+		{"NULL", "(SELECT x FROM (VALUES (CAST(NULL AS TIMESTAMP))) v(x))", "600", "<nil>"},
 		// Year 2286 and later over n = 999999999: in the band, past it.
 		{"over a large n, past the band", "TIMESTAMP '1970-01-01' + to_microseconds(11 * 999999999000000 - 5)", "999999999", "10"},
 		{"over a large n, past the band, negative", "TIMESTAMP '1970-01-01' + to_microseconds(-11 * 999999999000000 - 5)", "999999999", "-12"},
@@ -112,7 +112,9 @@ func TestPGFloorEpochValues(t *testing.T) {
 		{"just over a negative one", "TIMESTAMP '1970-01-01' + to_microseconds(-11 * 999999999000000 - 1)", "999999999", "too close to a whole number"},
 		{"a date", "DATE '2026-11-18'", "600", "not a timestamp"},
 		{"an interval", "INTERVAL 1 DAY", "600", "not a timestamp"},
-		{"a NULL of no type", "NULL", "600", "not a timestamp"},
+		// A NULL of no type fails to bind in both (epoch_us has no
+		// overload for it), as the general macros did before.
+		{"a NULL of no type", "NULL", "600", "epoch_us"},
 	} {
 		for _, expr := range []string{
 			fmt.Sprintf("_bintrail_pg_floor_epoch(%s, %s)", c.x, c.n),
