@@ -1125,8 +1125,21 @@ func buildFilters(opts query.Options, cols map[string]bool) ([]string, []any) {
 	}
 	if opts.ChangedColumn != "" {
 		needle, _ := json.Marshal(opts.ChangedColumn)
-		where = append(where, "json_contains(changed_columns, ?)")
-		args = append(args, string(needle))
+		if opts.PostgresHistory {
+			// The archive twin of internal/query's PostgreSQL changed-column
+			// filter, which must admit exactly the same rows: the live-only
+			// short-circuits of the merged fetch assume the two sides agree.
+			// An UPDATE that stored no changed columns (NULL, or the text
+			// "null" an archived JSON null becomes) and whose earlier image
+			// has a column holding an object with the not-captured key.
+			where = append(where, "(json_contains(changed_columns, ?) OR (event_type = ? AND "+
+				"(changed_columns IS NULL OR json_type(changed_columns) = 'NULL') AND "+
+				"len(json_extract(row_before, '$.*.\""+event.NotCapturedKey+"\"')) > 0))")
+			args = append(args, string(needle), int32(event.EventUpdate))
+		} else {
+			where = append(where, "json_contains(changed_columns, ?)")
+			args = append(args, string(needle))
+		}
 	}
 	if opts.QueryHash != "" {
 		if cols != nil && !cols["query_hash"] {

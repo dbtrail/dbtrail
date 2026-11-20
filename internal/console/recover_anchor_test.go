@@ -267,7 +267,7 @@ func TestRecoverRefusesAMalformedAnchor(t *testing.T) {
 // that the round trip closes.
 func TestEventDTOAnchorRoundTripsThroughTheCursorParser(t *testing.T) {
 	ts := time.Date(2026, 8, 21, 20, 8, 36, 0, time.UTC)
-	dto := toEventDTO(query.ResultRow{EventID: 403440, EventTimestamp: ts})
+	dto := toEventDTO(query.ResultRow{EventID: 403440, EventTimestamp: ts}, false)
 	if dto.Anchor == "" {
 		t.Fatal("eventDTO.anchor is empty — the Undo bridge has no identity to carry")
 	}

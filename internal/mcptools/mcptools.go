@@ -94,6 +94,14 @@ type Target struct {
 	// deliberately NEVER migrated (the console's read-only contract confines
 	// DDL to the command-line DSN).
 	EnsureSchema bool
+	// SourcePostgres, when set, is the surface's own answer to "is this a
+	// PostgreSQL index" for the query tool's history rendering
+	// (query.Options.PostgresHistory): the console sets it from the decision
+	// its Events view uses, without a read, because it never migrates
+	// registry servers and an old index's flavor read would fail on every
+	// call. nil (standalone): the tool reads it with query.HistoryFlavor and
+	// warns when it cannot.
+	SourcePostgres *bool
 	// EnvArchiveDiscovery consults BINTRAIL_ARCHIVE_S3 + BINTRAIL_ID before
 	// falling back to archive_state auto-discovery (standalone behavior).
 	// False on the console, whose archive posture is per-server.
@@ -744,6 +752,17 @@ func MakeQueryTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Query
 			return ErrorResult(fmt.Errorf("invalid order %q; must be ASC or DESC", args.Order)), nil, nil
 		}
 		opts.Order = args.Order
+		// Query only, like query_hash: on a PostgreSQL index render the rows
+		// of tables that were not at REPLICA IDENTITY FULL, and let
+		// changed_column also return the UPDATEs whose changed columns are
+		// unknown (query.Options.PostgresHistory). Recover never sets it.
+		var flavorWarning string
+		if t.SourcePostgres != nil {
+			opts.PostgresHistory = *t.SourcePostgres
+		} else {
+			opts.PostgresHistory, flavorWarning = query.HistoryFlavor(t.DB)
+		}
+		pgChangedColumn := opts.PostgresHistory && opts.ChangedColumn != ""
 
 		// Hard ceiling on an explicit, oversized limit (#654). BuildQueryOptions
 		// already coerces limit<=0 to the default, so this only bounds a large
@@ -822,7 +841,11 @@ func MakeQueryTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Query
 		// The live index already answered and the archives went unread
 		// (#1410). Recorded in the result: a skip is never silent.
 		var archivesSkipped bool
-		if len(archSources) == 0 && !t.RedactStatementText {
+		// The rows a PostgreSQL changed-column filter returned only because
+		// their changed columns are unknown; counted on the merge path, which
+		// is why that filter does not take the fast one.
+		mayHaveChanged := 0
+		if len(archSources) == 0 && !t.RedactStatementText && !pgChangedColumn {
 			// Fast path: no archives and no post-fetch redaction — fetch and
 			// format in one step.
 			n, err = engine.Run(ctx, opts, format, &buf)
@@ -870,9 +893,12 @@ func MakeQueryTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Query
 				results, divergedEvents = query.MergeAndTrimReport(results, opts.Limit, opts.LimitPerPK, opts.Order)
 			}
 			t.stripStatementText(results)
-			n, err = query.Format(results, format, &buf)
+			n, err = query.FormatHistory(results, format, &buf, opts.PostgresHistory)
 			if err != nil {
 				return ErrorResult(err), nil, nil
+			}
+			if pgChangedColumn {
+				mayHaveChanged = query.MayHaveChangedCount(results)
 			}
 		}
 
@@ -888,6 +914,12 @@ func MakeQueryTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Query
 		}
 		if archivesSkipped {
 			text += "\nNote: " + queryArchivesSkippedNote() + "\n"
+		}
+		if note := query.MayHaveChangedNotice(opts.ChangedColumn, mayHaveChanged); note != "" {
+			text += "\nNote: " + note + "\n"
+		}
+		if flavorWarning != "" {
+			text += "\nWarning: " + flavorWarning + "\n"
 		}
 
 		ext.Record(ctx, ext.AuditEvent{

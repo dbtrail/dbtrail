@@ -4041,6 +4041,51 @@ function ovStat(value, key, mod, scope) {
     el("div", { class: "ov-stat-scope", text: scope || "" }));
 }
 
+// PostgreSQL history: a table that was not at REPLICA IDENTITY FULL sends at
+// most the key of the earlier row, and does not resend a large value the
+// change left alone. The server says so per event, and only on a PostgreSQL
+// index: before_image "key_only" and unchanged_columns (eventDTO). The page
+// reads those two fields and never the shape of a value alone, because on
+// MySQL a JSON column can hold exactly the marker object as user data. The
+// words are the query command's (internal/query: NotCapturedText,
+// UnchangedLargeValueText, ChangedColumnsUnknownText).
+const NOT_CAPTURED_TEXT = "(not captured: REPLICA IDENTITY not FULL)";
+const UNCHANGED_LARGE_TEXT = "(unchanged large value)";
+const CHANGED_UNKNOWN_TEXT = "unknown";
+function isNotCapturedMarker(v) {
+  return v !== null && typeof v === "object" && !Array.isArray(v) &&
+    Object.keys(v).length === 1 && v.__bintrail_not_captured__ === true;
+}
+// historyImage: the event's earlier ("before") or later ("after") row with
+// each marker the server vouched for replaced by its words; the row itself
+// otherwise. Never mutates the event (exports keep the markers).
+function historyImage(ev, side) {
+  const img = side === "before" ? ev.row_before : ev.row_after;
+  if (!img) return img;
+  const keyOnly = side === "before" && ev.before_image === "key_only";
+  const unchanged = side === "after" ? new Set(ev.unchanged_columns || []) : new Set();
+  if (!keyOnly && !unchanged.size) return img;
+  const out = {};
+  Object.keys(img).forEach((c) => {
+    if (keyOnly && isNotCapturedMarker(img[c])) out[c] = NOT_CAPTURED_TEXT;
+    else if (unchanged.has(c)) out[c] = UNCHANGED_LARGE_TEXT;
+    else out[c] = img[c];
+  });
+  return out;
+}
+// changedColumnsUnknown: an UPDATE whose earlier row carries only its key, so
+// which columns it changed is unknown (a no-op UPDATE has a whole earlier row).
+function changedColumnsUnknown(ev) {
+  return ev.event_type === "UPDATE" && ev.before_image === "key_only" && !(ev.changed_columns && ev.changed_columns.length);
+}
+function eventColsSummary(ev, highlight) {
+  if (changedColumnsUnknown(ev)) {
+    return [el("span", { class: "cols-unknown", text: CHANGED_UNKNOWN_TEXT,
+      title: "Which columns changed is unknown: the table was not at REPLICA IDENTITY FULL when this change was captured." })];
+  }
+  return colsSummary(ev.changed_columns, highlight);
+}
+
 function colsSummary(cols, highlight) {
   cols = cols || [];
   if (cols.length > 2) return [el("span", { text: cols.length + " cols" })];
@@ -4060,7 +4105,7 @@ function ovEventRow(e) {
   const tbl = el("span", { class: "ov-ev-tbl", text: e.schema_name + "." + e.table_name + " " });
   tbl.append(el("span", { class: "ov-ev-pk", text: "#" + e.pk_values }));
   row.append(tbl);
-  row.append(el("span", { class: "ov-ev-cols" }, ...colsSummary(e.changed_columns, false)));
+  row.append(el("span", { class: "ov-ev-cols" }, ...eventColsSummary(e, false)));
   const undo = el("button", { class: "btn btn-sm ov-ev-undo", type: "button", text: "Undo", "data-anchor": e.anchor,
     onclick: (ev) => { ev.stopPropagation(); undoEvent(e); } });
   row.append(undo);
@@ -4769,7 +4814,7 @@ function buildEventRows(container, events, scopeNote) {
     row.append(el("span", { class: "ev-table", text: e.schema_name + "." + e.table_name }));
     row.append(el("span", {}, badge(e.event_type)));
     row.append(el("span", { class: "ev-pk", text: e.pk_values }));
-    row.append(el("span", { class: "ev-cols" }, ...colsSummary(e.changed_columns, true)));
+    row.append(el("span", { class: "ev-cols" }, ...eventColsSummary(e, true)));
     const wrap = el("div", { class: "diff-wrap", id: "diff-" + i });
     let loaded = false;
     row.addEventListener("click", () => {
@@ -4788,8 +4833,8 @@ function buildEventRows(container, events, scopeNote) {
 }
 
 function renderDiff(ev) {
-  const before = ev.row_before || {};
-  const after = ev.row_after || {};
+  const before = historyImage(ev, "before") || {};
+  const after = historyImage(ev, "after") || {};
   const cols = Array.from(new Set([...Object.keys(before), ...Object.keys(after)])).sort();
   const changed = new Set(ev.changed_columns || []);
   const wholeRow = ev.event_type === "INSERT" || ev.event_type === "DELETE";
@@ -4813,6 +4858,11 @@ function renderDiff(ev) {
   }
 
   const foot = el("div", { class: "diff-foot" });
+  if (ev.before_image === "key_only") {
+    foot.append(el("span", { class: "diff-foot-note diff-partial",
+      text: "Only the key of the earlier row was captured: the table was not at REPLICA IDENTITY FULL." +
+        (changedColumnsUnknown(ev) ? " Which columns changed is unknown." : "") }));
+  }
   foot.append(el("span", { class: "diff-foot-note", text: "Generates undo SQL. Nothing runs on its own." }));
   const label = ev.event_type === "DELETE" ? "Restore this row" : ev.event_type === "INSERT" ? "Undo this insert" : "Undo this change";
   foot.append(el("button", { class: "btn btn-sm btn-primary", type: "button", text: label, onclick: () => undoEvent(ev) }));
@@ -5565,7 +5615,9 @@ function undoEvent(e) {
     schema: e.schema_name, table: e.table_name, pk: e.pk_values,
     type: e.event_type, time: e.event_timestamp,
     // The row images, for the drawing above the script (#1950).
-    before: e.row_before || null, after: e.row_after || null, changed: e.changed_columns || [],
+    // historyImage: the words, not the raw marker, on a PostgreSQL row that
+    // was partly captured; the row itself everywhere else.
+    before: historyImage(e, "before") || null, after: historyImage(e, "after") || null, changed: e.changed_columns || [],
     // The server's own identity token for this row, echoed back verbatim
     // (eventDTO.Anchor). Never rebuilt from `time`: that one is second-
     // granular and offset-less, which is exactly the ambiguity the anchor
