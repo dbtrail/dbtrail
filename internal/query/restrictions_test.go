@@ -82,7 +82,7 @@ func TestApplyRedaction_allowColumns(t *testing.T) {
 		{Schema: "mydb", Table: "employees", Column: "id"},
 		{Schema: "mydb", Table: "employees", Column: "name"},
 	}
-	applyRedaction(rows, nil, allow)
+	applyRedaction(rows, nil, allow, false)
 
 	if rows[0].RowBefore["salary"] != nil || rows[0].RowAfter["salary"] != nil {
 		t.Errorf("column outside the allow list must be nulled, got before=%v after=%v",
@@ -107,7 +107,7 @@ func TestApplyRedaction_redactWinsOverAllow(t *testing.T) {
 	}}
 	allow := []SchemaTableColumn{{Schema: "mydb", Table: "employees", Column: "name"}}
 	redact := []SchemaTableColumn{{Schema: "mydb", Table: "employees", Column: "name"}}
-	applyRedaction(rows, redact, allow)
+	applyRedaction(rows, redact, allow, false)
 	if rows[0].RowAfter["name"] != nil {
 		t.Errorf("redact must win over allow, got %v", rows[0].RowAfter["name"])
 	}
@@ -206,7 +206,7 @@ func TestApplyRedaction_stripsHiddenChangedColumns(t *testing.T) {
 	allow := []SchemaTableColumn{{Schema: "mydb", Table: "employees", Column: "name"}}
 	redact := []SchemaTableColumn{{Schema: "mydb", Table: "employees", Column: "name"}}
 	// name is allowed AND redacted: redact wins, so it is stripped too.
-	applyRedaction(rows, redact, allow)
+	applyRedaction(rows, redact, allow, false)
 
 	if len(rows[0].ChangedColumns) != 0 {
 		t.Errorf("hidden column names leaked through changed_columns: %v", rows[0].ChangedColumns)
