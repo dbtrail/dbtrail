@@ -1,0 +1,2 @@
+- **A write inside an executable comment is seen as a write.** A statement-format `INSERT`, `UPDATE`, `DELETE` or `REPLACE` written inside `/*! ... */` (or `/*!50001 ... */`, or MariaDB's `/*M! ... */`), which the server runs, was skipped as a comment, so the warning, the metric and the capture-skip record for a write the binary log holds no row image of were never made.
+- **Two statements that differ only in a keyword written against a string no longer share a fingerprint** (`s LIKE'a'` and `s REGEXP'a'`).
