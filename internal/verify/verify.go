@@ -67,6 +67,10 @@ type TableResult struct {
 	EventsChecked      int
 	ChainsChecked      int
 	ChainsInconclusive int
+	// ChangesNotCaptured counts the table's UPDATEs and DELETEs whose earlier
+	// row was only partly captured (PostgreSQL below REPLICA IDENTITY FULL):
+	// not checkable, and not undoable either.
+	ChangesNotCaptured int
 	// InconclusiveKind subdivides an inconclusive verdict — see the constants
 	// beside it. Empty for every other status and for the content modes,
 	// whose inconclusives are not yet classified.
