@@ -378,8 +378,15 @@ func TestIntegrationPGRouterForward(t *testing.T) {
 		if got := one(ctx, c, "BEGIN"); !strings.HasPrefix(got, "error 08006") || !strings.Contains(got, "default_transaction_read_only off") {
 			t.Errorf("BEGIN after the connection was dropped: %q", got)
 		}
-		if got := one(ctx, c, count); got != "2" {
-			t.Errorf("the copy still answers this connection: %q", got)
+		// The source sent this connection a row before it was dropped, and
+		// this copy keeps no recent changes to prove it holds as much: the
+		// copy does not answer it, and the lost source says reconnect
+		// (#2985). A new connection reads the copy.
+		if got := one(ctx, c, count); !strings.HasPrefix(got, "error 08006") {
+			t.Errorf("a read for the copy after the source's row, with the source lost: %q, want 08006", got)
+		}
+		if got := one(ctx, pgClient(t, ctx, env.portDSN(), nil), count); got != "2" {
+			t.Errorf("a new connection: %q, want the copy's 2", got)
 		}
 	})
 
