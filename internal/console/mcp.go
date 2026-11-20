@@ -409,8 +409,8 @@ func (s *Server) newMCPServer(id string, pol *ext.AccessPolicy) *mcp.Server {
 				// per call, never schema-migrated (registry servers are
 				// deliberately not EnsureSchema'd — the console's read-only
 				// contract confines DDL to the command-line DSN).
-				CloseDB:             false,
-				EnsureSchema:        false,
+				CloseDB:      false,
+				EnsureSchema: false,
 				// The Events view's decision, without a read (an index this
 				// console never migrated would fail one on every call).
 				SourcePostgres:      &pgHistory,
