@@ -53,8 +53,11 @@ type Forward struct {
 	DSN     string
 	Refused string
 	// Acquire takes one of the connections to sources the port may hold
-	// (Limit of them); release gives it back. ok false: none is free.
-	Acquire func() (release func(), ok bool)
+	// (Limit of them); release gives it back. When none is free it waits for
+	// one, as a statement waits in line for the copy, for as long as the host
+	// allows and no longer than ctx, which ends when the client leaves or
+	// the statement's statement_timeout passes. ok false: none came free.
+	Acquire func(ctx context.Context) (release func(), ok bool)
 	Limit   int
 	// Timeout bounds each wait for the source's answer, as the port's own
 	// cap bounds a statement on the copy; 0 for none.
@@ -194,9 +197,21 @@ func (s *session) source() (*upstream, *pgErr) {
 	}
 	release := func() {}
 	if f.Acquire != nil {
-		r, ok := f.Acquire()
+		// Every statement may need one now (route_cost.go asks the source for
+		// the plan of most), so a client waits for a slot a statement gives
+		// back, a few milliseconds away, instead of being refused while it is
+		// taken (#2985).
+		var ctx context.Context
+		var cancel context.CancelFunc
+		if d := s.set.stmtTimeout; d > 0 {
+			ctx, cancel = context.WithTimeout(s.connContext(), d)
+		} else {
+			ctx, cancel = context.WithCancel(s.connContext())
+		}
+		r, ok := f.Acquire(ctx)
+		cancel()
 		if !ok {
-			return nil, &pgErr{"53300", fmt.Sprintf("the port already holds %d connections to sources, the most it opens (--max-source-connections); try again in a moment", f.Limit)}
+			return nil, &pgErr{"53300", fmt.Sprintf("the port already holds %d connections to sources, the most it opens (--max-source-connections), and none was given back while this statement waited; try again in a moment", f.Limit)}
 		}
 		release = r
 	}

@@ -59,6 +59,7 @@ const (
 	ReasonCatalogNotOnCopy  = "catalog_not_on_copy" // a catalog statement the copy does not answer
 	ReasonCheapPlan         = "cheap_plan"          // the source's plan is below both thresholds (route_cost.go)
 	ReasonExplainFailed     = "explain_failed"      // the source's plan could not be had: EXPLAIN did not run, or was not asked
+	ReasonCopyTooOld        = "copy_too_old"        // the copy's answer was older than one the source already gave this connection
 
 	// Nobody ran it.
 	ReasonReadOnly = "read_only" // not a read, and the port is read-only toward the source
@@ -242,12 +243,47 @@ func (s *session) copyFallback(err error, perr *pgErr) string {
 	return ReasonCopyRefused
 }
 
+// copyOlderThanSource says why the copy's answer that was just read is not
+// given to a connection the source answered before (#2985), "" when it may
+// be. A connection must not read a value go back: once the source answered
+// it, at sourceAnsweredAt, an answer of the copy is given only when every
+// change the source had committed by then is in it, which the copy can say
+// only for tables with their recent changes over them (fresh mode, CopyAge
+// Through). A table read from its snapshot alone says nothing of how far
+// it reaches, and goes to the source too. Nothing is decided where the
+// statement cannot go to the source, nor when the host does not say how old
+// the answer was (Binding.RunAge nil).
+//
+// It is the MySQL port's rule for the copy against itself (#2913: the copy
+// never answers a connection with less of the index than an earlier answer
+// of the copy held, and the statement goes to MySQL as copy_too_old), with
+// the source's answer as the earlier one. The two clocks differ: Through is
+// a commit time on the source, sourceAnsweredAt this process's time, so a
+// source clock ahead of this one by more than the copy's lag lets an older
+// answer through, as it lets MySQL's lag limit (#2777).
+func (s *session) copyOlderThanSource() string {
+	if s.sourceAnsweredAt.IsZero() || s.bound == nil || s.bound.RunAge == nil || !s.canFallBack() {
+		return ""
+	}
+	a := s.bound.RunAge()
+	switch {
+	case !a.Read:
+		return ""
+	case a.Through.IsZero():
+		return "the copy read a table from its snapshot alone, which can be older than what the source answered this connection before"
+	case a.Through.Before(s.sourceAnsweredAt):
+		return fmt.Sprintf("the copy's data reaches %s, before the source's last answer on this connection (%s)",
+			a.Through.UTC().Format(time.RFC3339Nano), s.sourceAnsweredAt.UTC().Format(time.RFC3339Nano))
+	}
+	return ""
+}
+
 // transientFallback reports whether a reason a statement went to the
 // source is the moment's (a busy or lagging copy), which must not keep a
 // prepared statement on the source for good.
 func transientFallback(reason string) bool {
 	switch reason {
-	case ReasonCopyBehindSource, ReasonCopyAgeUnknown, ReasonCopyQueueFull, ReasonCopyWaitTimeout:
+	case ReasonCopyBehindSource, ReasonCopyAgeUnknown, ReasonCopyQueueFull, ReasonCopyWaitTimeout, ReasonCopyTooOld:
 		return true
 	}
 	return false
@@ -1069,6 +1105,12 @@ func (s *session) noteIfFailed(st *preparedStatement) {
 
 // routeNote tells the host how a statement was answered.
 func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, failed bool) {
+	if d.side == RouteSource {
+		// When it ended, not when it was sent: the source's answer may hold
+		// any change committed before then (copyOlderThanSource). Failed
+		// too: a statement that failed may have sent rows first.
+		s.sourceAnsweredAt = time.Now()
+	}
 	if s.bound == nil || s.bound.Routed == nil || d.side == "" {
 		return
 	}

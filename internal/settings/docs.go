@@ -771,7 +771,7 @@ var docs = map[string]Doc{
 	},
 	"BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS": {
 		Group:   "pgrouter",
-		Text:    "How many connections to your own PostgreSQL servers the PostgreSQL router holds at once, across all servers, 1 to 1024. A client uses one while a statement the source answers (or its transaction) runs there; past the limit that statement is refused with error 53300. This keeps the port from using up the source's own connection slots.",
+		Text:    "How many connections to your own PostgreSQL servers the PostgreSQL router holds at once, across all servers, 1 to 1024. A client uses one while a statement the source answers (or its transaction) runs there; past the limit that statement waits for one to be given back, up to 30 seconds, and is then refused with error 53300. This keeps the port from using up the source's own connection slots.",
 		Default: "16",
 		Example: "32",
 		ReadBy:  "pg-router",

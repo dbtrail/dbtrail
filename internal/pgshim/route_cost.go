@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 )
@@ -50,6 +51,27 @@ const (
 type CostPolicy struct {
 	CostThreshold float64
 	ScanRows      int64
+	// Remember is how long a connection keeps the verdict of a plan it was
+	// given for a statement shape, and sends the shape's next statements by
+	// it without asking the source again (rememberedVerdict); 0 is
+	// DefaultCostRemember, a negative value remembers nothing.
+	Remember time.Duration
+}
+
+// DefaultCostRemember is how long a connection keeps a plan's verdict: past
+// it, the source's statistics may have changed the plan (an ANALYZE, a table
+// that grew), and the shape is asked about again.
+const DefaultCostRemember = time.Minute
+
+// remember is how long a verdict is kept, 0 for not at all.
+func (p CostPolicy) remember() time.Duration {
+	switch {
+	case p.Remember < 0:
+		return 0
+	case p.Remember == 0:
+		return DefaultCostRemember
+	}
+	return p.Remember
 }
 
 // DefaultCostPolicy is the policy a Forward without one gets.
@@ -209,25 +231,32 @@ func multiStatement(q string) bool {
 // for, or the source could not be reached, which sending the statement there
 // would only try again.
 func (s *session) routeByCost(text string, generic bool) (d routeDecision, keep bool, stop *pgErr) {
+	d, keep, stop, _ = s.routeByCostPlan(text, generic)
+	return d, keep, stop
+}
+
+// routeByCostPlan is routeByCost with the plan it decided by, nil when it
+// decided without one.
+func (s *session) routeByCostPlan(text string, generic bool) (d routeDecision, keep bool, stop *pgErr, plan *pgPlan) {
 	pol := s.costPolicy()
 	if pol.off() {
-		return routeDecision{RouteCopy, ReasonAnswersTheSame}, true, nil
+		return routeDecision{RouteCopy, ReasonAnswersTheSame}, true, nil, nil
 	}
 	failed := routeDecision{RouteSource, ReasonExplainFailed}
 	if multiStatement(text) {
 		s.logger.Debug("pgshim: sent to the source", "reason", ReasonExplainFailed, "why", "more than one statement")
-		return failed, true, nil
+		return failed, true, nil, nil
 	}
 	if s.up != nil && s.up.inCycle {
 		// An extended batch is open there: a simple query cannot be sent in
 		// the middle of it, and an error of the port's own in it would
 		// discard the client's batch on the source.
 		s.logger.Debug("pgshim: sent to the source", "reason", ReasonExplainFailed, "why", "an extended batch is open on the source")
-		return failed, false, nil
+		return failed, false, nil, nil
 	}
 	up, perr := s.prepareSource()
 	if perr != nil {
-		return failed, false, perr
+		return failed, false, perr, nil
 	}
 	opts := "FORMAT JSON"
 	if generic {
@@ -236,39 +265,140 @@ func (s *session) routeByCost(text string, generic bool) (d routeDecision, keep 
 	raw, srcErr, lost := s.explainOnSource(up, "EXPLAIN ("+opts+") "+text)
 	if lost != nil {
 		s.loseSource(lost.why)
-		return failed, false, s.lostError(lost)
+		return failed, false, s.lostError(lost), nil
 	}
 	if srcErr != nil {
 		if srcErr.code == "57014" {
-			return failed, false, srcErr
+			return failed, false, srcErr, nil
 		}
 		if strings.HasPrefix(srcErr.code, "42") {
 			// The statement's own (a name the source does not know, a syntax
 			// it refuses, GENERIC_PLAN before PostgreSQL 16): it goes there,
 			// and the source answers it.
 			s.logger.Debug("pgshim: sent to the source", "reason", ReasonExplainFailed, "code", srcErr.code, "err", srcErr.msg)
-			return failed, true, nil
+			return failed, true, nil, nil
 		}
 		// Anything else (a privilege, a lock, the source busy) may be the
 		// moment's: said, and not kept by a prepared statement.
 		s.logger.Warn("pgshim: the source did not give a statement's plan; it answers the statement", "code", srcErr.code, "err", srcErr.msg)
-		return failed, false, nil
+		return failed, false, nil, nil
 	}
 	pl, err := parsePGPlan(raw)
 	if err != nil {
 		s.logger.Warn("pgshim: the source's plan could not be read; the statement goes to the source", "err", err)
-		return failed, true, nil
+		return failed, true, nil, nil
 	}
 	toCopy, why := pol.toCopy(pl)
 	if !toCopy {
 		s.logger.Debug("pgshim: sent to the source", "reason", ReasonCheapPlan, "plan", why)
-		return routeDecision{RouteSource, ReasonCheapPlan}, true, nil
+		return routeDecision{RouteSource, ReasonCheapPlan}, true, nil, &pl
 	}
 	s.logger.Debug("pgshim: sent to the copy", "plan", why)
 	// Nothing of the client's lives on the source: its slot is given back
 	// now, not when the copy has answered, which can be minutes.
 	s.releaseIdleSource()
-	return routeDecision{RouteCopy, ReasonAnswersTheSame}, true, nil
+	return routeDecision{RouteCopy, ReasonAnswersTheSame}, true, nil, &pl
+}
+
+// A connection remembers the source's verdict on a statement shape for a
+// while (CostPolicy.Remember), so the next statement of that shape, the same
+// read by key with another key, is sent where the last one went without
+// asking the source for a plan again (#2985). Asking costs a round trip to
+// the source for every statement, and a connection there for it: under 50
+// clients and a limit of 16 connections it was most of the port's work.
+//
+// The MySQL port remembers nothing: it asks for every statement's plan, a
+// prepared one with its arguments, so a value that changes the plan changes
+// the side. A verdict is kept here only where a value cannot do that by much:
+//   - the plan was read (cheap or expensive), never a failure to have it: a
+//     plan refused for the moment, or a statement the source refused, is
+//     asked about again, so those paths stay as they are;
+//   - every value in the statement is compared with = (valuesOnlyEqualed):
+//     id = 5 and id = 6 read as many rows, while id > 5 and id > 5000000,
+//     or a LIMIT of 10 and of a million, do not, and are asked every time;
+//   - the plan is far from both thresholds (CostPolicy.clear): a cost of 12
+//     under a threshold of 50,000 stays cheap whatever key is read, while
+//     one of 30,000 might cross it for another value, and is asked again;
+//   - the key is the shape (Fingerprint) and the search_path, under which a
+//     name can mean another table.
+//
+// Prepared statements keep their own decision as before (stmtRoute).
+
+// costVerdict is one remembered verdict and when it was given.
+type costVerdict struct {
+	d  routeDecision
+	at time.Time
+}
+
+// costVerdictMargin is how far from a threshold a plan must be for its
+// verdict to be kept: ten times under it, or ten times over.
+const costVerdictMargin = 10
+
+// costVerdictsMax bounds what a connection remembers; past it, it forgets
+// everything and starts again.
+const costVerdictsMax = 512
+
+// clear reports whether a plan is far enough from the thresholds that
+// another value of the same shape is not expected to change its verdict.
+func (p CostPolicy) clear(pl pgPlan) bool {
+	toCopy, _ := p.toCopy(pl)
+	if toCopy {
+		return p.CostThreshold > 0 && pl.cost >= costVerdictMargin*p.CostThreshold ||
+			p.ScanRows > 0 && pl.maxSeqScanRows >= costVerdictMargin*float64(p.ScanRows)
+	}
+	return (p.CostThreshold <= 0 || pl.cost*costVerdictMargin < p.CostThreshold) &&
+		(p.ScanRows <= 0 || pl.maxSeqScanRows*costVerdictMargin < float64(p.ScanRows))
+}
+
+// valuesOnlyEqualed reports whether every value of a statement (a string, a
+// number, a parameter) stands right after an =, and the statement was read
+// whole.
+func valuesOnlyEqualed(q string) bool {
+	toks, why := lexSQL(q)
+	if why != "" {
+		return false
+	}
+	for i, t := range toks {
+		switch t.kind {
+		case rtString, rtNumber, rtParam:
+			if i == 0 || toks[i-1].kind != rtOp || toks[i-1].text != "=" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// costVerdictKey is what a verdict is remembered by.
+func (s *session) costVerdictKey(text string) string {
+	return Fingerprint(text) + "\x00" + s.set.schema + "\x00" + strings.Join(s.set.searchPath, ",")
+}
+
+// routeByCostRemembered is routeByCost for a simple query, with the verdicts
+// the connection remembers: a remembered one is used without asking, and a
+// new one is kept when it may be.
+func (s *session) routeByCostRemembered(text string) (routeDecision, *pgErr) {
+	pol := s.costPolicy()
+	keepFor := pol.remember()
+	key := ""
+	if !pol.off() && keepFor > 0 {
+		key = s.costVerdictKey(text)
+		if v, ok := s.costVerdicts[key]; ok {
+			if time.Since(v.at) < keepFor {
+				s.logger.Debug("pgshim: routed by a remembered plan", "side", v.d.side, "reason", v.d.reason)
+				return v.d, nil
+			}
+			delete(s.costVerdicts, key)
+		}
+	}
+	d, keep, stop, pl := s.routeByCostPlan(text, false)
+	if key != "" && stop == nil && keep && pl != nil && pol.clear(*pl) && valuesOnlyEqualed(text) {
+		if s.costVerdicts == nil || len(s.costVerdicts) >= costVerdictsMax {
+			s.costVerdicts = map[string]costVerdict{}
+		}
+		s.costVerdicts[key] = costVerdict{d: d, at: time.Now()}
+	}
+	return d, stop
 }
 
 // explainOnSource runs one EXPLAIN as a simple query on the source, outside

@@ -49,6 +49,8 @@ func withAccount(t *testing.T, raw, user, password string) string {
 func pgFwdEnv(t *testing.T, ctx context.Context, sources int) (pgExtEnv, *pgconn.PgConn) {
 	t.Helper()
 	env := startPGPortFor(t, ctx, nil, pgPortFixture{table: pgFwdTable, slot: "pgfwd_slot", pub: "pgfwd_pub", sources: sources,
+		// A statement past the limit waits this long, not the port's 30 s.
+		sourceWait: 300 * time.Millisecond,
 		setup: []string{
 			"CREATE TABLE " + pgFwdTable + " (id int PRIMARY KEY, v text)",
 			"INSERT INTO " + pgFwdTable + " VALUES (1, 'one'), (2, 'two')",

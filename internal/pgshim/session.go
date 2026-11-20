@@ -75,6 +75,13 @@ type session struct {
 	// fallback is why the statement the copy just failed goes to the
 	// source instead (route.go), "" when it does not; set by runFree.
 	fallback string
+	// costVerdicts are the source's plans' verdicts this connection
+	// remembers, by statement shape (route_cost.go).
+	costVerdicts map[string]costVerdict
+	// sourceAnsweredAt is when the source last answered a statement of this
+	// connection: the copy may not answer it with data older than that
+	// (copyOlderThanSource). Zero when the source never answered one.
+	sourceAnsweredAt time.Time
 }
 
 // initSettings sets a connection's settings before its start-up message is
@@ -159,7 +166,7 @@ func (s *session) handleSimpleQuery(qstr string) error {
 		// The screen lets the copy answer it: the source's plan says
 		// whether the copy is worth it (route_cost.go).
 		var stop *pgErr
-		if d, _, stop = s.routeByCost(qstr, false); stop != nil {
+		if d, stop = s.routeByCostRemembered(qstr); stop != nil {
 			s.fail(stop)
 			s.routeNote(qstr, d, time.Since(started), true)
 			return s.readyFlush()

@@ -105,6 +105,23 @@ type Binding struct {
 	// reached the copy or the source, and why (route.go), for the port's
 	// status.
 	Routed func(RouteNote)
+	// RunAge, when set, says how far the data of Run's last successful run
+	// on this connection reaches, asked right after it returned. With it a
+	// connection the source answered is not given an older answer of the
+	// copy (copyOlderThanSource); nil: the copy's answers are given as they
+	// are.
+	RunAge func() CopyAge
+}
+
+// CopyAge is how far the data of a statement the copy ran reaches.
+type CopyAge struct {
+	// Read: it read a table of the copy (a statement that reads none, SELECT
+	// 1 or SHOW TABLES, has no age).
+	Read bool
+	// Through: every change capture recorded up to this instant (a commit
+	// time on the source) was in what it read; zero when that is not known,
+	// as for a table read from its snapshot alone.
+	Through time.Time
 }
 
 // RunOptions are what a connection set for itself that a statement on the
@@ -290,6 +307,12 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 			s.fallTo(s.copyFallback(err, perr))
 		}
 		return nil, nil, nil, "", perr
+	}
+	if why := s.copyOlderThanSource(); why != "" {
+		// Nothing of it was sent: the source answers instead (#2985).
+		s.logger.Debug("pgshim: the copy's answer is older than the source's last one on this connection; the source answers", "why", why)
+		s.fallTo(ReasonCopyTooOld)
+		return nil, nil, nil, "", &pgErr{"55000", why}
 	}
 	if res.Truncated {
 		// Refused, not returned short: a client would take the first rows

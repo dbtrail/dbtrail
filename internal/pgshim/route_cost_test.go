@@ -159,6 +159,8 @@ func TestMultiStatement(t *testing.T) {
 type fakeSource struct {
 	plans map[string]string
 	addr  string
+	// delay, when set, is how long it takes to answer each simple query.
+	delay time.Duration
 
 	mu       sync.Mutex
 	explains []string
@@ -167,11 +169,18 @@ type fakeSource struct {
 
 func startFakeSource(t *testing.T, plans map[string]string) *fakeSource {
 	t.Helper()
+	return startFakeSourceSlow(t, plans, 0)
+}
+
+// startFakeSourceSlow is startFakeSource answering each simple query after
+// delay.
+func startFakeSourceSlow(t *testing.T, plans map[string]string, delay time.Duration) *fakeSource {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fakeSource{plans: plans, addr: ln.Addr().String()}
+	f := &fakeSource{plans: plans, addr: ln.Addr().String(), delay: delay}
 	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		for {
@@ -234,6 +243,9 @@ func (f *fakeSource) serve(c net.Conn) {
 		case *pgproto3.Query:
 			q := m.String
 			upper := strings.ToUpper(strings.TrimSpace(q))
+			if f.delay > 0 {
+				time.Sleep(f.delay)
+			}
 			switch {
 			case strings.HasPrefix(upper, "EXPLAIN"):
 				f.mu.Lock()
@@ -336,6 +348,13 @@ type costLogin struct {
 	mu         sync.Mutex
 	heldAtCopy []int32
 	notes      []RouteNote
+	// slots, when set, bounds the connections to the source as the port
+	// does: a statement waits for one while its context lasts. maxHeld is
+	// the most held at once.
+	slots   chan struct{}
+	maxHeld atomic.Int32
+	// age, when set, is the copy's RunAge.
+	age func() CopyAge
 }
 
 func (l *costLogin) run(_ context.Context, st string, _ RunOptions) (sqlsandbox.Result, error) {
@@ -355,13 +374,30 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 		l.notes = append(l.notes, n)
 	}}
 	if l.src != nil {
-		b.Forward = &Forward{DSN: l.src.dsn(), Limit: 4, Cost: l.cost, Acquire: func() (func(), bool) {
+		b.Forward = &Forward{DSN: l.src.dsn(), Limit: 4, Cost: l.cost, Acquire: func(ctx context.Context) (func(), bool) {
+			if l.slots != nil {
+				select {
+				case l.slots <- struct{}{}:
+				case <-ctx.Done():
+					return nil, false
+				}
+			}
 			l.opened.Add(1)
-			l.held.Add(1)
+			n := l.held.Add(1)
+			for m := l.maxHeld.Load(); n > m && !l.maxHeld.CompareAndSwap(m, n); m = l.maxHeld.Load() {
+			}
 			var once sync.Once
-			return func() { once.Do(func() { l.held.Add(-1) }) }, true
+			return func() {
+				once.Do(func() {
+					l.held.Add(-1)
+					if l.slots != nil {
+						<-l.slots
+					}
+				})
+			}, true
 		}}
 	}
+	b.RunAge = l.age
 	return b, nil
 }
 

@@ -5,12 +5,16 @@ package consoleapp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/pgshim"
@@ -104,14 +108,63 @@ func TestIntegrationPGRouterRoutesByPlan(t *testing.T) {
 
 	reasons := func() map[string]uint64 { return env.routes.doc("").Servers[env.serverID].Reasons }
 	c := pgClient(t, ctx, env.portDSN(), nil)
-	if got := one(ctx, c, lookup); got != "1000" {
-		t.Errorf("the read by key: %q, want the source's 1000 (the copy does not hold the row)", got)
-	}
 	if got := one(ctx, c, scan); got != strconv.Itoa(pgCostRows) {
 		t.Errorf("the sum: %q, want the copy's %d", got, pgCostRows)
 	}
+	if got := one(ctx, c, lookup); got != "1000" {
+		t.Errorf("the read by key: %q, want the source's 1000 (the copy does not hold the row)", got)
+	}
 	if r := reasons(); r[pgshim.ReasonCheapPlan] != 1 || r[pgshim.ReasonAnswersTheSame] != 1 {
 		t.Errorf("reasons %v, want one cheap_plan and one answers_the_same", r)
+	}
+	// #2985: the source just showed this connection the row the copy does
+	// not hold. The same sum on it now is never the copy's older one: the
+	// source answers it (copy_too_old), unless the copy has caught up with
+	// that answer by then, which it shows by holding the row.
+	if got := one(ctx, c, scan); got != strconv.Itoa(pgCostRows+1000) {
+		t.Errorf("the sum after the source's answer: %q, want %d, with the row the source showed (the copy's %d went back)", got, pgCostRows+1000, pgCostRows)
+	}
+	if r := reasons(); r[pgshim.ReasonCopyTooOld] != 1 && r[pgshim.ReasonAnswersTheSame] != 2 {
+		t.Errorf("reasons %v, want a copy_too_old or the copy caught up", r)
+	}
+	// Another connection, which the source never answered, reads the copy.
+	if got := one(ctx, pgClient(t, ctx, env.portDSN(), nil), scan); got != strconv.Itoa(pgCostRows) && got != strconv.Itoa(pgCostRows+1000) {
+		t.Errorf("the sum on another connection: %q", got)
+	}
+
+	// #2985: 50 clients reading by key, over the port's 16 connections to
+	// the source: each waits for a connection, and none is refused (53300).
+	var wg sync.WaitGroup
+	var failed atomic.Int32
+	firstErr := make(chan string, 1)
+	for i := range 50 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cl, err := pgconn.Connect(ctx, env.portDSN())
+			if err != nil {
+				failed.Add(1)
+				select {
+				case firstErr <- err.Error():
+				default:
+				}
+				return
+			}
+			defer cl.Close(context.Background())
+			for j := range 10 {
+				if got := one(ctx, cl, lookup); got != "1000" {
+					failed.Add(1)
+					select {
+					case firstErr <- fmt.Sprintf("client %d, read %d: %s", i, j, got):
+					default:
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if n := failed.Load(); n != 0 {
+		t.Errorf("%d of 500 reads by key from 50 clients failed; the first: %s", n, <-firstErr)
 	}
 	// A statement the source refuses to plan: it goes there, and the
 	// client gets PostgreSQL's own error.
@@ -127,10 +180,8 @@ func TestIntegrationPGRouterRoutesByPlan(t *testing.T) {
 	// source answers a statement with parameters).
 	for _, mode := range []pgx.QueryExecMode{pgx.QueryExecModeCacheStatement, pgx.QueryExecModeDescribeExec, pgx.QueryExecModeExec} {
 		conn := pgxConn(t, ctx, env.portDSN(), mode)
-		byKey := pgxAnswer(ctx, conn, "SELECT amount FROM "+pgCostTable+" WHERE id = $1", pgCostRows+1)
-		if byKey != `[amount] ["1000"]` {
-			t.Errorf("mode %v, the read by key: %s, want the source's row", mode, byKey)
-		}
+		// The sums first: once the source answered this connection, the
+		// copy's older sum is not given to it (#2985).
 		want := `[sum] ["` + strconv.Itoa(pgCostRows) + `"]`
 		if version < 160000 {
 			want = `[sum] ["` + strconv.Itoa(pgCostRows+1000) + `"]`
@@ -139,6 +190,10 @@ func TestIntegrationPGRouterRoutesByPlan(t *testing.T) {
 			if got := pgxAnswer(ctx, conn, "SELECT sum(amount) FROM "+pgCostTable+" WHERE amount < $1", 999999); got != want {
 				t.Errorf("mode %v, run %d, the sum: %s, want %s", mode, i, got, want)
 			}
+		}
+		byKey := pgxAnswer(ctx, conn, "SELECT amount FROM "+pgCostTable+" WHERE id = $1", pgCostRows+1)
+		if byKey != `[amount] ["1000"]` {
+			t.Errorf("mode %v, the read by key: %s, want the source's row", mode, byKey)
 		}
 		conn.Close(ctx)
 	}

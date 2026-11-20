@@ -982,7 +982,7 @@ mode): on a 16GB machine, set `--workers 2`.
 | `--threads` | `BINTRAIL_PG_ROUTER_THREADS` | 2 | Threads each statement may use (1 to 16) |
 | `--sql-memory` | `BINTRAIL_CONSOLE_SQL_MEMORY` | 2GB, or the value saved in the web interface | Memory each statement may use |
 | `--max-connections` | `BINTRAIL_PG_ROUTER_MAX_CONNECTIONS` | 256 | Clients connected at once (1 to 1024). One more is refused with an error |
-| `--max-source-connections` | `BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS` | 16 | Connections to the servers' own PostgreSQL held at once, every server together (1 to 1024). A client holds one while its transaction block (or a catalog statement the copy does not answer) runs there; past the limit the statement that needed one is refused (`53300`) |
+| `--max-source-connections` | `BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS` | 16 | Connections to the servers' own PostgreSQL held at once, every server together (1 to 1024). A client holds one while a statement the source answers, its plan, or its transaction block runs there; past the limit the statement that needed one waits for one to be given back, up to 30 seconds, and is then refused (`53300`) |
 | `--max-wait` | `BINTRAIL_PG_ROUTER_MAX_WAIT` | none | How long a statement waits for its turn before it is refused |
 | `--sql-port-max-rows` | `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS` | the port's row cap | Most rows one statement returns |
 | `--token` | `BINTRAIL_CONSOLE_TOKEN` | none | The access token, one more password. It does not open the port |
@@ -1223,9 +1223,41 @@ What this costs and where it can go wrong:
   back as soon as the copy is chosen. A client connection holds one there
   only while something of its own lives on it, so most statements open it,
   a login of the forwarding user, as a statement the source answers did
-  already. With every one of them taken, or a
-  source that cannot be reached, the statement goes to the source and gets
-  that error (`53300`, `08001`), where the copy used to answer it.
+  already. With every one of them taken, the statement waits for one to be
+  given back, as a statement waits in line for the copy: up to 30 seconds,
+  or its `statement_timeout` when that is shorter, and it gets `53300` only
+  then. A slot is given back as soon as a statement outside a block has its
+  answer, so with 50 clients over the default 16 the wait is a few
+  milliseconds; only blocks held open longer make it run out. With a source
+  that cannot be reached, the statement goes to the source and gets that
+  error (`08001`), where the copy used to answer it.
+- **A statement shape is asked about once a minute, not every time**, when
+  its answer cannot depend on its values: a connection remembers the verdict
+  on `SELECT ... WHERE id = 5` for a minute, by its shape (values blanked)
+  and the session's `search_path`, and sends `WHERE id = 6` the same way
+  without asking. Only where every value is compared with `=` (a `>`, a
+  `BETWEEN`, an `IN` list or a `LIMIT` can change the plan with the value,
+  and are asked every time), and only for a plan ten times below both
+  thresholds or ten times over one (a plan near a threshold can cross it
+  for another value). A plan the source refused, for the moment or for
+  good, is asked about again. The MySQL port asks every time.
+- **A connection does not read a value go back after the source answered
+  it.** The copy is a second or two behind the source in fresh mode, and
+  more in fast mode: a counter the source just showed a connection as 37413
+  could read 37405 on the copy the next moment. So once the source answered
+  a connection, the copy's answer to it is given only when the copy's data
+  reaches past that moment, that is, when every table it read had its
+  recent changes over it and those reach that far; otherwise the statement
+  goes to the source before anything is sent (`copy_too_old` in `/status`,
+  as on the MySQL port when the copy is older than an earlier answer of its
+  own). A table read from its snapshot alone (fast mode, a table with no
+  recent changes) does not say how far it reaches, so a connection the
+  source answered gets the source for it. The copy runs the statement
+  first and its answer is dropped, so such a statement costs both sides.
+  The comparison is between the source's commit times and this process's
+  clock: a source clock ahead of the router's by more than the copy's lag
+  lets an older answer through. A connection the source never answered
+  reads the copy as before.
 - **An `EXPLAIN` the source refuses** (a table it does not have, a syntax it
   does not take) sends the statement to the source, which answers it with
   its own error (`explain_failed` in `/status`). So does a text of more than
