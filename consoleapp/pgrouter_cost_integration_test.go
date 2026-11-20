@@ -212,4 +212,23 @@ func TestIntegrationPGRouterRoutesByPlan(t *testing.T) {
 	if c.TxStatus() != 'I' {
 		t.Errorf("status %c", c.TxStatus())
 	}
+
+	// #2985: the table dropped and made again on the source within the time
+	// a verdict is remembered (a minute). The copy still holds the old
+	// table's rows; the source's new one has one row. On a connection the
+	// source never answered, the next sum must be the new table's, from the
+	// source, whose plan for one row is cheap: a verdict for the copy kept
+	// from before the drop would have answered the old rows.
+	e := pgClient(t, ctx, env.portDSN(), nil)
+	if got := one(ctx, e, scan); got != strconv.Itoa(pgCostRows) {
+		t.Fatalf("the sum before the drop: %q, want the copy's %d", got, pgCostRows)
+	}
+	exec1("DROP TABLE " + pgCostTable)
+	exec1("CREATE TABLE " + pgCostTable + " (id int PRIMARY KEY, amount int NOT NULL)")
+	exec1("INSERT INTO " + pgCostTable + " VALUES (1, 7)")
+	exec1("ANALYZE " + pgCostTable)
+	exec1("GRANT SELECT ON " + pgCostTable + " TO " + pgCostRole)
+	if got := one(ctx, e, scan); got != "7" {
+		t.Errorf("the sum after the table was dropped and made again on the source: %q, want the new table's 7 (%d is the old table's, from the copy)", got, pgCostRows)
+	}
 }

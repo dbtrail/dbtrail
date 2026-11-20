@@ -648,7 +648,10 @@ func TestRouteByCost_2985_aCancelStopsTheSlotWait(t *testing.T) {
 	if _, err := a.Exec(ctx, "BEGIN").ReadAll(); err != nil {
 		t.Fatal(err)
 	}
+	cancelled := make(chan struct{})
+	defer func() { <-cancelled }()
 	go func() {
+		defer close(cancelled)
 		time.Sleep(200 * time.Millisecond)
 		_ = b.CancelRequest(context.Background())
 	}()
@@ -697,7 +700,10 @@ func TestRouteByCost_2985_oneDeadlineForTheStatement(t *testing.T) {
 	if _, err := a.Exec(ctx, "BEGIN").ReadAll(); err != nil {
 		t.Fatal(err)
 	}
+	committed := make(chan struct{})
+	defer func() { <-committed }()
 	go func() {
+		defer close(committed)
 		time.Sleep(300 * time.Millisecond)
 		_, _ = a.Exec(context.Background(), "COMMIT").ReadAll()
 	}()
