@@ -346,23 +346,18 @@ func (g *Generator) generate(rows []query.ResultRow, w *countingWriter) (int, []
 		return 0, nil, err
 	}
 
-	// Fail loud on a residual unchanged-TOAST marker (#592). Under the required
-	// REPLICA IDENTITY FULL the PostgreSQL decoder resolves every unchanged
-	// TOAST value at decode time, so the marker is never persisted for a
-	// supported source — one in a fetched row means the capture invariant was
-	// violated and the stored image does not carry the real value. The refusal
-	// must be UP FRONT, before a single byte reaches w: a per-statement error in
-	// the render loop below demotes to a SQL comment and the script keeps
-	// rendering, and a reversal that writes the marker's JSON into a real column
-	// is silent corruption — the same fail-loud stance as the schema-drift
-	// refusal (#601) and the script-budget refusal (#654). Both images are
-	// scanned because both are consumed (SET from row_before, WHERE from
-	// row_after).
-	for _, row := range rows {
-		if err := event.CheckUnresolvedToast(row.SchemaName, row.TableName, row.PKValues,
-			row.RowBefore, row.RowAfter); err != nil {
-			return 0, nil, err
-		}
+	// Fail loud on a marker in any row image (CheckRowsUndoable): the
+	// not-captured marker (a PostgreSQL table below REPLICA IDENTITY FULL sent
+	// only the key of the earlier row, so its UPDATE or DELETE cannot be undone)
+	// and the residual unchanged-TOAST marker (#592). The refusal must be UP
+	// FRONT, before a single byte reaches w: a per-statement error in the render
+	// loop below demotes to a SQL comment and the script keeps rendering, and a
+	// reversal that writes a marker's JSON into a real column is silent
+	// corruption — the same fail-loud stance as the schema-drift refusal (#601)
+	// and the script-budget refusal (#654). Both images are scanned because
+	// both are consumed (SET from row_before, WHERE from row_after).
+	if err := CheckRowsUndoable(rows); err != nil {
+		return 0, nil, err
 	}
 
 	// Put the changes in binary log order where that can be established
@@ -1719,10 +1714,10 @@ func formatValuePG(v any) string {
 		return "false"
 	case map[string]any, []any, json.RawMessage:
 		// Defensive, mirroring FormatSQLValue: a structured value → JSON, quoted. On
-		// the PG path the only structured value a row image can carry is the
-		// unchanged-TOAST sentinel map — but a marker can no longer reach here through
-		// the real path: GenerateSQLFromRows scans every row image and refuses up
-		// front (#592, event.CheckUnresolvedToast), because the render loop demotes
+		// the PG path the only structured values a row image can carry are the
+		// unchanged-TOAST and not-captured marker maps — but a marker can no longer
+		// reach here through the real path: GenerateSQLFromRows scans every row image
+		// and refuses up front (#592, CheckRowsUndoable), because the render loop demotes
 		// per-statement errors to SQL comments and this function has no error return.
 		// The JSON-marshal below is last-resort rendering for any OTHER stray
 		// structured value, kept valid, collision-distinct SQL.

@@ -184,6 +184,7 @@ func VerifyRecoverInputs(ctx context.Context, cfg RecoverInputsConfig, schema, t
 	res.EventsChecked = out.Events
 	res.ChainsChecked = out.Chains
 	res.ChainsInconclusive = out.ChainsNoPredecessor
+	res.ChangesNotCaptured = out.NotCaptured
 	return res, nil
 }
 
@@ -399,6 +400,12 @@ type recoverChainOutcome struct {
 	// see the PKValues=="" guard in checkRecoverChains). They belong to no
 	// chain and are counted as unproven, never folded together.
 	UnwalkableEvents int
+	// NotCaptured counts UPDATEs and DELETEs whose earlier row was only partly
+	// captured (a PostgreSQL table below REPLICA IDENTITY FULL; see step 2a of
+	// checkRecoverChains). Not checkable and not undoable, never a mismatch.
+	// notCapturedNote is the sentence the verdict carries for them.
+	NotCaptured     int
+	notCapturedNote string
 	// InconclusiveKind subdivides StatusInconclusive (#1416). One bucket was
 	// carrying three meanings and rendering them identically, so a healthy
 	// run over a server full of append-only tables read as a page of
@@ -463,6 +470,7 @@ func checkRecoverChains(in recoverChainInput) recoverChainOutcome {
 	}
 	var unresolved int
 	var firstUnresolved string
+	var firstNotCaptured string
 	noPredecessor := make(map[string]struct{})
 
 	for i := range in.Events {
@@ -501,7 +509,29 @@ func checkRecoverChains(in recoverChainInput) recoverChainOutcome {
 			continue
 		}
 
-		// (2) The same unchanged-TOAST refusal recovery performs up front.
+		// (2a) A change whose earlier row was only partly captured: a
+		// PostgreSQL table below REPLICA IDENTITY FULL sends, for an UPDATE or
+		// a DELETE, only the key of the earlier row, and the rest is the
+		// not-captured marker. There is no earlier row to compare, so the
+		// change is NOT CHECKABLE (counted, never a mismatch), and recover
+		// refuses it. The state after it is not knowable from its images (the
+		// new row may hold an unchanged large value PostgreSQL did not resend),
+		// so the chain restarts. Only row_before qualifies: a marker in a new
+		// row is never written by the capture and falls through to (2b) as a
+		// mismatch.
+		if (ev.EventType == event.EventUpdate || ev.EventType == event.EventDelete) &&
+			len(event.NotCapturedColumns(ev.RowAfter)) == 0 {
+			if cols := event.NotCapturedColumns(ev.RowBefore); len(cols) > 0 {
+				if out.NotCaptured == 0 {
+					firstNotCaptured = fmt.Sprintf("event %d (pk=%s), column(s) %s", ev.EventID, ev.PKValues, strings.Join(cols, ", "))
+				}
+				out.NotCaptured++
+				*st = chainState{}
+				continue
+			}
+		}
+
+		// (2b) The same unchanged-TOAST refusal recovery performs up front.
 		if err := event.CheckUnresolvedToast(ev.SchemaName, ev.TableName, ev.PKValues, ev.RowBefore, ev.RowAfter); err != nil {
 			recordMismatch(fmt.Sprintf("event %d (pk=%s): %v", ev.EventID, ev.PKValues, err))
 			*st = chainState{}
@@ -565,6 +595,9 @@ func checkRecoverChains(in recoverChainInput) recoverChainOutcome {
 	// rows must not report events "checked" that were never walked.
 	out.Events = len(in.Events) - out.UnwalkableEvents
 	out.ChainsNoPredecessor = len(noPredecessor)
+	if out.NotCaptured > 0 {
+		out.notCapturedNote = notCapturedNote(in.Schema, in.Table, out.NotCaptured, firstNotCaptured)
+	}
 	out.Status, out.Detail, out.InconclusiveKind = recoverChainVerdict(out, mismatchCount, firstMismatch, unresolved, firstUnresolved, in.Truncated)
 	if out.Status == StatusMismatch {
 		out.Detail = withNote(out.Detail, order.note())
@@ -619,6 +652,9 @@ func recoverChainVerdict(out recoverChainOutcome, mismatchCount int, firstMismat
 	if out.UnwalkableEvents > 0 {
 		notes = append(notes, fmt.Sprintf("%d change(s) have no primary key on record, so they belong to no row's history and were skipped", out.UnwalkableEvents))
 	}
+	if out.notCapturedNote != "" {
+		notes = append(notes, out.notCapturedNote)
+	}
 
 	if out.Assertions == 0 {
 		// Three shapes used to share one sentence here, and the first two are
@@ -634,7 +670,7 @@ func recoverChainVerdict(out recoverChainOutcome, mismatchCount int, firstMismat
 			// Events==0 — and "did not change in the window" would be false there.
 			// Existing tests caught exactly that misclassification.
 			return StatusInconclusive, "this table did not change in the window, so there was nothing to check", InconclusiveNoActivity
-		case out.Events == out.Chains && out.ChainsNoPredecessor == 0 && unresolved == 0 && out.UnwalkableEvents == 0:
+		case out.Events == out.Chains && out.ChainsNoPredecessor == 0 && unresolved == 0 && out.UnwalkableEvents == 0 && out.NotCaptured == 0:
 			// Every chain is a single INSERT: true append-only. Zero
 			// assertions is the only possible outcome for this shape, in
 			// every window, forever — a fact about the table, not a gap in
@@ -664,6 +700,25 @@ func recoverChainVerdict(out recoverChainOutcome, mismatchCount int, firstMismat
 	}
 	return StatusMatch, detail, ""
 }
+
+// notCapturedNote is the verdict's sentence for changes whose earlier row was
+// only partly captured. Its own words on purpose: this surface checks, it does
+// not undo, so it says what it could not check and that recover refuses the
+// same changes, then the one action that helps.
+func notCapturedNote(schema, table string, n int, first string) string {
+	target := pgIdent(table)
+	if schema != "" {
+		target = pgIdent(schema) + "." + target
+	}
+	return fmt.Sprintf("%d change(s) could not be checked: the earlier row was not captured, because the table was not at "+
+		"REPLICA IDENTITY FULL when the change was made (only the row's key was kept); recover cannot undo them either; "+
+		"first: %s. Running ALTER TABLE %s REPLICA IDENTITY FULL on the source makes later changes checkable, not these",
+		n, first, target)
+}
+
+// pgIdent double-quotes a PostgreSQL identifier, doubling any quote inside it,
+// so the printed command is right for every name (mixed case, reserved words).
+func pgIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 
 // emptyImagePairMarker is compareImages' out-of-band signal that BOTH images
 // were empty — nothing to compare, so nothing was proven. It contains a NUL

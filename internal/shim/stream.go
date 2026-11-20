@@ -6,8 +6,6 @@ import (
 
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/server"
-
-	"github.com/dbtrail/dbtrail/internal/event"
 )
 
 // packetWriter is the subset of *server.Conn the streaming full-table path
@@ -212,14 +210,15 @@ func (w *streamWriter) finish() (*mysql.Result, error) {
 }
 
 // projectCell coerces one raw merged-row value to its text wire form for the
-// stream, failing loud on a residual unchanged-TOAST marker (#592) exactly as
+// stream, failing loud on a residual unchanged-TOAST marker (#592) or a
+// not-captured marker (cellMarkerError) exactly as
 // the buffered buildImagesResult does — serving the marker's JSON would be
 // silently wrong data on the wire. schema/table/column identify the offending
 // cell in the error. A FLOAT or DOUBLE cell is printed as MySQL prints it
 // (floats, #2851; nil prints none).
 func (h *Handler) projectCell(floats *timeTravelFloats, schema, table, column string, raw any) (any, error) {
-	if event.IsUnchangedToastMarker(raw) {
-		return nil, event.UnresolvedToastError(schema, table, "", []string{column})
+	if err := cellMarkerError(schema, table, column, raw); err != nil {
+		return nil, err
 	}
 	if out, ok := floats.cell(column, raw); ok {
 		return out, nil

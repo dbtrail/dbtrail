@@ -1,7 +1,9 @@
 package icebergexport
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
@@ -61,10 +63,15 @@ func newFold(schema, table string, pkCols []metadata.ColumnMeta, pg bool) *fold 
 // (reconstruct.SplitPKChange, the full-table fold's split since #2501), so the
 // exported table equals `reconstruct` at the same cut (#2619). The split keeps
 // its own refusals: a key the index would spell another way, and PostgreSQL.
+//
+// A PostgreSQL table below REPLICA IDENTITY FULL is exported too (f.pg): its
+// UPDATEs and DELETEs keep only the key of the earlier row, which is all the
+// export reads from it, and an unchanged large value in an UPDATE's new row is
+// carried from the key's earlier change in this fold (apply).
 func (f *fold) addPage(page []query.ResultRow) error {
 	for i := range page {
 		ev := &page[i]
-		if err := event.CheckUnresolvedToast(ev.SchemaName, ev.TableName, ev.PKValues, ev.RowBefore, ev.RowAfter); err != nil {
+		if err := f.checkMarkers(ev); err != nil {
 			return err
 		}
 		halves, err := reconstruct.SplitPKChange(ev, f.schema, f.table, f.pkCols, f.pg)
@@ -104,6 +111,11 @@ func (f *fold) apply(ev *query.ResultRow) error {
 			return fmt.Errorf("event %d (type %d) for %s.%s pk %q carries no after-image", ev.EventID, ev.EventType, f.schema, f.table, ev.PKValues)
 		}
 		row := copyMap(ev.RowAfter)
+		if f.pg {
+			if err := f.carryUnchanged(ev, row); err != nil {
+				return err
+			}
+		}
 		pk, err := pkImage(row, f.pkCols)
 		if err != nil {
 			return fmt.Errorf("event %d for %s.%s: %w", ev.EventID, f.schema, f.table, err)
@@ -116,6 +128,19 @@ func (f *fold) apply(ev *query.ResultRow) error {
 		pk, err := pkImage(ev.RowBefore, f.pkCols)
 		if err != nil {
 			return fmt.Errorf("DELETE event %d for %s.%s: %w", ev.EventID, f.schema, f.table, err)
+		}
+		if f.pg {
+			// Below FULL the earlier row is the key alone; the key itself must
+			// be real, or the equality delete would match nothing.
+			var marked []string
+			for _, c := range f.pkCols {
+				if event.IsNotCapturedMarker(pk[c.Name]) || event.IsUnchangedToastMarker(pk[c.Name]) {
+					marked = append(marked, c.Name)
+				}
+			}
+			if len(marked) > 0 {
+				return f.markerMisplacedErr(ev, marked)
+			}
 		}
 		op = &netOp{PK: pk}
 	default:
@@ -134,6 +159,97 @@ func (f *fold) apply(ev *query.ResultRow) error {
 	}
 	f.ops[ev.PKValues] = op
 	return nil
+}
+
+// checkMarkers is the per-event refusal of a value the index does not hold.
+//
+// MySQL (and every non-PostgreSQL source) keeps the shared refusal exactly:
+// either marker in either image refuses (#592). Only the not-captured message
+// is reworded, because the shared one speaks of undo.
+//
+// PostgreSQL: the not-captured marker in row_before is expected below REPLICA
+// IDENTITY FULL and the export does not need that earlier row (a DELETE's key
+// is checked in apply). An unchanged large value in row_after is left for
+// apply to carry. What the capture never writes still refuses: the
+// not-captured marker in a new row, and an unchanged large value in an earlier
+// row.
+func (f *fold) checkMarkers(ev *query.ResultRow) error {
+	if !f.pg {
+		err := event.CheckUnresolvedToast(ev.SchemaName, ev.TableName, ev.PKValues, ev.RowBefore, ev.RowAfter)
+		var nc *event.NotCapturedError
+		if errors.As(err, &nc) {
+			return f.markerMisplacedErr(ev, nc.Columns)
+		}
+		return err
+	}
+	if cols := event.NotCapturedColumns(ev.RowAfter); len(cols) > 0 {
+		return f.markerMisplacedErr(ev, cols)
+	}
+	if cols := event.UnresolvedToastColumns(ev.RowBefore); len(cols) > 0 {
+		return event.UnresolvedToastError(ev.SchemaName, ev.TableName, ev.PKValues, cols)
+	}
+	return nil
+}
+
+// carryUnchanged replaces, in row (a PostgreSQL INSERT or UPDATE's new row,
+// already copied), each unchanged large value PostgreSQL did not resend with
+// the value the key's earlier change in this fold left. The fold keeps one op
+// per key holding the newest row it filed, never a marker (this function
+// resolved or refused each), so a chain of such UPDATEs carries through. With
+// no earlier row (first change of the key in the window, or the key deleted
+// before it) the value is not in reach, and the table is refused: exporting
+// the marker, or NULL, would be a table that reads cleanly and is wrong.
+func (f *fold) carryUnchanged(ev *query.ResultRow, row map[string]any) error {
+	cols := event.UnresolvedToastColumns(row)
+	if len(cols) == 0 {
+		return nil
+	}
+	cur, seen := f.ops[ev.PKValues]
+	var missing []string
+	for _, c := range cols {
+		if ev.EventType == event.EventUpdate && seen && !cur.deleted() {
+			if v, ok := cur.Row[c]; ok {
+				row[c] = v
+				continue
+			}
+		}
+		missing = append(missing, c)
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("cannot export %s.%s (pk=%s): column(s) %s kept an unchanged large value that PostgreSQL did not resend "+
+		"(the table was not at REPLICA IDENTITY FULL when the change was captured), and no earlier change of this row in the "+
+		"export window holds it. %s. Running ALTER TABLE %s REPLICA IDENTITY FULL on the source makes later changes carry the value",
+		f.schema, f.table, ev.PKValues, strings.Join(missing, ", "), f.reloadRemedy(), pgQuoted(f.schema, f.table))
+}
+
+// markerMisplacedErr refuses a marker where the capture never writes one: the
+// not-captured marker in a new row or in a DELETE's key, or (MySQL) either
+// marker anywhere. The stored row does not hold the value to export.
+func (f *fold) markerMisplacedErr(ev *query.ResultRow, cols []string) error {
+	return fmt.Errorf("cannot export %s.%s (pk=%s): the stored change (event %d) marks column(s) %s as a value the index does not hold, "+
+		"in a place the capture never writes that mark, so the value to export is unknown. %s",
+		f.schema, f.table, ev.PKValues, ev.EventID, strings.Join(cols, ", "), f.reloadRemedy())
+}
+
+// reloadRemedy is the export's way past a change it cannot apply: the cursor
+// lives in the table, so only a reload from a baseline past the change helps
+// (the same remedy as a refused key change, #2619).
+func (f *fold) reloadRemedy() string {
+	return fmt.Sprintf("The table's cursor stays before this change and every run refuses it again; take a baseline at or after "+
+		"the change and remove the table directory (or drop the table from the catalog) so the next run reloads %s.%s from it",
+		f.schema, f.table)
+}
+
+// pgQuoted is "schema"."table" with each PostgreSQL identifier double-quoted
+// (quotes inside doubled), so the printed command is right for every name.
+func pgQuoted(schema, table string) string {
+	q := func(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
+	if schema == "" {
+		return q(table)
+	}
+	return q(schema) + "." + q(table)
 }
 
 // touched returns the net ops in first-touched order.
