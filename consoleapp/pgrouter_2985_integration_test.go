@@ -180,15 +180,17 @@ func TestIntegrationPGRouterNoReadGoesBack_2985(t *testing.T) {
 	time.Sleep(3 * time.Second)
 	final := counter(c, sourceRead)
 	quietBefore := reasons()
-	copied := 0
 	for range 10 {
 		if n := counter(c, copyRead); n != final {
 			t.Fatalf("a quiet source: %d, want %d", n, final)
 		}
 		_ = counter(c, sourceRead)
 	}
-	copied = int(reasons()[pgshim.ReasonAnswersTheSame] - quietBefore[pgshim.ReasonAnswersTheSame])
+	copied := int(reasons()[pgshim.ReasonAnswersTheSame] - quietBefore[pgshim.ReasonAnswersTheSame])
 	t.Logf("a quiet source: the copy answered %d of 10 reads for it after the source answered", copied)
+	if copied*2 < 10 {
+		t.Errorf("a quiet source: the copy answered %d of 10 reads: capture's walsender position should carry it to the source's", copied)
+	}
 
 	// A connection the source never answered reads the copy, fresh.
 	d := pgClient(t, ctx, dsn, nil)
