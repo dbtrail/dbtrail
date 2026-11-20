@@ -36,7 +36,7 @@ func TestEventDTOIncludesConnectionID(t *testing.T) {
 		QueryHash:      &qHash, // present on the source row…
 	}
 
-	b, err := json.Marshal(toEventDTO(row))
+	b, err := json.Marshal(toEventDTO(row, false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestEventDTOIncludesConnectionID(t *testing.T) {
 		}
 	}
 
-	dto := toEventDTO(row)
+	dto := toEventDTO(row, false)
 	if dto.EventType != "UPDATE" {
 		t.Errorf("EventType = %q, want UPDATE", dto.EventType)
 	}
@@ -94,7 +94,7 @@ func TestEventTypeName(t *testing.T) {
 }
 
 func TestToEventDTOsNonNil(t *testing.T) {
-	if got := toEventDTOs(nil); got == nil {
+	if got := toEventDTOs(nil, false); got == nil {
 		t.Error("toEventDTOs(nil) should return a non-nil empty slice (JSON []), got nil")
 	}
 }
@@ -115,7 +115,7 @@ func TestEventDTOFieldAllowlist(t *testing.T) {
 		ChangedColumns: []string{"a"},
 		RowBefore:      map[string]any{"a": 1},
 		RowAfter:       map[string]any{"a": 2},
-	})
+	}, false)
 	b, err := json.Marshal(dto)
 	if err != nil {
 		t.Fatal(err)

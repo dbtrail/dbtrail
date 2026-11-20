@@ -348,7 +348,7 @@ func TestEventTypeName(t *testing.T) {
 
 func TestWriteTable_empty(t *testing.T) {
 	var buf bytes.Buffer
-	n, err := writeTable(nil, &buf)
+	n, err := writeTable(nil, &buf, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -377,7 +377,7 @@ func TestWriteTable_singleRow(t *testing.T) {
 		ChangedColumns: []string{"status", "amount"},
 	}}
 	var buf bytes.Buffer
-	n, err := writeTable(rows, &buf)
+	n, err := writeTable(rows, &buf, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -421,7 +421,7 @@ func TestWriteJSON_structure(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	n, err := writeJSON(rows, &buf)
+	n, err := writeJSON(rows, &buf, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -579,7 +579,7 @@ func TestApplyRedaction(t *testing.T) {
 	redact := []SchemaTableColumn{
 		{Schema: "mydb", Table: "orders", Column: "amount"},
 	}
-	applyRedaction(rows, redact, nil)
+	applyRedaction(rows, redact, nil, false)
 
 	if rows[0].RowBefore["amount"] != nil {
 		t.Errorf("expected RowBefore[amount] to be nil, got %v", rows[0].RowBefore["amount"])
@@ -893,7 +893,7 @@ func TestApplyRedaction_blanksQueryTextEverywhere(t *testing.T) {
 	redact := []SchemaTableColumn{
 		{Schema: "mydb", Table: "orders", Column: "amount"},
 	}
-	applyRedaction(rows, redact, nil)
+	applyRedaction(rows, redact, nil, false)
 
 	for i := range rows {
 		if rows[i].QueryText != nil {
@@ -915,7 +915,7 @@ func TestApplyRedaction_wrongTable(t *testing.T) {
 	redact := []SchemaTableColumn{
 		{Schema: "mydb", Table: "orders", Column: "amount"}, // different table
 	}
-	applyRedaction(rows, redact, nil)
+	applyRedaction(rows, redact, nil, false)
 
 	// Values must be unchanged — redaction only applies to the matching table.
 	if rows[0].RowBefore["amount"] != float64(50) {

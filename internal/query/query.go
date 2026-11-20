@@ -469,6 +469,16 @@ type Options struct {
 	// (or query.MisfiledArchiveHours) by callers that prune archives by time.
 	ExtraArchiveHours []time.Time
 	ChangedColumn     string // column name; matched via JSON_CONTAINS
+	// PostgresHistory is set only by the history surfaces (query, the
+	// console's Events view, the MCP query tool), and only when the index was
+	// written by PostgreSQL capture (SourceFlavor == "postgres"). It does two
+	// things, both inert on a MySQL index: ChangedColumn also matches the
+	// UPDATEs whose changed columns are unknown because the table was not at
+	// REPLICA IDENTITY FULL (see ChangedColumnsUnknown), so the filter misses
+	// nothing; and Run renders the partly captured rows (FormatHistory).
+	// Recover, cascade and verify never set it. A flavor flag, not a row
+	// check, because a MySQL JSON column can hold the marker object exactly.
+	PostgresHistory bool
 	// QueryHash restricts results to the events produced by ONE statement
 	// digest: the 64-char hex STATEMENT_DIGEST() stored in
 	// binlog_events.query_hash at index time (#699). It is populated only while
@@ -646,7 +656,7 @@ func (e *Engine) Fetch(ctx context.Context, opts Options) ([]ResultRow, error) {
 	// so rows of an ALLOWED table can carry a statement whose literals
 	// belong to a denied sibling table — see applyRedaction (#699).
 	if opts.RedactionActive() {
-		applyRedaction(results, opts.RedactColumns, opts.AllowColumns)
+		applyRedaction(results, opts.RedactColumns, opts.AllowColumns, opts.PostgresHistory)
 	}
 	return results, nil
 }
@@ -832,20 +842,31 @@ func (e *Engine) Run(ctx context.Context, opts Options, format string, w io.Writ
 	if err != nil {
 		return 0, err
 	}
-	return Format(results, format, w)
+	return FormatHistory(results, format, w, opts.PostgresHistory)
 }
 
 // Format writes rows to w in the chosen format (table, json, or csv).
 // It is exported so callers that fetch from multiple sources (e.g. MySQL + Parquet
 // archives) can merge rows before formatting.
 func Format(rows []ResultRow, format string, w io.Writer) (int, error) {
+	return FormatHistory(rows, format, w, false)
+}
+
+// FormatHistory is Format for a history surface: with postgres set (the
+// index was written by PostgreSQL capture, Options.PostgresHistory) a JSON
+// row whose earlier row carries only its key adds "before_image": "key_only",
+// one with large values PostgreSQL did not resend adds "unchanged_columns",
+// and the table prints "unknown" for an UPDATE whose changed columns are
+// unknown plus a note under it. The markers stay in the JSON row images, and
+// CSV is unchanged. With postgres false the output is byte-for-byte Format's.
+func FormatHistory(rows []ResultRow, format string, w io.Writer, postgres bool) (int, error) {
 	switch strings.ToLower(format) {
 	case "json":
-		return writeJSON(rows, w)
+		return writeJSON(rows, w, postgres)
 	case "csv":
 		return writeCSV(rows, w)
 	default:
-		return writeTable(rows, w)
+		return writeTable(rows, w, postgres)
 	}
 }
 
@@ -1151,8 +1172,16 @@ func buildWhere(opts Options) ([]string, []any) {
 		// json.Marshal produces the JSON string representation (with quotes),
 		// which is exactly what MySQL's JSON_CONTAINS expects as the needle.
 		needle, _ := json.Marshal(opts.ChangedColumn)
-		where = append(where, "JSON_CONTAINS(changed_columns, ?)")
-		args = append(args, string(needle))
+		if opts.PostgresHistory {
+			// A PostgreSQL UPDATE of a table below REPLICA IDENTITY FULL has
+			// no known changed columns; it may have changed this one, so the
+			// filter returns it and the surface says so (MayHaveChangedNotice).
+			where = append(where, "(JSON_CONTAINS(changed_columns, ?) OR "+pgPartialUpdateSQL+")")
+			args = append(args, string(needle), uint8(event.EventUpdate))
+		} else {
+			where = append(where, "JSON_CONTAINS(changed_columns, ?)")
+			args = append(args, string(needle))
+		}
 	}
 	if opts.QueryHash != "" {
 		// Lowercased for parity with the archive side: under a stock
@@ -1372,7 +1401,15 @@ func isStreamShape(opts Options) bool {
 // #1449): for a table appearing in it, every row-image column NOT listed for
 // that table is nulled — the complement of redact, composed so that an
 // explicit redact entry wins even over a column the allow list names.
-func applyRedaction(rows []ResultRow, redact, allow []SchemaTableColumn) {
+//
+// keepNotCaptured (Options.PostgresHistory) leaves a hidden column of an
+// earlier row as the not-captured marker instead of nulling it: the marker is
+// no value of the row (nothing was captured), and nulling it would make a
+// key-only earlier row read as a captured one full of NULLs. The
+// unchanged-TOAST marker of a hidden column IS nulled: it says the hidden
+// value is large and did not change. On a MySQL index the flag is false and
+// every hidden value is nulled, marker-shaped or not.
+func applyRedaction(rows []ResultRow, redact, allow []SchemaTableColumn, keepNotCaptured bool) {
 	type colKey struct{ schema, table, column string }
 	type tblKey struct{ schema, table string }
 	set := make(map[colKey]struct{}, len(redact))
@@ -1402,8 +1439,8 @@ func applyRedaction(rows []ResultRow, redact, allow []SchemaTableColumn) {
 			}
 			return false
 		}
-		for col := range r.RowBefore {
-			if null(col) {
+		for col, v := range r.RowBefore {
+			if null(col) && !(keepNotCaptured && event.IsNotCapturedMarker(v)) {
 				r.RowBefore[col] = nil
 			}
 		}
@@ -1580,13 +1617,17 @@ const tsFormat = "2006-01-02 15:04:05"
 // writeTable renders results as a human-readable aligned table.
 // row_before and row_after are omitted to keep the output scannable;
 // use --format json for full row data.
-func writeTable(rows []ResultRow, w io.Writer) (int, error) {
+func writeTable(rows []ResultRow, w io.Writer, postgres bool) (int, error) {
 	if len(rows) == 0 {
 		fmt.Fprintln(w, "No results.")
 		return 0, nil
 	}
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if postgres {
+		// The note goes under the table, so after the flush.
+		defer func() { fmt.Fprint(w, historyRowNotes(rows)) }()
+	}
 	defer tw.Flush()
 
 	fmt.Fprintln(tw, "ID\tTIMESTAMP\tTYPE\tSCHEMA\tTABLE\tPK_VALUES\tCHANGED_COLS\tGTID\tCONN_ID")
@@ -1603,6 +1644,9 @@ func writeTable(rows []ResultRow, w io.Writer) (int, error) {
 			connID = fmt.Sprintf("%d", *r.ConnectionID)
 		}
 		changed := strings.Join(r.ChangedColumns, ",")
+		if postgres && ChangedColumnsUnknown(r) {
+			changed = ChangedColumnsUnknownText
+		}
 		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			r.EventID,
 			r.EventTimestamp.Format(tsFormat),
@@ -1637,9 +1681,13 @@ type jsonRow struct {
 	QueryText      *string        `json:"query_text"`
 	QueryHash      *string        `json:"query_hash"`
 	CommitTsUS     *uint64        `json:"commit_ts_us"`
+	// Set only on a PostgreSQL index (FormatHistory), and only on a row that
+	// has them, so every other row encodes exactly as before.
+	BeforeImage      string   `json:"before_image,omitempty"`
+	UnchangedColumns []string `json:"unchanged_columns,omitempty"`
 }
 
-func writeJSON(rows []ResultRow, w io.Writer) (int, error) {
+func writeJSON(rows []ResultRow, w io.Writer, postgres bool) (int, error) {
 	out := make([]jsonRow, len(rows))
 	for i, r := range rows {
 		out[i] = jsonRow{
@@ -1660,6 +1708,12 @@ func writeJSON(rows []ResultRow, w io.Writer) (int, error) {
 			QueryText:      r.QueryText,
 			QueryHash:      r.QueryHash,
 			CommitTsUS:     r.CommitTsUS,
+		}
+		if postgres {
+			if KeyOnlyBefore(&r) {
+				out[i].BeforeImage = BeforeImageKeyOnly
+			}
+			out[i].UnchangedColumns = UnchangedColumns(&r)
 		}
 	}
 	enc := json.NewEncoder(w)
