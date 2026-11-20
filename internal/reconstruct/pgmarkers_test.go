@@ -158,14 +158,14 @@ func TestPGRowLink_aRowKnownByItsKeyAlone(t *testing.T) {
 		leaves, needs pgRowState
 		links         bool
 	}{
-		"a row, then one that starts from a row known by its key": {row, partial, true},
-		"a row known by its key, then one that starts from a row": {partial, row, true},
-		"both known by their key":                                 {partial, partial, true},
+		"a row, then one that starts from a row known by its key":  {row, partial, true},
+		"a row known by its key, then one that starts from a row":  {partial, row, true},
+		"both known by their key":                                  {partial, partial, true},
 		"no row, then one that starts from a row known by its key": {none, partial, false},
-		"a row known by its key, then an insert":                    {partial, none, false},
-		"two different rows, both known whole":                      {row, other, false},
-		"the same row, known whole":                                 {row, row, true},
-		"an image that cannot be compared":                          {pgRowState{Kind: pgStateUnknown}, partial, false},
+		"a row known by its key, then an insert":                   {partial, none, false},
+		"two different rows, both known whole":                     {row, other, false},
+		"the same row, known whole":                                {row, row, true},
+		"an image that cannot be compared":                         {pgRowState{Kind: pgStateUnknown}, partial, false},
 	} {
 		if why := pgRowLink(c.leaves, c.needs); (why == "") != c.links {
 			t.Errorf("%s: %q, want links=%v", name, why, c.links)
