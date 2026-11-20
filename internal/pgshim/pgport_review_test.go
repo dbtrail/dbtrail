@@ -28,10 +28,11 @@ func TestDecodeBinaryTimestampFarFromTheEpoch(t *testing.T) {
 		{-1, "1999-12-31 23:59:59.999999"},
 		{1_500_000, "2000-01-01 00:00:01.5"},
 		{-1_500_000, "1999-12-31 23:59:58.5"},
-		// 10^16 microseconds is about 317 years: 1683 and 2316.
-		{-10_000_000_000_000_000, "1683-02-07 14:13:20"},
-		{-10_000_000_000_000_001, "1683-02-07 14:13:19.999999"},
-		{10_000_000_000_000_000, "2316-11-24 09:46:40"},
+		// 10^16 microseconds is about 317 years: 1683 and 2316, the dates
+		// PostgreSQL 16 gives for 2000-01-01 -/+ 10^10 seconds.
+		{-10_000_000_000_000_000, "1683-02-10 06:13:20"},
+		{-10_000_000_000_000_001, "1683-02-10 06:13:19.999999"},
+		{10_000_000_000_000_000, "2316-11-20 17:46:40"},
 		// The last microsecond of 9999 and the first of year 1.
 		{252_455_615_999_999_999, "9999-12-31 23:59:59.999999"},
 		{-63_082_281_600_000_000, "0001-01-01 00:00:00"},
@@ -58,7 +59,7 @@ func TestDecodeBinaryTimestampFarFromTheEpoch(t *testing.T) {
 		}
 	}
 	a, perr := decodeBinaryArg(0, oidTimestamptz, be(-10_000_000_000_000_000))
-	if perr != nil || a.text != "1683-02-07 14:13:20+00" {
+	if perr != nil || a.text != "1683-02-10 06:13:20+00" {
 		t.Errorf("timestamptz: got %q %v", a.text, perr)
 	}
 }
