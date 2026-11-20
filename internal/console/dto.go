@@ -52,13 +52,21 @@ type eventDTO struct {
 	ChangedColumns []string       `json:"changed_columns"`
 	RowBefore      map[string]any `json:"row_before"`
 	RowAfter       map[string]any `json:"row_after"`
+	// Only on a PostgreSQL index, and only on a row that has them (the same
+	// fields as the query command's JSON, query.FormatHistory): the earlier
+	// row carries only its key ("key_only"), and the columns of the later row
+	// PostgreSQL did not resend. The page draws the markers from these, never
+	// from the shape of a value, which on MySQL can be user data.
+	BeforeImage      string   `json:"before_image,omitempty"`
+	UnchangedColumns []string `json:"unchanged_columns,omitempty"`
 }
 
 // toEventDTO maps a query.ResultRow to the wire view: connection_id now
 // passes through (#701 D1); query_text/query_hash are still dropped (#699);
-// the event type and timestamp are stringified.
-func toEventDTO(r query.ResultRow) eventDTO {
-	return eventDTO{
+// the event type and timestamp are stringified. postgres is
+// Options.PostgresHistory: the index was written by PostgreSQL capture.
+func toEventDTO(r query.ResultRow, postgres bool) eventDTO {
+	d := eventDTO{
 		EventID:        r.EventID,
 		BinlogFile:     r.BinlogFile,
 		StartPos:       r.StartPos,
@@ -75,16 +83,36 @@ func toEventDTO(r query.ResultRow) eventDTO {
 		RowBefore:      r.RowBefore,
 		RowAfter:       r.RowAfter,
 	}
+	if postgres {
+		if query.KeyOnlyBefore(&r) {
+			d.BeforeImage = query.BeforeImageKeyOnly
+		}
+		d.UnchangedColumns = query.UnchangedColumns(&r)
+	}
+	return d
 }
 
 // toEventDTOs maps a slice of result rows. The returned slice is non-nil even
 // when rows is empty, so the JSON encodes as [] rather than null.
-func toEventDTOs(rows []query.ResultRow) []eventDTO {
+func toEventDTOs(rows []query.ResultRow, postgres bool) []eventDTO {
 	out := make([]eventDTO, len(rows))
 	for i, r := range rows {
-		out[i] = toEventDTO(r)
+		out[i] = toEventDTO(r, postgres)
 	}
 	return out
+}
+
+// pgHistoryWarnings is the Events response's warning for a changed-column
+// filter on a PostgreSQL index that returned UPDATEs whose changed columns
+// are unknown (query.MayHaveChangedNotice); nil otherwise, MySQL always.
+func pgHistoryWarnings(opts query.Options, rows []query.ResultRow) []string {
+	if !opts.PostgresHistory || opts.ChangedColumn == "" {
+		return nil
+	}
+	if note := query.MayHaveChangedNotice(opts.ChangedColumn, query.MayHaveChangedCount(rows)); note != "" {
+		return []string{note}
+	}
+	return nil
 }
 
 // eventTypeName renders an event.EventType as its canonical SQL keyword,

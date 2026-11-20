@@ -287,6 +287,11 @@ func runQuery(cmd *cobra.Command, args []string) error {
 		return indexer.WrapSchemaMigrationErr(err)
 	}
 
+	// A PostgreSQL index can hold rows of tables that were not at REPLICA
+	// IDENTITY FULL: render them, and let --changed-column also return the
+	// UPDATEs whose changed columns are unknown (query.Options.PostgresHistory).
+	opts.PostgresHistory = query.SourceFlavor(db) == "postgres"
+
 	// ── Re-encode --pk/--pks against the at-rest pk_values form ────────────────
 	// (#957) binlog_events.pk_values is stored PIPE/BACKSLASH-ESCAPED
 	// (event.BuildPKValues escapes each PK component before joining with "|"),
@@ -435,7 +440,10 @@ func runQuery(cmd *cobra.Command, args []string) error {
 	// output for --pks needs a separate formatting step, so fall through to
 	// the merge path when it's active.
 	groupedJSON := len(qPKs) > 0 && qFormat == "json"
-	if len(archSources) == 0 && !groupedJSON && !qIncludeSnapshot {
+	// A PostgreSQL changed-column query also needs its rows, to say how many
+	// may have changed the column (query.MayHaveChangedNotice).
+	pgChangedColumn := opts.PostgresHistory && opts.ChangedColumn != ""
+	if len(archSources) == 0 && !groupedJSON && !qIncludeSnapshot && !pgChangedColumn {
 		n, err := engine.Run(cmd.Context(), opts, qFormat, os.Stdout)
 		if err != nil {
 			return err
@@ -463,7 +471,9 @@ func runQuery(cmd *cobra.Command, args []string) error {
 	// When the planner says MySQL can be skipped (entire range is archived),
 	// avoid the unnecessary MySQL query.
 	var results []query.ResultRow
-	if plan != nil && plan.SkipMySQL() {
+	// The PostgreSQL changed-column detour reaches here with no archive to
+	// read; skipping the index then would return nothing at all.
+	if plan != nil && plan.SkipMySQL() && !(pgChangedColumn && len(archSources) == 0) {
 		slog.Debug("planner: skipping MySQL query (range fully archived)")
 	} else {
 		results, err = engine.Fetch(cmd.Context(), fetchOpts)
@@ -514,12 +524,17 @@ func runQuery(cmd *cobra.Command, args []string) error {
 
 	var n int
 	if groupedJSON {
-		n, err = writeGroupedJSON(qPKs, spelledPKs, opts.PKAliases, results, os.Stdout)
+		n, err = writeGroupedJSONHistory(qPKs, spelledPKs, opts.PKAliases, results, os.Stdout, opts.PostgresHistory)
 	} else {
-		n, err = query.Format(results, qFormat, os.Stdout)
+		n, err = query.FormatHistory(results, qFormat, os.Stdout, opts.PostgresHistory)
 	}
 	if err != nil {
 		return err
+	}
+	if pgChangedColumn {
+		if note := query.MayHaveChangedNotice(opts.ChangedColumn, query.MayHaveChangedCount(results)); note != "" {
+			fmt.Fprintln(os.Stderr, "Note: "+note)
+		}
 	}
 
 	slog.Info("query complete",
@@ -740,6 +755,15 @@ func sanitizeArchiveErrorMessage(err error) string {
 // groups (matching the row-count semantic of query.Format for the truncation
 // warning at the call site).
 func writeGroupedJSON(pks []string, spelled, aliases map[string]string, rows []query.ResultRow, w io.Writer) (int, error) {
+	return writeGroupedJSONHistory(pks, spelled, aliases, rows, w, false)
+}
+
+// writeGroupedJSONHistory is writeGroupedJSON with query.FormatHistory's
+// PostgreSQL fields: with postgres set (a PostgreSQL index) an event whose
+// earlier row carries only its key adds "before_image": "key_only", and one
+// with large values PostgreSQL did not resend adds "unchanged_columns". With
+// postgres false the output is byte-for-byte writeGroupedJSON's.
+func writeGroupedJSONHistory(pks []string, spelled, aliases map[string]string, rows []query.ResultRow, w io.Writer, postgres bool) (int, error) {
 	type groupedEvent struct {
 		EventID        uint64         `json:"event_id"`
 		BinlogFile     string         `json:"binlog_file"`
@@ -755,6 +779,9 @@ func writeGroupedJSON(pks []string, spelled, aliases map[string]string, rows []q
 		ChangedColumns []string       `json:"changed_columns"`
 		RowBefore      map[string]any `json:"row_before"`
 		RowAfter       map[string]any `json:"row_after"`
+		// Only on a PostgreSQL index, and only on an event that has them.
+		BeforeImage      string   `json:"before_image,omitempty"`
+		UnchangedColumns []string `json:"unchanged_columns,omitempty"`
 	}
 	type group struct {
 		PK     string         `json:"pk"`
@@ -781,6 +808,12 @@ func writeGroupedJSON(pks []string, spelled, aliases map[string]string, rows []q
 			ChangedColumns: r.ChangedColumns,
 			RowBefore:      r.RowBefore,
 			RowAfter:       r.RowAfter,
+		}
+		if postgres {
+			if query.KeyOnlyBefore(&r) {
+				ev.BeforeImage = query.BeforeImageKeyOnly
+			}
+			ev.UnchangedColumns = query.UnchangedColumns(&r)
 		}
 		byPK[r.PKValues] = append(byPK[r.PKValues], ev)
 	}
