@@ -997,6 +997,18 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			}
 			return age
 		}
+		// The copy waits for the source's position on a connection the
+		// source answered, then answers (#2985).
+		bound.CopyWait = func(ctx context.Context, lsn uint64) (pgshim.CopyWaitOutcome, string) {
+			outcome, why := copySQL.WaitPGTailsPast(ctx, lsn)
+			switch outcome {
+			case console.PGCopyReached:
+				return pgshim.CopyReached, why
+			case console.PGCopyNotReached:
+				return pgshim.CopyNotReached, why
+			}
+			return pgshim.CopyNoWait, why
+		}
 		bound.Run = func(ctx context.Context, statement string, opts pgshim.RunOptions) (sqlsandbox.Result, error) {
 			if timeout > 0 {
 				var cancel context.CancelFunc

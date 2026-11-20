@@ -354,3 +354,200 @@ func TestCostPolicyClear(t *testing.T) {
 		t.Error("with the cost rule off, a cheap scan is not kept")
 	}
 }
+
+// copyWaitKnob is a CopyWait a test steers: reach says whether the copy
+// reaches the position (block: it waits until its context ends), and it
+// records the positions and deadlines it was given.
+type copyWaitKnob struct {
+	mu       sync.Mutex
+	reach    bool
+	block    bool
+	none     bool // nothing to wait on
+	lsns     []uint64
+	deadline []time.Duration
+}
+
+func (k *copyWaitKnob) wait(ctx context.Context, lsn uint64) (CopyWaitOutcome, string) {
+	k.mu.Lock()
+	k.lsns = append(k.lsns, lsn)
+	if d, ok := ctx.Deadline(); ok {
+		k.deadline = append(k.deadline, time.Until(d))
+	}
+	reach, block, none := k.reach, k.block, k.none
+	k.mu.Unlock()
+	if none {
+		return CopyNoWait, "no tails yet"
+	}
+	if block {
+		<-ctx.Done()
+		return CopyNotReached, "ran out"
+	}
+	if !reach {
+		return CopyNotReached, "capture is behind"
+	}
+	return CopyReached, ""
+}
+
+func (k *copyWaitKnob) set(reach, block bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.reach, k.block = reach, block
+}
+
+func (k *copyWaitKnob) asked() (int, uint64, time.Duration) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if len(k.lsns) == 0 {
+		return 0, 0, 0
+	}
+	return len(k.lsns), k.lsns[len(k.lsns)-1], k.deadline[len(k.deadline)-1]
+}
+
+// On a connection the source answered, the copy waits for the source's
+// position before it runs: reached, it answers whatever its tails' instant
+// says (a quiet source's stays at the last commit); not reached, the source
+// answers and the copy runs nothing.
+func TestRouteByCost_2985_theCopyWaits(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	knob := &copyAgeKnob{}
+	w := &copyWaitKnob{reach: true}
+	src := startFakeSource(t, costPlans)
+	l := &costLogin{src: src, age: knob.age, wait: w.wait}
+	c := costPortConn(t, ctx, l)
+	const report = "SELECT sum(n) FROM big"
+	onCopy := costOutcome{"7", "", RouteCopy, ReasonAnswersTheSame}
+	tooOld := costOutcome{"42", "", RouteSource, ReasonCopyTooOld}
+	wantLSN, _ := parseLSN(fakeWALPosition)
+
+	// Before the source answered: no wait at all.
+	knob.at(time.Now().Add(-time.Hour))
+	if got := costSimple(ctx, c, l, report); got != onCopy {
+		t.Fatalf("before the source answered: %+v", got)
+	}
+	if n, _, _ := w.asked(); n != 0 || src.positionsRead() != 0 {
+		t.Fatalf("waited %d times and read %d positions before the source answered", n, src.positionsRead())
+	}
+	if got := costSimple(ctx, c, l, "SELECT n FROM t WHERE id = 1"); got.side != RouteSource {
+		t.Fatalf("the read by key: %+v", got)
+	}
+
+	// Reached: the copy answers, its tails' instant an hour old (a quiet
+	// source), and the position was read on the connection its plan was.
+	opened := l.opened.Load()
+	if got := costSimple(ctx, c, l, report); got != onCopy {
+		t.Errorf("the copy reached the position: %+v, want %+v", got, onCopy)
+	}
+	n, lsn, deadline := w.asked()
+	if n != 1 || lsn != wantLSN {
+		t.Errorf("waited %d times for %x, want once for %x", n, lsn, wantLSN)
+	}
+	if deadline <= 0 || deadline > copyWaitLimit {
+		t.Errorf("the wait's deadline was %v away, want within %v", deadline, copyWaitLimit)
+	}
+	if d := l.opened.Load() - opened; d != 1 {
+		t.Errorf("%d connections to the source for one report, want 1: its position is read where its plan was", d)
+	}
+
+	// Reached, but the run read a snapshot alone: still the source.
+	knob.set(snapshotAlone)
+	if got := costSimple(ctx, c, l, report); got != tooOld {
+		t.Errorf("reached, a snapshot alone: %+v, want %+v", got, tooOld)
+	}
+
+	// Not reached: the source answers, and the copy ran nothing.
+	knob.at(time.Now().Add(-time.Hour))
+	w.set(false, false)
+	runs := l.runs.Load()
+	if got := costSimple(ctx, c, l, report); got != tooOld {
+		t.Errorf("not reached: %+v, want %+v", got, tooOld)
+	}
+	if d := l.runs.Load() - runs; d != 0 {
+		t.Errorf("the copy ran %d statements it could not answer", d)
+	}
+
+	// Nothing to wait on (the server keeps no recent changes yet): the copy
+	// runs, and its answer's age decides, as without the wait.
+	w.mu.Lock()
+	w.none = true
+	w.mu.Unlock()
+	knob.at(time.Now().Add(-time.Hour))
+	runs = l.runs.Load()
+	if got := costSimple(ctx, c, l, report); got != tooOld || l.runs.Load() != runs+1 {
+		t.Errorf("nothing to wait on, the copy behind: %+v after %d runs, want %+v after one", got, l.runs.Load()-runs, tooOld)
+	}
+	knob.at(time.Now().Add(time.Hour))
+	if got := costSimple(ctx, c, l, report); got != onCopy {
+		t.Errorf("nothing to wait on, the copy past it: %+v, want %+v", got, onCopy)
+	}
+	w.mu.Lock()
+	w.none = false
+	w.mu.Unlock()
+
+	// A command of the copy's own is not waited for: the source would not
+	// take it.
+	knob.set(noTable)
+	waits, _, _ := w.asked()
+	if got := costSimple(ctx, c, l, "SHOW TABLES"); got.answer != "7" || got.side != RouteCopy {
+		t.Errorf("SHOW TABLES: %+v, want the copy's", got)
+	}
+	if n, _, _ := w.asked(); n != waits {
+		t.Errorf("SHOW TABLES waited")
+	}
+	knob.at(time.Now().Add(-time.Hour))
+
+	// A prepared statement waits at each execution: the first with the
+	// position read where its plan was, the next with one read on its own.
+	w.set(true, false)
+	if _, err := c.Prepare(ctx, "rep2", report, nil); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 2 {
+		before, _, _ := w.asked()
+		positions := src.positionsRead()
+		if res := c.ExecPrepared(ctx, "rep2", nil, nil, nil).Read(); res.Err != nil || len(res.Rows) != 1 || string(res.Rows[0][0]) != "7" {
+			t.Errorf("prepared, run %d, reached: %v %q, want the copy's 7", i, res.Err, res.Rows)
+		}
+		if after, _, _ := w.asked(); after != before+1 {
+			t.Errorf("prepared, run %d: waited %d times, want once", i, after-before)
+		}
+		if i == 1 && src.positionsRead() != positions+1 {
+			t.Errorf("prepared, run %d: read the position %d times, want once", i, src.positionsRead()-positions)
+		}
+	}
+
+	// The statement's own timeout ends the wait: 57014, and it runs nowhere.
+	w.set(false, true)
+	if _, err := c.Exec(ctx, "SET statement_timeout = '150ms'").ReadAll(); err != nil {
+		t.Fatal(err)
+	}
+	ran := len(src.ran())
+	runs = l.runs.Load()
+	start := time.Now()
+	got := costSimple(ctx, c, l, report)
+	if got.code != "57014" {
+		t.Errorf("the statement's timeout while it waited: %+v, want 57014", got)
+	}
+	if took := time.Since(start); took > copyWaitLimit {
+		t.Errorf("waited %v, past the statement's 150ms", took)
+	}
+	if len(src.ran()) != ran || l.runs.Load() != runs {
+		t.Errorf("a statement stopped while it waited ran on the source (%d) or the copy (%d)", len(src.ran())-ran, l.runs.Load()-runs)
+	}
+	if c.TxStatus() != 'I' {
+		t.Errorf("status %c", c.TxStatus())
+	}
+}
+
+func TestParseLSN(t *testing.T) {
+	for in, want := range map[string]uint64{"16/B374D848": 0x16B374D848, "0/0": 0, "FFFFFFFF/FFFFFFFF": 1<<64 - 1} {
+		if got, ok := parseLSN(in); !ok || got != want {
+			t.Errorf("parseLSN(%q) = %x %v, want %x", in, got, ok, want)
+		}
+	}
+	for _, in := range []string{"", "42", "/1", "1/", "G/1", "100000000/0", "1/2/3"} {
+		if _, ok := parseLSN(in); ok {
+			t.Errorf("parseLSN(%q) read a position", in)
+		}
+	}
+}

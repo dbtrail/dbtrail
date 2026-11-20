@@ -294,6 +294,15 @@ func (s *session) routeByCostPlan(text string, generic bool) (d routeDecision, k
 		return routeDecision{RouteSource, ReasonCheapPlan}, true, nil, &pl
 	}
 	s.logger.Debug("pgshim: sent to the copy", "plan", why)
+	if !s.sourceAnsweredAt.IsZero() && s.bound != nil && s.bound.CopyWait != nil {
+		// The copy will wait for the source's position (waitForCopy): read
+		// on this connection while it is open, not on one opened again.
+		if cell, perr, lost := s.cellOnSource(up, sourceWALPositionSQL); lost != nil {
+			s.loseSource(lost.why)
+		} else if lsn, ok := parseLSN(string(cell)); perr == nil && ok {
+			s.copyWant, s.copyWantAt = lsn, time.Now()
+		}
+	}
 	// Nothing of the client's lives on the source: its slot is given back
 	// now, not when the copy has answered, which can be minutes.
 	s.releaseIdleSource()
@@ -406,6 +415,21 @@ func (s *session) routeByCostRemembered(text string) (routeDecision, *pgErr) {
 // of the source is (relay): the statement's context, statement_timeout and
 // the port's cap.
 func (s *session) explainOnSource(up *upstream, sql string) (plan []byte, perr *pgErr, lost *errSourceLost) {
+	plan, perr, lost = s.cellOnSource(up, sql)
+	if perr != nil && perr.code == "XX000" && perr.msg == noCellAnswered {
+		perr = &pgErr{"XX000", "EXPLAIN answered no plan"}
+	}
+	return plan, perr, lost
+}
+
+// noCellAnswered is cellOnSource's error for a statement that returned no
+// row.
+const noCellAnswered = "the source answered no row"
+
+// cellOnSource runs one statement of the port's own as a simple query on the
+// source, outside any extended batch, and returns the first cell of its
+// first row, bounded as explainOnSource is.
+func (s *session) cellOnSource(up *upstream, sql string) (plan []byte, perr *pgErr, lost *errSourceLost) {
 	if err := up.send(&pgproto3.Query{String: sql}); err != nil {
 		return nil, nil, &errSourceLost{"it could not be written to: " + err.Error()}
 	}
@@ -429,7 +453,7 @@ func (s *session) explainOnSource(up *upstream, sql string) (plan []byte, perr *
 		clear(up.portals)
 	}
 	if perr == nil && plan == nil {
-		return nil, &pgErr{"XX000", "EXPLAIN answered no plan"}, nil
+		return nil, &pgErr{"XX000", noCellAnswered}, nil
 	}
 	return plan, perr, nil
 }

@@ -28,9 +28,9 @@ const (
 
 // #2985, in fresh mode against a real PostgreSQL and its capture: a
 // connection the source answered never reads an older counter from the copy
-// afterwards, while the source keeps writing. What a quiet source does after
-// that is logged: the copy's data reaches the last change captured, which no
-// later answer of the source is before.
+// afterwards, while the source keeps writing, and the copy, which waits for
+// what the source showed, answers most of those reads. How many it answers
+// on a quiet source is logged.
 func TestIntegrationPGRouterNoReadGoesBack_2985(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
@@ -132,47 +132,68 @@ func TestIntegrationPGRouterNoReadGoesBack_2985(t *testing.T) {
 	if n := counter(c, copyRead); n != 1 {
 		t.Fatalf("before the source answered: %d, want the copy's 1", n)
 	}
-	for i := 2; i <= 21; i++ {
-		exec1(fmt.Sprintf("UPDATE %s SET counter = %d WHERE id = 1", pgMonoTable, i))
-		if n := counter(c, sourceRead); n != i {
-			t.Fatalf("the source: %d, want %d", n, i)
+	// Constant writes: the counter goes up every 20 ms on the source while
+	// the connection reads it from the source and then from the copy, a
+	// hundred times. Every read is at least the last one; the copy waits
+	// for what the source showed and answers most of them.
+	wctx, stopWriter := context.WithCancel(ctx)
+	writer := pgClient(t, ctx, baseDSN, nil)
+	wrote := make(chan struct{})
+	go func() {
+		defer close(wrote)
+		for wctx.Err() == nil {
+			if _, err := writer.Exec(wctx, "UPDATE "+pgMonoTable+" SET counter = counter + 1 WHERE id = 1").ReadAll(); err != nil && wctx.Err() == nil {
+				t.Errorf("the writer: %v", err)
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
-		// The copy is a moment behind: whoever answers, never the older value.
-		if n := counter(c, copyRead); n < i {
-			t.Fatalf("after the source showed %d, the copy's read said %d: it went back", i, n)
+	}()
+	before := reasons()
+	last := 0
+	const pairs = 100
+	for i := range pairs {
+		s := counter(c, sourceRead)
+		if s < last {
+			t.Fatalf("pair %d: the source said %d after %d", i, s, last)
 		}
+		n := counter(c, copyRead)
+		if n < s {
+			t.Fatalf("pair %d: after the source showed %d, the read for the copy said %d: it went back", i, s, n)
+		}
+		last = n
 	}
-	r := reasons()
-	t.Logf("while the source writes: copy_too_old %d, answers_the_same %d", r[pgshim.ReasonCopyTooOld], r[pgshim.ReasonAnswersTheSame])
-	if r[pgshim.ReasonCopyTooOld] == 0 {
-		t.Logf("the copy kept up with every answer of the source; the rule was not needed this run")
+	stopWriter()
+	<-wrote
+	after := reasons()
+	byCopy := after[pgshim.ReasonAnswersTheSame] - before[pgshim.ReasonAnswersTheSame]
+	tooOld := after[pgshim.ReasonCopyTooOld] - before[pgshim.ReasonCopyTooOld]
+	t.Logf("constant writes: of %d reads for the copy after the source answered, the copy answered %d (%.0f%%), the source %d (copy_too_old)",
+		pairs, byCopy, 100*float64(byCopy)/pairs, tooOld)
+	if byCopy*2 < pairs {
+		t.Errorf("the copy answered %d of %d reads for it: most should wait for it and be answered there", byCopy, pairs)
 	}
 
-	// A quiet source: nothing written after the last change. Once capture
-	// has it, the copy holds the source's state, but its data reaches the
-	// last change's commit, which no later answer of the source is before.
+	// A quiet source: nothing written. The copy waits for capture's saved
+	// position, which on a quiet source reaches the source's through the
+	// walsender's own position, and answers.
 	time.Sleep(3 * time.Second)
-	if n := counter(c, sourceRead); n != 21 {
-		t.Fatalf("the source, quiet: %d", n)
-	}
-	before := reasons()
-	copied := false
+	final := counter(c, sourceRead)
+	quietBefore := reasons()
+	copied := 0
 	for range 10 {
-		if n := counter(c, copyRead); n != 21 {
-			t.Fatalf("a quiet source: %d, want 21", n)
+		if n := counter(c, copyRead); n != final {
+			t.Fatalf("a quiet source: %d, want %d", n, final)
 		}
-		if reasons()[pgshim.ReasonAnswersTheSame] > before[pgshim.ReasonAnswersTheSame] {
-			copied = true
-			break
-		}
-		time.Sleep(time.Second)
+		_ = counter(c, sourceRead)
 	}
-	t.Logf("a quiet source, 10 s after the source's last answer: the copy answered this connection again: %v", copied)
+	copied = int(reasons()[pgshim.ReasonAnswersTheSame] - quietBefore[pgshim.ReasonAnswersTheSame])
+	t.Logf("a quiet source: the copy answered %d of 10 reads for it after the source answered", copied)
 
 	// A connection the source never answered reads the copy, fresh.
 	d := pgClient(t, ctx, dsn, nil)
 	pgTestWait(t, "another connection to read the copy's newest value", 60*time.Second, func() (bool, string) {
 		n := counter(d, copyRead)
-		return n == 21, strconv.Itoa(n)
+		return n == final, strconv.Itoa(n)
 	})
 }

@@ -82,6 +82,14 @@ type session struct {
 	// connection: the copy may not answer it with data older than that
 	// (copyOlderThanSource). Zero when the source never answered one.
 	sourceAnsweredAt time.Time
+	// copyWant is the source's WAL position read on the connection that
+	// asked for a statement's plan, at copyWantAt, kept for the wait of the
+	// statement the copy then runs (waitForCopy).
+	copyWant   uint64
+	copyWantAt time.Time
+	// slotWaitCap, when set, bounds the wait for a connection to the source
+	// (source), below the statement's own.
+	slotWaitCap time.Duration
 }
 
 // initSettings sets a connection's settings before its start-up message is

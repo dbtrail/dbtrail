@@ -165,6 +165,17 @@ type fakeSource struct {
 	mu       sync.Mutex
 	explains []string
 	queries  []string
+	// positions counts the reads of its WAL position.
+	positions int
+}
+
+// fakeWALPosition is the WAL position a fakeSource says it stands at.
+const fakeWALPosition = "16/B374D848"
+
+func (f *fakeSource) positionsRead() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.positions
 }
 
 func startFakeSource(t *testing.T, plans map[string]string) *fakeSource {
@@ -265,6 +276,13 @@ func (f *fakeSource) serve(c net.Conn) {
 					be.Send(&pgproto3.DataRow{Values: [][]byte{[]byte(answer)}})
 					be.Send(&pgproto3.CommandComplete{CommandTag: []byte("EXPLAIN")})
 				}
+			case strings.Contains(q, "pg_current_wal_lsn()"):
+				f.mu.Lock()
+				f.positions++
+				f.mu.Unlock()
+				be.Send(&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{{Name: []byte("lsn"), DataTypeOID: 3220, DataTypeSize: 8, TypeModifier: -1}}})
+				be.Send(&pgproto3.DataRow{Values: [][]byte{[]byte(fakeWALPosition)}})
+				be.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")})
 			case strings.HasPrefix(upper, "SET"):
 				be.Send(&pgproto3.CommandComplete{CommandTag: []byte("SET")})
 			case upper == "BEGIN" || strings.HasPrefix(upper, "BEGIN "):
@@ -353,11 +371,15 @@ type costLogin struct {
 	// the most held at once.
 	slots   chan struct{}
 	maxHeld atomic.Int32
-	// age, when set, is the copy's RunAge.
-	age func() CopyAge
+	// age, when set, is the copy's RunAge; wait its CopyWait. runs counts
+	// the statements the copy ran.
+	age  func() CopyAge
+	wait func(ctx context.Context, lsn uint64) (CopyWaitOutcome, string)
+	runs atomic.Int32
 }
 
 func (l *costLogin) run(_ context.Context, st string, _ RunOptions) (sqlsandbox.Result, error) {
+	l.runs.Add(1)
 	l.mu.Lock()
 	l.heldAtCopy = append(l.heldAtCopy, l.held.Load())
 	l.mu.Unlock()
@@ -398,6 +420,9 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 		}}
 	}
 	b.RunAge = l.age
+	if l.wait != nil {
+		b.CopyWait = l.wait
+	}
 	return b, nil
 }
 

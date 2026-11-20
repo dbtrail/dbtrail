@@ -111,7 +111,26 @@ type Binding struct {
 	// copy (copyOlderThanSource); nil: the copy's answers are given as they
 	// are.
 	RunAge func() CopyAge
+	// CopyWait, when set, waits within ctx until the copy holds every commit
+	// of the source before lsn, a WAL position, and says whether it does, or
+	// why not (waitForCopy). nil: nothing waits, and RunAge alone decides.
+	CopyWait func(ctx context.Context, lsn uint64) (CopyWaitOutcome, string)
 }
+
+// CopyWaitOutcome is what Binding.CopyWait found.
+type CopyWaitOutcome int
+
+const (
+	// CopyNoWait: there is nothing to wait on (no recent changes are kept
+	// for the server yet: the copy's run starts them); the copy runs, and
+	// RunAge decides after.
+	CopyNoWait CopyWaitOutcome = iota
+	// CopyReached: the copy holds every commit before the position.
+	CopyReached
+	// CopyNotReached: it does not within the time given, or cannot; the
+	// source answers.
+	CopyNotReached
+)
 
 // CopyAge is how far the data of a statement the copy ran reaches.
 type CopyAge struct {
@@ -293,6 +312,13 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	if refusal := s.admitResult(); refusal != nil {
 		return nil, nil, nil, "", refusal
 	}
+	// On a connection the source answered, the copy first waits to reach
+	// what the source showed it (#2985), or the source answers instead,
+	// before the copy does any work.
+	waited, stop := s.waitForCopy(ctx, qstr)
+	if stop != nil {
+		return nil, nil, nil, "", stop
+	}
 	res, err := s.bound.Run(ctx, s.copyText(qstr), s.runOptions())
 	if res.Spool != nil {
 		// Only a bug gets here: this port asks for no result in a file.
@@ -308,7 +334,7 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		}
 		return nil, nil, nil, "", perr
 	}
-	if why := s.copyOlderThanSource(); why != "" {
+	if why := s.copyOlderThanSource(waited); why != "" {
 		// Nothing of it was sent: the source answers instead (#2985).
 		s.logger.Debug("pgshim: the copy's answer is older than the source's last one on this connection; the source answers", "why", why)
 		s.fallTo(ReasonCopyTooOld)

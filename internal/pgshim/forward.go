@@ -203,7 +203,11 @@ func (s *session) source() (*upstream, *pgErr) {
 		// taken (#2985).
 		var ctx context.Context
 		var cancel context.CancelFunc
-		if d := s.set.stmtTimeout; d > 0 {
+		d := s.set.stmtTimeout
+		if c := s.slotWaitCap; c > 0 && (d <= 0 || c < d) {
+			d = c
+		}
+		if d > 0 {
 			ctx, cancel = context.WithTimeout(s.connContext(), d)
 		} else {
 			ctx, cancel = context.WithCancel(s.connContext())
