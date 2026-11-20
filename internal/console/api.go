@@ -486,8 +486,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// PostgreSQL index, show the rows of tables that were not at REPLICA
 	// IDENTITY FULL, and let changed_column also return the UPDATEs whose
 	// changed columns are unknown (query.Options.PostgresHistory).
-	var flavorWarning string
-	opts.PostgresHistory, flavorWarning = s.historyIsPostgres(b)
+	opts.PostgresHistory = s.historyIsPostgres(b)
 	// The anchor is accepted here for exactly the reason stated above the cap,
 	// and it is the sharper case: unmirrored, the preview lists the row's whole
 	// history up to the clicked second while the script reverses one event of
@@ -579,9 +578,6 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// under an anchor is the same ambiguity, rendered as "0 affected event(s)".
 	warnings = append(anchorMissedWarning(opts, len(rows)), warnings...)
 	warnings = append(warnings, pgHistoryWarnings(opts, rows)...)
-	if flavorWarning != "" {
-		warnings = append(warnings, flavorWarning)
-	}
 	resp := eventsResponse{
 		Events:   toEventDTOs(rows, opts.PostgresHistory),
 		Count:    len(rows),

@@ -21,6 +21,10 @@ func TestIntegrationEventsAPIPostgresHistory(t *testing.T) {
 			db := srv.cm.boot.db
 			testutil.MustExec(t, db, `INSERT INTO stream_state (id, mode, flavor, last_checkpoint, server_id)
 				VALUES (1, 'position', ?, UTC_TIMESTAMP(), 1)`, flavor)
+			// The console reads the boot index's flavor once, at startup
+			// (server.go); the stamp above came after New, so set what that
+			// read would have found.
+			srv.cm.boot.pgSource = flavor == "postgres"
 			testutil.InsertEvent(t, db, "0/16B3748", 200, 250, "2026-06-01 12:10:00", nil, "app", "users", 2, "2",
 				[]byte(`null`), []byte(`{"id": "2", "name": {"__bintrail_not_captured__": true}}`),
 				[]byte(`{"id": "2", "name": "bob", "bio": {"__bintrail_unchanged_toast__": true}}`))

@@ -103,24 +103,20 @@ func toEventDTOs(rows []query.ResultRow, postgres bool) []eventDTO {
 }
 
 // historyIsPostgres is Options.PostgresHistory for the Events view of b's
-// server, with query.FlavorUnreadableWarning when it could not be told. A
-// registry server answers from its entry, whose flavor is fixed when it is
-// made (sourceIsPostgres): no read, and so no failure, and a registry index
-// the console never migrated cannot raise the warning on every page. The
-// server given on the command line has no entry and reads its index, as the
-// query command does.
-func (s *Server) historyIsPostgres(b *bundle) (bool, string) {
+// server, decided the way the SQL card decides it (sourceIsPostgres): a
+// registry server from its entry, whose flavor is fixed when it is made, the
+// server given on the command line from what its index said when the console
+// started. Nothing is read per request, so no page of a MySQL server pays a
+// query for it, and there is no read that can fail and pass for MySQL.
+func (s *Server) historyIsPostgres(b *bundle) bool {
 	if b == nil {
-		return false, ""
+		return false
 	}
-	if b.serverID != "" && b.serverID != bootServerID {
-		var get func(string) (ServerEntry, bool)
-		if s.cm != nil && s.cm.reg != nil {
-			get = s.cm.reg.Get
-		}
-		return sourceIsPostgres(b.serverID, false, get), ""
+	var get func(string) (ServerEntry, bool)
+	if s.cm != nil && s.cm.reg != nil {
+		get = s.cm.reg.Get
 	}
-	return query.HistoryFlavor(b.db)
+	return sourceIsPostgres(b.serverID, b.pgSource, get)
 }
 
 // pgHistoryWarnings is the Events response's warning for a changed-column

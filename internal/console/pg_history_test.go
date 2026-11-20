@@ -2,7 +2,6 @@ package console
 
 import (
 	"encoding/json"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -76,9 +75,9 @@ func TestPGHistoryWarnings(t *testing.T) {
 	}
 }
 
-// A registry server answers from its entry and never reads its index for
-// this (so an index the console never migrated cannot warn on every page);
-// the server given on the command line reads it and warns when it cannot.
+// The Events view decides PostgreSQL the SQL card's way and never reads the
+// index for it per request: the boot server from what its index said at
+// startup, a registry server from its entry.
 func TestHistoryIsPostgres(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -86,22 +85,22 @@ func TestHistoryIsPostgres(t *testing.T) {
 	}
 	defer db.Close()
 	s := &Server{}
-	if pg, warn := s.historyIsPostgres(&bundle{serverID: "pg-1", db: db}); pg || warn != "" {
-		t.Errorf("registry server with no registry: %v %q", pg, warn)
+	for _, tc := range []struct {
+		b    *bundle
+		want bool
+	}{
+		{&bundle{serverID: bootServerID, pgSource: true, db: db}, true},
+		{&bundle{pgSource: true, db: db}, true},
+		{&bundle{serverID: bootServerID, db: db}, false},
+		{&bundle{serverID: "pg-1", pgSource: true, db: db}, false}, // not in a registry
+		{nil, false},
+	} {
+		if got := s.historyIsPostgres(tc.b); got != tc.want {
+			t.Errorf("historyIsPostgres(%+v) = %v, want %v", tc.b, got, tc.want)
+		}
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("a registry server read its index: %v", err)
-	}
-	mock.ExpectQuery("SELECT flavor FROM stream_state").WillReturnError(errors.New("Unknown column 'flavor'"))
-	if pg, warn := s.historyIsPostgres(&bundle{serverID: bootServerID, db: db}); pg || warn != query.FlavorUnreadableWarning {
-		t.Errorf("boot server, read fails: %v %q", pg, warn)
-	}
-	mock.ExpectQuery("SELECT flavor FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"flavor"}).AddRow("postgres"))
-	if pg, warn := s.historyIsPostgres(&bundle{db: db}); !pg || warn != "" {
-		t.Errorf("boot server, postgres: %v %q", pg, warn)
-	}
-	if pg, warn := s.historyIsPostgres(nil); pg || warn != "" {
-		t.Errorf("nil bundle: %v %q", pg, warn)
+		t.Errorf("the index was read: %v", err)
 	}
 }
 
