@@ -576,8 +576,16 @@ func TestReconstructTables_PGTablePairContinuesThePairBefore(t *testing.T) {
 // the pair, with the window's changes alone read from the index: what the
 // pair held is in the table, and is not read again.
 func TestReconstructTables_PGTablePairEndsWithoutReadingItsChangesAgain(t *testing.T) {
-	for name, changes := range map[string]bool{"changes in the window": true, "no change in the window": false} {
+	type tc struct{ changes, byEngine bool }
+	for name, c := range map[string]tc{
+		"changes in the window, folded by the engine":   {true, true},
+		"no change in the window, folded by the engine": {false, true},
+		"changes in the window, row by row":             {true, false},
+		"no change in the window, row by row":           {false, false},
+	} {
+		changes := c.changes
 		t.Run(name, func(t *testing.T) {
+			folds := reconstruct.CountPGFoldsByEngine(t, c.byEngine)
 			f := newPGFixture(t)
 			onRoot, offRoot := t.TempDir(), t.TempDir()
 			taken := f.at(10 * time.Minute)
@@ -628,9 +636,68 @@ func TestReconstructTables_PGTablePairEndsWithoutReadingItsChangesAgain(t *testi
 			if r.EventsApplied != window {
 				t.Fatalf("second update applied %d events; want the %d of its window, not the 3 the pair held", r.EventsApplied, window)
 			}
+			// Written the way this case names: by the engine once, or not
+			// by it at all.
+			if want := map[bool]int{true: 1, false: 0}[c.byEngine]; *folds != want {
+				t.Fatalf("the engine folded %d tables; want %d", *folds, want)
+			}
+			// Its footer has the keys the row-by-row merge writes, no other,
+			// and the values that do not depend on which file it came from.
+			duck, err := sql.Open("duckdb", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer duck.Close()
+			onKV, err := pgdelta.Footer(context.Background(), duck, f.tableFile(onRoot, at2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			offKV, err := pgdelta.Footer(context.Background(), duck, f.tableFile(offRoot, at2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for k := range onKV {
+				if _, ok := offKV[k]; !ok && changes {
+					t.Errorf("the rewritten file's footer has %q, which the row-by-row merge with deltas off does not write", k)
+				}
+			}
+			for k, v := range offKV {
+				got, ok := onKV[k]
+				if !ok {
+					t.Errorf("the rewritten file's footer lacks %q", k)
+				}
+				if changes && got != v && !strings.Contains(k, "derived_from") && !strings.Contains(k, "generation") {
+					t.Errorf("footer %q is %q; with deltas off %q", k, got, v)
+				}
+			}
 			// What only the pair held is in the table.
 			if got["1"] != "one" || got["2"] != "" {
 				t.Fatalf("second update: row 1 reads %q and row 2 %q; want one, and no row 2", got["1"], got["2"])
+			}
+			// The file a fold by the engine writes carries the footer the
+			// row-by-row merge writes: the folder with deltas off has that one.
+			onMD, err := baseline.ReadParquetMetadata(f.tableFile(onRoot, at2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			offMD, err := baseline.ReadParquetMetadata(f.tableFile(offRoot, at2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if onMD.LSN != offMD.LSN || onMD.PGDeltaSince != offMD.PGDeltaSince || onMD.PGDeltaSince == "" || onMD.PGRelation != offMD.PGRelation ||
+				onMD.RenderGUCs != offMD.RenderGUCs || onMD.LockMode != offMD.LockMode || onMD.LockMode == "" ||
+				// With no change the folder with deltas off carried its file,
+				// which keeps the time of the update that wrote it.
+				(changes && !onMD.SnapshotTimestamp.Equal(offMD.SnapshotTimestamp)) || !onMD.SnapshotTimestamp.Equal(at2) {
+				t.Fatalf("the rewritten file's footer: LSN %d since %q taken %s lock %q; with deltas off: LSN %d since %q taken %s lock %q",
+					onMD.LSN, onMD.PGDeltaSince, onMD.SnapshotTimestamp, onMD.LockMode, offMD.LSN, offMD.PGDeltaSince, offMD.SnapshotTimestamp, offMD.LockMode)
+			}
+			// And the update after it writes a pair beside that file.
+			f.event(0x900, 32*time.Minute, 2, "9", s("nine"))
+			f.checkpoint(0x900)
+			at3 := f.at(40 * time.Minute)
+			if r, _ := run(at3, f.base); len(f.pairFiles(onRoot, at3)) != 2 || r.EventsApplied != 1 || !f.sameFile(f.tableFile(onRoot, at2), f.tableFile(onRoot, at3)) {
+				t.Fatalf("third update: delta files %v, %d events; want a pair of 1 change beside the rewritten file", f.pairFiles(onRoot, at3), r.EventsApplied)
 			}
 		})
 	}
