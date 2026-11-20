@@ -228,6 +228,14 @@ func TestRouteByCost_2985_noReadGoesBackAfterTheSource(t *testing.T) {
 	if got := costSimple(ctx, d, l, report); got != onCopy {
 		t.Errorf("another connection: %+v, want %+v", got, onCopy)
 	}
+	// Nor one the source only answered with an error: the client was given
+	// no value to go back from.
+	if got := costSimple(ctx, d, l, "SELECT count(*) FROM nosuch"); got.code != "42P01" || got.side != RouteSource {
+		t.Fatalf("a table neither side has: %+v", got)
+	}
+	if got := costSimple(ctx, d, l, report); got != onCopy {
+		t.Errorf("after the source's error: %+v, want %+v", got, onCopy)
+	}
 }
 
 // The verdict on a statement shape is remembered for a while, only when it

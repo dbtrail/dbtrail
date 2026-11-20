@@ -1105,10 +1105,10 @@ func (s *session) noteIfFailed(st *preparedStatement) {
 
 // routeNote tells the host how a statement was answered.
 func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, failed bool) {
-	if d.side == RouteSource {
+	if d.side == RouteSource && !failed {
 		// When it ended, not when it was sent: the source's answer may hold
-		// any change committed before then (copyOlderThanSource). Failed
-		// too: a statement that failed may have sent rows first.
+		// any change committed before then (copyOlderThanSource). Not one
+		// that failed: the client was given an error, not an answer.
 		s.sourceAnsweredAt = time.Now()
 	}
 	if s.bound == nil || s.bound.Routed == nil || d.side == "" {

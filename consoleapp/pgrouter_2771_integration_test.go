@@ -172,8 +172,10 @@ func TestIntegrationPGRouterForward(t *testing.T) {
 		if got := one(ctx, c, "COMMIT"); got != "COMMIT" || c.TxStatus() != 'I' {
 			t.Errorf("COMMIT: %q, status %c", got, c.TxStatus())
 		}
-		if got := one(ctx, c, count); got != "2" {
-			t.Errorf("after the block: %q, want the copy's 2 again", got)
+		// The block showed this connection the source's 3: the copy's 2
+		// would read back from it, so the source answers (#2985).
+		if got := one(ctx, c, count); got != "3" {
+			t.Errorf("after the block: %q, want the source's 3, not the copy's older 2", got)
 		}
 	})
 
@@ -469,8 +471,9 @@ func TestIntegrationPGRouterForward(t *testing.T) {
 			if err := tx.Commit(ctx); err != nil {
 				t.Errorf("mode %v: commit: %v", mode, err)
 			}
-			if got := n(nil); got != 2 {
-				t.Errorf("mode %v after: %d", mode, got)
+			// After the block, not the copy's older 2 (#2985).
+			if got := n(nil); got != 3 {
+				t.Errorf("mode %v after: %d, want the source's 3", mode, got)
 			}
 			// An error in a batch inside the block: the block fails, the
 			// rest of the batch is discarded, ROLLBACK ends it.
@@ -489,8 +492,8 @@ func TestIntegrationPGRouterForward(t *testing.T) {
 			if err := tx.Rollback(ctx); err != nil {
 				t.Errorf("mode %v: rollback: %v", mode, err)
 			}
-			if got := n(nil); got != 2 {
-				t.Errorf("mode %v after a failed batch: %d", mode, got)
+			if got := n(nil); got != 3 {
+				t.Errorf("mode %v after a failed batch: %d, want the source's 3", mode, got)
 			}
 			conn.Close(ctx)
 		}
@@ -655,7 +658,7 @@ func TestIntegrationPGRouterForward(t *testing.T) {
 				t.Fatal(err)
 			}
 			out, err := exec.CommandContext(ctx, python, script, env.portDSN()).CombinedOutput()
-			if got := strings.TrimSpace(string(out)); err != nil || got != "outside=2 inside=3 three after=2 write=25006" {
+			if got := strings.TrimSpace(string(out)); err != nil || got != "outside=2 inside=3 three after=3 write=25006" {
 				t.Errorf("psycopg: %v %q", err, got)
 			}
 		}
@@ -674,7 +677,7 @@ func TestIntegrationPGRouterForward(t *testing.T) {
 		}
 		jdbcURL := fmt.Sprintf("jdbc:postgresql://%s:%s/pgsrv?user=anyone&password=tok&sslmode=disable", env.host, env.port)
 		out, err := exec.CommandContext(ctx, java, "-cp", jar, src, jdbcURL).CombinedOutput()
-		if got := strings.TrimSpace(string(out)); err != nil || got != "outside=2 inside=3 three after=2 write=25006" {
+		if got := strings.TrimSpace(string(out)); err != nil || got != "outside=2 inside=3 three after=3 write=25006" {
 			t.Errorf("JDBC: %v %q", err, got)
 		}
 	})
@@ -687,7 +690,7 @@ func TestIntegrationPGRouterForward(t *testing.T) {
 		out, err := exec.CommandContext(ctx, psql, "-X", "-At", "-v", "ON_ERROR_STOP=0",
 			"-c", count, "-c", "BEGIN", "-c", count, "-c", "SELECT v FROM "+pgFwdTable+" WHERE id = 3", "-c", "COMMIT", "-c", count,
 			env.portDSN()).CombinedOutput()
-		if got := strings.Fields(strings.TrimSpace(string(out))); err != nil || strings.Join(got, " ") != "2 BEGIN 3 three COMMIT 2" {
+		if got := strings.Fields(strings.TrimSpace(string(out))); err != nil || strings.Join(got, " ") != "2 BEGIN 3 three COMMIT 3" {
 			t.Errorf("psql: %v %q", err, out)
 		}
 	})

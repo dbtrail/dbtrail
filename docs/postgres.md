@@ -1103,7 +1103,9 @@ server, closes the connections that use it; clients reconnect.
   is refused. A connection that is lost, or whose read-only guard was turned
   off, is not replaced behind the client's back: a statement that needs the
   source answers `08006 ... reconnect` (a block open at that moment fails, and
-  only its `ROLLBACK` is answered), while reads on the copy go on.
+  only its `ROLLBACK` is answered), while reads on the copy go on, except one
+  the copy would answer with data older than what the source already
+  answered that connection (see below), which gets the same `08006`.
 - **Every wait for the source is bounded** by the port's five-minute cap on a
   statement, besides the client's `statement_timeout` and cancel.
 - **When the source cannot be reached**: `08001 cannot connect to the source`;
@@ -1256,8 +1258,8 @@ What this costs and where it can go wrong:
   first and its answer is dropped, so such a statement costs both sides.
   The comparison is between the source's commit times and this process's
   clock: a source clock ahead of the router's by more than the copy's lag
-  lets an older answer through. A connection the source never answered
-  reads the copy as before.
+  lets an older answer through. A connection the source never answered, or
+  answered only with an error, reads the copy as before.
 - **An `EXPLAIN` the source refuses** (a table it does not have, a syntax it
   does not take) sends the statement to the source, which answers it with
   its own error (`explain_failed` in `/status`). So does a text of more than

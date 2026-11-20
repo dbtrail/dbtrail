@@ -132,12 +132,13 @@ func TestIntegrationPGRouterRoutesByPlan(t *testing.T) {
 		t.Errorf("the sum on another connection: %q", got)
 	}
 
-	// #2985: 50 clients reading by key, over the port's 16 connections to
-	// the source: each waits for a connection, and none is refused (53300).
+	// #2985: 24 clients reading by key (the fixture takes 32), over the
+	// port's 16 connections to the source: each waits for a connection, and
+	// none is refused (53300).
 	var wg sync.WaitGroup
 	var failed atomic.Int32
 	firstErr := make(chan string, 1)
-	for i := range 50 {
+	for i := range 24 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -164,7 +165,7 @@ func TestIntegrationPGRouterRoutesByPlan(t *testing.T) {
 	}
 	wg.Wait()
 	if n := failed.Load(); n != 0 {
-		t.Errorf("%d of 500 reads by key from 50 clients failed; the first: %s", n, <-firstErr)
+		t.Errorf("%d of 240 reads by key from 24 clients failed; the first: %s", n, <-firstErr)
 	}
 	// A statement the source refuses to plan: it goes there, and the
 	// client gets PostgreSQL's own error.
