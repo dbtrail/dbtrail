@@ -448,8 +448,9 @@ func CanonicalPKValues(s string) string {
 // It also returns nil when the before image holds the not-captured marker
 // (NotCapturedKey): a PostgreSQL table below REPLICA IDENTITY FULL sends only
 // the key of the earlier row, so which columns changed is unknown, and unknown
-// is stored as NULL rather than as a guess. A MySQL image never carries the
-// marker (pinned by TestChangedColumns_MySQLGolden).
+// is stored as NULL rather than as a guess. The MySQL capture never produces
+// the marker (MySQL output pinned by TestChangedColumns_MySQLGolden; see
+// NotCapturedKey for the one JSON value that matches it).
 func ChangedColumns(before, after map[string]any) []string {
 	if before == nil || after == nil {
 		return nil

@@ -126,8 +126,10 @@ func CheckUnresolvedToast(schema, table, pkValues string, images ...map[string]a
 // ({NotCapturedKey: true}), structurally distinct from every real PostgreSQL
 // value, which the index stores as text.
 //
-// The key is persisted in binlog_events row images and must never change. A
-// MySQL image never carries it.
+// The key is persisted in binlog_events row images and must never change. The
+// MySQL capture never produces it; a MySQL JSON column can only match it by
+// storing exactly {"__bintrail_not_captured__": true}, which, as with the
+// unchanged-TOAST marker, cannot be told apart from the marker by construction.
 const NotCapturedKey = "__bintrail_not_captured__"
 
 // IsNotCapturedMarker reports whether v is exactly the not-captured marker

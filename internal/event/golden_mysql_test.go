@@ -15,7 +15,8 @@ const notCapturedKeyLiteral = "__bintrail_not_captured__"
 // returns for row images a MySQL source produces, as the indexer stores it
 // (json.Marshal of the result into binlog_events.changed_columns). The
 // PostgreSQL not-captured marker changes ChangedColumns for images that carry
-// it; a MySQL image never does, so every line here must stay exactly as it is.
+// it; the MySQL capture never produces it, so every line here must stay
+// exactly as it is.
 // The near-miss cases are MySQL JSON values that look like the marker but are
 // not its exact shape (a one-key map whose value is true).
 func TestChangedColumns_MySQLGolden(t *testing.T) {
