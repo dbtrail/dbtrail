@@ -94,6 +94,14 @@ type Target struct {
 	// deliberately NEVER migrated (the console's read-only contract confines
 	// DDL to the command-line DSN).
 	EnsureSchema bool
+	// SourcePostgres, when set, is the surface's own answer to "is this a
+	// PostgreSQL index" for the query tool's history rendering
+	// (query.Options.PostgresHistory): the console sets it from the decision
+	// its Events view uses, without a read, because it never migrates
+	// registry servers and an old index's flavor read would fail on every
+	// call. nil (standalone): the tool reads it with query.HistoryFlavor and
+	// warns when it cannot.
+	SourcePostgres *bool
 	// EnvArchiveDiscovery consults BINTRAIL_ARCHIVE_S3 + BINTRAIL_ID before
 	// falling back to archive_state auto-discovery (standalone behavior).
 	// False on the console, whose archive posture is per-server.
@@ -749,7 +757,11 @@ func MakeQueryTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Query
 		// changed_column also return the UPDATEs whose changed columns are
 		// unknown (query.Options.PostgresHistory). Recover never sets it.
 		var flavorWarning string
-		opts.PostgresHistory, flavorWarning = query.HistoryFlavor(t.DB)
+		if t.SourcePostgres != nil {
+			opts.PostgresHistory = *t.SourcePostgres
+		} else {
+			opts.PostgresHistory, flavorWarning = query.HistoryFlavor(t.DB)
+		}
 		pgChangedColumn := opts.PostgresHistory && opts.ChangedColumn != ""
 
 		// Hard ceiling on an explicit, oversized limit (#654). BuildQueryOptions
