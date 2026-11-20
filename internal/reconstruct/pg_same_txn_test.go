@@ -529,9 +529,9 @@ func TestPGImageState(t *testing.T) {
 		}
 	}
 	for name, img := range map[string]map[string]any{
-		"no image":                  nil,
-		"a number":                  {"id": json.Number("1")},
-		"a boolean":                 {"id": "1", "v": true},
+		"no image":  nil,
+		"a number":  {"id": json.Number("1")},
+		"a boolean": {"id": "1", "v": true},
 	} {
 		if got := pgImageState(img); got.Kind != pgStateUnknown {
 			t.Errorf("%s: %+v, want a state that cannot be compared", name, got)
