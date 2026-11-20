@@ -171,6 +171,107 @@ func BasePositionsOf(ctx context.Context, db *sql.DB, basePath string, keyColumn
 	return found, nil
 }
 
+// BaseValuesOf is, for each of keys the base file holds, the text of the
+// named columns in that key's row: nil for a NULL. A key the file does not
+// hold is absent from the answer. Keys are compared as their bytes, as
+// BasePositionsOf compares them; a wanted key the file holds twice, a row of
+// the file with a NULL in a key column, and a column the file does not have
+// are errors. The values are the file's own bytes: a PostgreSQL table's file
+// holds PostgreSQL's text for every column.
+func BaseValuesOf(ctx context.Context, db *sql.DB, basePath string, keyColumns, keys, columns []string) (map[string]map[string]*string, error) {
+	if len(keyColumns) == 0 {
+		return nil, errors.New("pgdelta: a table with no key column")
+	}
+	found := map[string]map[string]*string{}
+	if len(keys) == 0 || len(columns) == 0 {
+		return found, nil
+	}
+	quote := func(c string) string { return `"` + strings.ReplaceAll(c, `"`, `""`) + `"` }
+	parts := make([]string, len(keyColumns))
+	nulls := make([]string, len(keyColumns))
+	for i, c := range keyColumns {
+		parts[i] = `replace(replace(` + quote(c) + `, '\', '\\'), '|', '\|')`
+		nulls[i] = quote(c) + " IS NULL"
+	}
+	src := "read_parquet(" + file(basePath) + ", file_row_number=true" + noHive + ")"
+	shape, err := db.QueryContext(ctx, "SELECT * FROM "+src+" LIMIT 0")
+	if err != nil {
+		return nil, fmt.Errorf("read the columns of %s: %w", basePath, err)
+	}
+	has, err := shape.Columns()
+	shape.Close()
+	if err != nil {
+		return nil, fmt.Errorf("read the columns of %s: %w", basePath, err)
+	}
+	in := make(map[string]bool, len(has))
+	for _, c := range has {
+		in[c] = true
+	}
+	sel := make([]string, len(columns))
+	for i, c := range columns {
+		if !in[c] {
+			return nil, fmt.Errorf("%s has no column %s", basePath, c)
+		}
+		sel[i] = "encode(bintrail_b." + quote(c) + ")"
+	}
+	var badRow sql.NullInt64
+	if err := db.QueryRowContext(ctx, "SELECT min(file_row_number) FROM "+src+" WHERE "+strings.Join(nulls, " OR ")).Scan(&badRow); err != nil {
+		return nil, fmt.Errorf("read the keys of %s: %w", basePath, err)
+	}
+	if badRow.Valid {
+		return nil, fmt.Errorf("row %d of %s has no value in a key column (%s)", badRow.Int64, basePath, strings.Join(keyColumns, ", "))
+	}
+	wanted, cleanup, err := writeWantedKeys(keys)
+	if err != nil {
+		return nil, fmt.Errorf("write the keys to look for in %s: %w", basePath, err)
+	}
+	defer cleanup()
+	rows, err := db.QueryContext(ctx, "SELECT bintrail_w.bintrail_k, bintrail_b.file_row_number, "+strings.Join(sel, ", ")+
+		" FROM (SELECT *, encode("+strings.Join(parts, " || '|' || ")+") AS bintrail_k FROM "+src+") AS bintrail_b"+
+		" JOIN (SELECT DISTINCT encode("+KeyColumn+") AS bintrail_k FROM read_parquet("+file(wanted)+noHive+")) AS bintrail_w"+
+		" ON bintrail_b.bintrail_k = bintrail_w.bintrail_k")
+	if err != nil {
+		return nil, fmt.Errorf("read the rows of the changed keys in %s: %w", basePath, err)
+	}
+	defer rows.Close()
+	at := map[string]int64{}
+	for rows.Next() {
+		var raw []byte
+		var pos int64
+		vals := make([][]byte, len(columns))
+		dest := make([]any, 0, len(columns)+2)
+		dest = append(dest, &raw, &pos)
+		for i := range vals {
+			dest = append(dest, &vals[i])
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return nil, fmt.Errorf("read the rows of the changed keys in %s: %w", basePath, err)
+		}
+		key := string(raw)
+		if first, twice := at[key]; twice {
+			if first > pos {
+				first, pos = pos, first
+			}
+			return nil, fmt.Errorf("%s holds key %q twice, at rows %d and %d", basePath, key, first, pos)
+		}
+		at[key] = pos
+		row := make(map[string]*string, len(columns))
+		for i, c := range columns {
+			if vals[i] != nil {
+				text := string(vals[i])
+				row[c] = &text
+			} else {
+				row[c] = nil
+			}
+		}
+		found[key] = row
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the rows of the changed keys in %s: %w", basePath, err)
+	}
+	return found, nil
+}
+
 // writeWantedKeys writes keys to a Parquet file of one column (KeyColumn) in
 // a folder of its own, and returns the file and what removes the folder.
 func writeWantedKeys(keys []string) (path string, cleanup func(), err error) {
