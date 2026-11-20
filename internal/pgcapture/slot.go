@@ -573,7 +573,13 @@ func ListUncoveredCascadeChildren(ctx context.Context, conn *pgx.Conn, publicati
 // ensureSlot fails loud in that case rather than skip; the recovery policy
 // (re-baseline) is #532.
 func ensureSlot(ctx context.Context, replConn *pgconn.PgConn, queryConn *pgx.Conn, slotName string, savedLSN pglogrepl.LSN, expectExisting bool) (pglogrepl.LSN, error) {
-	found, walStatus, err := querySlotState(ctx, queryConn, slotName)
+	// By its identity, not its name alone: a physical slot, a slot of
+	// another plugin or one of another database that happens to be called
+	// this is not the capture's, and resuming "on" it would look healthy
+	// while reading a stream nobody positioned (queryScopedSlotState, as
+	// EnsureSlotExists has always asked). Catalog columns only, so a standby
+	// source answers it like a primary.
+	found, walStatus, err := queryScopedSlotState(ctx, queryConn, slotName)
 	if err != nil {
 		return 0, err
 	}

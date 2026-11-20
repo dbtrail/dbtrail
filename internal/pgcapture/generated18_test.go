@@ -25,6 +25,10 @@ func TestGeneratedColumnsProblem(t *testing.T) {
 			has: []string{`ALTER TABLE "public"."items" REPLICA IDENTITY DEFAULT;`, "VIRTUAL", "cannot be captured",
 				`ALTER PUBLICATION "pub" DROP TABLE "public"."items";`, "FOR ALL TABLES"},
 			lacks: []string{"publish_generated_columns"}},
+		{name: "a virtual column of a table in two publications", found: []UnpublishedGenerated{
+			{Schema: "public", Table: "items", Column: "label", Virtual: true, Publication: "p1"},
+			{Schema: "public", Table: "items", Column: "label", Virtual: true, Publication: "p2"}},
+			has: []string{"1 table", `ALTER PUBLICATION "p1" DROP TABLE "public"."items"; ALTER PUBLICATION "p2" DROP TABLE "public"."items";`}},
 		{name: "one of each", found: []UnpublishedGenerated{virtual, stored},
 			has: []string{"2 tables", `ALTER TABLE "public"."items" REPLICA IDENTITY DEFAULT; ALTER TABLE "public"."orders" REPLICA IDENTITY DEFAULT;`,
 				`SET (publish_generated_columns = stored);`, `DROP TABLE "public"."items";`}},

@@ -2,6 +2,7 @@ package pgcapture
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -367,7 +368,14 @@ func (c *Capturer) receiveLoop(ctx context.Context, replConn *pgconn.PgConn, dec
 		if !ok {
 			continue
 		}
-		switch cd.Data[0] {
+		// A message with nothing in it has no kind to read: an error the
+		// supervisor reconnects on, where reading its first byte stopped
+		// the whole process.
+		kind, err := copyDataKind(cd.Data)
+		if err != nil {
+			return err
+		}
+		switch kind {
 		case pglogrepl.PrimaryKeepaliveMessageByteID:
 			pkm, err := pglogrepl.ParsePrimaryKeepaliveMessage(cd.Data[1:])
 			if err != nil {
@@ -536,4 +544,13 @@ func inferenceOrWarn(prepare func() (DDLInference, error), logger *slog.Logger) 
 		return nil
 	}
 	return []DecoderOption{WithDDLInference(cfg)}
+}
+
+// copyDataKind is the kind of a CopyData message, its first byte. A message
+// with nothing in it has none.
+func copyDataKind(data []byte) (byte, error) {
+	if len(data) == 0 {
+		return 0, errors.New("pgcapture: the source sent an empty CopyData message")
+	}
+	return data[0], nil
 }
