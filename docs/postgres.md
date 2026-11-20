@@ -1107,7 +1107,10 @@ server, closes the connections that use it; clients reconnect.
   the copy would answer with data older than what the source already
   answered that connection (see below), which gets the same `08006`.
 - **Every wait for the source is bounded** by the port's five-minute cap on a
-  statement, besides the client's `statement_timeout` and cancel.
+  statement, besides the client's `statement_timeout` and cancel. The wait
+  for a connection there, when the port holds as many as it opens, is
+  bounded by 30 seconds and the `statement_timeout`; a cancel request does
+  not end that wait, the client leaving does.
 - **When the source cannot be reached**: `08001 cannot connect to the source`;
   when it refuses the forwarding user, `08004` with PostgreSQL's reason (not
   `28P01`, which would read as the client's own password being wrong). The
@@ -1256,6 +1259,15 @@ What this costs and where it can go wrong:
   recent changes) does not say how far it reaches, so a connection the
   source answered gets the source for it. The copy runs the statement
   first and its answer is dropped, so such a statement costs both sides.
+  Measured on PostgreSQL 16 in fresh mode, with the source writing between
+  every pair of reads: all 20 of the copy's answers that followed an answer
+  of the source were behind it, and the source answered them. On a source
+  that writes nothing more, the copy's data reaches its last captured
+  change, before any later answer of the source, so the copy does not
+  answer such a connection again until the source writes. This holds for
+  every connection with a forwarding user, routing by plan or not: a
+  connection that ran a transaction block on the source reads the source
+  after its `COMMIT` too, where it used to read the copy's older rows.
   The comparison is between the source's commit times and this process's
   clock: a source clock ahead of the router's by more than the copy's lag
   lets an older answer through. A connection the source never answered, or
