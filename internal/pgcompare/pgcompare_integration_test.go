@@ -30,6 +30,7 @@ const (
 	itTimes     = "pgcmp_times"
 	itRound     = "pgcmp_round"
 	itWords     = "pgcmp_words"
+	itEpoch     = "pgcmp_epoch"
 	itPub       = "pgcmp_pub"
 	itSlot      = "pgcmp_slot"
 )
@@ -65,7 +66,7 @@ func TestIntegrationPGCompare(t *testing.T) {
 	dropAll := func() {
 		bg := context.Background()
 		_, _ = setup.Exec(bg, "DROP PUBLICATION IF EXISTS "+itPub)
-		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS "+itOrders+", "+itCustomers+", "+itOdd+", "+itArrays+", "+itTimes+", "+itRound+", "+itWords+", pivot")
+		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS "+itOrders+", "+itCustomers+", "+itOdd+", "+itArrays+", "+itTimes+", "+itRound+", "+itWords+", "+itEpoch+", pivot")
 		_, _ = setup.Exec(bg, "SELECT pg_drop_replication_slot($1) WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)", itSlot)
 	}
 	dropAll()
@@ -238,7 +239,22 @@ func seedSQL() []string {
 		`INSERT INTO ` + itWords + ` VALUES (1, '2026-01-02 03:04:05', 2, 3, 'a', 'b', 4, true, 'x'), (2, NULL, 2, NULL, NULL, 'c', 5, false, NULL), (3, '2026-02-01 00:00:00', 7, 1, 'd', NULL, NULL, NULL, 'y')`,
 		`CREATE TABLE pivot (id int PRIMARY KEY, v int)`,
 		`INSERT INTO pivot VALUES (1, 10), (2, 20)`,
-		`CREATE PUBLICATION ` + itPub + ` FOR TABLE ` + itCustomers + `, ` + itOrders + `, ` + itOdd + `, ` + itArrays + `, ` + itTimes + `, ` + itRound + `, ` + itWords + `, pivot`,
+		// Time buckets at their edges: a microsecond either side of one,
+		// before 1970, NULL, and far enough from 1970 that a large bucket
+		// lies within the band PostgreSQL's division could round up.
+		`CREATE TABLE ` + itEpoch + ` (id int PRIMARY KEY, at timestamp, atz timestamptz)`,
+		`INSERT INTO ` + itEpoch + ` SELECT id, at, at AT TIME ZONE 'UTC' FROM (VALUES
+			(1, TIMESTAMP '2026-11-18 10:07:30.25'), (2, '2026-11-18 10:09:59.999999'), (3, '2026-11-18 10:10:00'),
+			(4, '1970-01-01 00:00:00'), (5, '1969-12-31 23:59:59.999999'), (6, '1969-12-31 23:50:00'),
+			(7, '1969-12-31 23:49:59.999999'), (8, '1900-01-01 00:00:00.000001'), (9, NULL)) v(id, at)`,
+		// 11 * 999999999 seconds from 1970, less 5 and 1 microseconds, on
+		// both sides of it.
+		`INSERT INTO ` + itEpoch + ` SELECT id, TIMESTAMP '1970-01-01' + d, TIMESTAMPTZ '1970-01-01 00:00:00+00' + d FROM (VALUES
+			(10, interval '10999999988 seconds' + interval '999995 microseconds'),
+			(11, interval '10999999988 seconds' + interval '999999 microseconds'),
+			(12, interval '-10999999989 seconds' - interval '5 microseconds'),
+			(13, interval '-10999999989 seconds' - interval '1 microsecond')) v(id, d)`,
+		`CREATE PUBLICATION ` + itPub + ` FOR TABLE ` + itCustomers + `, ` + itOrders + `, ` + itOdd + `, ` + itArrays + `, ` + itTimes + `, ` + itRound + `, ` + itWords + `, ` + itEpoch + `, pivot`,
 	}
 }
 
@@ -495,6 +511,15 @@ func expectations() []expectation {
 		eq(`SELECT id, extract(epoch from seen_at), extract(epoch from placed_at) FROM ` + o + ` ORDER BY id`),
 		eq(`SELECT to_timestamp(floor(extract(epoch from seen_at) / 600) * 600) AS p, count(*) FROM ` + o + ` GROUP BY 1 ORDER BY 1`),
 		eq(`SELECT to_timestamp(floor(extract(epoch from placed_at) / 3600) * 3600) AS p, count(*), sum(count(*)) OVER (ORDER BY to_timestamp(floor(extract(epoch from placed_at) / 3600) * 3600)) FROM ` + o + ` GROUP BY 1 ORDER BY 1`),
+		// floor(extract(epoch from x) / N), worked out from microseconds on
+		// the copy: at a bucket's edges, before 1970, NULL; and the HTAP
+		// bench's Q13 and Q04 as they write it.
+		eq(`SELECT id, floor(extract(epoch from at) / 600), floor(extract(epoch from atz) / 600), floor(extract(epoch from at) / 1), floor(extract(epoch from atz) / 7), floor(extract(epoch from at) / 86400) FROM ` + itEpoch + ` WHERE id <= 9 ORDER BY id`),
+		eq(`SELECT to_timestamp(FLOOR(EXTRACT(EPOCH FROM e.at) / 600) * 600) AS period_start, count(*) AS n FROM ` + itEpoch + ` e WHERE e.id <= 9 GROUP BY 1 ORDER BY 1`),
+		eq(`SELECT to_timestamp(FLOOR(EXTRACT(EPOCH FROM a.atz) / 600) * 600) AS period_start, count(*), count(b.id) FROM ` + itEpoch + ` a JOIN ` + itEpoch + ` b ON b.id = a.id WHERE a.id <= 9 GROUP BY 1 ORDER BY 1`),
+		eq(`SELECT id, floor(extract(epoch from at) / 999999999), floor(extract(epoch from atz) / 999999999) FROM ` + itEpoch + ` WHERE id IN (10, 12) ORDER BY id`),
+		refused("too close to a whole number", "by design: PostgreSQL's division could round this quotient up first", `SELECT floor(extract(epoch from at) / 999999999) FROM `+itEpoch+` WHERE id = 11`),
+		refused("too close to a whole number", "by design: PostgreSQL's division could round this quotient up first", `SELECT floor(extract(epoch from atz) / 999999999) FROM `+itEpoch+` WHERE id = 13`),
 		refused("not a timestamp", "by design: PostgreSQL reads a date or an interval otherwise", `SELECT id, extract(epoch from span) FROM `+tm),
 		refused("not a whole number of seconds", "by design: a fraction of a second is a double on PostgreSQL", `SELECT to_timestamp(extract(epoch from seen_at)) FROM `+o),
 		// A table or a column named like a word of the copy's own SQL, written
