@@ -132,7 +132,8 @@ func TestFold_pg_markerWhereTheCaptureNeverPutsItRefuses(t *testing.T) {
 	}
 	for name, e := range cases {
 		t.Run(name, func(t *testing.T) {
-			err := newFold("public", "orders", idPK, true).addPage([]query.ResultRow{e})
+			// ev() stamps shop.orders on every event.
+			err := newFold("shop", "orders", idPK, true).addPage([]query.ResultRow{e})
 			if err == nil {
 				t.Fatal("expected a refusal")
 			}
@@ -140,7 +141,7 @@ func TestFold_pg_markerWhereTheCaptureNeverPutsItRefuses(t *testing.T) {
 			if strings.Contains(err.Error(), "cannot undo") {
 				t.Errorf("the export's message must not talk about undo:\n%s", err)
 			}
-			if !strings.Contains(err.Error(), "public.orders") {
+			if !strings.Contains(err.Error(), "shop.orders") {
 				t.Errorf("message must name the table:\n%s", err)
 			}
 		})

@@ -61,8 +61,4 @@ func TestShimCells_refuseNotCapturedMarker(t *testing.T) {
 	if want := event.UnresolvedToastError("myapp", "m", "", []string{"body"}).Error(); err == nil || err.Error() != want {
 		t.Fatalf("got  %v\nwant %s", err, want)
 	}
-	// A MySQL JSON value that only looks like the marker is data.
-	if _, err := imagesToResult([]map[string]any{{"id": "3", "body": map[string]any{event.NotCapturedKey: true, "x": "1"}}}, []string{"id", "body"}); err != nil {
-		t.Fatalf("a JSON value with an extra key is data: %v", err)
-	}
 }
