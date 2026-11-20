@@ -120,10 +120,20 @@ and the publication that names its tables, which you create first:
   bintrail-console server add --flavor postgres -h pg1 -u dbtrail -p -d shop --publication bintrail_pub
 
 DBTrail creates the replication slot (--slot, bintrail_<database> unless
-named). There is no forwarding user: the PostgreSQL port answers from the
-copy alone. docs/postgres.md has the setup of the source.
+named). No forwarding user is asked for, so at first the PostgreSQL port
+answers from the copy alone and sends nothing to your PostgreSQL. To have it
+send what the copy is not known to answer as PostgreSQL does, and a client's
+transaction blocks, set one once the server is added:
 
-DBTrail's user on your database, if it does not exist yet:
+  bintrail-console server forward-user <server> -u <user> -p
+
+DBTrail's user on a PostgreSQL needs REPLICATION, and SELECT on the tables
+for the first copy; docs/postgres.md has the setup of the source:
+
+  CREATE ROLE dbtrail WITH LOGIN REPLICATION PASSWORD <a password>;
+  GRANT SELECT ON ALL TABLES IN SCHEMA public TO dbtrail;
+
+DBTrail's user on a MySQL or MariaDB, if it does not exist yet:
 
   CREATE USER 'dbtrail'@'%' IDENTIFIED BY <a password>;
   GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO 'dbtrail'@'%';
@@ -1017,7 +1027,8 @@ func printNewServerPort(out io.Writer, p *ctlNewServerPort, name string, noForwa
 // client connects to is the PostgreSQL router, which listens on 5433 unless
 // its own setting says otherwise, and this command cannot see that setting:
 // the line says so. The database a client names is the server's name. No
-// Engine Routing and no forwarding user: the copy answers alone.
+// Engine Routing, and no forwarding user yet (server forward-user sets one
+// afterwards): until then the copy answers alone.
 func printNewServerPortPG(out io.Writer, p *ctlNewServerPort, name string) {
 	if p == nil || p.Enabled == nil {
 		return
