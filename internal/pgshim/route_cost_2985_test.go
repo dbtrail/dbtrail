@@ -85,7 +85,9 @@ func TestRouteByCost_2985_manyClientsWaitForASourceSlot(t *testing.T) {
 }
 
 // A statement that finds every connection taken waits for one as long as its
-// statement_timeout lets it, then gets 53300 with the limit's name.
+// statement_timeout lets it, then gets 57014, its own timeout: nothing runs
+// past it. A wait that runs out for the port's own limit instead leaves the
+// plan unasked, and the copy answers (source_unreachable).
 func TestRouteByCost_2985_aWaitThatRunsOut(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -113,8 +115,8 @@ func TestRouteByCost_2985_aWaitThatRunsOut(t *testing.T) {
 	_, err = b.Exec(ctx, "SELECT n FROM t WHERE id = 1").ReadAll()
 	took := time.Since(start)
 	var pe *pgconn.PgError
-	if !errors.As(err, &pe) || pe.Code != "53300" || !strings.Contains(pe.Message, "--max-source-connections") || !strings.Contains(pe.Message, "waited") {
-		t.Fatalf("with every connection taken: %v, want 53300 naming the limit and the wait", err)
+	if !errors.As(err, &pe) || pe.Code != "57014" {
+		t.Fatalf("with every connection taken: %v, want 57014 at its statement_timeout", err)
 	}
 	if took < 250*time.Millisecond {
 		t.Errorf("refused after %v: it did not wait for its statement_timeout", took)
@@ -125,6 +127,14 @@ func TestRouteByCost_2985_aWaitThatRunsOut(t *testing.T) {
 	}
 	if res, err := b.Exec(ctx, "SELECT n FROM t WHERE id = 1").ReadAll(); err != nil || len(res) != 1 || string(res[0].Rows[0][0]) != "42" {
 		t.Errorf("after the block ended: %v %v", res, err)
+	}
+
+	// The port's own limit ran out (no connection came free in its wait):
+	// no 53300, the copy answers what it can, as before routing by plan.
+	r := &costLogin{src: src, refuse: true}
+	e := costPortConn(t, ctx, r)
+	if got := costSimple(ctx, e, r, "SELECT n FROM t WHERE id = 1"); got != (costOutcome{"7", "", RouteCopy, ReasonSourceUnreachable}) {
+		t.Errorf("every connection taken for the whole wait: %+v, want the copy's 7 as source_unreachable", got)
 	}
 }
 

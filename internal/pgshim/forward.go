@@ -218,7 +218,13 @@ func (s *session) source() (*upstream, *pgErr) {
 		ctx, cancel := context.WithTimeout(base, d)
 		r, ok := f.Acquire(ctx)
 		cancel()
+		stopped := stoppedError(base)
 		finish()
+		if !ok && stopped != nil {
+			// The statement's own end (its statement_timeout, a cancel
+			// request) stopped the wait: that is its answer, not the limit.
+			return nil, stopped
+		}
 		if !ok {
 			return nil, &pgErr{"53300", fmt.Sprintf("the port already holds %d connections to sources, the most it opens (--max-source-connections), and none was given back while this statement waited; try again in a moment", f.Limit)}
 		}

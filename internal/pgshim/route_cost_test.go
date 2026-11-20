@@ -390,6 +390,9 @@ type costLogin struct {
 	// the most held at once.
 	slots   chan struct{}
 	maxHeld atomic.Int32
+	// refuse makes every Acquire fail, as a port whose every connection to
+	// the source stayed taken for the whole wait.
+	refuse bool
 	// age, when set, is the copy's RunAge; wait its CopyWait. runs counts
 	// the statements the copy ran.
 	age  func() CopyAge
@@ -416,6 +419,9 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 	}}
 	if l.src != nil {
 		b.Forward = &Forward{DSN: l.src.dsn(), Limit: 4, Cost: l.cost, Acquire: func(ctx context.Context) (func(), bool) {
+			if l.refuse {
+				return nil, false
+			}
 			if l.slots != nil {
 				select {
 				case l.slots <- struct{}{}:
