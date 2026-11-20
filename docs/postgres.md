@@ -1247,31 +1247,34 @@ What this costs and where it can go wrong:
   for another value). A plan the source refused, for the moment or for
   good, is asked about again. The MySQL port asks every time.
 - **A connection does not read a value go back after the source answered
-  it.** The copy is a second or two behind the source in fresh mode, and
-  more in fast mode: a counter the source just showed a connection as 37413
+  it; the copy waits for it.** The copy is a second or two behind the source
+  in fresh mode: a counter the source just showed a connection as 37413
   could read 37405 on the copy the next moment. So once the source answered
-  a connection, the copy's answer to it is given only when the copy's data
-  reaches past that moment, that is, when every table it read had its
-  recent changes over it and those reach that far; otherwise the statement
-  goes to the source before anything is sent (`copy_too_old` in `/status`,
-  as on the MySQL port when the copy is older than an earlier answer of its
-  own). A table read from its snapshot alone (fast mode, a table with no
-  recent changes) does not say how far it reaches, so a connection the
-  source answered gets the source for it. The copy runs the statement
-  first and its answer is dropped, so such a statement costs both sides.
-  Measured on PostgreSQL 16 in fresh mode, with the source writing between
-  every pair of reads: all 20 of the copy's answers that followed an answer
-  of the source were behind it, and the source answered them. On a source
-  that writes nothing more, the copy's data reaches its last captured
-  change, before any later answer of the source, so the copy does not
-  answer such a connection again until the source writes. This holds for
-  every connection with a forwarding user, routing by plan or not: a
-  connection that ran a transaction block on the source reads the source
-  after its `COMMIT` too, where it used to read the copy's older rows.
-  The comparison is between the source's commit times and this process's
-  clock: a source clock ahead of the router's by more than the copy's lag
-  lets an older answer through. A connection the source never answered, or
-  answered only with an error, reads the copy as before.
+  a connection, a statement for the copy on it first reads where the
+  source's WAL stands, then waits, up to 2 seconds and never past its own
+  `statement_timeout`, until capture's saved position has reached it (the
+  commit of its last whole transaction, or on a quiet source the position
+  the source's walsender last reported) and the copy's recent changes have
+  been brought up to date after that; then the copy answers. When capture
+  is not moving fast enough to get there in the time left (judged from how
+  far its saved position moved in the last seconds), or the wait runs out,
+  the source answers at once and the copy runs nothing (`copy_too_old` in
+  `/status`). Measured on PostgreSQL 16 in fresh mode, the counter written
+  every 20 ms and read 100 times from the source then for the copy on one
+  connection: the copy answered all 100, none went back, and on a quiet
+  source 10 of 10. The copy's position comes from the connection its plan
+  was asked on, so it costs one more statement there, not another login. A
+  table read from its snapshot alone (fast mode, a table with no recent
+  changes) says nothing of how far it reaches, so on such a connection the
+  source answers it. Until a statement has read the server's copy in fresh
+  mode there is nothing to wait on: the copy runs, and its answer is given
+  only when its recent changes' commit time reaches past the source's last
+  answer (the source's clock against the router's: a source clock ahead by
+  more than the copy's lag lets an older answer through). This holds for
+  every connection with a forwarding user, routing by plan or not: one that
+  ran a transaction block on the source waits for the copy after its
+  `COMMIT` too. A connection the source never answered, or answered only
+  with an error, reads the copy without waiting.
 - **An `EXPLAIN` the source refuses** (a table it does not have, a syntax it
   does not take) sends the statement to the source, which answers it with
   its own error (`explain_failed` in `/status`). So does a text of more than
