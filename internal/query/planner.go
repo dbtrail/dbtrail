@@ -116,13 +116,17 @@ func Plan(ctx context.Context, db *sql.DB, dbName string, since, until *time.Tim
 	}
 
 	// Determine the hour-aligned query range.
+	// In UTC: the hours they are looked up among (partition names, archive
+	// folders) are UTC, and a time.Time is a map key by its zone too. A
+	// --since written with an offset ("...T10:00:00-05:00") matched no hour,
+	// so every hour of the range read as a gap.
 	var rangeStart, rangeEnd time.Time
 	if since != nil {
-		rangeStart = since.Truncate(time.Hour)
+		rangeStart = since.UTC().Truncate(time.Hour)
 	}
 	if until != nil {
 		// End is exclusive: the hour containing 'until' plus one.
-		rangeEnd = until.Truncate(time.Hour).Add(time.Hour)
+		rangeEnd = until.UTC().Truncate(time.Hour).Add(time.Hour)
 	}
 
 	// Load live partition boundaries.
@@ -268,6 +272,10 @@ func browsePlanFromHours(liveHours, archivedHours []time.Time) *QueryPlan {
 // [rangeStart, rangeEnd) as live, archived, or gap, then builds a QueryPlan.
 // This function is extracted from Plan() for testability.
 func buildPlan(liveHours, archivedHours []time.Time, rangeStart, rangeEnd time.Time, noArchive bool) *QueryPlan {
+	// Hours are compared as map keys, and a time.Time is one by its zone as
+	// well as its instant: every caller's range is held to UTC here too, so
+	// an hour handed over in another zone still finds itself.
+	rangeStart, rangeEnd = utcOrZero(rangeStart), utcOrZero(rangeEnd)
 	// When archives are excluded from the fetch (--no-archive / active profile),
 	// archive_state coverage must NOT count toward classification or half-open
 	// range inference: those hours are rotated out of live MySQL and will not be
@@ -671,10 +679,10 @@ func MisfiledArchiveHours(ctx context.Context, db *sql.DB, since, until *time.Ti
 	}
 	var rangeStart, rangeEnd time.Time
 	if since != nil {
-		rangeStart = since.Truncate(time.Hour)
+		rangeStart = since.UTC().Truncate(time.Hour)
 	}
 	if until != nil {
-		rangeEnd = until.Truncate(time.Hour).Add(time.Hour)
+		rangeEnd = until.UTC().Truncate(time.Hour).Add(time.Hour)
 	}
 	return misfiledHours(cov, rangeStart, rangeEnd), nil
 }
@@ -690,4 +698,13 @@ func ParsePartitionName(name string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return t, true
+}
+
+// utcOrZero is t in UTC, and the zero time as it is (its UTC form is the
+// zero time too, but callers ask IsZero of it and nothing should move).
+func utcOrZero(t time.Time) time.Time {
+	if t.IsZero() {
+		return t
+	}
+	return t.UTC()
 }
