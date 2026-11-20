@@ -754,7 +754,23 @@ func streamLoopPG(
 		},
 	})
 	defer w.Close()
-	w.SetCommitWithin(commitWithin())
+	within := commitWithin()
+	w.SetCommitWithin(within)
+
+	// positionC saves the position within the same wait as the rows. WithinC
+	// alone does not: a batch that fills commits inside the writer and stops
+	// its timer, so under a steady load, where every batch fills before the
+	// wait, the saved position moved only on the checkpoint ticker (10 s in
+	// watch). The PostgreSQL port's wait for the source (#2985) reads the
+	// saved position, so with a 2 s limit most statements on a connection
+	// the source had answered went to the source. Nil when the wait is off
+	// or not shorter than the checkpoint interval.
+	var positionC <-chan time.Time
+	if within > 0 && within < checkpointInterval {
+		positionTicker := time.NewTicker(within)
+		defer positionTicker.Stop()
+		positionC = positionTicker.C
+	}
 
 	// checkpoint commits the rows of complete transactions, then persists the
 	// last commit LSN. The order is commit → saveCheckpointPG → AckCommitted:
@@ -845,6 +861,17 @@ func streamLoopPG(
 			// without its LSN, the less a start after a crash has to remove.
 			if err := checkpoint(); err != nil {
 				return err
+			}
+
+		case <-positionC:
+			// Only when there is something to save: a transaction ended since
+			// the last save, or the walsender's position moved past the saved
+			// one (a quiet source). Otherwise the checkpoint ticker keeps its
+			// own pace.
+			if commitsSince || pendingSent > state.sentThrough {
+				if err := checkpoint(); err != nil {
+					return err
+				}
 			}
 
 		case <-ticker.C:
