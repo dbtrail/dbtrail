@@ -22,6 +22,12 @@ func TestFingerprint(t *testing.T) {
 		{"SELECT a-1 FROM t", "select a - ? from t"},
 		// Strings, with or without a character set or hex prefix, are values.
 		{"SELECT * FROM t WHERE s = 'abc' OR s = \"d\" OR s = x'1F' OR s = _utf8mb4'e' OR s = N'f'", "select * from t where s = ? or s = ? or s = ? or s = ? or s = ?"},
+		// A keyword written against a string's quote is not its prefix: it
+		// stays, or LIKE and REGEXP would be one statement.
+		{"SELECT * FROM t WHERE s LIKE'a%'", "select * from t where s like ?"},
+		{"SELECT * FROM t WHERE s REGEXP'a'", "select * from t where s regexp ?"},
+		{"SELECT'a'", "select ?"},
+		{"SELECT * FROM t WHERE s = B'101' OR s = _latin1'e'", "select * from t where s = ? or s = ?"},
 		// Digits inside a name are the name.
 		{"SELECT col2 FROM t1 JOIN db3.t4 ON t1.id = t4.id", "select col2 from t1 join db3.t4 on t1.id = t4.id"},
 		{"SELECT * FROM 1t", "select * from 1t"},

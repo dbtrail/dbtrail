@@ -91,7 +91,10 @@ func fingerprintTokens(s string) []string {
 		case c == '\'':
 			// Shape writes every string as ''. A prefix written against it
 			// (x, b, n, _utf8mb4) is part of the value.
-			if len(toks) > 0 && i > 0 && wordByte(s[i-1]) {
+			// Only those: a keyword written against the quote ("LIKE'a'",
+			// "IN'x'") is not a prefix, and dropping it gave two different
+			// statements one fingerprint.
+			if len(toks) > 0 && i > 0 && wordByte(s[i-1]) && stringPrefix(toks[len(toks)-1]) {
 				toks = toks[:len(toks)-1]
 			}
 			toks = append(toks, "?")
@@ -161,3 +164,14 @@ func fingerprintNumberEnd(s string, i int) int {
 }
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+// stringPrefix reports whether tok, the word written against a string's
+// opening quote, is one of the prefixes a string takes: x, b, n, or a
+// character set introducer (_utf8mb4).
+func stringPrefix(tok string) bool {
+	switch strings.ToLower(tok) {
+	case "x", "b", "n":
+		return true
+	}
+	return strings.HasPrefix(tok, "_")
+}

@@ -566,6 +566,21 @@ func TestStatementDML(t *testing.T) {
 		{"/*+ HINT */\nUPDATE t SET x=1", "UPDATE"},
 		{"-- a note\nDELETE FROM t", "DELETE"},
 		{"# hash note\nINSERT INTO t VALUES (1)", "INSERT"},
+		// A write inside an executable comment is a write: the server runs
+		// what "/*! ... */" holds.
+		{"/*!50001 INSERT INTO t VALUES (1) */", "INSERT"},
+		{"/*! UPDATE t SET x=1 */", "UPDATE"},
+		{"/*!DELETE FROM t*/", "DELETE"},
+		{"/*M!100500 REPLACE INTO t VALUES (1) */", "REPLACE"},
+		{"/* note */ /*!40000 INSERT INTO t VALUES (1) */", "INSERT"},
+		{"-- note\n/*!50001 DELETE FROM t */", "DELETE"},
+		// One that holds no write is not one, and neither is a hint.
+		{"/*!40000 ALTER TABLE t DISABLE KEYS */", ""},
+		{"/*!40101 SET NAMES utf8 */", ""},
+		{"/*!50001 */ SELECT 1", ""},
+		{"/*+ INSERTED */ SELECT 1", ""},
+		{"/* INSERT INTO t VALUES (1) */", ""},
+		{"/*!", ""},
 		// TRUNCATE never produces row events — must NOT match here, even with a
 		// leading trace comment that slips past parseDDL (#776 false positive).
 		{"TRUNCATE TABLE orders", ""},

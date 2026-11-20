@@ -1265,7 +1265,7 @@ var dmlKeywords = []string{"INSERT", "UPDATE", "DELETE", "REPLACE", "LOAD DATA"}
 // statement first. TRUNCATE is excluded (see dmlKeywords) — it never produces
 // row events, so it must return false here even when parseDDL misses it.
 func statementDML(queryStr string) (string, bool) {
-	upper := strings.ToUpper(stripLeadingSQLComments(queryStr))
+	upper := strings.ToUpper(firstStatementText(queryStr))
 	for _, kw := range dmlKeywords {
 		if !strings.HasPrefix(upper, kw) {
 			continue
@@ -1327,6 +1327,58 @@ func statementDMLInScope(schema string, filters *Filters) bool {
 		return false
 	}
 	return true
+}
+
+// firstStatementText is queryStr from its first word the server runs: leading
+// whitespace and comments gone, as stripLeadingSQLComments leaves it, but for
+// one kind of comment that is not one. The server RUNS what "/*! ... */" and
+// "/*!50001 ... */" hold (MariaDB: "/*M! ... */" too), so a write inside one
+// is a write: taken for a comment, it was skipped whole and the alarm for a
+// write logged as a statement never rang.
+func firstStatementText(queryStr string) string {
+	s := queryStr
+	for {
+		s = strings.TrimLeft(s, " \t\r\n\f\v")
+		body, ok := executableCommentBody(s)
+		if ok {
+			s = body
+			continue
+		}
+		// One plain comment at a time, so an executable one after it is
+		// still seen as what it is.
+		if strings.HasPrefix(s, "/*") {
+			end := strings.Index(s[2:], "*/")
+			if end < 0 {
+				return ""
+			}
+			s = s[2+end+2:]
+			continue
+		}
+		rest := stripLeadingSQLComments(s)
+		if rest == s {
+			return s
+		}
+		s = rest
+	}
+}
+
+// executableCommentBody is what follows the opening of an executable comment
+// ("/*!", "/*!50001", "/*M!", "/*M!100500"): the SQL the server runs. ok is
+// false for anything else, an optimizer hint ("/*+") among them.
+func executableCommentBody(s string) (string, bool) {
+	var rest string
+	switch {
+	case strings.HasPrefix(s, "/*!"):
+		rest = s[3:]
+	case strings.HasPrefix(s, "/*M!"), strings.HasPrefix(s, "/*m!"):
+		rest = s[4:]
+	default:
+		return "", false
+	}
+	for len(rest) > 0 && rest[0] >= '0' && rest[0] <= '9' {
+		rest = rest[1:]
+	}
+	return rest, true
 }
 
 // stripLeadingSQLComments removes leading whitespace and SQL comments so the
