@@ -192,9 +192,9 @@ console.log(JSON.stringify({ rows, foot: text(foot), cols, all: text(diff), muta
 				t.Fatalf("node: %v\n%s", err, raw)
 			}
 			var got struct {
-				Rows           map[string]struct{ Before, After string }
+				Rows            map[string]struct{ Before, After string }
 				Foot, Cols, All string
-				Mutated        bool
+				Mutated         bool
 			}
 			if err := json.Unmarshal(raw, &got); err != nil {
 				t.Fatalf("decode %q: %v", raw, err)
