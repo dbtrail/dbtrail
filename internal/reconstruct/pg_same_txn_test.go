@@ -531,11 +531,22 @@ func TestPGImageState(t *testing.T) {
 	for name, img := range map[string]map[string]any{
 		"no image":                  nil,
 		"a number":                  {"id": json.Number("1")},
-		"an unchanged-TOAST marker": {"id": "1", "v": map[string]any{event.UnchangedToastKey: true}},
 		"a boolean":                 {"id": "1", "v": true},
 	} {
 		if got := pgImageState(img); got.Kind != pgStateUnknown {
 			t.Errorf("%s: %+v, want a state that cannot be compared", name, got)
 		}
+	}
+	// A row whose large value was not sent, or whose columns outside the key
+	// were not captured: a row is there, and not all of it is known. Neither
+	// hashes as the other, nor as a row with a NULL in that column.
+	unsent := pgImageState(map[string]any{"id": "1", "v": map[string]any{event.UnchangedToastKey: true}})
+	partial := pgImageState(map[string]any{"id": "1", "v": map[string]any{event.NotCapturedKey: true}})
+	null := pgImageState(map[string]any{"id": "1", "v": nil})
+	if unsent.Kind != pgStateRowAny || partial.Kind != pgStateRowAny {
+		t.Fatalf("a row not all known: kinds %d and %d, want a row known in part", unsent.Kind, partial.Kind)
+	}
+	if [2]uint64{unsent.Hi, unsent.Lo} == [2]uint64{partial.Hi, partial.Lo} || [2]uint64{unsent.Hi, unsent.Lo} == [2]uint64{null.Hi, null.Lo} {
+		t.Fatalf("a row with an unsent value hashes as another: %+v, %+v, %+v", unsent, partial, null)
 	}
 }
