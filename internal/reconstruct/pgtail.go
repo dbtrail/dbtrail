@@ -111,6 +111,10 @@ type pgPackedRow struct {
 // bytes: its key in the map of packed rows, the slice and the map's slot.
 const pgPackedEntryBytes = 96
 
+// pgSrcBytes is about what the fold holds for a key whose change carried a
+// large value (foldResult.pgSrc): the key, a map and an entry or two.
+const pgSrcBytes = 256
+
 // held is the packed row of key's change ev, when ev's image was put away.
 func (t *PGTail) held(key string, ev *query.ResultRow) ([]byte, bool) {
 	p, ok := t.packed[key]
@@ -118,6 +122,21 @@ func (t *PGTail) held(key string, ev *query.ResultRow) ([]byte, bool) {
 		return nil, false
 	}
 	return p.row, true
+}
+
+// imageOf is the row of key's change cur for the fold to read and change
+// (pgCarry): a packed row is taken out again and is cur's own until the page
+// is folded, when pack puts it away.
+func (t *PGTail) imageOf(key string, cur *query.ResultRow) (map[string]any, error) {
+	if row, ok := t.held(key, cur); ok {
+		img, err := t.unpackImage(key, row)
+		if err != nil {
+			return nil, err
+		}
+		cur.RowAfter = img
+		delete(t.packed, key)
+	}
+	return cur.RowAfter, nil
 }
 
 // pack puts the image of key's change away as its packed row and lets the
@@ -325,7 +344,7 @@ func (t *PGTail) Apply(page []query.ResultRow) error {
 	opts := foldOptions{pg: true, touched: func(key string) {
 		t.dirty[key] = struct{}{}
 		touched = append(touched, key)
-	}}
+	}, pgImage: t.imageOf}
 	if err := foldPage(own, t.schema, t.table, t.pkCols, nil, opts, &t.fold); err != nil {
 		return err
 	}
@@ -366,6 +385,7 @@ func (t *PGTail) PruneThrough(anchor query.BinlogPos, afterID uint64) (int, erro
 	for _, k := range drop {
 		delete(t.fold.Changes, k)
 		delete(t.fold.pgTxn, k)
+		delete(t.fold.pgSrc, k)
 		delete(t.dirty, k)
 		delete(t.packed, k)
 	}
@@ -395,7 +415,7 @@ func (t *PGTail) Bytes() int64 {
 	if seen > 0 {
 		rows = max(1, sum/seen) * int64(len(t.fold.Changes))
 	}
-	return rows + int64(len(t.fold.pgTxn))*pgTxnBytes
+	return rows + int64(len(t.fold.pgTxn))*pgTxnBytes + int64(len(t.fold.pgSrc))*pgSrcBytes
 }
 
 // Dirty is how many keys changed since the last file was written.
@@ -548,6 +568,10 @@ func (t *PGTail) tailRow(key string, ev *query.ResultRow) (map[string]any, error
 			v, ok := after[c]
 			if !ok {
 				return refuse("column %s of its copy is missing from a change after the copy's cut", c)
+			}
+			if event.IsUnchangedToastMarker(v) {
+				return refuse("the change of key %q left the large value of column %s as it was, PostgreSQL did not send it "+
+					"(the table was not at REPLICA IDENTITY FULL), and no change since the copy's cut holds it", key, c)
 			}
 			row[c] = v
 		}
