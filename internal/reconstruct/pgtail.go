@@ -1,6 +1,7 @@
 package reconstruct
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -85,8 +86,125 @@ type PGTail struct {
 	// not: the table's generated columns. Any other column the copy lacks
 	// was added at the source after the cut.
 	generated map[string]bool
+	// inNames is names as a set.
+	inNames map[string]bool
 	// needFull: see Tail.needFull.
 	needFull bool
+	// packed holds, for a key, the row of its change in place of the image
+	// the change arrived with (pack): the copy's columns, in names' order,
+	// as one run of bytes. The image is a map, which costs several times the
+	// row it holds; a table written to all the time kept a few hundred
+	// thousand of them between two updates of its copy, and the tails of a
+	// busy source passed their memory budget in minutes.
+	packed map[string]pgPackedRow
+}
+
+// pgPackedRow is the row of one change, put away. of is the change it is
+// the row of: a key whose change has since been replaced has a row here that
+// is no longer its own, and is not read.
+type pgPackedRow struct {
+	of  *query.ResultRow
+	row []byte
+}
+
+// pgPackedEntryBytes is what a packed row holds on the heap beside its own
+// bytes: its key in the map of packed rows, the slice and the map's slot.
+const pgPackedEntryBytes = 96
+
+// held is the packed row of key's change ev, when ev's image was put away.
+func (t *PGTail) held(key string, ev *query.ResultRow) ([]byte, bool) {
+	p, ok := t.packed[key]
+	if !ok || p.of != ev {
+		return nil, false
+	}
+	return p.row, true
+}
+
+// pack puts the image of key's change away as its packed row and lets the
+// image go. Only an image tailRow would write as it is: every column of the
+// copy present, each a text or NULL, and no other column but a generated
+// one. Any other image stays as it arrived, for tailRow to refuse with its
+// own words.
+func (t *PGTail) pack(key string) {
+	ev, ok := t.fold.Changes[key]
+	if !ok {
+		delete(t.packed, key)
+		return
+	}
+	if _, already := t.held(key, ev); already {
+		return
+	}
+	row, ok := t.packImage(ev)
+	if !ok {
+		delete(t.packed, key)
+		return
+	}
+	t.packed[key] = pgPackedRow{of: ev, row: row}
+	ev.RowAfter = nil
+}
+
+// packImage is ev's image as a packed row: for each column of the copy, 0
+// for NULL or the length of its text plus one, then the text.
+func (t *PGTail) packImage(ev *query.ResultRow) ([]byte, bool) {
+	img := ev.RowAfter
+	if ev.EventType == event.EventDelete || img == nil || len(img) < len(t.names) {
+		return nil, false
+	}
+	size := 0
+	for _, c := range t.names {
+		switch v := img[c].(type) {
+		case string:
+			var n [binary.MaxVarintLen64]byte
+			size += len(v) + binary.PutUvarint(n[:], uint64(len(v))+1)
+		case nil:
+			if _, present := img[c]; !present {
+				return nil, false
+			}
+			size++
+		default:
+			return nil, false
+		}
+	}
+	if len(img) > len(t.names) {
+		for c := range img {
+			if !t.generated[c] && !t.inNames[c] {
+				return nil, false
+			}
+		}
+	}
+	b := make([]byte, 0, size)
+	for _, c := range t.names {
+		if v, ok := img[c].(string); ok {
+			b = binary.AppendUvarint(b, uint64(len(v))+1)
+			b = append(b, v...)
+		} else {
+			b = append(b, 0)
+		}
+	}
+	return b, true
+}
+
+// unpackImage is the image a packed row was made from: the copy's columns,
+// each the text it was or nil.
+func (t *PGTail) unpackImage(key string, b []byte) (map[string]any, error) {
+	img := make(map[string]any, len(t.names)+2)
+	for _, c := range t.names {
+		n, w := binary.Uvarint(b)
+		if w <= 0 || (n > 0 && uint64(len(b)-w) < n-1) {
+			return nil, fmt.Errorf("internal: the row the tail of %s.%s holds for key %q does not read", t.schema, t.table, key)
+		}
+		b = b[w:]
+		if n == 0 {
+			img[c] = nil
+			continue
+		}
+		img[c] = string(b[:n-1])
+		b = b[n-1:]
+	}
+	if len(b) != 0 {
+		return nil, fmt.Errorf("internal: the row the tail of %s.%s holds for key %q does not read", t.schema, t.table, key)
+	}
+	return img, nil
 }
 
 // ErrPGTailTxnOpen says a key's transaction was delivered a second time and
@@ -158,9 +276,9 @@ func NewPGTail(schema, table string, md baseline.DumpMetadata, fileColumns []str
 	if _, err := baseline.TableDeltaColumns(cols); err != nil {
 		return nil, &TailRefusal{fmt.Sprintf("%s: %v", name, err)}
 	}
-	return &PGTail{schema: schema, table: table, names: append([]string(nil), fileColumns...), cols: cols,
+	return &PGTail{schema: schema, table: table, names: append([]string(nil), fileColumns...), inNames: inFile, cols: cols,
 		pkCols: pkCols, pkNames: pkNames, generated: gen,
-		fold: foldResult{Changes: map[string]*query.ResultRow{}}, dirty: map[string]struct{}{}}, nil
+		fold: foldResult{Changes: map[string]*query.ResultRow{}}, dirty: map[string]struct{}{}, packed: map[string]pgPackedRow{}}, nil
 }
 
 // sameNames: the same names, in any order.
@@ -203,9 +321,18 @@ func (t *PGTail) Apply(page []query.ResultRow) error {
 			return fmt.Errorf("%s.%s: event %d has no LSN (%q:%d), so its order against the others cannot be told", t.schema, t.table, ev.EventID, ev.BinlogFile, ev.StartPos)
 		}
 	}
-	opts := foldOptions{pg: true, touched: func(key string) { t.dirty[key] = struct{}{} }}
+	touched := make([]string, 0, len(own))
+	opts := foldOptions{pg: true, touched: func(key string) {
+		t.dirty[key] = struct{}{}
+		touched = append(touched, key)
+	}}
 	if err := foldPage(own, t.schema, t.table, t.pkCols, nil, opts, &t.fold); err != nil {
 		return err
+	}
+	// After the whole page: the fold has compared and checked every event
+	// as it arrived, and the change left for each key is its last.
+	for _, key := range touched {
+		t.pack(key)
 	}
 	for i := range own {
 		t.fold.LastEventID = max(t.fold.LastEventID, own[i].EventID)
@@ -240,6 +367,7 @@ func (t *PGTail) PruneThrough(anchor query.BinlogPos, afterID uint64) (int, erro
 		delete(t.fold.Changes, k)
 		delete(t.fold.pgTxn, k)
 		delete(t.dirty, k)
+		delete(t.packed, k)
 	}
 	t.needFull = true
 	return len(drop), nil
@@ -249,9 +377,25 @@ func (t *PGTail) PruneThrough(anchor query.BinlogPos, afterID uint64) (int, erro
 func (t *PGTail) Keys() int { return len(t.fold.Changes) }
 
 // Bytes is an estimate of the heap the tail holds (see Tail.Bytes).
+//
+// A sample, as Tail's is: a packed row counts as its change, which holds no
+// image then, its bytes and pgPackedEntryBytes.
 func (t *PGTail) Bytes() int64 {
-	b, _ := sampledChangeBytes(t.fold.Changes)
-	return b + int64(len(t.fold.pgTxn))*pgTxnBytes
+	var sum, seen int64
+	for k, ev := range t.fold.Changes {
+		sum += approxChangeBytes(ev)
+		if row, ok := t.held(k, ev); ok {
+			sum += pgPackedEntryBytes + int64(len(k)+cap(row))
+		}
+		if seen++; seen == changeSampleRows {
+			break
+		}
+	}
+	var rows int64
+	if seen > 0 {
+		rows = max(1, sum/seen) * int64(len(t.fold.Changes))
+	}
+	return rows + int64(len(t.fold.pgTxn))*pgTxnBytes
 }
 
 // Dirty is how many keys changed since the last file was written.
@@ -320,11 +464,13 @@ func (t *PGTail) write(path string, keys []string) (rows int64, retErr error) {
 	if err != nil {
 		return 0, &TailRefusal{fmt.Sprintf("%s.%s: %v", t.schema, t.table, err)}
 	}
-	// Every row before the file: a refusal leaves nothing behind.
+	// Every row before the file: a refusal leaves nothing behind. Each is
+	// made again when it is written, not kept: held all at once they are
+	// the maps the tail no longer holds, for every key, while a whole file
+	// is written.
 	sort.Strings(keys)
-	out := make([]map[string]any, len(keys))
-	for i, k := range keys {
-		if out[i], err = t.tailRow(k, t.fold.Changes[k]); err != nil {
+	for _, k := range keys {
+		if _, err = t.tailRow(k, t.fold.Changes[k]); err != nil {
 			return 0, err
 		}
 	}
@@ -341,7 +487,11 @@ func (t *PGTail) write(path string, keys []string) (rows int64, retErr error) {
 			_ = os.Remove(tmp)
 		}
 	}()
-	for _, row := range out {
+	for _, k := range keys {
+		row, rerr := t.tailRow(k, t.fold.Changes[k])
+		if rerr != nil {
+			return 0, rerr
+		}
 		if err := w.WriteRow(row, t.schema, t.table); err != nil {
 			return 0, err
 		}
@@ -384,11 +534,18 @@ func (t *PGTail) tailRow(key string, ev *query.ResultRow) (map[string]any, error
 		}
 		row[baseline.TableDeltaOpColumn] = baseline.TableDeltaOpDelete
 	} else {
-		if ev.RowAfter == nil {
+		after := ev.RowAfter
+		if row, ok := t.held(key, ev); ok {
+			var uerr error
+			if after, uerr = t.unpackImage(key, row); uerr != nil {
+				return nil, uerr
+			}
+		}
+		if after == nil {
 			return refuse("the change of key %q has no row image", key)
 		}
 		for _, c := range t.names {
-			v, ok := ev.RowAfter[c]
+			v, ok := after[c]
 			if !ok {
 				return refuse("column %s of its copy is missing from a change after the copy's cut", c)
 			}
@@ -397,9 +554,9 @@ func (t *PGTail) tailRow(key string, ev *query.ResultRow) (map[string]any, error
 		// A column the copy does not hold: a generated one, which the source
 		// may publish, or one added at the source after the cut, which this
 		// tail would hide.
-		if len(ev.RowAfter) > len(t.names) {
+		if len(after) > len(t.names) {
 			var added []string
-			for c := range ev.RowAfter {
+			for c := range after {
 				if _, in := row[c]; !in && !t.generated[c] {
 					added = append(added, c)
 				}
