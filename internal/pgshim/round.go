@@ -277,7 +277,7 @@ const maxEpochBucketSeconds = 999999999
 // own rounds rewritten) and N as the copy reads it. Any other division,
 // a parameter, a cast or another operator among them, goes the general way.
 func epochOverSeconds(q string, toks []rtToken, spans [][2]int, from, to int) (string, string, bool) {
-	if to-from < 8 ||toks[from].kind != rtWord || toks[from].text != "extract" || !isOpTok(toks, from+1, "(") {
+	if to-from < 8 || toks[from].kind != rtWord || toks[from].text != "extract" || !isOpTok(toks, from+1, "(") {
 		return "", "", false
 	}
 	end := closingParen(toks, from+1)
