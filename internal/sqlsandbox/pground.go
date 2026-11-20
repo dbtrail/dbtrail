@@ -56,6 +56,24 @@ package sqlsandbox
 // takes only a whole number of seconds, which a double holds exactly, so
 // to_timestamp(floor(extract(epoch from x) / 600) * 600) answers as there.
 //
+// floor(extract(epoch from x) / N), N a whole number of seconds the port
+// reads as written (pgshim epochOverSeconds), is _bintrail_pg_floor_epoch:
+// the same answer and the same refusals as _bintrail_pg_floor_div of
+// _bintrail_pg_epoch, worked out in 64-bit whole numbers straight from the
+// engine's microseconds, a = epoch_us(x) over b = N * 1000000, where the
+// general macros take each side through its text and 128 bits. It is the
+// time bucket of a report, run on every row, and the general way made such
+// a report three to five times slower on the copy. The quotient a / b has
+// at most 13 whole digits (epoch_us stays under 2^63, b is at least a
+// million), so PostgreSQL keeps at least 16 - 13 = 3 of its decimals and
+// the band refused is at most b / 1000 wide: a gap to the whole number
+// (twice the distance, in units of 1/b) with 1000 * gap > b is outside it
+// and needs no count of digits. Only a quotient within b / 1000 of a whole
+// number counts them, by comparisons, and is refused as the general macro
+// refuses it. With N at most 999999999, 1000 * gap stays under 2 * 10^18.
+// The engine's // and % of whole numbers truncate toward zero, so a
+// negative a with a remainder is one below its quotient.
+//
 // TEMP, as the other macros. A macro takes no DISTINCT, and the port leaves
 // avg(DISTINCT x) alone.
 const pgRoundMacros = `CREATE OR REPLACE TEMP MACRO _bintrail_pg_exact(x) AS (
@@ -119,6 +137,29 @@ CREATE OR REPLACE TEMP MACRO _bintrail_pg_floor_div(n, d) AS (
     WHEN d = 0 THEN error('division by zero')
     ELSE _bintrail_pg_floor_core(_bintrail_pg_unscaled(n), _bintrail_pg_scale(n), _bintrail_pg_unscaled(d), _bintrail_pg_scale(d))
   END AS DECIMAL(38,0))
+);
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_us_digits(w) AS (
+  CASE WHEN w = 0 THEN 0 WHEN w < 10 THEN 1 WHEN w < 100 THEN 2 WHEN w < 1000 THEN 3
+  WHEN w < 10000 THEN 4 WHEN w < 100000 THEN 5 WHEN w < 1000000 THEN 6 WHEN w < 10000000 THEN 7
+  WHEN w < 100000000 THEN 8 WHEN w < 1000000000 THEN 9 WHEN w < 10000000000 THEN 10
+  WHEN w < 100000000000 THEN 11 WHEN w < 1000000000000 THEN 12 WHEN w < 10000000000000 THEN 13
+  ELSE error('the copy cannot take floor() of this as PostgreSQL does: a quotient past 13 digits') END
+);
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_us_gap(a, b) AS (
+  CASE WHEN a > 0 THEN 2 * (b - a % b) ELSE -2 * (a % b) END
+);
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_us_floor(a, b) AS (
+  CASE WHEN a % b = 0 THEN a // b
+  WHEN 1000 * _bintrail_pg_us_gap(a, b) <= b
+    AND _bintrail_pg_us_gap(a, b) <= b // _bintrail_pg_pow10(16 - _bintrail_pg_us_digits(abs(a) // b))
+    THEN error('the copy cannot take floor() of this as PostgreSQL does: the quotient lies too close to a whole number, where PostgreSQL rounds it first')
+  WHEN a > 0 THEN a // b
+  ELSE a // b - 1 END
+);
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_floor_epoch(x, n) AS (
+  CAST(CASE WHEN typeof(x) IN ('TIMESTAMP', 'TIMESTAMP WITH TIME ZONE')
+    THEN _bintrail_pg_us_floor(epoch_us(x), CAST(n AS BIGINT) * 1000000)
+  ELSE error('the copy cannot take extract(epoch) of this as PostgreSQL does: it is not a timestamp') END AS DECIMAL(38,0))
 );
 CREATE OR REPLACE TEMP MACRO _bintrail_pg_epoch(x) AS (
   CASE WHEN typeof(x) IN ('TIMESTAMP', 'TIMESTAMP WITH TIME ZONE')

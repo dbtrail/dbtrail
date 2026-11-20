@@ -159,12 +159,19 @@ func compareOne(ctx context.Context, src, cp Side, opts Options, stmt string) (R
 		// A write between the two reads looks exactly like a difference. If
 		// the copy agrees with a second read of the source, the first one
 		// was stale and nothing can be concluded.
-		again, _, err := src.Query(ctx, stmt, opts.MaxRows)
+		again, againOver, err := src.Query(ctx, stmt, opts.MaxRows)
 		if err != nil {
 			if fatal(ctx, err) {
 				return res, fmt.Errorf("source: %w", err)
 			}
 			res.Detail += "; the second read of the source failed: " + err.Error()
+			return res, nil
+		}
+		if againOver {
+			// Cut at the limit, it is a part of the answer: matching the copy
+			// says nothing, and must not turn the difference into a live
+			// write.
+			res.Detail += fmt.Sprintf("; the second read of the source had more than %d rows and was not compared", opts.MaxRows)
 			return res, nil
 		}
 		if v, _, _ := sqlcompare.Compare(again, cpRows, ordered); v == sqlcompare.Equal {
@@ -209,11 +216,23 @@ func IsQuery(stmt string) bool {
 			s = s[i+1:]
 			continue
 		case strings.HasPrefix(s, "/*"):
-			i := strings.Index(s, "*/")
-			if i < 0 {
+			// Block comments nest in PostgreSQL: /* /* */ SELECT */ DELETE
+			// is a DELETE.
+			i, depth := 2, 1
+			for depth > 0 && i < len(s) {
+				switch {
+				case strings.HasPrefix(s[i:], "/*"):
+					depth, i = depth+1, i+2
+				case strings.HasPrefix(s[i:], "*/"):
+					depth, i = depth-1, i+2
+				default:
+					i++
+				}
+			}
+			if depth > 0 {
 				return false
 			}
-			s = s[i+2:]
+			s = s[i:]
 			continue
 		}
 		break

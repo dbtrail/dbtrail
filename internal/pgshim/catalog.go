@@ -607,18 +607,21 @@ func splitOr(w string) []string {
 func likeRegexp(p string) (*regexp.Regexp, *pgErr) {
 	var b strings.Builder
 	b.WriteString("^(?s)")
-	for i := 0; i < len(p); i++ {
-		switch c := p[i]; c {
+	// By character, not by byte: a byte of a letter like é quoted on its
+	// own is not that letter (and, after a backslash, not valid UTF-8).
+	rs := []rune(p)
+	for i := 0; i < len(rs); i++ {
+		switch c := rs[i]; c {
 		case '%':
 			b.WriteString(".*")
 		case '_':
 			b.WriteString(".")
 		case '\\':
-			if i+1 >= len(p) {
+			if i+1 >= len(rs) {
 				return nil, &pgErr{"22025", "LIKE pattern must not end with escape character"}
 			}
 			i++
-			b.WriteString(regexp.QuoteMeta(p[i : i+1]))
+			b.WriteString(regexp.QuoteMeta(string(rs[i])))
 		default:
 			b.WriteString(regexp.QuoteMeta(string(c)))
 		}

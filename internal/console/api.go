@@ -19,6 +19,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/cliutil"
+	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
@@ -482,6 +483,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// History only (recover shares buildOptions and never sets it): on a
+	// PostgreSQL index, show the rows of tables that were not at REPLICA
+	// IDENTITY FULL, and let changed_column also return the UPDATEs whose
+	// changed columns are unknown (query.Options.PostgresHistory).
+	opts.PostgresHistory = s.historyIsPostgres(b)
 	// The anchor is accepted here for exactly the reason stated above the cap,
 	// and it is the sharper case: unmirrored, the preview lists the row's whole
 	// history up to the clicked second while the script reverses one event of
@@ -572,8 +578,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// The preview mirrors the script, so it mirrors this too: an empty preview
 	// under an anchor is the same ambiguity, rendered as "0 affected event(s)".
 	warnings = append(anchorMissedWarning(opts, len(rows)), warnings...)
+	warnings = append(warnings, pgHistoryWarnings(opts, rows)...)
 	resp := eventsResponse{
-		Events:   toEventDTOs(rows),
+		Events:   toEventDTOs(rows, opts.PostgresHistory),
 		Count:    len(rows),
 		Limit:    pageLimit,
 		HasMore:  hasMore,
@@ -640,6 +647,11 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// On a PostgreSQL index a changed_column filter must also return the
+	// UPDATEs whose changed columns are unknown (query.Options.PostgresHistory),
+	// or the script would silently skip them; they then meet the generator's
+	// not-captured refusal. Decided as the Events view decides it, with no read.
+	opts.PostgresHistory = s.historyIsPostgres(b)
 	if !applyEventAnchor(w, &opts, body.Event) {
 		return
 	}
@@ -776,6 +788,17 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 							float64(be.EstimatedBytes)/(1<<20), float64(be.Budget)/(1<<20)),
 					}, warnings...)
 					break // out of the switch → plain recover below
+				}
+				// A change whose earlier row was not captured (a PostgreSQL
+				// table below REPLICA IDENTITY FULL) cannot be undone, whether it
+				// is the parent or a synthesized child: the plain path would
+				// refuse the parent the same way, or hand back a parent-only
+				// script under a warning that blames the synthesis. Refuse the
+				// request as the plain path does (422, the refusal's own text).
+				var nce *event.NotCapturedError
+				if errors.As(cerr, &nce) {
+					writeRecoverError(w, cerr)
+					return
 				}
 				// Cascade synthesis is an ENHANCEMENT of the plain recover, not a
 				// precondition — the base rows were already fetched. A synthesis
@@ -1339,6 +1362,15 @@ func writeRecoverError(w http.ResponseWriter, err error) {
 				"for large recoveries; it runs outside DBTrail's shared process and supports "+
 				"--max-script-bytes to raise or disable this budget.",
 			float64(be.EstimatedBytes)/(1<<20), float64(be.Budget)/(1<<20)))
+		return
+	}
+	// A change whose earlier row was not captured (a PostgreSQL table below
+	// REPLICA IDENTITY FULL) is a refusal about the data, not a server fault:
+	// 422 with the refusal's own words (table, key, columns, the ALTER TABLE
+	// that makes later changes undoable; no CLI flag in it).
+	var nce *event.NotCapturedError
+	if errors.As(err, &nce) {
+		writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 	writeJSONError(w, http.StatusInternalServerError, err.Error())

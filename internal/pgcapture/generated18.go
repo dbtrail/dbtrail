@@ -121,14 +121,20 @@ func GeneratedColumnsProblem(found []UnpublishedGenerated) string {
 	tables := map[key]bool{}
 	var stored, virtual []string
 	storedPubs := map[string]bool{}
-	virtualTables := map[key]string{}
+	// A table in two publications is taken out of each: one statement for
+	// every (table, publication), or the advice leaves the table blocked.
+	type inPub struct {
+		key
+		pub string
+	}
+	virtualTables := map[inPub]bool{}
 	for _, g := range found {
 		k := key{g.Schema, g.Table}
 		tables[k] = true
 		col := fmt.Sprintf("%s.%s.%s (publication %q)", g.Schema, g.Table, g.Column, g.Publication)
 		if g.Virtual {
 			virtual = append(virtual, col)
-			virtualTables[k] = g.Publication
+			virtualTables[inPub{k, g.Publication}] = true
 		} else {
 			stored = append(stored, col)
 			storedPubs[g.Publication] = true
@@ -169,8 +175,8 @@ func GeneratedColumnsProblem(found []UnpublishedGenerated) string {
 		b.WriteString(strings.Join(virtual, ", "))
 		b.WriteString(") cannot be published by any setting, so its table cannot be captured: take it out of the publication:")
 		vt := make([]string, 0, len(virtualTables))
-		for k, p := range virtualTables {
-			vt = append(vt, fmt.Sprintf(" ALTER PUBLICATION %s DROP TABLE %s;", pgx.Identifier{p}.Sanitize(), quoteQualified(k.schema, k.table)))
+		for k := range virtualTables {
+			vt = append(vt, fmt.Sprintf(" ALTER PUBLICATION %s DROP TABLE %s;", pgx.Identifier{k.pub}.Sanitize(), quoteQualified(k.schema, k.table)))
 		}
 		sort.Strings(vt)
 		b.WriteString(strings.Join(vt, ""))

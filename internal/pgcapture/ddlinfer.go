@@ -684,7 +684,11 @@ func typeName(oid uint32, mod int32) string {
 		}
 	case pgtype.NumericOID:
 		if mod >= 4 {
-			return fmt.Sprintf("%s(%d,%d)", name, (mod-4)>>16, (mod-4)&0xffff)
+			// PostgreSQL packs a numeric's modifier as the precision in
+			// the high 16 bits and the scale in the low 11, signed: a
+			// numeric(5,-2) (PostgreSQL 15 on) has scale -2, not 2046.
+			m := mod - 4
+			return fmt.Sprintf("%s(%d,%d)", name, (m>>16)&0xffff, ((m&0x7ff)^1024)-1024)
 		}
 	case pgtype.TimestampOID, pgtype.TimestamptzOID, pgtype.TimeOID, pgtype.TimetzOID, pgtype.BitOID, pgtype.VarbitOID:
 		if mod >= 0 {

@@ -948,9 +948,14 @@ func (s *session) handleExecute(m *pgproto3.Execute) {
 	// Every row is sent: what they counted in the budget is given back once
 	// they are written (at the flush that follows), as on the simple path.
 	defer s.releasePortal(p)
-	// The count is this Execute's rows, as PostgreSQL counts them.
-	word, _, _ := strings.Cut(p.tag, " ")
-	s.commandComplete(word + " " + strconv.Itoa(n))
+	// The count is this Execute's rows, as PostgreSQL counts them. It is
+	// the tag's last word: SELECT 5, INSERT 0 5. A tag with no count (SHOW)
+	// is sent as it is, as PostgreSQL sends it.
+	tag := p.tag
+	if i := strings.LastIndexByte(tag, ' '); i >= 0 {
+		tag = tag[:i+1] + strconv.Itoa(n)
+	}
+	s.commandComplete(tag)
 }
 
 // handleClose answers Close of a statement ('S') or a portal ('P'). Closing

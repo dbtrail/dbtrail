@@ -25,7 +25,6 @@ import (
 	"strings"
 
 	"github.com/dbtrail/dbtrail/internal/cascade"
-	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/recovery"
@@ -100,14 +99,14 @@ func EmitSQLIndexed(w io.Writer, gen *recovery.Generator, rows []query.ResultRow
 		return 0, nil, err
 	}
 
-	// Fail loud on a residual unchanged-TOAST marker (#592) next, mirroring the
+	// Fail loud on a marker in any row image next (recovery.CheckRowsUndoable:
+	// a not-captured earlier row from a PostgreSQL table below REPLICA IDENTITY
+	// FULL, or a residual unchanged-TOAST value, #592), mirroring the
 	// generator's own up-front refusal so its precedence over the SET NULL
-	// build errors below is preserved.
-	for _, row := range rows {
-		if err := event.CheckUnresolvedToast(row.SchemaName, row.TableName, row.PKValues,
-			row.RowBefore, row.RowAfter); err != nil {
-			return 0, nil, err
-		}
+	// build errors below is preserved. Parents and synthesized children are
+	// scanned alike: a child's row_before is its last known row, re-inserted.
+	if err := recovery.CheckRowsUndoable(rows); err != nil {
+		return 0, nil, err
 	}
 
 	// Build every FK restoration — the ON DELETE SET NULL ones and the ON UPDATE

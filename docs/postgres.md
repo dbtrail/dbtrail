@@ -704,13 +704,17 @@ What to know:
   whose encoding is `SQL_ASCII`, text that is not valid UTF-8 is stored with
   replacement characters, so two rows that differ only in such bytes compare
   equal.
-- **An unchanged-TOAST marker refuses** on any change the fold reads, even
-  one a later change overwrote. Under `REPLICA IDENTITY FULL`, which capture
-  requires, there is no marker to meet: capture replaces an unchanged large
-  value with the real one from the old row of the same change, for an
-  ordinary UPDATE and for one that changes the key. A marker is only in
-  changes captured without the whole old row, where the value was never
-  captured.
+- **An unchanged-TOAST marker** is the place of a large value an UPDATE did
+  not touch and PostgreSQL did not send. Under `REPLICA IDENTITY FULL`, which
+  capture requires, there is none to meet: capture replaces it with the real
+  value from the old row of the same change, for an ordinary UPDATE and for
+  one that changes the key. A change captured with the old row's key only
+  (nothing captures one yet) keeps the marker, and a fold gives the row the
+  value of its newest earlier change, or, in a snapshot update, of its row
+  in the table's previous file. What neither holds is refused by name, as is
+  a marker in any other place (beside a whole old row, in an INSERT, in the
+  new row of a change of key); a value is never written as NULL in its
+  stead.
 - **A table with no change is carried forward** under
   `--carry-forward-unchanged`, as for MySQL: the new snapshot gets the previous
   file (a hard link where the filesystem allows one) and the table is not read

@@ -129,6 +129,11 @@ type TableReport struct {
 	// nil-image/unresolved-TOAST/unknown-type finding. All are legitimately
 	// unverifiable rather than divergent.
 	ChainsInconclusive int `json:"chains_inconclusive,omitempty"`
+	// ChangesNotCaptured counts UPDATEs and DELETEs whose earlier row was only
+	// partly captured: a PostgreSQL table below REPLICA IDENTITY FULL keeps
+	// only the key of the earlier row. They could not be checked, and recover
+	// cannot undo them; never counted as a mismatch.
+	ChangesNotCaptured int `json:"changes_not_captured,omitempty"`
 	// InconclusiveKind subdivides an inconclusive verdict (#1416): no-activity
 	// | nothing-to-assert | unproven. Empty on other statuses and on modes
 	// that do not classify.
@@ -262,6 +267,7 @@ func NewReport(mode string, results []TableResult) *Report {
 			EventsChecked:      r.EventsChecked,
 			ChainsChecked:      r.ChainsChecked,
 			ChainsInconclusive: r.ChainsInconclusive,
+			ChangesNotCaptured: r.ChangesNotCaptured,
 			InconclusiveKind:   r.InconclusiveKind,
 		})
 	}

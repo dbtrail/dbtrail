@@ -138,7 +138,14 @@ func foldPage(
 				continue
 			}
 		}
-		if err := checkEventToast(*ev); err != nil {
+		// A PostgreSQL change is held to PostgreSQL's own check, which takes
+		// an earlier row captured with its key only (checkPGEventMarkers);
+		// every other change to the one it always was.
+		if opts.pg {
+			if err := checkPGEventMarkers(ev, pkCols); err != nil {
+				return err
+			}
+		} else if err := checkEventToast(*ev); err != nil {
 			return err
 		}
 		var halves []query.ResultRow
@@ -185,6 +192,10 @@ func foldPage(
 				if err := res.notePGTxn(ev, false, "", "", schema, table); err != nil {
 					return err
 				}
+				// An unchanged large value the row's earlier change holds.
+				if ev, err = res.pgCarry(ev, opts.pgImage); err != nil {
+					return err
+				}
 			}
 			res.fold(ev, opts.touched)
 			continue
@@ -195,6 +206,11 @@ func foldPage(
 				// else the same transaction did to each half's key
 				// (pgKeyTxn).
 				if err := res.notePGTxn(&halves[h], true, halves[0].PKValues, halves[1].PKValues, schema, table); err != nil {
+					return err
+				}
+				// A half holds no such value (splitPGKeyChange); it may be
+				// what gives one to a later change of its key.
+				if _, err := res.pgCarry(&halves[h], opts.pgImage); err != nil {
 					return err
 				}
 			}
@@ -228,6 +244,11 @@ type foldOptions struct {
 	// (#2495). Both keys of a PK change are reported, which is why a tail
 	// cannot take them from the page's own pk_values.
 	touched func(key string)
+	// pgImage, for a PostgreSQL fold whose caller keeps the rows of the
+	// changes somewhere else (a tail packs them): the row of the change the
+	// fold holds for key, to read and to change (pgCarry). nil: the
+	// change's own RowAfter.
+	pgImage func(key string, cur *query.ResultRow) (map[string]any, error)
 }
 
 // splitPKChange turns an UPDATE that changed the row's primary key (#782)
@@ -430,6 +451,12 @@ type foldResult struct {
 	// the last drain and the same choice is made again when a group is read
 	// back (changeSpill.load).
 	Changes map[string]*query.ResultRow
+
+	// pgSrc, in a PostgreSQL fold, says for a key whose last change holds
+	// or held an unchanged large value where each such column's value came
+	// from (pgCarry). pgUSeen: the fold met one.
+	pgSrc   map[string]map[string]pgColSrc
+	pgUSeen bool
 
 	// Total is the number of events folded across every page (the
 	// archive-inclusive, deduplicated count — the same number the old

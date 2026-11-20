@@ -279,6 +279,11 @@ func WritePair(in PairInput) (dead, rows string, keys int64, err error) {
 			if there, serr := os.Stat(rows); serr == nil && os.SameFile(mine, there) {
 				os.Remove(rows)
 			}
+		} else if errors.Is(serr, os.ErrNotExist) {
+			// The folder holds no hard links, so publish gave the rows
+			// their name by renaming the file this call wrote: the one
+			// under that name is this call's, and half a pair is not left.
+			os.Remove(rows)
 		}
 	}
 	return

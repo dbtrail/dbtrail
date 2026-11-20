@@ -249,6 +249,15 @@ func MakeRecoverCascadeTool(cfg Config) func(context.Context, *mcp.CallToolReque
 			}
 		}
 
+		// The index's dialect, read once (it was read before this change too,
+		// just later, to build the generator). A PostgreSQL index is refused
+		// before anything is fetched: its capture does not record foreign
+		// keys, so the script would bring back the parent alone.
+		dialect := recovery.DialectForIndex(t.DB)
+		if dialect == recovery.PostgresDialect {
+			return ErrorResult(cascaderecover.PostgresCascadeRefusal(cascaderecover.SurfaceMCP, args.Schema)), nil, nil
+		}
+
 		// Advisory notes for the payload. Unlike the CLI, whose operator sees
 		// slog on stderr, an MCP client sees nothing but the result — so every
 		// degradation the CLI logs must land here instead.
@@ -451,7 +460,7 @@ func MakeRecoverCascadeTool(cfg Config) func(context.Context, *mcp.CallToolReque
 		res.Warnings = append(res.Warnings, cascaderecover.OrderNotes(order)...)
 		rows := append(append([]query.ResultRow{}, parents...), res.Victims...)
 
-		gen := recovery.NewForDialect(t.DB, resolver, recovery.DialectForIndex(t.DB))
+		gen := recovery.NewForDialect(t.DB, resolver, dialect)
 		// #849: same "only call when set" gate as the recover tool — see
 		// Config.scriptBudgetOverride for why this must never become an
 		// unconditional SetMaxScriptBytes(cfg.MaxScriptBytes).

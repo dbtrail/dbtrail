@@ -11,7 +11,13 @@ import (
 // punctuation. It follows PostgreSQL's rules, not MySQL's: `#` is an
 // operator, `"x"` is a name, a backslash escapes only inside E'...', `$tag$`
 // opens a body, and block comments nest.
-func scrub(stmt string) string {
+func scrub(stmt string) string { return scrubText(stmt, false) }
+
+// scrubNames is scrub with each quoted identifier's name kept and only its
+// quotes blanked, for a check that must read "pg_sleep"(1) as the call it is.
+func scrubNames(stmt string) string { return scrubText(stmt, true) }
+
+func scrubText(stmt string, keepNames bool) string {
 	b := []byte(stmt)
 	blank := func(from, to int) {
 		for i := from; i < to && i < len(b); i++ {
@@ -80,7 +86,14 @@ func scrub(stmt string) string {
 				}
 				j++
 			}
-			blank(i, j)
+			if keepNames {
+				blank(i, i+1)
+				if j > i+1 && b[j-1] == '"' {
+					blank(j-1, j)
+				}
+			} else {
+				blank(i, j)
+			}
 			i = j
 		case c == '$' && (i == 0 || !isWord(b[i-1])):
 			// $tag$ ... $tag$, tag possibly empty. $1 is a parameter.
@@ -177,7 +190,8 @@ var (
 // with side effects cannot be told from its name.
 func ReadOnlyVeto(stmt string) string {
 	s := scrub(stmt)
-	if m := sideEffectFn.FindStringSubmatch(s); m != nil {
+	// A quoted name calls the same function: "pg_sleep"(50) is pg_sleep.
+	if m := sideEffectFn.FindStringSubmatch(scrubNames(stmt)); m != nil {
 		return "it calls " + m[1] + ", which waits, locks, or changes something a read-only transaction does not protect"
 	}
 	if lockingRE.MatchString(s) {

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
@@ -545,5 +546,76 @@ func TestReconstructTables_PsqlNeedsPostgres(t *testing.T) {
 	})
 	if !errors.Is(err, reconstruct.ErrPsqlNeedsPostgres) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// leavesLarge writes an UPDATE of id at lsn that leaves the large value of
+// status as it was: PostgreSQL did not send it, and the row before the
+// change was captured with its key only.
+func (f *pgFixture) leavesLarge(lsn uint64, d time.Duration, id string) {
+	f.t.Helper()
+	img, _ := json.Marshal(map[string]any{"id": id, "status": map[string]any{event.UnchangedToastKey: true}})
+	before, _ := json.Marshal(map[string]any{"id": id, "status": map[string]any{event.NotCapturedKey: true}})
+	testutil.InsertEvent(f.t, f.db, lsnString(lsn), lsn, lsn, f.at(d).Format("2006-01-02 15:04:05"), nil,
+		"public", "orders", 2, id, nil, before, img)
+}
+
+// A large value an UPDATE left as it was, in a table below REPLICA IDENTITY
+// FULL (#2775): the snapshot update gives the row the value of its earlier
+// change in the window, or of its row in the table's previous file, and
+// refuses what neither holds. It never writes the row without the value.
+func TestReconstructTables_PGUnchangedLargeValue(t *testing.T) {
+	t.Run("from the earlier change and from the file", func(t *testing.T) {
+		f := newPGFixture(t)
+		snap := f.at(10 * time.Minute)
+		f.event(0x600, 12*time.Minute, 2, "2", s("changed"))
+		f.leavesLarge(0x700, 15*time.Minute, "2") // from the change at 0x600
+		f.leavesLarge(0x710, 16*time.Minute, "1") // from the file
+		f.leavesLarge(0x720, 17*time.Minute, "1")
+		f.checkpoint(0x720)
+		root := t.TempDir()
+		f.baseline(root, snap, 0x500, "", [2]string{"1", "paid"}, [2]string{"2", "open"}, [2]string{"5", "keep"})
+		got, _, _, err := f.run(root, pgRun{at: f.at(30 * time.Minute)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := map[string]string{"1": "paid", "2": "changed", "5": "keep"}; !sameRows(got, want) {
+			t.Fatalf("rows %v, want %v", got, want)
+		}
+	})
+	for name, c := range map[string]struct {
+		setup func(f *pgFixture)
+		run   pgRun
+		says  string
+	}{
+		"a key the file does not hold": {
+			func(f *pgFixture) { f.leavesLarge(0x700, 15*time.Minute, "7") }, pgRun{}, "no row under that key"},
+		"a row deleted before the change": {
+			func(f *pgFixture) {
+				f.event(0x600, 12*time.Minute, 3, "1", nil)
+				f.leavesLarge(0x700, 15*time.Minute, "1")
+			}, pgRun{}, "the row was deleted"},
+		"a file that holds an empty text there": {
+			func(f *pgFixture) { f.leavesLarge(0x700, 15*time.Minute, "3") }, pgRun{}, "a NULL or an empty text"},
+		"a run told to go on over missing changes": {
+			func(f *pgFixture) { f.leavesLarge(0x700, 15*time.Minute, "1") }, pgRun{allowGaps: true}, "It is not read from the copy"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newPGFixture(t)
+			c.setup(f)
+			f.checkpoint(0x700)
+			root := t.TempDir()
+			f.baseline(root, f.at(10*time.Minute), 0x500, "", [2]string{"1", "paid"}, [2]string{"3", ""})
+			run := c.run
+			run.at = f.at(30 * time.Minute)
+			_, _, _, err := f.run(root, run)
+			text := fmt.Sprint(err)
+			if !strings.Contains(text, c.says) {
+				t.Fatalf("the run answered %q; want a refusal that says %q", text, c.says)
+			}
+			if _, serr := os.Stat(filepath.Join(root, reconstruct.SnapshotDirName(run.at), "public", "orders.parquet")); serr == nil {
+				t.Fatal("the refused table was written")
+			}
+		})
 	}
 }
