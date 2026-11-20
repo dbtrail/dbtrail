@@ -118,7 +118,7 @@ func TestDbtrailCLI_runsTheCommandInTheContainer(t *testing.T) {
 	}
 	// Not a terminal here, so no terminal is asked of Docker (-T). Every
 	// word arrives as one word, the one with a space included.
-	want := []string{"compose", "exec", "-T", "-e", "DBTRAIL_PROG=dbtrail", "bintrail", "bintrail-console", "server", "add", "-h", "db1", "--name", "my shop", "-u", "dbtrail", "--password-stdin"}
+	want := []string{"compose", "exec", "-T", "-e", "DBTRAIL_PROG=" + r.stack + "/dbtrail", "bintrail", "bintrail-console", "server", "add", "-h", "db1", "--name", "my shop", "-u", "dbtrail", "--password-stdin"}
 	if !sameArgs(r.args(), want) {
 		t.Errorf("docker was asked\n %q\nwant\n %q", r.args(), want)
 	}
@@ -148,7 +148,7 @@ func TestDbtrailCLI_sendsTheOptionFileOnStandardInput(t *testing.T) {
 			if r.code != 0 {
 				t.Fatalf("exit %d: %s", r.code, r.out)
 			}
-			want := []string{"compose", "exec", "-T", "-e", "DBTRAIL_PROG=dbtrail", "bintrail", "bintrail-console", "server", "add", "--defaults-file=-", "--name", "shop"}
+			want := []string{"compose", "exec", "-T", "-e", "DBTRAIL_PROG=" + r.stack + "/dbtrail", "bintrail", "bintrail-console", "server", "add", "--defaults-file=-", "--name", "shop"}
 			if !sameArgs(r.args(), want) {
 				t.Errorf("docker was asked\n %q\nwant\n %q", r.args(), want)
 			}
@@ -212,7 +212,7 @@ func TestDbtrailCLI_anOptionFileAlreadyOnStandardInputIsLeftAlone(t *testing.T) 
 		{"server", "add", "--defaults-file=-"},
 	} {
 		r := runCLI(t, "[client]\nuser=u\n", nil, nil, args...)
-		want := []string{"compose", "exec", "-T", "-e", "DBTRAIL_PROG=dbtrail", "bintrail", "bintrail-console", "server", "add", "--defaults-file=-"}
+		want := []string{"compose", "exec", "-T", "-e", "DBTRAIL_PROG=" + r.stack + "/dbtrail", "bintrail", "bintrail-console", "server", "add", "--defaults-file=-"}
 		if r.code != 0 || !sameArgs(r.args(), want) || r.field("stdin") != "[client]\nuser=u" {
 			t.Errorf("%q: exit %d, asked %q, stdin %q", args, r.code, r.args(), r.field("stdin"))
 		}
@@ -268,6 +268,87 @@ func TestDbtrailCLI_keepsTheExitCode(t *testing.T) {
 	if r.code != 1 {
 		t.Errorf("with an option file: exit %d, want the container's 1", r.code)
 	}
+}
+
+// The name the program is told to use in what it suggests next: the plain
+// word only when the word runs this file, else this file's absolute path,
+// which works from any folder (a stranger was told "dbtrail snapshot run"
+// before any link existed, and got command not found).
+func TestDbtrailCLI_tellsTheProgramANameThatRuns(t *testing.T) {
+	prog := func(r cliRun) string {
+		args := r.args()
+		for i, a := range args {
+			if v, ok := strings.CutPrefix(a, "DBTRAIL_PROG="); ok && i > 0 && args[i-1] == "-e" {
+				return v
+			}
+		}
+		return ""
+	}
+	t.Run("not on the PATH: its own path", func(t *testing.T) {
+		r := runCLI(t, "", nil, nil, "server", "list")
+		if got := prog(r); got != r.stack+"/dbtrail" {
+			t.Errorf("DBTRAIL_PROG = %q, want %q", got, r.stack+"/dbtrail")
+		}
+	})
+	t.Run("linked into the PATH: the word", func(t *testing.T) {
+		r := runCLI(t, "", func(stack string) string {
+			link := filepath.Join(filepath.Dir(stack), "bin", "dbtrail")
+			if err := os.Symlink(filepath.Join("..", "my stack", "dbtrail"), link); err != nil {
+				t.Fatal(err)
+			}
+			return link
+		}, nil, "server", "list")
+		if got := prog(r); got != "dbtrail" {
+			t.Errorf("DBTRAIL_PROG = %q, want dbtrail", got)
+		}
+	})
+	t.Run("linked, and run by its path: the word still runs it", func(t *testing.T) {
+		r := runCLI(t, "", func(stack string) string {
+			if err := os.Symlink(filepath.Join("..", "my stack", "dbtrail"), filepath.Join(filepath.Dir(stack), "bin", "dbtrail")); err != nil {
+				t.Fatal(err)
+			}
+			return ""
+		}, nil, "server", "list")
+		if got := prog(r); got != "dbtrail" {
+			t.Errorf("DBTRAIL_PROG = %q, want dbtrail", got)
+		}
+	})
+	t.Run("another dbtrail on the PATH: its own path", func(t *testing.T) {
+		r := runCLI(t, "", func(stack string) string {
+			if err := os.WriteFile(filepath.Join(filepath.Dir(stack), "bin", "dbtrail"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			return ""
+		}, nil, "server", "list")
+		if got := prog(r); got != r.stack+"/dbtrail" {
+			t.Errorf("DBTRAIL_PROG = %q, want %q", got, r.stack+"/dbtrail")
+		}
+	})
+	t.Run("a folder name the program would refuse: the word", func(t *testing.T) {
+		body, err := os.ReadFile(filepath.Join("..", "..", "dbtrail.sh"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := runCLI(t, "", func(stack string) string {
+			odd := filepath.Join(filepath.Dir(stack), "it's")
+			if err := os.Mkdir(odd, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(odd, "docker-compose.yml"), []byte("services: {}\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(odd, "dbtrail"), body, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			return filepath.Join(odd, "dbtrail")
+		}, nil, "server", "list")
+		if r.code != 0 {
+			t.Fatalf("exit %d: %s", r.code, r.out)
+		}
+		if got := prog(r); got != "dbtrail" {
+			t.Errorf("DBTRAIL_PROG = %q, want dbtrail", got)
+		}
+	})
 }
 
 // Linked into a folder of the PATH (/usr/local/bin/dbtrail -> stack/dbtrail),

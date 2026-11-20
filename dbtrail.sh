@@ -67,9 +67,36 @@ while [ "$n" -gt 0 ]; do
   esac
 done
 
-# The program in the container is bintrail-console. Told it was called
-# dbtrail (DBTRAIL_PROG), it says dbtrail in its help and in the commands it
-# suggests.
+# The program in the container is bintrail-console. Told what to call
+# itself (DBTRAIL_PROG), it uses that name in its help and in the commands it
+# suggests: dbtrail when that word runs this file (it was linked into the
+# PATH), else this file's absolute path, which works from any folder. A
+# suggested "dbtrail snapshot run" before the link would be command not found.
+realdir() {
+  p=$1
+  while [ -L "$p" ]; do
+    l=$(readlink "$p")
+    case "$l" in
+      /*) p=$l ;;
+      *)  p=$(dirname "$p")/$l ;;
+    esac
+  done
+  (cd "$(dirname "$p")" 2>/dev/null && pwd -P)
+}
+prog="$dir/$(basename "$self")"
+on_path=$(command -v dbtrail 2>/dev/null || true)
+case "$on_path" in
+  /*)
+    if [ "$(realdir "$on_path")" = "$(cd "$dir" && pwd -P)" ] && [ "$(basename "$self")" = dbtrail ]; then
+      prog=dbtrail
+    fi
+    ;;
+esac
+# A path the program would not take as one word (a quote, a backslash, a $
+# or a backtick in a folder name) falls back to the word, as before.
+case "$prog" in
+  *[\'\"\\\$\`]*) prog=dbtrail ;;
+esac
 
 cd "$dir"
 if [ -n "$file" ]; then
@@ -78,11 +105,11 @@ if [ -n "$file" ]; then
   # shellcheck disable=SC2088
   case "$file" in "~/"*) file=$HOME/${file#"~/"} ;; esac
   [ -r "$file" ] || { echo "dbtrail: cannot read the option file $file" >&2; exit 1; }
-  set_compose exec -T -e DBTRAIL_PROG=dbtrail bintrail bintrail-console "$@" < "$file"
+  set_compose exec -T -e "DBTRAIL_PROG=$prog" bintrail bintrail-console "$@" < "$file"
 elif [ -t 0 ] && [ -t 1 ]; then
-  set_compose exec -e DBTRAIL_PROG=dbtrail bintrail bintrail-console "$@"
+  set_compose exec -e "DBTRAIL_PROG=$prog" bintrail bintrail-console "$@"
 else
   # Not a terminal (a pipe, a script): no terminal is asked of Docker either,
   # which would refuse, and standard input is passed through as it is.
-  set_compose exec -T -e DBTRAIL_PROG=dbtrail bintrail bintrail-console "$@"
+  set_compose exec -T -e "DBTRAIL_PROG=$prog" bintrail bintrail-console "$@"
 fi
