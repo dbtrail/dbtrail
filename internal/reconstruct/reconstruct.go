@@ -71,10 +71,19 @@ func applyAtFrom(initialState map[string]any, events []query.ResultRow, at time.
 		if ev.EventTimestamp.After(at) {
 			break
 		}
-		if err := checkEventToast(*ev); err != nil {
-			return nil, nil, err
+		// A PostgreSQL change is checked and applied by PostgreSQL's own
+		// step (applyPGEvent); every other change as it always was.
+		if _, pg := pgRowLSN(ev); pg {
+			var err error
+			if state, err = applyPGEvent(state, ev); err != nil {
+				return nil, nil, err
+			}
+		} else {
+			if err := checkEventToast(*ev); err != nil {
+				return nil, nil, err
+			}
+			state = applyEvent(state, *ev)
 		}
-		state = applyEvent(state, *ev)
 		src = eventSource(src, ev)
 	}
 	return state, src, nil
@@ -101,10 +110,17 @@ func BuildHistory(initialState map[string]any, baselineTime time.Time, events []
 		if ev.EventTimestamp.After(at) {
 			break
 		}
-		if err := checkEventToast(ev); err != nil {
-			return nil, err
+		if _, pg := pgRowLSN(&ev); pg {
+			var err error
+			if current, err = applyPGEvent(current, &ev); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := checkEventToast(ev); err != nil {
+				return nil, err
+			}
+			current = applyEvent(current, ev)
 		}
-		current = applyEvent(current, ev)
 		gtid := ""
 		if ev.GTID != nil {
 			gtid = *ev.GTID
@@ -375,13 +391,20 @@ func FoldBeforeSnapshot(row map[string]any, events []query.ResultRow, snapshotTi
 			rest = append(rest, ev)
 			continue
 		}
-		if err := checkEventToast(ev); err != nil {
-			return nil, nil, err
-		}
-		if _, _, moved := pkChangedInEvent(&ev, pkCols); moved {
-			state = nil
+		if _, pg := pgRowLSN(&ev); pg {
+			var err error
+			if state, err = foldPGEventBeforeSnapshot(state, &ev, pkCols); err != nil {
+				return nil, nil, err
+			}
 		} else {
-			state = applyEvent(state, ev)
+			if err := checkEventToast(ev); err != nil {
+				return nil, nil, err
+			}
+			if _, _, moved := pkChangedInEvent(&ev, pkCols); moved {
+				state = nil
+			} else {
+				state = applyEvent(state, ev)
+			}
 		}
 		folded = true
 	}
