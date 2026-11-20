@@ -20,8 +20,8 @@ func row3(id string, status, note any) map[string]any {
 	return map[string]any{"id": id, "status": status, "note": note}
 }
 
-// upd is an UPDATE of key 1 whose earlier row was captured with its key only.
-func upd(id, lsn uint64, status, note any) query.ResultRow {
+// upd3 is an UPDATE of key 1 whose earlier row was captured with its key only.
+func upd3(id, lsn uint64, status, note any) query.ResultRow {
 	return pgEv(id, lsn, event.EventUpdate, map[string]any{"id": "1", "status": notCaptured(), "note": notCaptured()}, row3("1", status, note))
 }
 
@@ -48,52 +48,52 @@ func TestPGCarry_takesTheValueOfTheNewestEarlierChange(t *testing.T) {
 		want  want
 	}{
 		"an insert, then an update that leaves the value": {
-			[][]query.ResultRow{{ins3(1, 0x700, "s", "big")}, {upd(2, 0x710, "t", u)}},
+			[][]query.ResultRow{{ins3(1, 0x700, "s", "big")}, {upd3(2, 0x710, "t", u)}},
 			want{status: "t", note: "big"}},
 		"a change of the value, then an update that leaves it": {
-			[][]query.ResultRow{{ins3(1, 0x700, "s", "old")}, {upd(2, 0x710, "s", "new")}, {upd(3, 0x720, "t", u)}},
+			[][]query.ResultRow{{ins3(1, 0x700, "s", "old")}, {upd3(2, 0x710, "s", "new")}, {upd3(3, 0x720, "t", u)}},
 			want{status: "t", note: "new"}},
 		"two updates, each leaving the value": {
-			[][]query.ResultRow{{ins3(1, 0x700, "s", "big")}, {upd(2, 0x710, "t", u)}, {upd(3, 0x720, "v", u)}},
+			[][]query.ResultRow{{ins3(1, 0x700, "s", "big")}, {upd3(2, 0x710, "t", u)}, {upd3(3, 0x720, "v", u)}},
 			want{status: "v", note: "big"}},
 		"two columns, each from its own change": {
-			[][]query.ResultRow{{ins3(1, 0x700, "S", "N")}, {upd(2, 0x710, u, "N2")}, {upd(3, 0x720, u, u)}},
+			[][]query.ResultRow{{ins3(1, 0x700, "S", "N")}, {upd3(2, 0x710, u, "N2")}, {upd3(3, 0x720, u, u)}},
 			want{status: "S", note: "N2"}},
 		"in one transaction": {
-			[][]query.ResultRow{{ins3(1, 0x700, "s", "big"), upd(2, 0x700, "t", u)}},
+			[][]query.ResultRow{{ins3(1, 0x700, "s", "big"), upd3(2, 0x700, "t", u)}},
 			want{status: "t", note: "big"}},
 		"a NULL is carried as a NULL": {
-			[][]query.ResultRow{{ins3(1, 0x700, "s", nil)}, {upd(2, 0x710, "t", u)}},
+			[][]query.ResultRow{{ins3(1, 0x700, "s", nil)}, {upd3(2, 0x710, "t", u)}},
 			want{status: "t", note: nil}},
 		"an empty text is carried as an empty text": {
-			[][]query.ResultRow{{ins3(1, 0x700, "s", "")}, {upd(2, 0x710, "t", u)}},
+			[][]query.ResultRow{{ins3(1, 0x700, "s", "")}, {upd3(2, 0x710, "t", u)}},
 			want{status: "t", note: ""}},
 		"the last change arrives first": {
-			[][]query.ResultRow{{upd(3, 0x720, "t", u)}, {ins3(1, 0x700, "s", "old")}, {upd(2, 0x710, "s", "new")}},
+			[][]query.ResultRow{{upd3(3, 0x720, "t", u)}, {ins3(1, 0x700, "s", "old")}, {upd3(2, 0x710, "s", "new")}},
 			want{status: "t", note: "new"}},
 		"the last change arrives first, then the nearer one, then the farther": {
-			[][]query.ResultRow{{upd(3, 0x720, "t", u)}, {upd(2, 0x710, "s", "new")}, {ins3(1, 0x700, "s", "old")}},
+			[][]query.ResultRow{{upd3(3, 0x720, "t", u)}, {upd3(2, 0x710, "s", "new")}, {ins3(1, 0x700, "s", "old")}},
 			want{status: "t", note: "new"}},
 		"a nearer change arrives after the value was carried from a farther one": {
-			[][]query.ResultRow{{ins3(1, 0x700, "s", "old")}, {upd(3, 0x720, "t", u)}, {upd(2, 0x710, "s", "new")}},
+			[][]query.ResultRow{{ins3(1, 0x700, "s", "old")}, {upd3(3, 0x720, "t", u)}, {upd3(2, 0x710, "s", "new")}},
 			want{status: "t", note: "new"}},
 		"a nearer change that leaves the value too changes nothing": {
-			[][]query.ResultRow{{ins3(1, 0x700, "s", "old")}, {upd(3, 0x720, "t", u)}, {upd(2, 0x710, "x", u)}},
+			[][]query.ResultRow{{ins3(1, 0x700, "s", "old")}, {upd3(3, 0x720, "t", u)}, {upd3(2, 0x710, "x", u)}},
 			want{status: "t", note: "old"}},
 		"a row deleted and inserted again": {
-			[][]query.ResultRow{{ins3(1, 0x700, "s", "first")}, {del3(2, 0x710)}, {ins3(3, 0x720, "s", "second")}, {upd(4, 0x730, "t", u)}},
+			[][]query.ResultRow{{ins3(1, 0x700, "s", "first")}, {del3(2, 0x710)}, {ins3(3, 0x720, "s", "second")}, {upd3(4, 0x730, "t", u)}},
 			want{status: "t", note: "second"}},
 		"a delete that arrives late takes the value back": {
-			[][]query.ResultRow{{ins3(1, 0x700, "s", "first")}, {upd(4, 0x730, "t", u)}, {del3(2, 0x710)}},
+			[][]query.ResultRow{{ins3(1, 0x700, "s", "first")}, {upd3(4, 0x730, "t", u)}, {del3(2, 0x710)}},
 			want{status: "t", note: u, left: []string{"note"}, gone: []string{"note"}}},
 		"and the insert after it gives the row's own": {
-			[][]query.ResultRow{{ins3(1, 0x700, "s", "first")}, {upd(4, 0x730, "t", u)}, {del3(2, 0x710)}, {ins3(3, 0x720, "s", "second")}},
+			[][]query.ResultRow{{ins3(1, 0x700, "s", "first")}, {upd3(4, 0x730, "t", u)}, {del3(2, 0x710)}, {ins3(3, 0x720, "s", "second")}},
 			want{status: "t", note: "second"}},
 		"no change of the window holds it": {
-			[][]query.ResultRow{{upd(2, 0x710, "t", u)}, {upd(3, 0x720, "v", u)}},
+			[][]query.ResultRow{{upd3(2, 0x710, "t", u)}, {upd3(3, 0x720, "v", u)}},
 			want{status: "v", note: u, left: []string{"note"}}},
 		"a later change that holds every value forgets the rest": {
-			[][]query.ResultRow{{upd(2, 0x710, "t", u)}, {upd(3, 0x720, "v", "sent")}, {ins3(1, 0x700, "s", "old")}},
+			[][]query.ResultRow{{upd3(2, 0x710, "t", u)}, {upd3(3, 0x720, "v", "sent")}, {ins3(1, 0x700, "s", "old")}},
 			want{status: "v", note: "sent"}},
 	} {
 		res := foldPGPages(t, pkColsIntID(), c.pages...)
@@ -119,7 +119,7 @@ func TestPGCarry_takesTheValueOfTheNewestEarlierChange(t *testing.T) {
 // The page a fold is handed is left as it was: the row a value is carried
 // into is the fold's own.
 func TestPGCarry_leavesThePageAsItWas(t *testing.T) {
-	page := []query.ResultRow{ins3(1, 0x700, "s", "big"), upd(2, 0x710, "t", unsent())}
+	page := []query.ResultRow{ins3(1, 0x700, "s", "big"), upd3(2, 0x710, "t", unsent())}
 	res := foldPGPages(t, pkColsIntID(), page)
 	if got := res.Changes["1"].RowAfter["note"]; got != "big" {
 		t.Fatalf("the fold's row holds %v", got)
@@ -133,7 +133,7 @@ func TestPGCarry_leavesThePageAsItWas(t *testing.T) {
 // follows it as a row does.
 func TestPGCarry_linksInsideOneTransaction(t *testing.T) {
 	res := foldPGPages(t, pkColsIntID(), []query.ResultRow{
-		ins3(1, 0x700, "s", "big"), upd(2, 0x700, "t", unsent()), del3(3, 0x700),
+		ins3(1, 0x700, "s", "big"), upd3(2, 0x700, "t", unsent()), del3(3, 0x700),
 	})
 	if ev := res.Changes["1"]; ev == nil || ev.EventType != event.EventDelete {
 		t.Fatalf("key 1 is %+v, want it deleted", ev)
@@ -147,8 +147,8 @@ func TestPGCarry_linksInsideOneTransaction(t *testing.T) {
 // was carried from is not kept there.
 func TestPGCarry_refusesOnceTheChangesAreOnDisk(t *testing.T) {
 	for name, pages := range map[string][][]query.ResultRow{
-		"the value comes after the move": {{ins3(1, 0x700, "s", "big")}, {upd(2, 0x710, "t", unsent())}},
-		"the value came before the move": {{upd(2, 0x710, "t", unsent())}, {ins3(3, 0x720, "s", "x")}},
+		"the value comes after the move": {{ins3(1, 0x700, "s", "big")}, {upd3(2, 0x710, "t", unsent())}},
+		"the value came before the move": {{upd3(2, 0x710, "t", unsent())}, {ins3(3, 0x720, "s", "x")}},
 	} {
 		res := &foldResult{Changes: map[string]*query.ResultRow{}}
 		var err error
