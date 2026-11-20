@@ -162,6 +162,51 @@ type HealthSnapshot struct {
 	// FlushedSourceAt is the source's own clock for that reading
 	// (QueryFlushed); zero when the source had none to give.
 	FlushedSourceAt time.Time
+	// Published is the tables the publication holds when the probe ran
+	// (QueryPublishedTables), with PublishedErr saying why when it could not
+	// be read. That read failing does not fail the probe.
+	Published    []PublishedTable
+	PublishedErr error
+}
+
+// PublishedTable is one table of a publication, by the OID that stays its
+// own through a rename.
+type PublishedTable struct {
+	OID    uint32
+	Schema string
+	Table  string
+}
+
+// QueryPublishedTables lists the tables publication holds now, ordered by
+// OID. A table taken out of the publication, or dropped, is no longer in it,
+// and nothing in the change stream says so: the stream just stops carrying
+// the table. Whoever polls this is how that is noticed.
+func QueryPublishedTables(ctx context.Context, conn *pgx.Conn, publication string) ([]PublishedTable, error) {
+	rows, err := conn.Query(ctx, `
+		SELECT c.oid::bigint, pt.schemaname, pt.tablename
+		FROM pg_publication_tables pt
+		JOIN pg_namespace n ON n.nspname = pt.schemaname
+		JOIN pg_class c ON c.relname = pt.tablename AND c.relnamespace = n.oid
+		WHERE pt.pubname = $1
+		ORDER BY 1`, publication)
+	if err != nil {
+		return nil, fmt.Errorf("pgcapture: listing the tables of publication %q: %w", publication, err)
+	}
+	defer rows.Close()
+	out := []PublishedTable{}
+	for rows.Next() {
+		var oid int64
+		var t PublishedTable
+		if err := rows.Scan(&oid, &t.Schema, &t.Table); err != nil {
+			return nil, fmt.Errorf("pgcapture: listing the tables of publication %q: %w", publication, err)
+		}
+		t.OID = uint32(oid)
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("pgcapture: listing the tables of publication %q: %w", publication, err)
+	}
+	return out, nil
 }
 
 // ProbeHealth opens a short-lived plain connection to queryDSN and reads current source
@@ -186,6 +231,7 @@ func ProbeHealth(ctx context.Context, queryDSN, slotName, publication string) (H
 	}
 	snap := HealthSnapshot{Slot: slot, ReplicaIdentityNotFull: notFull}
 	snap.FlushedLSN, snap.FlushedSourceAt, snap.FlushedLSNErr = QueryFlushed(ctx, conn)
+	snap.Published, snap.PublishedErr = QueryPublishedTables(ctx, conn, publication)
 	return snap, nil
 }
 
