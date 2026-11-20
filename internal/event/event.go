@@ -444,13 +444,22 @@ func CanonicalPKValues(s string) string {
 // ChangedColumns returns the sorted list of column names whose values differ
 // between before and after images. Returns nil for INSERT/DELETE events where
 // one image is nil.
+//
+// It also returns nil when the before image holds the not-captured marker
+// (NotCapturedKey): a PostgreSQL table below REPLICA IDENTITY FULL sends only
+// the key of the earlier row, so which columns changed is unknown, and unknown
+// is stored as NULL rather than as a guess. A MySQL image never carries the
+// marker (pinned by TestChangedColumns_MySQLGolden).
 func ChangedColumns(before, after map[string]any) []string {
 	if before == nil || after == nil {
 		return nil
 	}
 	var changed []string
-	for key := range before {
-		if !reflect.DeepEqual(before[key], after[key]) {
+	for key, v := range before {
+		if IsNotCapturedMarker(v) {
+			return nil
+		}
+		if !reflect.DeepEqual(v, after[key]) {
 			changed = append(changed, key)
 		}
 	}
