@@ -40,6 +40,24 @@ func TestProgramNameFromTheEnvironment(t *testing.T) {
 		"a\nb":                  "bintrail-console",
 		"$(id)":                 "bintrail-console",
 		strings.Repeat("a", 40): "bintrail-console",
+		// An absolute path: what the dbtrail command of a Docker install
+		// passes until "dbtrail" alone runs it. Printed as one shell word.
+		"/home/u/dbtrail/dbtrail": "/home/u/dbtrail/dbtrail",
+		"/tmp/my stack/dbtrail":   `/tmp/my\ stack/dbtrail`,
+		"/opt/db(1)/dbtrail":      `/opt/db\(1\)/dbtrail`,
+		"/srv/café/dbtrail":       `/srv/caf\é/dbtrail`,
+		// Paths a shell would read as something else, or no path at all.
+		"/tmp/a$b/dbtrail":    "bintrail-console",
+		"/tmp/a`id`/dbtrail":  "bintrail-console",
+		"/tmp/it's/dbtrail":   "bintrail-console",
+		`/tmp/a"b/dbtrail`:    "bintrail-console",
+		`/tmp/a\b/dbtrail`:    "bintrail-console",
+		"/tmp/a\nb/dbtrail":   "bintrail-console",
+		"/tmp/dbtrail/":       "bintrail-console",
+		"/":                   "bintrail-console",
+		"./dbtrail/dbtrail":   "bintrail-console",
+		"dbtrail/dbtrail":     "bintrail-console",
+		"/" + strings.Repeat("a", 1002): "bintrail-console",
 	} {
 		t.Setenv(progNameEnv, value)
 		if got := programName(args); got != want {
@@ -79,6 +97,26 @@ func TestUseProgName(t *testing.T) {
 	asProg(t, "bintrail-console")
 	if got := useProgName("bintrail-console server list"); got != "bintrail-console server list" {
 		t.Errorf("started under its own name: %q", got)
+	}
+}
+
+// A path name goes where the word went, whole, and the root command takes
+// it as its name: an escaped space is not a space, so cobra keeps it.
+func TestUseProgNameWithAPath(t *testing.T) {
+	t.Setenv(progNameEnv, "/tmp/my stack/dbtrail")
+	asProg(t, programName([]string{"/usr/local/bin/bintrail-console"}))
+	want := `Next, the first copy of its tables:  /tmp/my\ stack/dbtrail snapshot run shop`
+	if got := useProgName("Next, the first copy of its tables:  bintrail-console snapshot run shop"); got != want {
+		t.Errorf("got  %q\nwant %q", got, want)
+	}
+	root := &cobra.Command{Use: "bintrail-console"}
+	root.AddCommand(&cobra.Command{Use: "server", Long: "  bintrail-console server list"})
+	applyProgName(root)
+	if root.Name() != `/tmp/my\ stack/dbtrail` {
+		t.Errorf("root Name() = %q", root.Name())
+	}
+	if got := root.Commands()[0].Long; got != `  /tmp/my\ stack/dbtrail server list` {
+		t.Errorf("help = %q", got)
 	}
 }
 
