@@ -1493,7 +1493,8 @@ so a statement there often runs out of a 200 ms wait. Not yet per server
 Two budgets bound the tails, because they live in the router's memory:
 
 - `BINTRAIL_SQL_TAIL_MAX_KEYS` is the most keys one table's tail holds,
-  500,000 when unset. A table whose changes since its snapshot pass it
+  500,000 when unset (2,000,000 for a PostgreSQL server whose tails have a
+  memory bound, the next setting: the memory is then what holds them). A table whose changes since its snapshot pass it
   freezes its tail: statements keep reading the changes it holds, nothing
   newer, until the next snapshot is published and the tail is rebuilt. The
   router logs it as "a table's tail is over its budget" with the reason. A
