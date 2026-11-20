@@ -40,7 +40,7 @@ func TestIntegrationEventsAPIPostgresHistory(t *testing.T) {
 			all, allBody := get("/api/events?schema=app&table=users")
 			filtered, filteredBody := get("/api/events?schema=app&table=users&changed_column=name")
 			t.Logf("all: %s\nfiltered: %s", allBody, filteredBody)
-			warn := "1 UPDATE row may have changed name:"
+			warn := "On this page: 1 UPDATE row may have changed name:"
 			if flavor == "mysql" {
 				if strings.Contains(allBody, "before_image") || strings.Contains(allBody, "unchanged_columns") {
 					t.Errorf("a MySQL index was annotated: %s", allBody)

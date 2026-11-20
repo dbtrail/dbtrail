@@ -3,11 +3,14 @@ package query
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/dbtrail/dbtrail/internal/event"
 )
@@ -315,6 +318,50 @@ func TestMayHaveChangedNotice(t *testing.T) {
 	}
 	if strings.Contains(got, "--") {
 		t.Error("the notice names a command-line flag")
+	}
+}
+
+// A flavor read that fails must not pass silently for MySQL on a PostgreSQL
+// index: it answers MySQL and says so. A missing stream_state row is a
+// file-indexed MySQL-family index, and says nothing.
+func TestHistoryFlavor(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		expect   func(sqlmock.Sqlmock)
+		wantPG   bool
+		wantWarn bool
+	}{
+		{"postgres", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery("SELECT flavor FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"flavor"}).AddRow("postgres"))
+		}, true, false},
+		{"mysql", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery("SELECT flavor FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"flavor"}).AddRow("mysql"))
+		}, false, false},
+		{"no stream_state row", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery("SELECT flavor FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"flavor"}))
+		}, false, false},
+		{"read fails", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery("SELECT flavor FROM stream_state").WillReturnError(errors.New("lock wait timeout"))
+		}, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			tc.expect(mock)
+			pg, warn := HistoryFlavor(db)
+			if pg != tc.wantPG || (warn != "") != tc.wantWarn {
+				t.Errorf("HistoryFlavor = %v, %q", pg, warn)
+			}
+			if tc.wantWarn && warn != FlavorUnreadableWarning {
+				t.Errorf("warning = %q", warn)
+			}
+		})
+	}
+	if strings.Contains(FlavorUnreadableWarning, "--") {
+		t.Error("the warning names a command-line flag")
 	}
 }
 

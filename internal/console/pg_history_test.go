@@ -2,6 +2,7 @@ package console
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/query"
@@ -62,7 +65,7 @@ func TestEventDTOPostgresFields(t *testing.T) {
 func TestPGHistoryWarnings(t *testing.T) {
 	rows := []query.ResultRow{pgMarkerRow()}
 	got := pgHistoryWarnings(query.Options{ChangedColumn: "title", PostgresHistory: true}, rows)
-	if len(got) != 1 || !strings.HasPrefix(got[0], "1 UPDATE row may have changed title:") {
+	if len(got) != 1 || !strings.HasPrefix(got[0], "On this page: 1 UPDATE row may have changed title:") {
 		t.Errorf("warnings = %q", got)
 	}
 	if w := pgHistoryWarnings(query.Options{ChangedColumn: "title"}, rows); w != nil {
@@ -70,6 +73,35 @@ func TestPGHistoryWarnings(t *testing.T) {
 	}
 	if w := pgHistoryWarnings(query.Options{PostgresHistory: true}, rows); w != nil {
 		t.Errorf("a warning without a changed-column filter: %q", w)
+	}
+}
+
+// A registry server answers from its entry and never reads its index for
+// this (so an index the console never migrated cannot warn on every page);
+// the server given on the command line reads it and warns when it cannot.
+func TestHistoryIsPostgres(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := &Server{}
+	if pg, warn := s.historyIsPostgres(&bundle{serverID: "pg-1", db: db}); pg || warn != "" {
+		t.Errorf("registry server with no registry: %v %q", pg, warn)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("a registry server read its index: %v", err)
+	}
+	mock.ExpectQuery("SELECT flavor FROM stream_state").WillReturnError(errors.New("Unknown column 'flavor'"))
+	if pg, warn := s.historyIsPostgres(&bundle{serverID: bootServerID, db: db}); pg || warn != query.FlavorUnreadableWarning {
+		t.Errorf("boot server, read fails: %v %q", pg, warn)
+	}
+	mock.ExpectQuery("SELECT flavor FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"flavor"}).AddRow("postgres"))
+	if pg, warn := s.historyIsPostgres(&bundle{db: db}); !pg || warn != "" {
+		t.Errorf("boot server, postgres: %v %q", pg, warn)
+	}
+	if pg, warn := s.historyIsPostgres(nil); pg || warn != "" {
+		t.Errorf("nil bundle: %v %q", pg, warn)
 	}
 }
 

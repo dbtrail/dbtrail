@@ -748,7 +748,8 @@ func MakeQueryTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Query
 		// of tables that were not at REPLICA IDENTITY FULL, and let
 		// changed_column also return the UPDATEs whose changed columns are
 		// unknown (query.Options.PostgresHistory). Recover never sets it.
-		opts.PostgresHistory = query.SourceFlavor(t.DB) == "postgres"
+		var flavorWarning string
+		opts.PostgresHistory, flavorWarning = query.HistoryFlavor(t.DB)
 		pgChangedColumn := opts.PostgresHistory && opts.ChangedColumn != ""
 
 		// Hard ceiling on an explicit, oversized limit (#654). BuildQueryOptions
@@ -904,6 +905,9 @@ func MakeQueryTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Query
 		}
 		if note := query.MayHaveChangedNotice(opts.ChangedColumn, mayHaveChanged); note != "" {
 			text += "\nNote: " + note + "\n"
+		}
+		if flavorWarning != "" {
+			text += "\nWarning: " + flavorWarning + "\n"
 		}
 
 		ext.Record(ctx, ext.AuditEvent{

@@ -102,6 +102,27 @@ func toEventDTOs(rows []query.ResultRow, postgres bool) []eventDTO {
 	return out
 }
 
+// historyIsPostgres is Options.PostgresHistory for the Events view of b's
+// server, with query.FlavorUnreadableWarning when it could not be told. A
+// registry server answers from its entry, whose flavor is fixed when it is
+// made (sourceIsPostgres): no read, and so no failure, and a registry index
+// the console never migrated cannot raise the warning on every page. The
+// server given on the command line has no entry and reads its index, as the
+// query command does.
+func (s *Server) historyIsPostgres(b *bundle) (bool, string) {
+	if b == nil {
+		return false, ""
+	}
+	if b.serverID != "" && b.serverID != bootServerID {
+		var get func(string) (ServerEntry, bool)
+		if s.cm != nil && s.cm.reg != nil {
+			get = s.cm.reg.Get
+		}
+		return sourceIsPostgres(b.serverID, false, get), ""
+	}
+	return query.HistoryFlavor(b.db)
+}
+
 // pgHistoryWarnings is the Events response's warning for a changed-column
 // filter on a PostgreSQL index that returned UPDATEs whose changed columns
 // are unknown (query.MayHaveChangedNotice); nil otherwise, MySQL always.
@@ -110,7 +131,9 @@ func pgHistoryWarnings(opts query.Options, rows []query.ResultRow) []string {
 		return nil
 	}
 	if note := query.MayHaveChangedNotice(opts.ChangedColumn, query.MayHaveChangedCount(rows)); note != "" {
-		return []string{note}
+		// The count is of the page served, and the Events view pages: say so,
+		// or page 2's number reads as a correction of page 1's.
+		return []string{"On this page: " + note}
 	}
 	return nil
 }

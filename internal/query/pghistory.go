@@ -1,6 +1,7 @@
 package query
 
 import (
+	"database/sql"
 	"fmt"
 
 	"github.com/dbtrail/dbtrail/internal/event"
@@ -29,6 +30,26 @@ const (
 	UnchangedLargeValueText   = "(unchanged large value)"
 	ChangedColumnsUnknownText = "unknown"
 )
+
+// FlavorUnreadableWarning is what a history surface says when it could not
+// read the index's flavor (SourceFlavorDetail failed for a reason other than
+// a missing stream_state row): it then answers as MySQL, which on a
+// PostgreSQL index leaves partly captured rows unmarked and a changed-column
+// filter without the UPDATEs whose changed columns are unknown.
+const FlavorUnreadableWarning = "could not read whether this index holds PostgreSQL changes (stream_state); " +
+	"answering as MySQL, so rows of PostgreSQL tables not at REPLICA IDENTITY FULL are not marked and a " +
+	"changed-column filter may leave out the UPDATEs whose changed columns are unknown"
+
+// HistoryFlavor is the PostgresHistory value for a history surface, plus
+// FlavorUnreadableWarning when the flavor could not be read. A missing
+// stream_state row is a file-indexed MySQL-family index, not a failure.
+func HistoryFlavor(db *sql.DB) (postgres bool, warning string) {
+	flavor, noStream := SourceFlavorDetail(db)
+	if flavor == "" && !noStream {
+		return false, FlavorUnreadableWarning
+	}
+	return flavor == "postgres", ""
+}
 
 // KeyOnlyBefore reports whether a PostgreSQL row's earlier image carries the
 // not-captured marker: PostgreSQL sent at most the row's key.

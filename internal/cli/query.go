@@ -290,7 +290,11 @@ func runQuery(cmd *cobra.Command, args []string) error {
 	// A PostgreSQL index can hold rows of tables that were not at REPLICA
 	// IDENTITY FULL: render them, and let --changed-column also return the
 	// UPDATEs whose changed columns are unknown (query.Options.PostgresHistory).
-	opts.PostgresHistory = query.SourceFlavor(db) == "postgres"
+	var flavorWarning string
+	opts.PostgresHistory, flavorWarning = query.HistoryFlavor(db)
+	if flavorWarning != "" {
+		fmt.Fprintln(os.Stderr, "Warning: "+flavorWarning)
+	}
 
 	// ── Re-encode --pk/--pks against the at-rest pk_values form ────────────────
 	// (#957) binlog_events.pk_values is stored PIPE/BACKSLASH-ESCAPED
