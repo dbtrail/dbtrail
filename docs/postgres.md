@@ -1109,8 +1109,8 @@ server, closes the connections that use it; clients reconnect.
 - **Every wait for the source is bounded** by the port's five-minute cap on a
   statement, besides the client's `statement_timeout` and cancel. The wait
   for a connection there, when the port holds as many as it opens, is
-  bounded by 30 seconds and the `statement_timeout`; a cancel request does
-  not end that wait, the client leaving does.
+  bounded by 30 seconds, the `statement_timeout` and a cancel request; one
+  deadline covers every wait of a statement.
 - **When the source cannot be reached**: `08001 cannot connect to the source`;
   when it refuses the forwarding user, `08004` with PostgreSQL's reason (not
   `28P01`, which would read as the client's own password being wrong). The
@@ -1233,19 +1233,25 @@ What this costs and where it can go wrong:
   or its `statement_timeout` when that is shorter, and it gets `53300` only
   then. A slot is given back as soon as a statement outside a block has its
   answer, so with 50 clients over the default 16 the wait is a few
-  milliseconds; only blocks held open longer make it run out. With a source
-  that cannot be reached, the statement goes to the source and gets that
-  error (`08001`), where the copy used to answer it.
-- **A statement shape is asked about once a minute, not every time**, when
-  its answer cannot depend on its values: a connection remembers the verdict
-  on `SELECT ... WHERE id = 5` for a minute, by its shape (values blanked)
+  milliseconds; only blocks held open longer make it run out. A cancel
+  request ends the wait, and its `statement_timeout` counts everything the
+  statement did, the wait included. When the plan cannot be asked because
+  the source cannot be reached (down, refusing the forwarding user, its
+  connection lost, or no connection free in that wait), the copy answers
+  the statement, as before routing by plan, with a NOTICE that routing by
+  plan is off for the moment (`source_unreachable` in `/status`).
+- **A statement shape the source answers is asked about once a minute, not
+  every time**, when its answer cannot depend on its values: a connection
+  remembers the verdict on `SELECT ... WHERE id = 5` for a minute, by its shape (values blanked)
   and the session's `search_path`, and sends `WHERE id = 6` the same way
   without asking. Only where every value is compared with `=` (a `>`, a
   `BETWEEN`, an `IN` list or a `LIMIT` can change the plan with the value,
   and are asked every time), and only for a plan ten times below both
-  thresholds or ten times over one (a plan near a threshold can cross it
-  for another value). A plan the source refused, for the moment or for
-  good, is asked about again. The MySQL port asks every time.
+  thresholds (a plan near a threshold can cross it for another value). A
+  verdict for the copy is never kept: a table dropped and made again on
+  the source would still be read from the copy's old rows. A plan the
+  source refused, for the moment or for good, is asked about again. The
+  MySQL port asks every time.
 - **A connection does not read a value go back after the source answered
   it; the copy waits for it.** The copy is a second or two behind the source
   in fresh mode: a counter the source just showed a connection as 37413
@@ -1262,15 +1268,19 @@ What this costs and where it can go wrong:
   `/status`). Measured on PostgreSQL 16 in fresh mode, the counter written
   every 20 ms and read 100 times from the source then for the copy on one
   connection: the copy answered all 100, none went back, and on a quiet
-  source 10 of 10. The copy's position comes from the connection its plan
-  was asked on, so it costs one more statement there, not another login. A
-  table read from its snapshot alone (fast mode, a table with no recent
-  changes) says nothing of how far it reaches, so on such a connection the
-  source answers it. Until a statement has read the server's copy in fresh
-  mode there is nothing to wait on: the copy runs, and its answer is given
-  only when its recent changes' commit time reaches past the source's last
-  answer (the source's clock against the router's: a source clock ahead by
-  more than the copy's lag lets an older answer through). This holds for
+  source 10 of 10. The source's position is asked in the same write as
+  every statement the source answers, right behind it, so it costs no round
+  trip and no connection when the copy waits later; after an extended
+  batch it is asked once the batch is over. Any row or statement's end the
+  source sends counts, also when an error follows it. When no position of
+  the source after its last answer is known (that read was refused, or the
+  connection to the source was lost), the source answers the statement and
+  the log says so once a minute: no clock of the source is compared with
+  the router's. A table read from its snapshot alone (fast mode, a table
+  with no recent changes) says nothing of how far it reaches, so on such a
+  connection the source answers it. Until a statement has read the
+  server's copy in fresh mode there is nothing to wait on: the copy runs to
+  start its recent changes, and the source answers. This holds for
   every connection with a forwarding user, routing by plan or not: one that
   ran a transaction block on the source waits for the copy after its
   `COMMIT` too. A connection the source never answered, or answered only
