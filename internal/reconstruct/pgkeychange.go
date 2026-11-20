@@ -203,6 +203,10 @@ func pgOldRowMayBeKeyOnly(ev *query.ResultRow, pkCols []metadata.ColumnMeta) str
 	for _, c := range pkCols {
 		isKey[c.Name] = true
 	}
+	// An old row that SAYS it was captured with its key only holds the
+	// not-captured marker outside the key, which is a value here: that
+	// capture stores a large value that was not sent as its own marker in
+	// the new row, never as NULL, so a NULL there is a NULL.
 	for col, v := range ev.RowBefore {
 		if !isKey[col] && v != nil {
 			return ""
@@ -441,6 +445,11 @@ const (
 	pgStateNone    uint8 = iota + 1 // no row
 	pgStateRow                      // a row; Hi and Lo are its hash
 	pgStateUnknown                  // an image that cannot be compared
+	// pgStateRowAny is a row whose contents are not all known: an earlier
+	// row captured with its key only (event.NotCapturedKey in its other
+	// columns). It says a row was there, and not which. After the others,
+	// which are written to disk by their number (pgRunDigest).
+	pgStateRowAny
 )
 
 // pgImageState is the state a whole row image stands for. Every value of a
@@ -465,6 +474,7 @@ func pgImageState(img map[string]any) pgRowState {
 		h.Write(n[:1+binary.PutUvarint(n[1:], uint64(len(s)))])
 		h.Write([]byte(s))
 	}
+	partial := false
 	for _, c := range cols {
 		put('c', c)
 		switch v := img[c].(type) {
@@ -473,11 +483,21 @@ func pgImageState(img map[string]any) pgRowState {
 		case string:
 			put('s', v)
 		default:
-			return pgRowState{Kind: pgStateUnknown}
+			if !event.IsNotCapturedMarker(v) {
+				return pgRowState{Kind: pgStateUnknown}
+			}
+			// A column that was not sent: its own tag, so the image never
+			// hashes as one that holds a NULL or an empty text there.
+			partial = true
+			put('x', "")
 		}
 	}
 	sum := h.Sum(nil)
-	return pgRowState{Kind: pgStateRow, Hi: binary.BigEndian.Uint64(sum[:8]), Lo: binary.BigEndian.Uint64(sum[8:16])}
+	kind := pgStateRow
+	if partial {
+		kind = pgStateRowAny
+	}
+	return pgRowState{Kind: kind, Hi: binary.BigEndian.Uint64(sum[:8]), Lo: binary.BigEndian.Uint64(sum[8:16])}
 }
 
 // pgRowLink says why a change that starts from needs cannot follow one that
@@ -489,15 +509,37 @@ func pgRowLink(leaves, needs pgRowState) string {
 		return "two changes of it follow each other and their row images cannot be compared (an image is missing or holds a value that is not text)"
 	case leaves.Kind == pgStateNone && needs.Kind == pgStateNone:
 		return ""
-	case leaves.Kind == pgStateRow && needs.Kind == pgStateNone:
+	case pgStateIsRow(leaves) && needs.Kind == pgStateNone:
 		return "a row is inserted where the change before it had left a row"
-	case leaves.Kind == pgStateNone && needs.Kind == pgStateRow:
+	case leaves.Kind == pgStateNone && pgStateIsRow(needs):
 		return "a row is changed or deleted where the change before it had left no row"
+	case leaves.Kind == pgStateRowAny || needs.Kind == pgStateRowAny:
+		// A row on both sides, and one of them known by its key alone
+		// (a table below REPLICA IDENTITY FULL): there is nothing to
+		// compare the other with. An INSERT followed by an UPDATE in one
+		// transaction is the ordinary case. Two things are given up, for
+		// such a table only:
+		//   - that the row a change started from is the row the change
+		//     before it left, which is what showed a deferrable key
+		//     (pgKeyTxn). Capture refuses a table with one when it starts
+		//     (pgcapture.CheckDeferrableKeys), not one made so while it
+		//     runs;
+		//   - a transaction delivered a second time whose changes of the
+		//     key are all UPDATEs is not seen as one: its first change
+		//     links like any other. The whole delivery ends in the same
+		//     row; a delivery cut short would not, and capture leaves none
+		//     in the index since it deletes, when it resumes, what it had
+		//     indexed past its saved position (pgstreamrun), which is
+		//     also as far as a fold or a tail is fed.
+		return ""
 	case leaves == needs:
 		return ""
 	}
 	return "a change or a delete starts from a row that is not the row the change before it left"
 }
+
+// pgStateIsRow: a row is there, known whole or by its key alone.
+func pgStateIsRow(s pgRowState) bool { return s.Kind == pgStateRow || s.Kind == pgStateRowAny }
 
 // pgKeyTxnOf is the record of one filed row: ev itself, or one half of it
 // (half, with the key change's two keys). ok is false for a row with no
