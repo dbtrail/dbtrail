@@ -105,7 +105,13 @@ func applyProgName(root *cobra.Command) {
 	if prog == canonicalProg {
 		return
 	}
+	// cobra takes the root's name up to its first space, so a path that
+	// holds one (escaped or not) would be cut: the usage line then names
+	// the file alone. The texts below still name the whole path.
 	root.Use = prog
+	if strings.Contains(prog, " ") {
+		root.Use = filepath.Base(strings.ReplaceAll(prog, `\`, ""))
+	}
 	var walk func(*cobra.Command)
 	walk = func(c *cobra.Command) {
 		c.Short, c.Long, c.Example = useProgName(c.Short), useProgName(c.Long), useProgName(c.Example)

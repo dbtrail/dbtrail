@@ -47,16 +47,16 @@ func TestProgramNameFromTheEnvironment(t *testing.T) {
 		"/opt/db(1)/dbtrail":      `/opt/db\(1\)/dbtrail`,
 		"/srv/café/dbtrail":       `/srv/caf\é/dbtrail`,
 		// Paths a shell would read as something else, or no path at all.
-		"/tmp/a$b/dbtrail":    "bintrail-console",
-		"/tmp/a`id`/dbtrail":  "bintrail-console",
-		"/tmp/it's/dbtrail":   "bintrail-console",
-		`/tmp/a"b/dbtrail`:    "bintrail-console",
-		`/tmp/a\b/dbtrail`:    "bintrail-console",
-		"/tmp/a\nb/dbtrail":   "bintrail-console",
-		"/tmp/dbtrail/":       "bintrail-console",
-		"/":                   "bintrail-console",
-		"./dbtrail/dbtrail":   "bintrail-console",
-		"dbtrail/dbtrail":     "bintrail-console",
+		"/tmp/a$b/dbtrail":              "bintrail-console",
+		"/tmp/a`id`/dbtrail":            "bintrail-console",
+		"/tmp/it's/dbtrail":             "bintrail-console",
+		`/tmp/a"b/dbtrail`:              "bintrail-console",
+		`/tmp/a\b/dbtrail`:              "bintrail-console",
+		"/tmp/a\nb/dbtrail":             "bintrail-console",
+		"/tmp/dbtrail/":                 "bintrail-console",
+		"/":                             "bintrail-console",
+		"./dbtrail/dbtrail":             "bintrail-console",
+		"dbtrail/dbtrail":               "bintrail-console",
 		"/" + strings.Repeat("a", 1002): "bintrail-console",
 	} {
 		t.Setenv(progNameEnv, value)
@@ -100,8 +100,9 @@ func TestUseProgName(t *testing.T) {
 	}
 }
 
-// A path name goes where the word went, whole, and the root command takes
-// it as its name: an escaped space is not a space, so cobra keeps it.
+// A path name goes where the word went, whole. The root command takes it as
+// its name when it has no space; cobra cuts a name at its first space, so a
+// path with one names the file alone there.
 func TestUseProgNameWithAPath(t *testing.T) {
 	t.Setenv(progNameEnv, "/tmp/my stack/dbtrail")
 	asProg(t, programName([]string{"/usr/local/bin/bintrail-console"}))
@@ -112,11 +113,19 @@ func TestUseProgNameWithAPath(t *testing.T) {
 	root := &cobra.Command{Use: "bintrail-console"}
 	root.AddCommand(&cobra.Command{Use: "server", Long: "  bintrail-console server list"})
 	applyProgName(root)
-	if root.Name() != `/tmp/my\ stack/dbtrail` {
-		t.Errorf("root Name() = %q", root.Name())
+	if root.Name() != "dbtrail" {
+		t.Errorf("root Name() = %q, want the file alone", root.Name())
 	}
 	if got := root.Commands()[0].Long; got != `  /tmp/my\ stack/dbtrail server list` {
 		t.Errorf("help = %q", got)
+	}
+
+	t.Setenv(progNameEnv, "/home/u/dbtrail/dbtrail")
+	asProg(t, programName([]string{"/usr/local/bin/bintrail-console"}))
+	root = &cobra.Command{Use: "bintrail-console"}
+	applyProgName(root)
+	if root.Name() != "/home/u/dbtrail/dbtrail" {
+		t.Errorf("root Name() = %q, want the path", root.Name())
 	}
 }
 
