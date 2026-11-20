@@ -5,6 +5,11 @@ import (
 	"slices"
 	"sync/atomic"
 	"time"
+	"fmt"
+	"log/slog"
+	"strconv"
+	"strings"
+	"sync"
 )
 
 // pgTailsOn says this process gives PostgreSQL servers tails (#2756). Off
@@ -66,7 +71,7 @@ func (s *Server) tailKeeperForPG(id string, b *bundle) *tailKeeper {
 	}
 	src := newPGTailSource(s, b).capturing(captures)
 	src.capturesKey = capturesKey
-	k := newTailKeeper(src, os.TempDir(), tailBudgetFromEnv(), tailKeepOld, tailIdle)
+	k := newTailKeeper(src, os.TempDir(), pgTailBudgetFromEnv(), tailKeepOld, tailIdle)
 	k.pub.auto = true
 	if s.tails.by == nil {
 		s.tails.by = map[string]*tailKeeper{}
@@ -146,4 +151,46 @@ func (q *SQLOnCopy) LastRunAge() CopyRunAge {
 		return CopyRunAge{Ran: p.ranAt, Snapshot: true}
 	}
 	return CopyRunAge{Ran: p.ranAt, Unknown: true}
+}
+
+// pgTailDefaultMaxKeys is BINTRAIL_SQL_TAIL_MAX_KEYS for a PostgreSQL server
+// when it is not set and the tails' memory is bounded: the memory bound
+// (BINTRAIL_SQL_TAIL_MAX_BYTES, a fifth of the process's memory unless set)
+// is then what holds the tails, and the count is a second bound behind it.
+//
+// The count every family started with (tailDefaultMaxKeys, 500,000) was
+// passed by one table three times in twenty minutes on a 200-warehouse
+// TPROC-C source (order_line, 60M rows, snapshot updates taking 3 minutes
+// under reports), with the memory bound less than a third used. A table over
+// either bound has no fresh mode until its next snapshot.
+const pgTailDefaultMaxKeys = 2_000_000
+
+// pgTailBudgetFromEnv is tailBudgetFromEnv for a PostgreSQL server's tails.
+var pgTailBudgetFromEnv = sync.OnceValue(func() tailBudget {
+	b, warnings := pgTailBudgetFor(os.Getenv("BINTRAIL_SQL_TAIL_MAX_KEYS"), os.Getenv("BINTRAIL_SQL_TAIL_MAX_BYTES"), memoryBudget())
+	for _, w := range warnings {
+		slog.Warn("Engine Routing: " + w)
+	}
+	slog.Info("Engine Routing: the budget of the copy's tails (PostgreSQL)", "max_keys_per_table", b.Keys, "max_bytes_all_tables", b.Bytes)
+	return b
+})
+
+// pgTailBudgetFor is tailBudgetFor with PostgreSQL's default for the keys:
+// pgTailDefaultMaxKeys when the setting is not set (or cannot be read) and
+// the memory is bounded, the common default when it is not, since the count
+// is then the only bound there is.
+func pgTailBudgetFor(keysRaw, bytesRaw string, host uint64) (tailBudget, []string) {
+	b, warnings := tailBudgetFor(keysRaw, bytesRaw, host)
+	if n, err := strconv.Atoi(strings.TrimSpace(keysRaw)); err == nil && n > 0 {
+		return b, warnings
+	}
+	if b.Bytes <= 0 {
+		return b, warnings
+	}
+	b.Keys = pgTailDefaultMaxKeys
+	was, is := fmt.Sprintf("the default of %d keys per table stands", tailDefaultMaxKeys), fmt.Sprintf("the default of %d keys per table stands", pgTailDefaultMaxKeys)
+	for i := range warnings {
+		warnings[i] = strings.ReplaceAll(warnings[i], was, is)
+	}
+	return b, warnings
 }
