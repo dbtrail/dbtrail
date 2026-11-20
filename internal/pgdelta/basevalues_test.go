@@ -33,10 +33,10 @@ func TestBaseValuesOf(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]map[string]*string{
-		KeyOf([]string{"1", ""}):      {"big": text(big), "other": text("x")},
-		KeyOf([]string{"1", "k"}):     {"big": nil, "other": text("y")},
-		KeyOf([]string{"x|y", `\`}):  {"big": text(""), "other": nil},
-		KeyOf([]string{"a", "k"}):     {"big": text("lower"), "other": text("z")},
+		KeyOf([]string{"1", ""}):    {"big": text(big), "other": text("x")},
+		KeyOf([]string{"1", "k"}):   {"big": nil, "other": text("y")},
+		KeyOf([]string{"x|y", `\`}): {"big": text(""), "other": nil},
+		KeyOf([]string{"a", "k"}):   {"big": text("lower"), "other": text("z")},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %d keys, want %d", len(got), len(want))
