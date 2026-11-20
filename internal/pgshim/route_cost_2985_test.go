@@ -298,20 +298,20 @@ func TestRouteByCost_2985_remembersAShape(t *testing.T) {
 
 func TestValuesOnlyEqualed(t *testing.T) {
 	for q, want := range map[string]bool{
-		"SELECT n FROM t WHERE id = 1":                    true,
-		"SELECT n FROM t WHERE id = $1 AND k = 'x'":       true,
-		"SELECT n FROM t":                                 true,
-		"SELECT n FROM t WHERE id > 1":                    false,
-		"SELECT n FROM t WHERE id >= 1":                   false,
-		"SELECT n FROM t WHERE id BETWEEN 1 AND 9":        false,
-		"SELECT n FROM t WHERE id IN (1, 2)":              false,
-		"SELECT n FROM t WHERE id = 1 LIMIT 10":           false,
-		"SELECT n FROM t WHERE id = -1":                   false,
-		"SELECT 1 FROM t WHERE id = 1":                    false,
-		"SELECT n FROM t WHERE k LIKE 'a%'":               false,
-		"SELECT n FROM t WHERE k = $$x$$":                 false,
-		"SELECT n FROM t WHERE id = 1 OFFSET 5":           false,
-		"SELECT n FROM t WHERE id = 1 AND d = now() - 1":  false,
+		"SELECT n FROM t WHERE id = 1":                   true,
+		"SELECT n FROM t WHERE id = $1 AND k = 'x'":      true,
+		"SELECT n FROM t":                                true,
+		"SELECT n FROM t WHERE id > 1":                   false,
+		"SELECT n FROM t WHERE id >= 1":                  false,
+		"SELECT n FROM t WHERE id BETWEEN 1 AND 9":       false,
+		"SELECT n FROM t WHERE id IN (1, 2)":             false,
+		"SELECT n FROM t WHERE id = 1 LIMIT 10":          false,
+		"SELECT n FROM t WHERE id = -1":                  false,
+		"SELECT 1 FROM t WHERE id = 1":                   false,
+		"SELECT n FROM t WHERE k LIKE 'a%'":              false,
+		"SELECT n FROM t WHERE k = $$x$$":                false,
+		"SELECT n FROM t WHERE id = 1 OFFSET 5":          false,
+		"SELECT n FROM t WHERE id = 1 AND d = now() - 1": false,
 	} {
 		if got := valuesOnlyEqualed(q); got != want {
 			t.Errorf("valuesOnlyEqualed(%q) = %v, want %v", q, got, want)
