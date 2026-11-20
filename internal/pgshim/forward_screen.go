@@ -57,7 +57,7 @@ func forwardRefusal(qstr string) *pgErr {
 		return &pgErr{"22021", "the statement holds a NUL byte"}
 	}
 	plain := plainText(qstr)
-	if strings.Contains(plain, "u&") {
+	if unicodeEscapeStart(qstr) {
 		// U&"..." spells a name with escapes, which the screen below would
 		// not read as the name it is.
 		return &pgErr{"0A000", `a name or string written with Unicode escapes (U&"..." or U&'...') is not sent to the source from this port; write it plainly`}
@@ -85,6 +85,48 @@ func forwardRefusal(qstr string) *pgErr {
 		}
 	}
 	return nil
+}
+
+// unicodeEscapeStart says whether q writes a string or a name with Unicode
+// escapes, U&'...' or U&"...", read as PostgreSQL's scanner reads them: the
+// U& starts a token and the quote follows it at once, so menu&4 and
+// flags_mu&1 are a name and the & operator. Strings, quoted names, comments
+// and dollar quotes are skipped, so a U& written inside one is not one.
+func unicodeEscapeStart(q string) bool {
+	for i := 0; i < len(q); {
+		c := q[i]
+		switch {
+		case (c == 'u' || c == 'U') && i+2 < len(q) && q[i+1] == '&' && (q[i+2] == '\'' || q[i+2] == '"') && !continuesName(q, i):
+			return true
+		case c == '\'':
+			escapes := i > 0 && (q[i-1] == 'e' || q[i-1] == 'E') && !continuesName(q, i-1)
+			i = stringEnd(q, i+1, escapes)
+		case c == '"':
+			i = stringEnd(q, i+1, false)
+		case c == '-' && i+1 < len(q) && q[i+1] == '-':
+			if j := strings.IndexAny(q[i:], "\n\r"); j >= 0 {
+				i += j + 1
+			} else {
+				i = len(q)
+			}
+		case c == '/' && i+1 < len(q) && q[i+1] == '*':
+			i = commentEnd(q, i+2)
+		case c == '$' && !continuesName(q, i):
+			tag := dollarTag(q, i)
+			if tag == "" {
+				i++
+				continue
+			}
+			if end := strings.Index(q[i+len(tag):], tag); end >= 0 {
+				i += 2*len(tag) + end
+			} else {
+				i = len(q)
+			}
+		default:
+			i++
+		}
+	}
+	return false
 }
 
 // rollbackTo says whether a statement's words are ROLLBACK [WORK |

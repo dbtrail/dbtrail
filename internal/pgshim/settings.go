@@ -913,9 +913,10 @@ func parseOptions(v string) ([][2]string, *pgErr) {
 		case strings.HasPrefix(w, "-c") && len(w) > 2:
 			kv = w[2:]
 		case strings.HasPrefix(w, "--"):
-			// A dash in the name is an underscore; the value is as written.
-			name, value, _ := strings.Cut(w[2:], "=")
-			kv = strings.ReplaceAll(name, "-", "_") + "=" + value
+			kv = w[2:]
+			if !strings.Contains(kv, "=") {
+				return nil, &pgErr{"42601", fmt.Sprintf("--%s requires a value", kv)}
+			}
 		default:
 			return nil, &pgErr{"0A000", fmt.Sprintf("the start-up option %q is not supported on this port: it takes -c name=value", w)}
 		}
@@ -923,7 +924,9 @@ func parseOptions(v string) ([][2]string, *pgErr) {
 		if !found || name == "" {
 			return nil, &pgErr{"42601", fmt.Sprintf("-c %s requires a value", kv)}
 		}
-		out = append(out, [2]string{name, value})
+		// A dash in the name is an underscore, after -c as after --, as
+		// PostgreSQL reads them (ParseLongOption); the value is as written.
+		out = append(out, [2]string{strings.ReplaceAll(name, "-", "_"), value})
 	}
 	return out, nil
 }
