@@ -161,17 +161,17 @@ func TestPGRowLink_aRowKnownByItsKeyAlone(t *testing.T) {
 		leaves, needs pgRowState
 		links         bool
 	}{
-		"a row, then one that starts from a row known by its key":  {row, partial, true},
-		"a row known by its key, then one that starts from a row":  {partial, row, true},
-		"both known by their key":                                  {partial, partial, true},
-		"no row, then one that starts from a row known by its key": {none, partial, false},
-		"a row known by its key, then an insert":                   {partial, none, false},
-		"two different rows, both known whole":                     {row, other, false},
-		"the same row, known whole":                                {row, row, true},
-		"an image that cannot be compared":                         {pgRowState{Kind: pgStateUnknown}, partial, false},
+		"a row, then one that starts from a row known by its key":       {row, partial, true},
+		"a row known by its key, then one that starts from a row":       {partial, row, true},
+		"both known by their key":                                       {partial, partial, true},
+		"no row, then one that starts from a row known by its key":      {none, partial, false},
+		"a row known by its key, then an insert":                        {partial, none, false},
+		"two different rows, both known whole":                          {row, other, false},
+		"the same row, known whole":                                     {row, row, true},
+		"an image that cannot be compared":                              {pgRowState{Kind: pgStateUnknown}, partial, false},
 		"a row known by its key, then an image that cannot be compared": {partial, pgRowState{Kind: pgStateUnknown}, false},
-		"no record, then a row known by its key": {pgRowState{}, partial, false},
-		"a row known by its key, then no record": {partial, pgRowState{}, false},
+		"no record, then a row known by its key":                        {pgRowState{}, partial, false},
+		"a row known by its key, then no record":                        {partial, pgRowState{}, false},
 	} {
 		if why := pgRowLink(c.leaves, c.needs); (why == "") != c.links {
 			t.Errorf("%s: %q, want links=%v", name, why, c.links)
@@ -223,7 +223,7 @@ func TestCheckPGEventMarkers_aKeyOfTwoColumns(t *testing.T) {
 		}
 		err := checkPGEventMarkers(&ev, pkColsIntTwo())
 		if err == nil || !strings.Contains(err.Error(), "key column(s) b") || !strings.Contains(err.Error(), `ALTER TABLE "mydb"."orders" REPLICA IDENTITY FULL`) {
-			t.Errorf("%s with half its key: %v", typ, err)
+			t.Errorf("%v with half its key: %v", typ, err)
 		}
 	}
 }
