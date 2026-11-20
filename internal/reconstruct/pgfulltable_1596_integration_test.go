@@ -608,13 +608,8 @@ func TestReconstructTables_PGUnchangedLargeValue(t *testing.T) {
 			f.baseline(root, f.at(10*time.Minute), 0x500, "", [2]string{"1", "paid"}, [2]string{"3", ""})
 			run := c.run
 			run.at = f.at(30 * time.Minute)
-			_, _, reps, err := f.run(root, run)
+			_, _, _, err := f.run(root, run)
 			text := fmt.Sprint(err)
-			for _, r := range reps {
-				if r != nil && r.Err != nil {
-					text += " " + r.Err.Error()
-				}
-			}
 			if !strings.Contains(text, c.says) {
 				t.Fatalf("the run answered %q; want a refusal that says %q", text, c.says)
 			}
