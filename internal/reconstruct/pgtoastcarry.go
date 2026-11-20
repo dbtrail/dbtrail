@@ -1,12 +1,18 @@
 package reconstruct
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"maps"
 	"sort"
 	"strings"
 
+	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
+	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/dbtrail/dbtrail/internal/event"
+	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/pgdelta"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
@@ -31,8 +37,8 @@ import (
 // same in every order of arrival.
 //
 // What the window does not hold stays as the marker, with no source: the
-// value is in the table's copy, and whoever writes the table resolves it
-// there or refuses (pgResidualToast). It is never written as NULL.
+// value is in the table's copy. A snapshot update reads it there
+// (pgFillFromBase); a tail refuses. It is never written as NULL.
 
 // pgColSrc is where the value of one column of a key's last change came
 // from, for a column that change did not carry itself.
@@ -238,11 +244,89 @@ func (r *foldResult) pgResidualToast(limit int) ([]pgToastResidue, int) {
 	return out, n
 }
 
+// pgFillFromBase gives every unchanged large value the window did not hold
+// the value of its row in basePath, the file the window's changes go over.
+// It is right only for a window that holds every change since that file: no
+// change of the row in it gave the column a value, so the row holds the
+// file's. A value after a DELETE (Gone) is not looked for: the file's row is
+// the deleted one. What the file does not hold either (no row under the key)
+// is left, for the caller to refuse.
+//
+// One read of the file's key columns, and of the named columns for the rows
+// found; nothing is read when nothing is left to give. It returns how many
+// values it gave.
+func (r *foldResult) pgFillFromBase(ctx context.Context, basePath string, pkCols []metadata.ColumnMeta, tuning duckdbutil.Tuning) (int, error) {
+	var keys []string
+	colSet := map[string]bool{}
+	for key, srcs := range r.pgSrc {
+		if _, ok := r.Changes[key]; !ok {
+			continue
+		}
+		wants := false
+		for c, s := range srcs {
+			if !s.Have && !s.Gone {
+				colSet[c], wants = true, true
+			}
+		}
+		if wants {
+			keys = append(keys, key)
+		}
+	}
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	sort.Strings(keys)
+	cols := make([]string, 0, len(colSet))
+	for c := range colSet {
+		cols = append(cols, c)
+	}
+	sort.Strings(cols)
+	keyCols := make([]string, len(pkCols))
+	for i, c := range pkCols {
+		keyCols[i] = c.Name
+	}
+	if err := baselineintegrity.ValidateLocalFileOnce(basePath); err != nil {
+		return 0, err
+	}
+	duck, err := sql.Open("duckdb", "")
+	if err != nil {
+		return 0, fmt.Errorf("open duckdb: %w", err)
+	}
+	defer duck.Close()
+	applyDuckDBTuning(ctx, duck, tuning)
+	rows, err := pgdelta.BaseValuesOf(ctx, duck, basePath, keyCols, keys, cols)
+	if err != nil {
+		return 0, err
+	}
+	given := 0
+	for _, key := range keys {
+		row, ok := rows[key]
+		if !ok {
+			continue
+		}
+		img, srcs := r.Changes[key].RowAfter, r.pgSrc[key]
+		for c, s := range srcs {
+			if s.Have || s.Gone {
+				continue
+			}
+			if v := row[c]; v != nil {
+				img[c] = *v
+			} else {
+				img[c] = nil
+			}
+			s.Have = true
+			srcs[c] = s
+			given++
+		}
+	}
+	return given, nil
+}
+
 // pgToastResidueErr is the refusal of a table one of whose changes holds an
 // unchanged large value nothing here can give.
 func pgToastResidueErr(schema, table string, res pgToastResidue, more int) error {
 	target := pgQuoteIdent(schema) + "." + pgQuoteIdent(table)
-	why := "no earlier change of the row since the table's copy was written holds it"
+	why := "no earlier change of the row since the table's copy was written holds it, and the copy has no row under that key"
 	if len(res.Gone) > 0 {
 		why = "before that change the row was deleted, or had no such column, and no change after that holds it"
 	}
