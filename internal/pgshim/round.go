@@ -41,6 +41,7 @@ const (
 	pgRoundDiv         = "_bintrail_pg_round_div"
 	pgRoundAvg         = "_bintrail_pg_round_avg"
 	pgFloorDiv         = "_bintrail_pg_floor_div"
+	pgFloorEpoch       = "_bintrail_pg_floor_epoch"
 	pgEpochMacro       = "_bintrail_pg_epoch"
 	pgToTimestampMacro = "_bintrail_pg_to_timestamp"
 )
@@ -254,11 +255,48 @@ func floorCall(q string, toks []rtToken, spans [][2]int, from, to int) (string, 
 			return "", false
 		}
 	}
+	if x, n, ok := epochOverSeconds(q, toks, spans, from, to); ok {
+		return pgFloorEpoch + "(" + x + ", " + n + ")", true
+	}
 	p, d, ok := splitDivision(toks, from, to, text)
 	if !ok {
 		return "", false
 	}
 	return pgFloorDiv + "(" + p + ", " + d + ")", true
+}
+
+// maxEpochBucketSeconds is the largest N the copy's
+// _bintrail_pg_floor_epoch takes (9 digits, about 31 years): its arithmetic
+// is done in 64-bit whole numbers of microseconds, and 2000 times N
+// million stays well inside them.
+const maxEpochBucketSeconds = 999999999
+
+// epochOverSeconds reads toks[from:to] as extract(epoch from <x>) / N, N a
+// whole number of seconds written as digits, 1 to maxEpochBucketSeconds:
+// the time bucket of floor(extract(epoch from x) / 600). It gives x (its
+// own rounds rewritten) and N as the copy reads it. Any other division,
+// a parameter, a cast or another operator among them, goes the general way.
+func epochOverSeconds(q string, toks []rtToken, spans [][2]int, from, to int) (string, string, bool) {
+	if to-from < 8 ||toks[from].kind != rtWord || toks[from].text != "extract" || !isOpTok(toks, from+1, "(") {
+		return "", "", false
+	}
+	end := closingParen(toks, from+1)
+	if end < 0 || end+3 != to || !isOpTok(toks, end+1, "/") || toks[end+2].kind != rtNumber {
+		return "", "", false
+	}
+	digits := toks[end+2].text
+	if digits == "" || strings.Trim(digits, "0123456789") != "" {
+		return "", "", false
+	}
+	n, err := strconv.Atoi(digits)
+	if err != nil || n < 1 || n > maxEpochBucketSeconds {
+		return "", "", false
+	}
+	if end-(from+2) < 3 || toks[from+2].kind != rtWord || toks[from+2].text != "epoch" || toks[from+3].kind != rtWord || toks[from+3].text != "from" {
+		return "", "", false
+	}
+	x, _ := rewriteRounds(q[spans[from+4][0]:spans[end-1][1]])
+	return x, strconv.Itoa(n), true
 }
 
 // epochCall is the macro call for extract(epoch from <x>), false for any

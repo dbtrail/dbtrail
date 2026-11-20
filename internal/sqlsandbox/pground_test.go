@@ -55,6 +55,9 @@ func TestPGRoundMacros(t *testing.T) {
 		// Ten-minute buckets, as the HTAP bench's reports write them.
 		{"a ten-minute bucket", "CAST(_bintrail_pg_to_timestamp(_bintrail_pg_floor_div(_bintrail_pg_epoch(CAST('2026-11-18 10:07:30.25+00' AS TIMESTAMPTZ)), 600) * 600) AS VARCHAR)", "2026-11-18 10:00:00+00", "VARCHAR"},
 		{"a bucket before 1970", "CAST(_bintrail_pg_to_timestamp(_bintrail_pg_floor_div(_bintrail_pg_epoch(CAST('1969-12-31 23:55:00+00' AS TIMESTAMPTZ)), 600) * 600) AS VARCHAR)", "1969-12-31 23:50:00+00", "VARCHAR"},
+		// The same buckets as the port writes them since: from microseconds.
+		{"a ten-minute bucket from microseconds", "CAST(_bintrail_pg_to_timestamp(_bintrail_pg_floor_epoch(CAST('2026-11-18 10:07:30.25+00' AS TIMESTAMPTZ), 600) * 600) AS VARCHAR)", "2026-11-18 10:00:00+00", "VARCHAR"},
+		{"a bucket before 1970 from microseconds", "CAST(_bintrail_pg_to_timestamp(_bintrail_pg_floor_epoch(CAST('1969-12-31 23:55:00+00' AS TIMESTAMPTZ), 600) * 600) AS VARCHAR)", "1969-12-31 23:50:00+00", "VARCHAR"},
 	}
 	items := make([]string, len(cases))
 	for i, c := range cases {

@@ -42,8 +42,24 @@ func TestRewriteForCopy_rounds(t *testing.T) {
 		{"SELECT round(floor(a / b) / c, 2)", "SELECT _bintrail_pg_round_div(_bintrail_pg_floor_div(a, b), c, 2, 0.01)"},
 		// Ten-minute buckets, the HTAP bench's Q04 and Q13.
 		{"SELECT to_timestamp(FLOOR(EXTRACT(EPOCH FROM o.o_entry_d) / 600) * 600) AS period_start",
-			"SELECT _bintrail_pg_to_timestamp(_bintrail_pg_floor_div(_bintrail_pg_epoch(o.o_entry_d), 600) * 600) AS period_start"},
+			"SELECT _bintrail_pg_to_timestamp(_bintrail_pg_floor_epoch(o.o_entry_d, 600) * 600) AS period_start"},
 		{"SELECT extract(epoch from t)", "SELECT _bintrail_pg_epoch(t)"},
+		// floor(extract(epoch from x) / N), N whole seconds: from the
+		// timestamp's microseconds. N is written as the copy reads it.
+		{"SELECT floor(extract(epoch from t) / 1)", "SELECT _bintrail_pg_floor_epoch(t, 1)"},
+		{"SELECT floor(extract(epoch from t) / 0600)", "SELECT _bintrail_pg_floor_epoch(t, 600)"},
+		{"SELECT floor(extract(epoch from t) / 999999999)", "SELECT _bintrail_pg_floor_epoch(t, 999999999)"},
+		{"SELECT floor( Extract( Epoch From (t + interval '1 hour') ) / 60 )", "SELECT _bintrail_pg_floor_epoch((t + interval '1 hour'), 60)"},
+		{"SELECT floor(extract(epoch from max(t)) / 3600)", "SELECT _bintrail_pg_floor_epoch(max(t), 3600)"},
+		// Any other division of an epoch goes the general way.
+		{"SELECT floor(extract(epoch from t) / 0)", "SELECT _bintrail_pg_floor_div(_bintrail_pg_epoch(t), 0)"},
+		{"SELECT floor(extract(epoch from t) / 1000000000)", "SELECT _bintrail_pg_floor_div(_bintrail_pg_epoch(t), 1000000000)"},
+		{"SELECT floor(extract(epoch from t) / 600.0)", "SELECT _bintrail_pg_floor_div(_bintrail_pg_epoch(t), 600.0)"},
+		{"SELECT floor(extract(epoch from t) / (600))", "SELECT _bintrail_pg_floor_div(_bintrail_pg_epoch(t), (600))"},
+		{"SELECT floor(extract(epoch from t) / n)", "SELECT _bintrail_pg_floor_div(_bintrail_pg_epoch(t), n)"},
+		{"SELECT floor(2 * extract(epoch from t) / 600)", "SELECT _bintrail_pg_floor_div(2 * _bintrail_pg_epoch(t), 600)"},
+		{"SELECT floor(extract(epoch from t) * 2 / 600)", "SELECT _bintrail_pg_floor_div(_bintrail_pg_epoch(t) * 2, 600)"},
+		{"SELECT floor(extract(hour from t) / 6)", "SELECT _bintrail_pg_floor_div(extract(hour from t), 6)"},
 	} {
 		if got := RewriteForCopy(c.in); got != c.want {
 			t.Errorf("%q\n got %q\nwant %q", c.in, got, c.want)
