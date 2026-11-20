@@ -1,0 +1,3 @@
+SELECT id, q, round(q), pg_typeof(round(q)), round(b), round(-q) FROM zzm_t ORDER BY id
+SELECT round(0::int), round(-0::int), round(2147483647), round(-2147483648), round(999999999999999::bigint), round(1000000000000000::bigint), round(-999999999999999::bigint), round(9007199254740993::bigint), pg_typeof(round(5::smallint))
+SELECT round(sum(q)), round(count(*)), pg_typeof(round(sum(q))) FROM zzm_t
