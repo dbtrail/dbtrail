@@ -1,15 +1,15 @@
 package console
 
 import (
-	"os"
-	"slices"
-	"sync/atomic"
-	"time"
 	"fmt"
 	"log/slog"
+	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // pgTailsOn says this process gives PostgreSQL servers tails (#2756). Off

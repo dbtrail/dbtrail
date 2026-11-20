@@ -17,20 +17,20 @@ func TestPGTailBudgetFor(t *testing.T) {
 		wantBytes   int64
 		warns       string
 	}{
-		"nothing set":                        {"", "", host, pgTailDefaultMaxKeys, host / tailBytesShare, ""},
-		"only spaces":                        {"  ", "", host, pgTailDefaultMaxKeys, host / tailBytesShare, ""},
-		"the keys set":                       {"1000", "", host, 1000, host / tailBytesShare, ""},
-		"the keys set to the common default": {"500000", "", host, 500000, host / tailBytesShare, ""},
-		"the keys set above PostgreSQL's":    {"3000000", "", host, 3000000, host / tailBytesShare, ""},
-		"keys that are not a number":         {"abc", "", host, pgTailDefaultMaxKeys, host / tailBytesShare, "the default of 2000000 keys per table stands"},
-		"keys of zero":                       {"0", "", host, pgTailDefaultMaxKeys, host / tailBytesShare, "the default of 2000000 keys per table stands"},
-		"negative keys":                      {"-5", "", host, pgTailDefaultMaxKeys, host / tailBytesShare, "the default of 2000000 keys per table stands"},
-		"the memory set":                     {"", "512MiB", host, pgTailDefaultMaxKeys, 512 << 20, ""},
-		"no bound on the memory":             {"", "off", host, tailDefaultMaxKeys, 0, ""},
-		"no bound on the memory, as zero":    {"", "0", host, tailDefaultMaxKeys, 0, ""},
-		"memory not known":                   {"", "", 0, tailDefaultMaxKeys, 0, ""},
+		"nothing set":                         {"", "", host, pgTailDefaultMaxKeys, host / tailBytesShare, ""},
+		"only spaces":                         {"  ", "", host, pgTailDefaultMaxKeys, host / tailBytesShare, ""},
+		"the keys set":                        {"1000", "", host, 1000, host / tailBytesShare, ""},
+		"the keys set to the common default":  {"500000", "", host, 500000, host / tailBytesShare, ""},
+		"the keys set above PostgreSQL's":     {"3000000", "", host, 3000000, host / tailBytesShare, ""},
+		"keys that are not a number":          {"abc", "", host, pgTailDefaultMaxKeys, host / tailBytesShare, "the default of 2000000 keys per table stands"},
+		"keys of zero":                        {"0", "", host, pgTailDefaultMaxKeys, host / tailBytesShare, "the default of 2000000 keys per table stands"},
+		"negative keys":                       {"-5", "", host, pgTailDefaultMaxKeys, host / tailBytesShare, "the default of 2000000 keys per table stands"},
+		"the memory set":                      {"", "512MiB", host, pgTailDefaultMaxKeys, 512 << 20, ""},
+		"no bound on the memory":              {"", "off", host, tailDefaultMaxKeys, 0, ""},
+		"no bound on the memory, as zero":     {"", "0", host, tailDefaultMaxKeys, 0, ""},
+		"memory not known":                    {"", "", 0, tailDefaultMaxKeys, 0, ""},
 		"memory not known, keys not a number": {"abc", "", 0, tailDefaultMaxKeys, 0, "the default of 500000 keys per table stands"},
-		"memory that is not a size":          {"", "lots", host, pgTailDefaultMaxKeys, host / tailBytesShare, "is not a size"},
+		"memory that is not a size":           {"", "lots", host, pgTailDefaultMaxKeys, host / tailBytesShare, "is not a size"},
 	} {
 		b, warnings := pgTailBudgetFor(c.keys, c.bytes, c.host)
 		if b.Keys != c.wantKeys || b.Bytes != c.wantBytes {
