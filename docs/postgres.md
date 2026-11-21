@@ -1138,7 +1138,8 @@ or in the web interface, edit the server (Forwarding user and password). It is
 laid over the source's own address, database and parameters (`sslmode`
 included), and must be another user than the one DBTrail captures with: the
 port never runs anything as that one, which holds `REPLICATION` and reads every
-published table. Without a forwarding user, every statement, a transaction
+published table, unless the server says yes to that
+([below](#forwarding-with-the-capture-account)). Without a forwarding user, every statement, a transaction
 block's too, is answered by the copy alone, as before. Changing the forwarding user, or removing the
 server, closes the connections that use it; clients reconnect.
 
@@ -1205,6 +1206,58 @@ server, closes the connections that use it; clients reconnect.
 - `REPEATABLE READ` and `SERIALIZABLE` are still refused, as on the copy:
   inside a block the port still answers some statements itself (`SHOW`,
   the catalog statements it recognizes, time travel).
+
+
+### Forwarding with the capture account
+
+A server can forward without a second role: say yes to forwarding with the
+role DBTrail captures with.
+
+```bash
+bintrail-console server forward-user <server> --capture-account
+bintrail-console server forward-user <server> --no-capture-account   # takes it back
+```
+
+It is saved on the server and off until somebody says yes: a server added
+before this existed, or one nobody answered for, does not forward with it. A
+forwarding user of its own, when the server has one, is used instead.
+
+That role can read more than the copy holds (it can be the database owner, or
+the master user on a managed service, and read the system catalog), so with
+it the port sends a statement to your PostgreSQL only when all of this holds,
+checked before anything of it is sent:
+
+- it is one `SELECT` (or `WITH ... SELECT`) whose tables are all named in its
+  `FROM` clauses, calling only built-in functions known to read no table: no
+  function of yours, no `query_to_xml()`, no `pg_read_file()`, no `nextval()`,
+  no function in `FROM`, no `LATERAL`, `ONLY`, `TABLE` or `INTO`, no locking
+  read (`FOR UPDATE`, `FOR SHARE`), no name with its database;
+- the session's `search_path` does not name `pg_catalog` or `pg_temp`;
+- your PostgreSQL confirms, on the same connection and just before, that each
+  name is a plain table (not a view, a partitioned or inherited table, or one
+  with row-level security) and that no operator, cast or function of yours
+  could run in it;
+- every one of those tables is a table of the copy, by schema and name
+  exactly, and none is in `pg_catalog`, `information_schema` or another
+  `pg_` schema.
+
+Anything else gets `0A000` with the reason, and nothing of it is sent:
+
+```
+ERROR:  this server forwards to its source with the account DBTrail captures with, so the port sends there only a SELECT whose every table is a table of the copy, and this statement reads a table the copy does not hold; nothing was sent to the source
+```
+
+The connection is still read-only, as with a forwarding user. What that
+leaves out on purpose: a `SAVEPOINT`, a cursor and an `EXPLAIN` inside a
+transaction block, and a statement sent in the middle of an extended batch
+the port has already sent something of (it cannot ask your PostgreSQL first
+there). For those, set a forwarding user of its own. A statement the copy
+answers is answered by the copy as before; when the port would ask your
+PostgreSQL for its plan first, that `EXPLAIN` is held to the same check, and
+the copy answers what does not pass (`capture_gate` in the reasons below).
+`SHOW dbtrail.router_status` says `forwarding_account | capture account,
+read-only, tables of the copy only`, and the router's `/status` has the same
+in `forwarding_account` for the server.
 
 ### Which side answers a statement on the PostgreSQL port
 
@@ -1508,6 +1561,9 @@ STATUS`, with the same row names where they mean the same. The rows:
 - `forwarding`: `on` when statements of this connection may go to the source,
   `off` when the copy answers alone; `forwarding_off_reason` then says why (no
   forwarding user, or a server that hides tables or columns).
+- `forwarding_account`: the account statements are sent with, `forwarding
+  user <name>` or `capture account, read-only, tables of the copy only`
+  ([above](#forwarding-with-the-capture-account)); `none` when there is none.
 - `sql_mode`: `fresh` or `fast`.
 - `copy_snapshot` and `copy_age_seconds`: when the server's newest snapshot was
   taken and how long ago that is, `unknown` before the first snapshot. In fresh
@@ -1593,6 +1649,7 @@ The reasons, with the MySQL port's names where they mean the same:
 | copy | `copy_command` | a command of the copy's own (`SHOW TABLES`, `DESCRIBE`) |
 | copy | `no_forward_account` | the server has no forwarding user: the copy answers alone |
 | copy | `hidden_rules` | the server hides tables or columns: nothing is sent to its source |
+| copy | `capture_gate` | the server forwards with the capture account, and the statement did not pass that account's check, so the copy answered it without asking the source for its plan |
 | source | `cheap_plan` | its plan on the source is under both thresholds: the source answers it, by its indexes |
 | source | `explain_failed` | its plan could not be had (the source refused the `EXPLAIN`, a text of more than one statement): the source answers it, its error included |
 | source | `in_transaction` | the client's transaction block |
