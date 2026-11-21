@@ -363,3 +363,36 @@ func TestRouteCaptureAccountAPI(t *testing.T) {
 		t.Errorf("the command-line server: %d %s", rec.Code, b)
 	}
 }
+
+// The answer holds for the account it was given about. A build that did not
+// know about it can edit the source and carry the keys over untouched: the
+// yes then names another account, and is no.
+func TestCaptureAnswerHolds(t *testing.T) {
+	pg := ServerEntry{Flavor: FlavorPostgres, SourceDSN: capPGSource, ForwardWithCaptureAccount: true, ForwardWithCaptureAccountFor: "repl@db:5432"}
+	my := ServerEntry{SourceDSN: "repl:cap@tcp(db:3306)/", ForwardWithCaptureAccount: true, ForwardWithCaptureAccountFor: "repl@db:3306"}
+	for _, c := range []struct {
+		name string
+		edit func(ServerEntry) ServerEntry
+		base ServerEntry
+		want bool
+	}{
+		{"PostgreSQL, as saved", func(e ServerEntry) ServerEntry { return e }, pg, true},
+		{"PostgreSQL, a new password", func(e ServerEntry) ServerEntry { e.SourceDSN = "postgres://repl:new@db:5432/shop"; return e }, pg, true},
+		{"PostgreSQL, the host in capitals", func(e ServerEntry) ServerEntry { e.SourceDSN = "postgres://repl:cap@DB:5432/shop"; return e }, pg, true},
+		{"PostgreSQL, another user by an older build", func(e ServerEntry) ServerEntry { e.SourceDSN = "postgres://postgres:cap@db:5432/shop"; return e }, pg, false},
+		{"PostgreSQL, another host by an older build", func(e ServerEntry) ServerEntry { e.SourceDSN = "postgres://repl:cap@db2:5432/shop"; return e }, pg, false},
+		{"PostgreSQL, no account recorded", func(e ServerEntry) ServerEntry { e.ForwardWithCaptureAccountFor = ""; return e }, pg, false},
+		{"PostgreSQL, no", func(e ServerEntry) ServerEntry { e.ForwardWithCaptureAccount = false; return e }, pg, false},
+		{"PostgreSQL, a user with an @", func(e ServerEntry) ServerEntry {
+			e.SourceDSN, e.ForwardWithCaptureAccountFor = "postgres://a%40b:cap@db:5432/shop", "a@b@db:5432"
+			return e
+		}, pg, true},
+		{"MySQL, as saved", func(e ServerEntry) ServerEntry { return e }, my, true},
+		{"MySQL, another user by an older build", func(e ServerEntry) ServerEntry { e.SourceDSN = "root:cap@tcp(db:3306)/"; return e }, my, false},
+		{"MySQL, the source removed", func(e ServerEntry) ServerEntry { e.SourceDSN = ""; return e }, my, false},
+	} {
+		if got := captureAnswerHolds(c.edit(c.base)); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+}

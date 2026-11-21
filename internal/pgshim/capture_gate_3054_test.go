@@ -48,6 +48,10 @@ func TestCaptureTextRefusal(t *testing.T) {
 		{name: "ONLY", q: "SELECT * FROM ONLY orders", why: "ONLY"},
 		{name: "an empty statement", q: "  ;", why: "an empty statement"},
 
+		{name: "a server setting", q: "SELECT current_setting('archive_command')", why: "calls current_setting()"},
+		{name: "a sleep that holds the source", q: "SELECT pg_sleep(600)", why: "calls pg_sleep()"},
+		{name: "a cast that looks a role up", q: "SELECT 'postgres'::regrole", why: "casts to regrole"},
+		{name: "a cast that looks a table up", q: "SELECT 'secret.vip'::regclass", why: "casts to regclass"},
 		{name: "search_path naming pg_catalog", q: "SELECT * FROM orders", path: []string{"public", "pg_catalog"}, why: "search_path names pg_catalog"},
 		{name: "search_path naming pg_temp", q: "SELECT * FROM orders", path: []string{"pg_temp", "public"}, why: "search_path names pg_temp"},
 		{name: "search_path naming another session's temporary schema", q: "SELECT * FROM orders", path: []string{"pg_temp_3"}, why: "search_path names pg_temp_3"},
