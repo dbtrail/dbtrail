@@ -58,21 +58,25 @@ type CopyEstimate struct {
 
 // copySizeQuery lists the tables of publication $1 with their size, over the
 // same view and joins as discoverTables, so the tables sized are the tables
-// copied. pg_partition_tree answers with the table itself for one that is not
-// partitioned, and with every leaf for a partitioned one.
+// copied. A partitioned table (relkind 'p') is sized by the leaves of its
+// partition tree; any other by itself: pg_partition_tree answers with no row
+// at all for a table that is neither partitioned nor a partition.
 const copySizeQuery = `
 	SELECT pt.schemaname, pt.tablename, sz.bytes, sz.unsized, sz.other
 	FROM pg_publication_tables pt
 	JOIN pg_namespace n ON n.nspname = pt.schemaname
 	JOIN pg_class c ON c.relname = pt.tablename AND c.relnamespace = n.oid
 	CROSS JOIN LATERAL (
-		SELECT COALESCE(sum(pg_table_size(p.relid)), 0)::bigint AS bytes,
-		       (count(*) FILTER (WHERE pg_table_size(p.relid) IS NULL))::int AS unsized,
+		SELECT COALESCE(sum(pg_table_size(l.relid)), 0)::bigint AS bytes,
+		       (count(*) FILTER (WHERE pg_table_size(l.relid) IS NULL))::int AS unsized,
 		       (count(*) FILTER (WHERE am.amname IS NOT NULL AND am.amname <> 'heap'))::int AS other
-		FROM pg_partition_tree(c.oid::regclass) p
-		LEFT JOIN pg_class lc ON lc.oid = p.relid
+		FROM (
+			SELECT p.relid::oid AS relid FROM pg_partition_tree(c.oid::regclass) p WHERE c.relkind = 'p' AND p.isleaf
+			UNION ALL
+			SELECT c.oid WHERE c.relkind <> 'p'
+		) l
+		LEFT JOIN pg_class lc ON lc.oid = l.relid
 		LEFT JOIN pg_am am ON am.oid = lc.relam
-		WHERE p.isleaf
 	) sz
 	WHERE pt.pubname = $1`
 
