@@ -106,7 +106,6 @@ func TestIntegrationPGRouterWithReadingAWithIsAnsweredByTheCopy_3043(t *testing.
 	dsn := fmt.Sprintf("host=%s port=%s sslmode=disable user=anyone password=tok dbname=pg-chain", host, portNum)
 	reasons := func() map[string]uint64 { return routes.doc("").Servers[e.ID].Reasons }
 
-
 	// answeredBy runs stmt, a statement for the copy, and returns its answer
 	// and who gave it: "copy", or "held" when it was held back and the
 	// source answered (copy_too_old).
