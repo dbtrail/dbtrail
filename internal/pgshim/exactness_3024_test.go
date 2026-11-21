@@ -135,8 +135,8 @@ func TestCopyScreen_bothBoundsOfBetween(t *testing.T) {
 		`SELECT id FROM ` + o + ` WHERE $1 BETWEEN 1 AND 'x'`: text,
 		// The AND of a BETWEEN is not one inside a parenthesis or a CASE of
 		// its lower bound.
-		`SELECT id FROM ` + o + ` WHERE qty BETWEEN CASE WHEN id > 1 AND id < 5 THEN 1 ELSE 2 END AND note`: text,
-		`SELECT CASE WHEN qty BETWEEN 1 END FROM ` + o: "AND was not found",
+		`SELECT id FROM ` + o + ` WHERE qty BETWEEN CASE WHEN id > 1 AND id < 5 THEN 1 ELSE 2 END AND note`:   text,
+		`SELECT CASE WHEN qty BETWEEN 1 END FROM ` + o:                                                        "AND was not found",
 		`SELECT id FROM ` + o + ` WHERE qty BETWEEN (CASE WHEN id > 1 AND id < 5 THEN 1 ELSE 2 END) AND note`: text,
 		`SELECT id FROM ` + o + ` WHERE qty BETWEEN SYMMETRIC 9 AND 2`:                                        "SYMMETRIC",
 		`SELECT id FROM ` + o + ` WHERE qty BETWEEN 1`:                                                        "AND was not found",
