@@ -1,0 +1,132 @@
+package consoleapp
+
+import (
+	"bytes"
+	"context"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/dbtrail/dbtrail/internal/console"
+)
+
+// #3054: `server forward-user <server> --capture-account` and
+// `--no-capture-account`, against DBTrail's real web handlers, whole outputs
+// compared.
+
+func newCaptureDaemon(t *testing.T, e console.ServerEntry) (*console.Registry, string, *ctlClient) {
+	t.Helper()
+	f := newRouterFiles(t)
+	added, err := f.owner.Add(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: f.owner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	return f.owner, added.ID, &ctlClient{base: ts.URL, token: "tok", hc: ts.Client()}
+}
+
+func pgCaptureEntry() console.ServerEntry {
+	return console.ServerEntry{Name: "shop", DSN: "idxuser:idxsecret@tcp(127.0.0.1:1)/idx_shop", Flavor: console.FlavorPostgres,
+		SourceDSN: pgAddSourceURL, SourceSlot: "bintrail_shopdb", SourcePublication: "bintrail_pub"}
+}
+
+func mysqlCaptureEntry() console.ServerEntry {
+	return console.ServerEntry{Name: "shop", DSN: "idxuser:idxsecret@tcp(127.0.0.1:1)/idx_shop", SourceDSN: "dbtrail:capture-pw@tcp(db1:3306)/"}
+}
+
+func runFwd(t *testing.T, c *ctlClient, f fwdFlags) (string, error) {
+	t.Helper()
+	var out bytes.Buffer
+	err := runServerForwardUser(context.Background(), c, "shop", f, &seqAsker{t: t}, strings.NewReader(""), &out)
+	return out.String(), err
+}
+
+func TestServerForwardUserCaptureAccountPostgres(t *testing.T) {
+	reg, id, c := newCaptureDaemon(t, pgCaptureEntry())
+	answer := func() bool {
+		e, _ := reg.Get(id)
+		return e.ForwardWithCaptureAccount
+	}
+	steps := []struct {
+		name  string
+		flags fwdFlags
+		stdin string
+		want  string
+		saved bool
+	}{
+		{"yes, no forwarding user", fwdFlags{CaptureAccount: true}, "",
+			`"shop" forwards with the user DBTrail captures with (dbtrail): the PostgreSQL port sends to your PostgreSQL, read-only, a SELECT the copy does not answer, and only when every table it reads is a table of the copy. Anything else is refused and not sent.` + "\n", true},
+		{"a forwarding user set over the yes", fwdFlags{User: "app_ro", PasswordStdin: true}, "fwd-pw\n", strings.TrimSuffix(pgForwardsWant("app_ro"), "\n"), true},
+		{"yes again, with that user", fwdFlags{CaptureAccount: true}, "",
+			`Saved. "shop" keeps forwarding as its forwarding user, app_ro, while that one is set. Removed (--remove), the user DBTrail captures with takes its place.` + "\n", true},
+		{"no, with that user", fwdFlags{NoCaptureAccount: true}, "",
+			`"shop" does not forward with the user DBTrail captures with. It forwards as its forwarding user, app_ro, as before.` + "\n", false},
+		{"the user removed", fwdFlags{Remove: true}, "",
+			`"shop" has no forwarding user now: the PostgreSQL port answers its clients from the copy alone. A statement the copy cannot answer gets an error, and nothing is sent to your PostgreSQL.` + "\n", false},
+		{"no, and no user", fwdFlags{NoCaptureAccount: true}, "",
+			`"shop" does not forward with the user DBTrail captures with. It has no forwarding user, so the PostgreSQL port answers its clients from the copy alone.` + "\n", false},
+	}
+	for _, s := range steps {
+		var out bytes.Buffer
+		err := runServerForwardUser(context.Background(), c, "shop", s.flags, &seqAsker{t: t}, strings.NewReader(s.stdin), &out)
+		if err != nil {
+			t.Fatalf("%s: %v", s.name, err)
+		}
+		if got := out.String(); got != s.want {
+			t.Errorf("%s: output\n%s\nwant\n%s", s.name, got, s.want)
+		}
+		if answer() != s.saved {
+			t.Errorf("%s: saved answer %v, want %v", s.name, answer(), s.saved)
+		}
+		t.Logf("%s:\n%s", s.name, out.String())
+	}
+}
+
+func TestServerForwardUserCaptureAccountMySQL(t *testing.T) {
+	reg, id, c := newCaptureDaemon(t, mysqlCaptureEntry())
+	out, err := runFwd(t, c, fwdFlags{CaptureAccount: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Saved, and not used yet: the MySQL port does not forward with the user DBTrail captures with. Until \"shop\" has a forwarding user, a statement the copy cannot answer is refused:\n  bintrail-console server forward-user shop -u <user> -p\n"
+	if out != want {
+		t.Errorf("output\n%s\nwant\n%s", out, want)
+	}
+	if e, _ := reg.Get(id); !e.ForwardWithCaptureAccount || e.RouteDSN != "" {
+		t.Errorf("saved: %+v", e)
+	}
+	out, err = runFwd(t, c, fwdFlags{NoCaptureAccount: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "\"shop\" does not forward with the user DBTrail captures with. It has no forwarding user, so a statement the copy cannot answer is refused.\n"; out != want {
+		t.Errorf("output\n%s\nwant\n%s", out, want)
+	}
+	t.Logf("MySQL, yes:\n%s", want)
+}
+
+func TestServerForwardUserCaptureAccountRefusals(t *testing.T) {
+	_, _, c := newCaptureDaemon(t, pgCaptureEntry())
+	const both = "--capture-account and --no-capture-account take nothing else: they answer one question, whether the port may forward with the user DBTrail captures with"
+	for _, f := range []fwdFlags{
+		{CaptureAccount: true, NoCaptureAccount: true},
+		{CaptureAccount: true, Remove: true},
+		{CaptureAccount: true, User: "app_ro"},
+		{NoCaptureAccount: true, AskPassword: true},
+		{NoCaptureAccount: true, PasswordStdin: true},
+	} {
+		if _, err := runFwd(t, c, f); err == nil || err.Error() != both {
+			t.Errorf("%+v: %v", f, err)
+		}
+	}
+	// A server with no source has nothing to forward to: the daemon says so.
+	_, _, c2 := newCaptureDaemon(t, console.ServerEntry{Name: "shop", DSN: "idxuser:idxsecret@tcp(127.0.0.1:1)/idx_shop"})
+	if _, err := runFwd(t, c2, fwdFlags{CaptureAccount: true}); err == nil || !strings.Contains(err.Error(), "the server has no source database, so there is nothing to forward to; set its source first") {
+		t.Errorf("no source: %v", err)
+	}
+}

@@ -23,6 +23,9 @@ func (s *Server) handleRouteUserPut(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		User     *string `json:"user"`
 		Password *string `json:"password"`
+		// CaptureAccount is the answer about forwarding with the capture
+		// account (#3054, capture_forward.go), sent alone.
+		CaptureAccount *bool `json:"capture_account"`
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
 	dec.DisallowUnknownFields()
@@ -34,12 +37,20 @@ func (s *Server) handleRouteUserPut(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "the body holds more than one JSON value")
 		return
 	}
+	if body.CaptureAccount != nil {
+		if body.User != nil || body.Password != nil {
+			writeJSONError(w, http.StatusBadRequest, `send "capture_account" alone, or "user" and "password" without it: they are two settings`)
+			return
+		}
+		s.saveCaptureAnswer(w, r, *body.CaptureAccount)
+		return
+	}
 	// An empty user here would remove the account, which is what DELETE is
 	// for; an empty password is not a password.
 	if (body.User == nil && body.Password == nil) ||
 		(body.User != nil && strings.TrimSpace(*body.User) == "") ||
 		(body.Password != nil && *body.Password == "") {
-		writeJSONError(w, http.StatusBadRequest, `send "user", "password" or both, none of them empty; DELETE removes the forwarding account`)
+		writeJSONError(w, http.StatusBadRequest, `send "user", "password" or both, none of them empty, or "capture_account" alone; DELETE removes the forwarding account`)
 		return
 	}
 	s.saveRouteUser(w, r, serverRequest{RouteUser: body.User, RoutePassword: body.Password})
@@ -84,7 +95,38 @@ func (s *Server) saveRouteUser(w http.ResponseWriter, r *http.Request, req serve
 		return
 	}
 	// Connections the port opened as the old account must not outlive it.
-	if forwardDSNOf(saved) != forwardDSNOf(old) {
+	if forwardChanged(old, saved) {
+		s.dropRoutedConns(id, "the account the port forwards with changed", forwardDSNOf(old), old.SourceSSL())
+	}
+	writeJSON(w, http.StatusOK, s.entryDTO(saved))
+}
+
+// saveCaptureAnswer saves the answer about forwarding with the capture
+// account (#3054) through the registry's only writer of it.
+func (s *Server) saveCaptureAnswer(w http.ResponseWriter, r *http.Request, on bool) {
+	id := r.PathValue("id")
+	if id == bootServerID {
+		writeJSONError(w, http.StatusConflict, "the command-line server cannot be edited; it mirrors --index-dsn")
+		return
+	}
+	old, ok := s.cm.reg.Get(id)
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, ErrUnknownServer.Error())
+		return
+	}
+	saved, err := s.cm.reg.SetForwardWithCaptureAccount(id, on)
+	switch {
+	case errors.Is(err, errNoSourceToForward):
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	case errors.Is(err, ErrUnknownServer):
+		writeJSONError(w, http.StatusNotFound, ErrUnknownServer.Error())
+		return
+	case err != nil:
+		writeJSONError(w, registryErrStatus(err), err.Error())
+		return
+	}
+	if forwardChanged(old, saved) {
 		s.dropRoutedConns(id, "the account the port forwards with changed", forwardDSNOf(old), old.SourceSSL())
 	}
 	writeJSON(w, http.StatusOK, s.entryDTO(saved))

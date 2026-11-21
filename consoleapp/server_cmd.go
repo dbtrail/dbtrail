@@ -255,6 +255,8 @@ func init() {
 	fu.BoolVarP(&srvFwd.AskPassword, "password", "p", false, "Ask for the password (it is never taken on the command line)")
 	fu.BoolVar(&srvFwd.PasswordStdin, "password-stdin", false, "Read the password from the first line of stdin (for scripts)")
 	fu.BoolVar(&srvFwd.Remove, "remove", false, "Remove the forwarding user")
+	fu.BoolVar(&srvFwd.CaptureAccount, "capture-account", false, "Let the port forward with the user DBTrail captures with, read-only and only statements that read tables of the copy (PostgreSQL port; a forwarding user set with -u is used instead while there is one)")
+	fu.BoolVar(&srvFwd.NoCaptureAccount, "no-capture-account", false, "Stop the port from forwarding with the user DBTrail captures with")
 	serverForwardUserCmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		if passwordOnCommandLine(os.Args[1:]) {
 			return errors.New(noPasswordOnCommandLine)
@@ -307,6 +309,10 @@ type fwdFlags struct {
 	AskPassword   bool
 	PasswordStdin bool
 	Remove        bool
+	// CaptureAccount and NoCaptureAccount save the answer about forwarding
+	// with the account DBTrail captures with (#3054).
+	CaptureAccount   bool
+	NoCaptureAccount bool
 }
 
 var srvFwd fwdFlags
@@ -322,11 +328,19 @@ whoever has the port's password can run what this user can.
   bintrail-console server forward-user shop -u shop_fwd -p
   echo "$PASSWORD" | bintrail-console server forward-user shop -u shop_fwd --password-stdin
   bintrail-console server forward-user shop --remove
+  bintrail-console server forward-user shop --capture-account
 
 On your MySQL, for an application that reads the shop schema:
 
   CREATE USER 'shop_fwd'@'%' IDENTIFIED BY <a password>;
   GRANT SELECT ON shop.* TO 'shop_fwd'@'%';
+
+With --capture-account the port may forward with the user DBTrail captures
+with instead, so no second user is needed: only plain reads, read-only, and
+only statements whose every table is a table of the copy. The PostgreSQL port
+does this; the MySQL port does not yet, and keeps forwarding only as a user
+set with -u. --no-capture-account takes it back. A user set with -u is used
+instead while there is one.
 
 It changes this one setting and leaves the rest of the server as it is.`,
 	Args: func(cmd *cobra.Command, args []string) error {
@@ -349,6 +363,12 @@ It changes this one setting and leaves the rest of the server as it is.`,
 
 func runServerForwardUser(ctx context.Context, c *ctlClient, name string, f fwdFlags, ask asker, stdin io.Reader, out io.Writer) error {
 	user := strings.TrimSpace(f.User)
+	if f.CaptureAccount || f.NoCaptureAccount {
+		if f.CaptureAccount && f.NoCaptureAccount || f.Remove || user != "" || f.AskPassword || f.PasswordStdin {
+			return errors.New("--capture-account and --no-capture-account take nothing else: they answer one question, whether the port may forward with the user DBTrail captures with")
+		}
+		return runForwardCaptureAnswer(ctx, c, name, f.CaptureAccount, out)
+	}
 	switch {
 	case f.Remove && (user != "" || f.AskPassword || f.PasswordStdin):
 		return errors.New("--remove takes nothing else: it removes the forwarding user")
@@ -823,6 +843,9 @@ type ctlServer struct {
 	// RouteIsCapture: the saved forwarding account is the one DBTrail
 	// captures with, which the port refuses to forward as.
 	RouteIsCapture bool `json:"route_is_capture,omitempty"`
+	// ForwardWithCaptureAccount is the saved answer about forwarding with
+	// the capture account (#3054).
+	ForwardWithCaptureAccount bool `json:"forward_with_capture_account,omitempty"`
 	// SQLFresh is the mode this server's entry asks for on the MySQL port
 	// (fresh, or fast); SQLFreshSaved says it was chosen, as opposed to the
 	// default. What the router applies is `port mode`'s to say.

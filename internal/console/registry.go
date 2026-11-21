@@ -84,6 +84,18 @@ type ServerEntry struct {
 	// Additive at registryVersion 1: on binaries that predate it, it
 	// round-trips untouched through Extra.
 	RouteDSN string `yaml:"route_dsn,omitempty"`
+	// ForwardWithCaptureAccount is the operator's answer to "may the port
+	// forward, read-only, with the account DBTrail captures with?" (#3054):
+	// true only once somebody said yes. Absent (every entry saved before it
+	// existed) is no. It does not copy that account anywhere: the port opens
+	// SourceDSN for it, and only on a port that holds the stricter gate the
+	// capture account needs (capture_forward.go). A RouteDSN of its own, when
+	// set, is used instead. Registry-owned: only SetForwardWithCaptureAccount
+	// writes it, Add never stores it, and Update keeps it unless the edit
+	// changes the source's user or address (the answer was about that
+	// account). On builds that predate it, it round-trips through Extra and
+	// is not read, which is no.
+	ForwardWithCaptureAccount bool `yaml:"forward_with_capture_account,omitempty"`
 	// SourceServerID overrides the auto-derived replica server id (0 = derive
 	// from the source DSN, the same rule as `bintrail up`).
 	SourceServerID uint32 `yaml:"source_server_id,omitempty"`
@@ -839,6 +851,9 @@ func (r *Registry) insertLocked(e ServerEntry) (ServerEntry, error) {
 	e.SQLMaxBehindSource = 0            // SetSQLMode is the only writer (#2777)
 	e.PortUser, e.PortPassword = "", "" // SetPortLogin is the only writer
 	e.LocalKeepSavedWith = keepMark(e)  // registry-owned (#2675)
+	// SetForwardWithCaptureAccount is the only writer (#3054): a new
+	// server has no answer yet.
+	e.ForwardWithCaptureAccount = false
 	r.file.Servers = append(r.file.Servers, e)
 	if err := r.save(); err != nil {
 		r.file.Servers = r.file.Servers[:len(r.file.Servers)-1] // roll back
@@ -913,6 +928,11 @@ func (r *Registry) updateLocked(e ServerEntry) error {
 		e.SQLMaxBehindSource = old.SQLMaxBehindSource
 		// And the application login: SetPortLogin is its only writer.
 		e.PortUser, e.PortPassword = old.PortUser, old.PortPassword
+		// And the answer about forwarding with the capture account (#3054):
+		// SetForwardWithCaptureAccount is its only writer, and it was given
+		// about one account. An edit that points the source at another user
+		// or another address takes it back.
+		e.ForwardWithCaptureAccount = old.ForwardWithCaptureAccount && sameSourceAccount(old, e)
 		// Within MySQL and MariaDB the Source type is registry-owned too:
 		// capture corrects it (CorrectSourceFlavor), and an edit built from
 		// a copy read before that must not put the old value back. No edit
