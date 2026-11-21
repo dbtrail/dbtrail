@@ -3,6 +3,7 @@
 package pgstreamrun_test
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -358,6 +359,124 @@ func TestBuildPGReport_CoverageWarnings_Integration(t *testing.T) {
 		c := findCheck(t, r, "No UNLOGGED tables")
 		if c.Status != doctor.StatusPass {
 			t.Errorf("No UNLOGGED tables = %s (%s), want pass", c.Status, c.Detail)
+		}
+	})
+}
+
+// TestBuildPGReport_ReplicaIdentity_3027 is the report `server add`, Start and
+// `bintrail-pg doctor` read, against a real PostgreSQL, for tables that are not
+// at REPLICA IDENTITY FULL. A table at DEFAULT is a warning with the statement
+// to run and no failure, so the server is added and started. A table whose
+// identity is an index without the primary key is a failure, and goes away with
+// the statement the check prints.
+func TestBuildPGReport_ReplicaIdentity_3027(t *testing.T) {
+	dsn := testutil.SkipIfNoPostgres(t)
+	ctx := context.Background()
+	const (
+		slot = "bintrail_doctor_ri3027"
+		pub  = "bintrail_doctor_ri3027_pub"
+		undo = "REPLICA IDENTITY FULL"
+		key  = "Replica identity holds the primary key"
+	)
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { conn.Close(context.Background()) })
+	mustExec := func(sql string) {
+		t.Helper()
+		if _, err := conn.Exec(ctx, sql); err != nil {
+			t.Fatalf("exec %q: %v", sql, err)
+		}
+	}
+	dropAll := func() {
+		bg := context.Background()
+		_, _ = conn.Exec(bg, "DROP PUBLICATION IF EXISTS "+pub)
+		_, _ = conn.Exec(bg, `DROP TABLE IF EXISTS ri3027_full, ri3027_def, "Ri3027 Idx", ri3027_nothing`)
+		_, _ = conn.Exec(bg, "SELECT pg_drop_replication_slot($1) WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)", slot)
+	}
+	dropAll()
+	t.Cleanup(dropAll)
+	mustExec("CREATE TABLE ri3027_full (id int PRIMARY KEY, v text)")
+	mustExec("ALTER TABLE ri3027_full REPLICA IDENTITY FULL")
+	mustExec("CREATE TABLE ri3027_def (id int PRIMARY KEY, v text)")
+	mustExec("CREATE PUBLICATION " + pub + " FOR TABLE ri3027_full, ri3027_def")
+	mustExec("SELECT pg_create_logical_replication_slot('" + slot + "', 'pgoutput')")
+	report := func() *doctor.Report {
+		return pgstreamrun.BuildPGReport(ctx, pgstreamrun.PGDoctorConfig{QueryDSN: dsn, SlotName: slot, Publication: pub})
+	}
+	printed := func(r *doctor.Report) string {
+		var out bytes.Buffer
+		if err := r.Write(&out, "text"); err != nil {
+			t.Fatalf("write the report: %v", err)
+		}
+		return out.String()
+	}
+
+	t.Run("a table at DEFAULT: a warning, and the server can be added", func(t *testing.T) {
+		r := report()
+		t.Logf("the report as printed:\n%s", printed(r))
+		c := findCheck(t, r, undo)
+		if c.Status != doctor.StatusWarn {
+			t.Fatalf("%s = %s (%s), want a warning", undo, c.Status, c.Detail)
+		}
+		if c.Detail != `1 table of the publication is not at REPLICA IDENTITY FULL: "public"."ri3027_def"` {
+			t.Errorf("detail: %s", c.Detail)
+		}
+		if !strings.Contains(c.Remediation, "\n\n  ALTER TABLE \"public\".\"ri3027_def\" REPLICA IDENTITY FULL;\n") {
+			t.Errorf("remediation lacks the statement:\n%s", c.Remediation)
+		}
+		if k := findCheck(t, r, key); k.Status != doctor.StatusPass {
+			t.Errorf("%s = %s (%s), want pass", key, k.Status, k.Detail)
+		}
+		// What add and Start stop on.
+		if r.Failed != 0 || r.Err() != nil {
+			t.Errorf("a table below FULL must not fail the report: failed=%d err=%v", r.Failed, r.Err())
+		}
+	})
+
+	t.Run("the printed statement clears the warning", func(t *testing.T) {
+		mustExec(`ALTER TABLE "public"."ri3027_def" REPLICA IDENTITY FULL`)
+		if c := findCheck(t, report(), undo); c.Status != doctor.StatusPass {
+			t.Errorf("%s = %s (%s), want pass", undo, c.Status, c.Detail)
+		}
+	})
+
+	t.Run("an index without the primary key: a failure; no identity: said in the warning", func(t *testing.T) {
+		mustExec(`CREATE TABLE "Ri3027 Idx" (id int PRIMARY KEY, u int NOT NULL, v text)`)
+		mustExec(`CREATE UNIQUE INDEX ri3027_idx_uk ON "Ri3027 Idx" (u)`)
+		mustExec(`ALTER TABLE "Ri3027 Idx" REPLICA IDENTITY USING INDEX ri3027_idx_uk`)
+		mustExec("CREATE TABLE ri3027_nothing (id int PRIMARY KEY, v text)")
+		mustExec("ALTER TABLE ri3027_nothing REPLICA IDENTITY NOTHING")
+		mustExec(`ALTER PUBLICATION ` + pub + ` ADD TABLE "Ri3027 Idx", ri3027_nothing`)
+		r := report()
+		t.Logf("the report as printed:\n%s", printed(r))
+		k := findCheck(t, r, key)
+		if k.Status != doctor.StatusFail {
+			t.Fatalf("%s = %s (%s), want a failure", key, k.Status, k.Detail)
+		}
+		if k.Detail != `1 table of the publication has a replica identity that does not hold the primary key: "public"."Ri3027 Idx" (primary-key column id left out)` {
+			t.Errorf("detail: %s", k.Detail)
+		}
+		if !strings.Contains(k.Remediation, "\n\n  ALTER TABLE \"public\".\"Ri3027 Idx\" REPLICA IDENTITY DEFAULT;\n") {
+			t.Errorf("remediation lacks the statement:\n%s", k.Remediation)
+		}
+		u := findCheck(t, r, undo)
+		if u.Status != doctor.StatusWarn || strings.Contains(u.Detail, "Ri3027 Idx") || !strings.Contains(u.Detail, `"public"."ri3027_nothing"`) ||
+			!strings.Contains(u.Remediation, `has no replica identity at all (REPLICA IDENTITY NOTHING, or no usable primary key): "public"."ri3027_nothing"`) {
+			t.Errorf("warning: %s (%s)\n%s", u.Status, u.Detail, u.Remediation)
+		}
+		if r.Failed != 1 || r.Err() == nil {
+			t.Errorf("failed=%d err=%v, want the one failure", r.Failed, r.Err())
+		}
+
+		mustExec(`ALTER TABLE "public"."Ri3027 Idx" REPLICA IDENTITY DEFAULT`)
+		r = report()
+		if k := findCheck(t, r, key); k.Status != doctor.StatusPass {
+			t.Errorf("after the printed statement %s = %s (%s), want pass", key, k.Status, k.Detail)
+		}
+		if r.Failed != 0 {
+			t.Errorf("failed=%d after the fix", r.Failed)
 		}
 	})
 }

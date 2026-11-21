@@ -65,11 +65,12 @@ type Config struct {
 	// change to a table before an LSN. Both nil = inference off.
 	LoadKnownShapes func(fromLSN uint64) (KnownState, error)
 	LastChange      func(schema, table string, beforeLSN uint64) (lsn uint64, at time.Time, ok bool, err error)
-	// Skips is the capture-skip ledger: each change of a table that is not at
-	// REPLICA IDENTITY FULL is dropped and recorded there under
-	// SkipReplicaIdentityNotFull, and each captured row breaks its run of
-	// consecutive skips. The consumer persists it with its checkpoints. nil
-	// records nothing (the changes are still dropped, with the warning).
+	// Skips is the capture-skip ledger: each change of a table capture does not
+	// take (a primary key declared DEFERRABLE, a replica identity that does not
+	// hold the primary key) is dropped and recorded there under its reason, and
+	// each captured row breaks its run of consecutive skips. The consumer
+	// persists it with its checkpoints. nil records nothing (the changes are
+	// still dropped, with the warning).
 	Skips *parser.SkipCounters
 }
 
@@ -168,27 +169,62 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 	if err := validatePublication(startupCtx, queryConn, c.cfg.Publication, c.cfg.Filters); err != nil {
 		return err
 	}
-	// Before the replica identity gate, whose message tells an operator to
-	// set REPLICA IDENTITY FULL: on PostgreSQL 18 that is what stops the
+	// Before the replica identity warning, whose message tells an operator how
+	// to set REPLICA IDENTITY FULL: on PostgreSQL 18 that is what stops the
 	// source's application from writing to a table with a generated column.
 	if err := CheckGeneratedColumns(startupCtx, queryConn, c.cfg.Publication); err != nil {
 		return err
 	}
-	if err := CheckDeferrableKeys(startupCtx, queryConn, c.cfg.Publication); err != nil {
-		return err
+	// A table whose primary key is DEFERRABLE does not stop capture: the
+	// decoder skips it, each time PostgreSQL describes it
+	// (WithDeferrableResolver), and the other tables go on. Refusing to start
+	// over one such table kept EVERY table uncaptured, and for good: each
+	// automatic restart (a network cut, a write that timed out) was refused
+	// again, while the slot went on retaining WAL on the source. Said here once,
+	// for the tables already in the publication; a failed read only loses the
+	// warning.
+	if found, err := QueryDeferrableKeys(startupCtx, queryConn, c.cfg.Publication); err != nil {
+		c.logger.Warn("pgcapture: could not list the published tables whose primary key is DEFERRABLE; each table is still checked when PostgreSQL describes it", "error", err)
+	} else {
+		var kept []DeferrableKey
+		for _, k := range found {
+			if c.cfg.Filters.Matches(k.Schema, k.Table) {
+				kept = append(kept, k)
+			}
+		}
+		if len(kept) > 0 {
+			c.logger.Warn("pgcapture: " + DeferrableKeysProblem(kept) + " Until then the changes of " + thisOrThese(len(kept)) + " are NOT captured (each one is counted as skipped in capture health); the other tables are captured normally")
+		}
 	}
-	// A table below REPLICA IDENTITY FULL no longer stops capture: the decoder
-	// skips its changes (and records each one), so one such table does not take
-	// every other table down with it. Said here once, at start, for the tables
-	// already in the publication; the decoder says it again for each description
-	// of the table it receives.
-	notFull, err := validateReplicaIdentity(startupCtx, queryConn, c.cfg.Publication, c.cfg.Filters)
+	// A table below REPLICA IDENTITY FULL is captured: PostgreSQL sends at most
+	// the key of the row an UPDATE or a DELETE changed, and only undo needs the
+	// rest. Said here once, at start, for the tables already in the
+	// publication; the decoder says it again for each description of the table
+	// it receives, and is where a table whose identity leaves the primary key
+	// out is skipped.
+	belowFull, err := validateReplicaIdentity(startupCtx, queryConn, c.cfg.Publication, c.cfg.Filters)
 	if err != nil {
 		return err
 	}
-	if len(notFull) > 0 {
-		c.logger.Warn("pgcapture: published table(s) not at REPLICA IDENTITY FULL; their changes are NOT captured (each one is counted as skipped in capture health) until each is altered with ALTER TABLE <t> REPLICA IDENTITY FULL, the other tables are captured normally",
-			"tables", strings.Join(notFull, ", "))
+	withoutUndo, missesKey, noIdentity := SplitTableIdentities(belowFull)
+	names := func(ts []TableIdentity) string {
+		out := make([]string, len(ts))
+		for i, t := range ts {
+			out[i] = t.Name()
+		}
+		return strings.Join(out, ", ")
+	}
+	if len(withoutUndo) > 0 {
+		c.logger.Warn("pgcapture: "+countTables(len(withoutUndo))+" without undo: not at REPLICA IDENTITY FULL. Their changes are captured and everything else works on them; undo refuses their UPDATE and DELETE. To make a table's later changes undoable run ALTER TABLE <t> REPLICA IDENTITY FULL (the table then writes more WAL)",
+			"tables", names(withoutUndo))
+	}
+	if len(missesKey) > 0 {
+		c.logger.Warn("pgcapture: "+countTables(len(missesKey))+" whose replica identity does not hold the primary key; their changes are NOT captured (each one is counted as skipped in capture health) until it does, the other tables are captured normally. Run ALTER TABLE <t> REPLICA IDENTITY FULL (or DEFAULT, when the identity is an index that leaves the key out)",
+			"tables", names(missesKey))
+	}
+	if len(noIdentity) > 0 {
+		c.logger.Warn("pgcapture: "+countTables(len(noIdentity))+" with no replica identity (NOTHING, or DEFAULT without a primary key): PostgreSQL itself refuses UPDATE and DELETE on them while they are published, so only their INSERT and TRUNCATE are captured. Give each a primary key, or run ALTER TABLE <t> REPLICA IDENTITY FULL",
+			"tables", names(noIdentity))
 	}
 
 	// Non-fatal capture-coverage warnings (#555 UNLOGGED, #556 FK cascade child): tables
@@ -248,7 +284,31 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 		defer cancel()
 		return queryColumnAttrs(qctx, queryConn, relationID)
 	}
-	opts := []DecoderOption{WithAttrResolver(attrResolver), WithSkipCounters(c.cfg.Skips)}
+	// Catalog-backed check of a deferrable primary key, asked at every
+	// description of a relation; same conn + bounding.
+	deferrable := func(relationID uint32, schema, table string) (string, error) {
+		qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		return queryDeferrableKey(qctx, queryConn, relationID)
+	}
+	// What the catalog says of a relation's partitions, asked at every
+	// description of a relation. A failed or timed-out read does not stop the
+	// stream: the decoder reads that relation's old rows one by one, and asks
+	// no relation's partitions again for a minute. On a connection of its
+	// own, opened again when it is found closed: a read that times out closes
+	// the connection it ran on, which would end the stream at the next
+	// primary-key lookup. Bounded well under the other lookups' 10 s: this
+	// runs in the loop that also tells the server the stream is alive, and it
+	// is the one lookup that is tried again.
+	partsReader := &partitionsReader{dsn: c.cfg.QueryDSN}
+	defer partsReader.close()
+	partitions := func(relationID uint32, schema, table string) (Partitions, error) {
+		qctx, cancel := context.WithTimeout(ctx, partitionsReadTimeout)
+		defer cancel()
+		return partsReader.read(qctx, relationID)
+	}
+	opts := []DecoderOption{WithAttrResolver(attrResolver), WithSkipCounters(c.cfg.Skips),
+		WithDeferrableResolver(deferrable), WithPartitionsResolver(partitions)}
 	stampsClose := func() {}
 	defer func() { stampsClose() }()
 	if c.cfg.LastChange != nil && c.cfg.LoadKnownShapes != nil {

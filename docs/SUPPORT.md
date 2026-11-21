@@ -142,7 +142,9 @@ PostgreSQL logical replication **slot retains WAL** until DBTrail consumes it: i
 `max_slot_wal_keep_size`, monitoring slot lag, and the source's own disk are
 yours (`bintrail-pg doctor` reports slot/WAL health — see
 [postgres.md](./postgres.md)). Capturing from a misconfigured source
-(non-`FULL` row image, missing `REPLICA IDENTITY`, `PARTIAL_JSON`) is out of scope.
+(non-`FULL` row image, `PARTIAL_JSON`) is out of scope. On PostgreSQL, a table
+that is not at `REPLICA IDENTITY FULL` is in scope: it is captured, and only undo
+of its `UPDATE` and `DELETE` is refused ([postgres.md](./postgres.md)).
 
 **MariaDB topologies that are not supported.** DBTrail captures a MariaDB
 source that is one server, including one server that writes into several GTID

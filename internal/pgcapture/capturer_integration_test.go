@@ -3,8 +3,10 @@
 package pgcapture_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -192,12 +194,12 @@ func TestCapturer_Integration(t *testing.T) {
 // TestCapturer_PublicationCoverageFailsLoud proves the validate-don't-create gate:
 // a publication that omits a requested table fails loud rather than silently
 // streaming zero events for it.
-// TestCapturer_NonFullReplicaIdentityAtStartIsSkipped: a publication table left at
-// the default replica identity (not FULL) used to make Run refuse to start. Its
-// before-images would be partial (an unchanged out-of-line TOAST value lost), so its
-// rows must still never be indexed, but one such table must not stop capture: Run
-// starts, the table's changes are dropped and recorded in the skip ledger.
-func TestCapturer_NonFullReplicaIdentityAtStartIsSkipped(t *testing.T) {
+// TestCapturer_NonFullReplicaIdentityAtStartIsCaptured: a publication table left at
+// the default replica identity (not FULL) once made Run refuse to start, and then
+// had its changes dropped and recorded in the skip ledger. It is captured now: Run
+// starts, says once which tables are without undo, and the table's rows are
+// emitted, the earlier row of an UPDATE or a DELETE with its key only.
+func TestCapturer_NonFullReplicaIdentityAtStartIsCaptured(t *testing.T) {
 	baseDSN := testutil.SkipIfNoPostgres(t)
 	ctx := context.Background()
 	const pub = "bintrail_pgcap_ri_pub"
@@ -226,6 +228,7 @@ func TestCapturer_NonFullReplicaIdentityAtStartIsSkipped(t *testing.T) {
 		t.Fatalf("create publication: %v", err)
 	}
 
+	var logs bytes.Buffer
 	skips := parser.NewSkipCounters(nil)
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -236,26 +239,55 @@ func TestCapturer_NonFullReplicaIdentityAtStartIsSkipped(t *testing.T) {
 		Publication:     pub,
 		Skips:           skips,
 		StandbyInterval: 200 * time.Millisecond,
+		Logger:          slog.New(slog.NewTextHandler(&syncWriter{w: &logs}, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	})
 	events := make(chan event.Event, 64)
 	runErr := make(chan error, 1)
 	go func() { runErr <- cap.Run(runCtx, events) }()
 	waitSlotActive(t, setup, slot, runErr)
 
-	if _, err := setup.Exec(ctx, fmt.Sprintf("INSERT INTO %s VALUES (1, 'x')", tbl)); err != nil {
-		t.Fatal(err)
-	}
-	waitFor(t, 15*time.Second, func() bool { return skips.Count(pgcapture.SkipReplicaIdentityNotFull) >= 1 },
-		"the change of the non-FULL table recorded as a skip")
-	assertRunning(t, runErr)
-	for _, ev := range drain(events) {
-		if ev.Table == tbl && isRow(ev) {
-			t.Errorf("a row of the non-FULL table was emitted: %+v", ev)
+	for _, q := range []string{
+		fmt.Sprintf("INSERT INTO %s VALUES (1, 'x')", tbl),
+		fmt.Sprintf("UPDATE %s SET body = 'y' WHERE id = 1", tbl),
+		fmt.Sprintf("DELETE FROM %s WHERE id = 1", tbl),
+	} {
+		if _, err := setup.Exec(ctx, q); err != nil {
+			t.Fatal(err)
 		}
+	}
+	byType := map[event.EventType]event.Event{}
+	collectUntil(t, events, runErr, 20*time.Second, func(seen map[string]bool) bool {
+		return seen[key(tbl, event.EventDelete, "1")]
+	}, func(ev event.Event) { byType[ev.EventType] = ev })
+	assertRunning(t, runErr)
+	if ins := byType[event.EventInsert]; ins.RowAfter["body"] != "x" || ins.RowBefore != nil {
+		t.Errorf("INSERT: %+v", ins)
+	}
+	for _, typ := range []event.EventType{event.EventUpdate, event.EventDelete} {
+		ev := byType[typ]
+		if ev.RowBefore["id"] != "1" || !event.IsNotCapturedMarker(ev.RowBefore["body"]) {
+			t.Errorf("event type %d: the earlier row must hold the key and the not-captured marker, got %v", typ, ev.RowBefore)
+		}
+	}
+	if byType[event.EventUpdate].RowAfter["body"] != "y" {
+		t.Errorf("UPDATE after-image: %v", byType[event.EventUpdate].RowAfter)
+	}
+	if n := skips.Total(); n != 0 {
+		t.Errorf("nothing is skipped, got %d", n)
 	}
 	cancel()
 	if err := <-runErr; err != nil {
 		t.Errorf("Run returned non-nil on graceful cancel: %v", err)
+	}
+	// What the operator reads at start, printed from the real run.
+	t.Logf("startup log:\n%s", logs.String())
+	for _, want := range []string{"1 table without undo", "public." + tbl, "Their changes are captured"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("the startup warning lacks %q", want)
+		}
+	}
+	if strings.Contains(logs.String(), "NOT captured") {
+		t.Errorf("the table is captured; the log must not say otherwise")
 	}
 }
 

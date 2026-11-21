@@ -29,6 +29,14 @@ type relColumn struct {
 	// a reverse-UPDATE SET omits BOTH (PostgreSQL rejects SET on either).
 	isIdentityAlways bool
 	isGenerated      bool
+	// inIdentity reports that the column is one a key-only old tuple carries a
+	// real value for. Below FULL it is what the RelationMessage flagged as part
+	// of the replica identity (RelationMessageColumn.Flags bit 1): the primary
+	// key under DEFAULT, the index's key columns under USING INDEX, none under
+	// NOTHING (pinned on a live server by
+	// TestPgoutputReplicaIdentityWire_Integration). Under FULL the message flags
+	// every column, so the primary-key columns are taken instead (cacheRelation).
+	inIdentity bool
 }
 
 // relationInfo is the decoder's cached knowledge of one relation, keyed by its
@@ -42,13 +50,193 @@ type relationInfo struct {
 	columns []relColumn           // ordinal order, matching the tuple column order
 	pkCols  []metadata.ColumnMeta // primary-key columns in table-ordinal order (cacheRelation reorders the PKResolver's key-order result so pk_values aligns with the offline resolver)
 
-	// skipped marks a relation described at a replica identity weaker than FULL:
-	// its row changes are dropped and recorded in the capture-skip ledger instead
-	// of indexed. Only oid/schema/table/replicaIdentity are set for it (no
-	// columns, no PK: nothing of it is decoded). The next RelationMessage for the
-	// same OID replaces the entry, so a table altered to FULL resumes by itself.
-	skipped         bool
+	// replicaIdentity is the relation's REPLICA IDENTITY as this description
+	// gave it: 'f' full, 'd' default, 'i' using index, 'n' nothing.
 	replicaIdentity uint8
+
+	// partial reports that the earlier row of every UPDATE and DELETE of the
+	// relation is captured in part (decoder.go, partialBefore): the relation is
+	// described below FULL.
+	partial bool
+	// byShape reports that an old tuple of the relation is taken as whole or as
+	// key-only ROW BY ROW, by what it holds (decoder.go, holdsEmpty): the
+	// relation is described at FULL, and is a partitioned table or one the
+	// catalog did not answer for (Decoder.judgePartitions).
+	byShape bool
+	// partitioned reports that the catalog answered that the relation is a
+	// partitioned table.
+	partitioned bool
+	// partsRetryAt, when not zero, is when the read of the relation's
+	// partitions, which failed, is tried again (Decoder.relationFor).
+	partsRetryAt time.Time
+	// unsureStored counts the changes of the relation stored while
+	// partsRetryAt was set, the first at commit LSN unsureFrom: should the
+	// catalog then show that the table had to be skipped, the ledger is told
+	// of that stretch.
+	unsureStored int
+	unsureFrom   uint64
+	// keyNotSent counts the changes of the relation dropped under
+	// SkipReplicaIdentityKeyNotSent, to space their warning.
+	keyNotSent int
+
+	// skipped marks a relation whose row changes are dropped and recorded in the
+	// capture-skip ledger instead of indexed, under skipReason with skipDetail:
+	// a primary key declared DEFERRABLE, or a replica identity that does not
+	// hold the primary key. Only oid/schema/table/replicaIdentity are set
+	// beside them (no columns, no PK: nothing of it is decoded). The next
+	// RelationMessage for the same OID replaces the entry, so a table that was
+	// fixed resumes by itself.
+	skipped    bool
+	skipReason string
+	skipDetail string
+}
+
+// PartitionsResolver says what the catalog knows of a relation's partitions.
+//
+// It exists for one case the stream cannot show. A partitioned table published
+// through its root (publish_via_partition_root) is described with the ROOT's
+// identity, and pgoutput labels the old tuple of every change by that
+// description: 'O' (whole row) under a root at FULL. What the tuple holds is
+// what the PARTITION logged, and REPLICA IDENTITY is set per partition (ALTER
+// TABLE on the parent does not reach them). So a root at FULL over a partition
+// at DEFAULT sends a key-only tuple labeled as a whole row: every column
+// outside the key reads as NULL (seen on PostgreSQL 16,
+// TestCapturer_BelowFull_Partitioned_Integration). Nothing in the message
+// says which partition a change was made in.
+//
+// The same holds under a root below FULL: every tuple is labeled 'K' and
+// stored in part, but a partition whose own identity leaves the primary key
+// out sends NO old tuple for an UPDATE of the key, and a DELETE without it.
+//
+// The decoder asks at each description of a relation, whatever its identity,
+// and decides from the answer (Decoder.judgePartitions). It reads the catalog
+// as it is now, while capture that is behind reads changes made under an
+// earlier one, so the answer is used only for what the rows cannot show
+// (whether the relation is partitioned, and a partition that leaves the key
+// out), never to say what an old row holds: that is read from the row
+// (holdsEmpty).
+type PartitionsResolver func(relationID uint32, schema, table string) (Partitions, error)
+
+// Partitions is what the catalog says of a relation and its partitions.
+type Partitions struct {
+	// Known reports that the catalog holds the relation. A relation dropped
+	// since its changes were written is not known: it may have been
+	// partitioned.
+	Known bool
+	// Partitioned reports that the relation is a partitioned table.
+	Partitioned bool
+	// BelowFull counts its leaf partitions that are not at REPLICA IDENTITY
+	// FULL: their UPDATE and DELETE cannot be undone.
+	BelowFull int
+	// MissesKey counts its leaf partitions whose own replica identity is an
+	// index that leaves a primary-key column out. A change of the primary key
+	// made in one arrives with no earlier row at all.
+	MissesKey int
+}
+
+// partitionsQuery reads Partitions for relation $1: the relation and, when it
+// is a partitioned table, every leaf under it, through pg_inherits. It reads
+// catalogs only and takes no lock on any table: pg_partition_tree() locks each
+// partition (ACCESS SHARE), so it waits behind a VACUUM FULL, a rewriting ALTER
+// or a long TRUNCATE of one partition, and a tree of thousands takes as many
+// locks (seen on PostgreSQL 16, TestPartitionCatalogReadsTakeNoLock_Integration).
+//
+// A leaf's identity index is the one flagged indisreplident, valid and not
+// deferrable (relcache's rule); its key columns are the first indnkeyatts. The
+// primary-key columns are read as the capture reads them (pkColumnsQuery).
+const partitionsQuery = `
+WITH RECURSIVE tree AS (
+	SELECT c.oid, c.relkind, c.relreplident FROM pg_class c WHERE c.oid = $1::oid
+	UNION ALL
+	SELECT c.oid, c.relkind, c.relreplident
+	FROM tree t
+	JOIN pg_inherits i ON i.inhparent = t.oid
+	JOIN pg_class c ON c.oid = i.inhrelid
+	WHERE t.relkind = 'p'
+), leaves AS (
+	SELECT t.oid, t.relreplident FROM tree t WHERE t.relkind <> 'p' AND t.oid <> $1::oid
+), idx AS (
+	SELECT l.oid,
+	       EXISTS (SELECT 1 FROM pg_index pk, unnest(pk.indkey::int2[]) AS a(att)
+	               WHERE pk.indrelid = l.oid AND pk.indisprimary AND a.att > 0
+	                 AND NOT EXISTS (SELECT 1 FROM unnest(ri.indkey::int2[]) WITH ORDINALITY AS k(att, ord)
+	                                 WHERE k.ord <= ri.indnkeyatts AND k.att = a.att)) AS misses
+	FROM leaves l
+	JOIN pg_index ri ON ri.indrelid = l.oid AND ri.indisreplident AND ri.indisvalid AND ri.indimmediate
+	WHERE l.relreplident = 'i'
+)
+SELECT EXISTS (SELECT 1 FROM tree WHERE oid = $1::oid),
+       COALESCE((SELECT relkind = 'p' FROM tree WHERE oid = $1::oid), false),
+       (SELECT count(*) FROM leaves WHERE relreplident <> 'f'),
+       (SELECT count(*) FROM idx WHERE misses)`
+
+// queryPartitions is the catalog-backed PartitionsResolver body.
+func queryPartitions(ctx context.Context, conn *pgx.Conn, relationID uint32) (Partitions, error) {
+	var p Partitions
+	if err := conn.QueryRow(ctx, partitionsQuery, relationID).Scan(&p.Known, &p.Partitioned, &p.BelowFull, &p.MissesKey); err != nil {
+		return Partitions{}, fmt.Errorf("pgcapture: reading the partitions of relation OID %d: %w", relationID, err)
+	}
+	return p, nil
+}
+
+// partitionsReadTimeout bounds one read of a relation's partitions, opening
+// its connection included. One attempt a minute at most is made while reads
+// fail (Decoder.partsDownUntil), so a catalog that hangs holds the
+// replication loop for this long once a minute, well inside the server's
+// wal_sender_timeout (60 s by default).
+const partitionsReadTimeout = 3 * time.Second
+
+// partitionsReader runs queryPartitions on a connection of its own, opened at
+// the first read and again whenever it is found closed (pgx closes a
+// connection whose query was cut by its deadline). Used from the decode loop
+// alone: not safe for concurrent use.
+type partitionsReader struct {
+	dsn  string
+	conn *pgx.Conn
+}
+
+func (r *partitionsReader) read(ctx context.Context, relationID uint32) (Partitions, error) {
+	if r.conn == nil || r.conn.IsClosed() {
+		conn, err := pgx.Connect(ctx, r.dsn)
+		if err != nil {
+			return Partitions{}, fmt.Errorf("pgcapture: opening the connection that reads the partitions of relation OID %d: %w", relationID, err)
+		}
+		r.conn = conn
+	}
+	return queryPartitions(ctx, r.conn, relationID)
+}
+
+func (r *partitionsReader) close() {
+	if r.conn != nil && !r.conn.IsClosed() {
+		cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = r.conn.Close(cctx)
+	}
+}
+
+// DeferrableResolver returns the name of a relation's primary-key constraint
+// when that key is declared DEFERRABLE, and "" when the table has no primary
+// key or a key that is not deferrable. The capturer implements it with a
+// catalog query by OID; tests stub it. A failed lookup must return an error:
+// a table whose key could not be checked is not captured as if it were safe.
+type DeferrableResolver func(relationID uint32, schema, table string) (constraint string, err error)
+
+// deferrableKeyQuery reads the name of relation $1's primary-key constraint
+// when it is deferrable. No row = no primary key, or one that is not.
+const deferrableKeyQuery = `SELECT conname FROM pg_constraint
+WHERE conrelid = $1 AND contype = 'p' AND condeferrable`
+
+// queryDeferrableKey is the catalog-backed DeferrableResolver body.
+func queryDeferrableKey(ctx context.Context, conn *pgx.Conn, relationID uint32) (string, error) {
+	var name string
+	err := conn.QueryRow(ctx, deferrableKeyQuery, relationID).Scan(&name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("pgcapture: reading whether the primary key of relation OID %d is deferrable: %w", relationID, err)
+	}
+	return name, nil
 }
 
 // PKResolver returns the primary-key columns of a relation, in primary-key (indkey)
@@ -59,8 +247,8 @@ type relationInfo struct {
 // event.Event.PKValues.
 //
 // It must source the PK from the catalog (pg_index.indisprimary), NOT from the
-// RelationMessage's per-column "key" flag: under REPLICA IDENTITY FULL — the mode
-// bintrail requires (#531) — pgoutput flags EVERY column as key, so the flag would
+// RelationMessage's per-column "key" flag: under REPLICA IDENTITY FULL pgoutput
+// flags EVERY column as key, so the flag would
 // make every table's PK the whole row; under REPLICA IDENTITY USING INDEX it marks
 // the index's columns, which need not be the PK; under NOTHING it marks none
 // (pinned on a live server by TestPgoutputReplicaIdentityWire_Integration).

@@ -147,10 +147,14 @@ func TestGeneratedColumnsStopDoctorAndCapture(t *testing.T) {
 	}
 }
 
-// A deferrable primary key: the doctor fails with what to do, and the capture
-// refuses to start and leaves no slot. Once the key is not deferrable both
-// pass. On every PostgreSQL version.
-func TestDeferrableKeyStopsDoctorAndCapture(t *testing.T) {
+// A deferrable primary key: the doctor fails with what to do (a server is not
+// added or started with one). The capture itself starts: it skips that table
+// and captures the others (pgcapture's
+// TestCapturer_DeferrableKeyAtStart_TableSkippedOthersCaptured shows the
+// rows), because refusing the start kept every table uncaptured at each
+// automatic restart. Once the key is not deferrable the doctor passes. On
+// every PostgreSQL version.
+func TestDeferrableKeyFailsDoctorAndDoesNotStopCapture(t *testing.T) {
 	pgDSN := testutil.SkipIfNoPostgres(t)
 	testutil.SkipIfNoMySQL(t)
 	ctx := context.Background()
@@ -237,12 +241,8 @@ func TestDeferrableKeyStopsDoctorAndCapture(t *testing.T) {
 		!strings.Contains(c.Detail, fmt.Sprintf(`ALTER TABLE "public".%q DROP CONSTRAINT %q, ADD PRIMARY KEY`, tbl, tbl+"_pkey")) {
 		t.Fatalf("the doctor on a deferrable key: %+v", c)
 	}
-	if err := start(); !errors.Is(err, pgcapture.ErrDeferrableKey) {
-		t.Fatalf("the capture on a deferrable key: %v, want a refusal", err)
-	}
-	var slots int
-	if err := pg.QueryRow(ctx, "SELECT COUNT(*) FROM pg_replication_slots WHERE slot_name = $1", slot).Scan(&slots); err != nil || slots != 0 {
-		t.Fatalf("the refused capture left %d slot(s) (err %v)", slots, err)
+	if err := start(); err != nil {
+		t.Fatalf("the capture on a deferrable key must start (the table is skipped, not the server): %v", err)
 	}
 	if _, err := pg.Exec(ctx, fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s_pkey, ADD PRIMARY KEY (id)", tbl, tbl)); err != nil {
 		t.Fatal(err)
