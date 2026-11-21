@@ -170,6 +170,25 @@ func TestIntegrationFreshWithBlocks_3043(t *testing.T) {
 	}
 	settleTails(t, r.s, func() { run("SELECT status FROM shop." + tbl.Table) })
 	checkWithChainShapes(t, "CAST(id AS VARCHAR) || '=' || status", "shop."+tbl.Table, "shop."+none.Table, "1=new", run)
+
+	// A connection that routes (the port with a forwarding user): the copy
+	// answers the chained statement with the table's tail, and says the run
+	// read every table with its changes. No star here: a routing session
+	// refuses one over this rig's tables, which carry no definition.
+	t.Run("a block reading a block, on a connection that routes", func(t *testing.T) {
+		stmt := "WITH x AS (SELECT id, status FROM shop." + tbl.Table + "), y AS (SELECT id, status FROM x) SELECT CAST(id AS VARCHAR) || '=' || status FROM y ORDER BY id"
+		for range 2 {
+			res, err := q.Run(context.Background(), stmt, "", sqlsandbox.Session{StrictStar: true})
+			if err != nil {
+				t.Fatalf("not answered by the copy: %v", err)
+			}
+			age := q.LastRunAge()
+			q.NoteRoute("copy")
+			if len(res.Rows) != 1 || res.Rows[0][0].(string) != "1=paid" || res.Note != "" || !age.Tailed {
+				t.Fatalf("answered %v with note %q, read with its changes: %v", res.Rows, res.Note, age.Tailed)
+			}
+		}
+	})
 }
 
 // settleTails has the boot server's keeper build and publish the tail of the
