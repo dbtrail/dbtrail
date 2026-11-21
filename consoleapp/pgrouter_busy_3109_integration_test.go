@@ -160,7 +160,11 @@ func TestIntegrationPGRouterBusyCopyRefusesNotForwards(t *testing.T) {
 	if r := numbers().Reasons[pgshim.ReasonAnswersTheSame]; r < 4 {
 		t.Fatalf("reasons %v, want 4 answers_the_same", numbers().Reasons)
 	}
+	// What the fixture did on the source (its snapshot reads the table
+	// whole) is published by then.
+	time.Sleep(pgStatsSettle)
 	seq0, idx0 := scans()
+	t.Logf("the source's scans of the table before the copy is held: %d sequential, %d by index", seq0, idx0)
 
 	// The copy's one worker held.
 	hctx, stopHolder := context.WithCancel(ctx)
