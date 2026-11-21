@@ -85,6 +85,10 @@ type serverDTO struct {
 	// account of its own is used instead: capture_forward.go. Edited through
 	// PUT /api/servers/{id}/route only.
 	ForwardWithCaptureAccount bool `json:"forward_with_capture_account"`
+	// CaptureAccountRefused: the answer is yes, the server has no account
+	// of its own, and its source URL cannot be forwarded with as the
+	// capture account (pgCaptureURLRefusal): why.
+	CaptureAccountRefused string `json:"capture_account_refused,omitempty"`
 
 	// Hidden are the tables and columns the analytical surfaces leave out
 	// for this server (#2529). Edited through /api/servers/{id}/hidden only.
@@ -1948,7 +1952,10 @@ func (s *Server) entryDTO(e ServerEntry) serverDTO {
 		SourceSlot:           e.SourceSlot,
 		SourcePublication:    e.SourcePublication,
 	}
-	dto.ForwardWithCaptureAccount = e.ForwardWithCaptureAccount
+	dto.ForwardWithCaptureAccount = captureAnswerHolds(e)
+	if dto.ForwardWithCaptureAccount && e.IsPostgres() && e.RouteDSN == "" {
+		dto.CaptureAccountRefused = pgCaptureURLRefusal(e.SourceDSN)
+	}
 	fillDSNParts(&dto, e.DSN)
 	fillSourceDSNParts(&dto, e.SourceDSN, e.SourceFlavor())
 	if e.IsPostgres() {

@@ -976,10 +976,8 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			closers = append(closers, untrack)
 			bound.Forward = &pgshim.Forward{DSN: fwd.DSN, CaptureAccount: fwd.CaptureAccount, Acquire: sources.acquire, Limit: sources.limit(), Timeout: timeout,
 				Barred: pgForwardBarred(tgt.ID, tgt.TimeTravelRefusal, routes, logger), Cost: cost}
-			routes.setAccount(tgt.ID, fwd.Account)
 		case fwd.Refused != "":
 			bound.Forward = &pgshim.Forward{Refused: fwd.Refused}
-			routes.setAccount(tgt.ID, "")
 		}
 		if tgt.SQL == nil {
 			// The connection is made and every statement says why it cannot

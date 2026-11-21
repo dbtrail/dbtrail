@@ -96,6 +96,13 @@ type ServerEntry struct {
 	// account). On builds that predate it, it round-trips through Extra and
 	// is not read, which is no.
 	ForwardWithCaptureAccount bool `yaml:"forward_with_capture_account,omitempty"`
+	// ForwardWithCaptureAccountFor is the account that answer was given
+	// about, "user@host:port" of SourceDSN when it was saved: the answer
+	// holds only while the source is still that account (captureAnswerHolds).
+	// A build that predates the answer keeps both keys and can still edit the
+	// source; this is what keeps a yes from carrying over to another account
+	// then. Written with ForwardWithCaptureAccount and by nothing else.
+	ForwardWithCaptureAccountFor string `yaml:"forward_with_capture_account_for,omitempty"`
 	// SourceServerID overrides the auto-derived replica server id (0 = derive
 	// from the source DSN, the same rule as `bintrail up`).
 	SourceServerID uint32 `yaml:"source_server_id,omitempty"`
@@ -853,7 +860,7 @@ func (r *Registry) insertLocked(e ServerEntry) (ServerEntry, error) {
 	e.LocalKeepSavedWith = keepMark(e)  // registry-owned (#2675)
 	// SetForwardWithCaptureAccount is the only writer (#3054): a new
 	// server has no answer yet.
-	e.ForwardWithCaptureAccount = false
+	e.ForwardWithCaptureAccount, e.ForwardWithCaptureAccountFor = false, ""
 	r.file.Servers = append(r.file.Servers, e)
 	if err := r.save(); err != nil {
 		r.file.Servers = r.file.Servers[:len(r.file.Servers)-1] // roll back
@@ -932,7 +939,10 @@ func (r *Registry) updateLocked(e ServerEntry) error {
 		// SetForwardWithCaptureAccount is its only writer, and it was given
 		// about one account. An edit that points the source at another user
 		// or another address takes it back.
-		e.ForwardWithCaptureAccount = old.ForwardWithCaptureAccount && sameSourceAccount(old, e)
+		e.ForwardWithCaptureAccount, e.ForwardWithCaptureAccountFor = false, ""
+		if old.ForwardWithCaptureAccount && sameSourceAccount(old, e) {
+			e.ForwardWithCaptureAccount, e.ForwardWithCaptureAccountFor = true, old.ForwardWithCaptureAccountFor
+		}
 		// Within MySQL and MariaDB the Source type is registry-owned too:
 		// capture corrects it (CorrectSourceFlavor), and an edit built from
 		// a copy read before that must not put the old value back. No edit

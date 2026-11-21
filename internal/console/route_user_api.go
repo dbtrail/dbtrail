@@ -116,7 +116,7 @@ func (s *Server) saveCaptureAnswer(w http.ResponseWriter, r *http.Request, on bo
 	}
 	saved, err := s.cm.reg.SetForwardWithCaptureAccount(id, on)
 	switch {
-	case errors.Is(err, errNoSourceToForward):
+	case errors.Is(err, errNoSourceToForward), errors.Is(err, errSourceUnreadable):
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	case errors.Is(err, ErrUnknownServer):

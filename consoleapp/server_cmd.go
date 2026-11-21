@@ -386,6 +386,10 @@ func runServerForwardUser(ctx context.Context, c *ctlClient, name string, f fwdF
 		if err := c.do(ctx, http.MethodDelete, path, nil, nil); err != nil {
 			return err
 		}
+		if s.Flavor == console.FlavorPostgres && s.ForwardWithCaptureAccount {
+			fmt.Fprintf(out, "%q has no forwarding user now. It may forward with the user DBTrail captures with, so the PostgreSQL port does that from now on: read-only, and only a SELECT whose every table is a table of the copy. Take that back with --no-capture-account.\n", s.Name)
+			return nil
+		}
 		if s.Flavor == console.FlavorPostgres {
 			fmt.Fprintf(out, "%q has no forwarding user now: the PostgreSQL port answers its clients from the copy alone. A statement the copy cannot answer gets an error, and nothing is sent to your PostgreSQL.\n", s.Name)
 			return nil
@@ -846,6 +850,11 @@ type ctlServer struct {
 	// ForwardWithCaptureAccount is the saved answer about forwarding with
 	// the capture account (#3054).
 	ForwardWithCaptureAccount bool `json:"forward_with_capture_account,omitempty"`
+	// RouteUnreadable: a saved forwarding account that cannot be read;
+	// CaptureAccountRefused: why the capture account cannot be forwarded
+	// with although the answer is yes.
+	RouteUnreadable       bool   `json:"route_unreadable,omitempty"`
+	CaptureAccountRefused string `json:"capture_account_refused,omitempty"`
 	// SQLFresh is the mode this server's entry asks for on the MySQL port
 	// (fresh, or fast); SQLFreshSaved says it was chosen, as opposed to the
 	// default. What the router applies is `port mode`'s to say.
@@ -1185,6 +1194,8 @@ func runServerList(ctx context.Context, c *ctlClient, format string, out io.Writ
 		}
 		fwd := s.RouteUser
 		switch {
+		case (!s.HasRoute || fwd == "") && s.ForwardWithCaptureAccount && s.Flavor == console.FlavorPostgres && !s.RouteIsCapture && !s.RouteUnreadable && s.CaptureAccountRefused == "":
+			fwd = "the user above (copy tables only)"
 		case !s.HasRoute || fwd == "":
 			fwd = "-"
 		case s.RouteIsCapture:

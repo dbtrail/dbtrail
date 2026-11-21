@@ -118,10 +118,8 @@ func TestIntegrationPGRouterCaptureAccount(t *testing.T) {
 	t.Run("search_path moved to the schema that is not captured", func(t *testing.T) {
 		c := pgClient(t, ctx, env.portDSN(), nil)
 		one(ctx, c, "SET search_path = pgcap_secret, public")
-		// Refused either way: the source resolves vip to the schema that is
-		// not captured, which the copy does not hold.
-		if got := inBlock(c, "SELECT card FROM vip"); !strings.HasPrefix(got, refused) {
-			t.Errorf("got %s, want a refusal", got)
+		if got, want := inBlock(c, "SELECT card FROM vip"), refused+"this statement reads a table the copy does not hold; nothing was sent to the source"; got != want {
+			t.Errorf("got %s\nwant %s", got, want)
 		}
 		one(ctx, c, "SET search_path = pg_catalog, public")
 		if got, want := inBlock(c, "SELECT count(*) FROM "+pgCapTable), refused+"this session's search_path names pg_catalog, which changes what a name in the statement is; nothing was sent to the source"; got != want {
@@ -149,6 +147,62 @@ func TestIntegrationPGRouterCaptureAccount(t *testing.T) {
 			t.Errorf("a table not captured, by parameter: %q, %v", v, err)
 		}
 		_ = tx.Rollback(ctx)
+	})
+
+	t.Run("outside a block, a table the copy does not hold", func(t *testing.T) {
+		c := pgClient(t, ctx, env.portDSN(), nil)
+		// The copy cannot run it, so it would go to the source: the gate
+		// refuses it there.
+		if got, want := one(ctx, c, "SELECT card FROM pgcap_secret.vip"), refused+"this statement reads a table the copy does not hold; nothing was sent to the source"; got != want {
+			t.Errorf("got %s\nwant %s", got, want)
+		}
+		if got := one(ctx, c, "SELECT count(*) FROM "+pgCapTable); got != "2" {
+			t.Errorf("a table of the copy outside a block: %q, want the copy's 2", got)
+		}
+	})
+
+	t.Run("one batch: Parse, Describe, Bind, Execute, Sync", func(t *testing.T) {
+		c := pgClient(t, ctx, env.portDSN(), nil)
+		if got := one(ctx, c, "BEGIN"); got != "BEGIN" {
+			t.Fatalf("BEGIN: %q", got)
+		}
+		pipe := c.StartPipeline(ctx)
+		pipe.SendPrepare("cap_one", "SELECT v FROM "+pgCapTable+" WHERE id = $1", nil)
+		pipe.SendQueryPrepared("cap_one", [][]byte{[]byte("3")}, nil, nil)
+		if err := pipe.Sync(); err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for {
+			res, err := pipe.GetResults()
+			if err != nil {
+				got = append(got, "error "+pgCode(err))
+				break
+			}
+			if res == nil {
+				break
+			}
+			switch r := res.(type) {
+			case *pgconn.ResultReader:
+				out := r.Read()
+				if out.Err != nil {
+					got = append(got, "error "+pgCode(out.Err))
+				}
+				for _, row := range out.Rows {
+					got = append(got, string(row[0]))
+				}
+			case *pgconn.PipelineSync:
+				got = append(got, "sync")
+			}
+			if len(got) > 0 && got[len(got)-1] == "sync" {
+				break
+			}
+		}
+		_ = pipe.Close()
+		one(ctx, c, "ROLLBACK")
+		if strings.Join(got, ",") != "three,sync" {
+			t.Errorf("one batch: %q, want the source's row and the Sync", got)
+		}
 	})
 
 	t.Run("the status names the account", func(t *testing.T) {

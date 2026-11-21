@@ -134,6 +134,9 @@ type upstream struct {
 	// inCycle is set while extended-protocol messages were sent since the
 	// last Sync: the source expects a Sync before the next simple query.
 	inCycle bool
+	// cycle counts the batches ended there (syncCycle): a check of the
+	// capture gate made in one batch holds for that batch only.
+	cycle uint64
 	// failed is set when the source answered an error in this cycle: it
 	// discards everything up to the Sync.
 	failed bool
@@ -662,6 +665,7 @@ func (s *session) syncCycle(up *upstream, out relayOut) (byte, *errSourceLost) {
 		return 0, lost
 	}
 	up.inCycle, up.failed = false, false
+	up.cycle++
 	if k.tx == 'I' {
 		// The implicit transaction ended, and with it every portal.
 		clear(up.portals)

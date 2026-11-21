@@ -81,9 +81,16 @@ func (r *Registry) SetForwardWithCaptureAccount(id string, on bool) (ServerEntry
 		if on && old.SourceDSN == "" {
 			return ServerEntry{}, errNoSourceToForward
 		}
-		r.file.Servers[i].ForwardWithCaptureAccount = on
+		key := ""
+		if on {
+			var ok bool
+			if key, ok = captureAccountKey(old); !ok {
+				return ServerEntry{}, errSourceUnreadable
+			}
+		}
+		r.file.Servers[i].ForwardWithCaptureAccount, r.file.Servers[i].ForwardWithCaptureAccountFor = on, key
 		if err := r.save(); err != nil {
-			r.file.Servers[i].ForwardWithCaptureAccount = old.ForwardWithCaptureAccount // roll back
+			r.file.Servers[i] = old // roll back
 			return ServerEntry{}, err
 		}
 		return r.file.Servers[i], nil
@@ -93,6 +100,49 @@ func (r *Registry) SetForwardWithCaptureAccount(id string, on bool) (ServerEntry
 
 // errNoSourceToForward refuses the answer yes on a server with no source.
 var errNoSourceToForward = errors.New("the server has no source database, so there is nothing to forward to; set its source first")
+
+// errSourceUnreadable refuses the answer yes on a server whose source cannot
+// be read: there is no account to give it about.
+var errSourceUnreadable = errors.New("the server's source cannot be read, so the account it captures with is not known; fix the source first")
+
+// captureAccountKey is the account e's source names, "user@host:port", ok
+// false when the source does not read.
+func captureAccountKey(e ServerEntry) (string, bool) {
+	if e.SourceDSN == "" {
+		return "", false
+	}
+	if e.IsPostgres() {
+		cfg, err := parsePGRouteURL(e.SourceDSN)
+		if err != nil {
+			return "", false
+		}
+		return cfg.user + "@" + cfg.addr(), true
+	}
+	cfg, err := mysql.ParseDSN(e.SourceDSN)
+	if err != nil {
+		return "", false
+	}
+	return cfg.User + "@" + cfg.Addr, true
+}
+
+// captureAnswerHolds reports whether e carries the answer yes about the
+// account its source names now. A yes saved about another account (the
+// source edited by a build that did not know to take it back) is no.
+func captureAnswerHolds(e ServerEntry) bool {
+	if !e.ForwardWithCaptureAccount || e.ForwardWithCaptureAccountFor == "" {
+		return false
+	}
+	now, ok := captureAccountKey(e)
+	if !ok {
+		return false
+	}
+	at := strings.LastIndexByte(e.ForwardWithCaptureAccountFor, '@')
+	cur := strings.LastIndexByte(now, '@')
+	if at < 0 || cur < 0 {
+		return false
+	}
+	return e.ForwardWithCaptureAccountFor[:at] == now[:cur] && sameAddr(e.ForwardWithCaptureAccountFor[at+1:], now[cur+1:])
+}
 
 // forwardChanged reports whether an edit changed what a server's routed
 // connections were opened as, so that they are closed and what was said
@@ -104,7 +154,7 @@ func forwardChanged(old, next ServerEntry) bool {
 	if forwardDSNOf(old) != forwardDSNOf(next) {
 		return true
 	}
-	return old.RouteDSN == "" && next.RouteDSN == "" && old.ForwardWithCaptureAccount != next.ForwardWithCaptureAccount
+	return old.RouteDSN == "" && next.RouteDSN == "" && captureAnswerHolds(old) != captureAnswerHolds(next)
 }
 
 // PGForwardTarget is what the PostgreSQL port forwards with for a server.
@@ -144,7 +194,7 @@ func (s *Server) PostgresForwardTarget(id string) PGForwardTarget {
 	case routeUnreadable:
 		return PGForwardTarget{Gen: gen, Refused: PGRouteRefusedUnreadable}
 	}
-	if !entry.ForwardWithCaptureAccount {
+	if !captureAnswerHolds(entry) {
 		return PGForwardTarget{Gen: gen, Refused: PGRouteRefusedNoAccount}
 	}
 	if why := pgCaptureURLRefusal(entry.SourceDSN); why != "" {

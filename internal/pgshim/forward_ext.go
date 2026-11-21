@@ -115,7 +115,7 @@ func (s *session) portalToSource(p *portal) (ok bool) {
 		s.extFail(perr)
 		return false
 	}
-	if perr := s.captureRefusal(up, p.stmt.query); perr != nil {
+	if perr := s.captureRefusalStmt(up, p.stmt); perr != nil {
 		// The capture account's gate (#3054), before the statement is
 		// parsed there.
 		s.extFail(perr)
@@ -250,7 +250,7 @@ func (s *session) describeOnSource(st *preparedStatement) {
 		s.extFail(perr)
 		return
 	}
-	if perr := s.captureRefusal(up, st.query); perr != nil {
+	if perr := s.captureRefusalStmt(up, st); perr != nil {
 		// The capture account's gate (#3054), before the statement is
 		// parsed there.
 		s.extFail(perr)
@@ -321,7 +321,7 @@ func (s *session) bindOnSource(st *preparedStatement, m *pgproto3.Bind) {
 		s.extFail(perr)
 		return
 	}
-	if perr := s.captureRefusal(up, st.query); perr != nil {
+	if perr := s.captureRefusalStmt(up, st); perr != nil {
 		// The capture account's gate (#3054), before the statement is
 		// parsed there.
 		s.extFail(perr)

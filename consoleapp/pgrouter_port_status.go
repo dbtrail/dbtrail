@@ -72,11 +72,13 @@ func pgPortStatusRows(in pgPortStatusInput) [][2]string {
 		out = append(out, [2]string{"forwarding", "off"}, [2]string{"forwarding_off_reason", in.ForwardingOff})
 	}
 	// The MySQL port's row of that name: which account, or none.
+	// Named only while statements may go there: with forwarding off the
+	// account in force is none, whatever is saved.
 	switch {
-	case in.ForwardingAccount != "":
-		out = append(out, [2]string{"forwarding_account", in.ForwardingAccount})
 	case in.ForwardingOff != "":
 		out = append(out, [2]string{"forwarding_account", "none"})
+	case in.ForwardingAccount != "":
+		out = append(out, [2]string{"forwarding_account", in.ForwardingAccount})
 	}
 	if in.Mode != "" {
 		out = append(out, [2]string{"sql_mode", in.Mode})

@@ -62,7 +62,7 @@ func TestServerForwardUserCaptureAccountPostgres(t *testing.T) {
 		saved bool
 	}{
 		{"yes, no forwarding user", fwdFlags{CaptureAccount: true}, "",
-			`"shop" forwards with the user DBTrail captures with (dbtrail): the PostgreSQL port sends to your PostgreSQL, read-only, a SELECT the copy does not answer, and only when every table it reads is a table of the copy. Anything else is refused and not sent.` + "\n", true},
+			`"shop" forwards with the user DBTrail captures with (dbtrail): the PostgreSQL port sends to your PostgreSQL, read-only, a SELECT the copy does not answer, and only when every table it reads is a table of the copy. Anything else is refused and not sent. A server that hides tables or columns sends nothing.` + "\n", true},
 		{"a forwarding user set over the yes", fwdFlags{User: "app_ro", PasswordStdin: true}, "fwd-pw\n", strings.TrimSuffix(pgForwardsWant("app_ro"), "\n"), true},
 		{"yes again, with that user", fwdFlags{CaptureAccount: true}, "",
 			`Saved. "shop" keeps forwarding as its forwarding user, app_ro, while that one is set. Removed (--remove), the user DBTrail captures with takes its place.` + "\n", true},
@@ -157,5 +157,67 @@ func TestPGPortStatusNamesTheForwardingAccount(t *testing.T) {
 			t.Errorf("%s:\n got:\n%s\nwant:\n%s", c.name, got, c.want)
 		}
 		t.Logf("%s:\n%s", c.name, got)
+	}
+}
+
+func TestServerForwardUserCaptureAccountOtherCases(t *testing.T) {
+	// A PostgreSQL with the answer yes: removing its forwarding user hands
+	// forwarding to the capture account, and the command says so.
+	reg, id, c := newCaptureDaemon(t, pgCaptureEntry())
+	if _, err := reg.SetForwardWithCaptureAccount(id, true); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runServerForwardUser(context.Background(), c, "shop", fwdFlags{User: "app_ro", PasswordStdin: true}, &seqAsker{t: t}, strings.NewReader("fwd-pw\n"), &out); err != nil {
+		t.Fatal(err)
+	}
+	got, err := runFwd(t, c, fwdFlags{Remove: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `"shop" has no forwarding user now. It may forward with the user DBTrail captures with, so the PostgreSQL port does that from now on: read-only, and only a SELECT whose every table is a table of the copy. Take that back with --no-capture-account.` + "\n"; got != want {
+		t.Errorf("--remove with yes:\n%s\nwant\n%s", got, want)
+	}
+
+	// A MySQL with a forwarding user: the yes is saved and changes nothing.
+	_, _, c = newCaptureDaemon(t, func() console.ServerEntry {
+		e := mysqlCaptureEntry()
+		e.RouteDSN = "app_ro:pw@tcp(db1:3306)/"
+		return e
+	}())
+	got, err = runFwd(t, c, fwdFlags{CaptureAccount: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `Saved, and not used: the MySQL port does not forward with the user DBTrail captures with. "shop" keeps forwarding as its forwarding user, app_ro.` + "\n"; got != want {
+		t.Errorf("MySQL with a forwarding user:\n%s\nwant\n%s", got, want)
+	}
+
+	// A PostgreSQL whose saved forwarding user is the capture user by hand.
+	_, _, c = newCaptureDaemon(t, func() console.ServerEntry {
+		e := pgCaptureEntry()
+		e.RouteDSN = pgAddSourceURL
+		return e
+	}())
+	got, err = runFwd(t, c, fwdFlags{CaptureAccount: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `Saved, and not used yet: "shop" has a saved forwarding user that the port refuses (it is the user DBTrail captures with, or it cannot be read), and while it is saved nothing is forwarded. Remove it:  bintrail-console server forward-user shop --remove` + "\n"; got != want {
+		t.Errorf("a saved capture user:\n%s\nwant\n%s", got, want)
+	}
+
+	// A PostgreSQL whose source asks for replication.
+	_, _, c = newCaptureDaemon(t, func() console.ServerEntry {
+		e := pgCaptureEntry()
+		e.SourceDSN = pgAddSourceURL + "&replication=database"
+		return e
+	}())
+	got, err = runFwd(t, c, fwdFlags{CaptureAccount: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "Saved, and not used: the server's source URL asks for replication: the port forwards with the capture account only over a plain postgres:// URL with a host, a user, and no parameter that names the account or asks for replication; set a separate forwarding user instead, or correct the source.\n"; got != want {
+		t.Errorf("a replication URL:\n%s\nwant\n%s", got, want)
 	}
 }

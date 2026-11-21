@@ -40,6 +40,10 @@ import (
 // needs DDL on the source, which is beyond what a client of the port can
 // do through it.
 
+// captureNotPure are the functions of pureFuncs the gate does not let
+// through.
+var captureNotPure = map[string]bool{"current_setting": true, "pg_sleep": true}
+
 // captureSystemSchemas are schemas no table of the copy can be in.
 var captureSystemSchemas = map[string]bool{"pg_catalog": true, "information_schema": true, "pg_toast": true}
 
@@ -71,11 +75,26 @@ func captureTextRefusal(qstr string, searchPath []string) (stmtReads, string) {
 			return stmtReads{}, "this statement names a table with its database"
 		}
 	}
+	// Functions readsOf takes as reading no table that still read past the
+	// copy with this account: a server setting (archive_command,
+	// primary_conninfo can hold credentials), or a session held open on the
+	// source as long as asked.
+	for _, f := range reads.funcs {
+		if captureNotPure[f] {
+			return stmtReads{}, "this statement calls " + f + "(), which reads beyond the copy's tables or holds the source"
+		}
+	}
 	// A locking read (FOR UPDATE, FOR SHARE, FOR [NO] KEY ...) holds locks
 	// other sessions wait on: not a plain read. readsOf already read the
 	// whole text, so lexSQL reads it the same way here.
 	toks, _ := lexSQL(qstr)
 	for i := 0; i+1 < len(toks); i++ {
+		// A cast to a reg type (regclass, regrole, regnamespace...) looks a
+		// name up in the system catalog: it tells whether a table, a role
+		// or a schema exists.
+		if isOpTok(toks, i, "::") && toks[i+1].kind == rtWord && strings.HasPrefix(toks[i+1].text, "reg") {
+			return stmtReads{}, "this statement casts to " + toks[i+1].text + ", which reads the system catalog"
+		}
 		if toks[i].kind == rtWord && toks[i].text == "for" && toks[i+1].kind == rtWord {
 			switch toks[i+1].text {
 			case "update", "share", "no", "key":
@@ -135,18 +154,56 @@ func (s *session) captureRefusal(up *upstream, qstr string) *pgErr {
 		s.loseSource(lost.why)
 		return s.lostError(lost)
 	}
+	if perr != nil {
+		// The source's own error, said: a timeout, a cancel or a privilege
+		// is not a view the client should go looking for.
+		s.logger.Warn("pgshim: the source refused the capture gate's check of a statement; the statement is not sent", "code", perr.code, "err", perr.msg)
+		return captureRefused("the source could not check the names in it (" + perr.code + ": " + perr.msg + ")")
+	}
 	proven, ok := parseProof(cell)
-	if perr != nil || !ok {
+	if !ok {
 		return captureRefused("the source did not confirm that the names in it are plain tables and that nothing of a user's runs in it")
 	}
 	ctx, done := s.statementContext()
 	copyTables, err := s.bound.Catalog(ctx)
 	done()
 	if err != nil {
-		return captureRefused("the copy's tables could not be listed")
+		s.logger.Warn("pgshim: the copy's tables could not be listed for the capture gate; the statement is not sent", "err", err)
+		return captureRefused("the copy's tables could not be listed (" + err.Error() + ")")
 	}
 	if why := captureTablesRefusal(proven, copyTables); why != "" {
 		return captureRefused(why)
 	}
+	return nil
+}
+
+// capturePass is one statement let through by the capture gate on up, in
+// the batch numbered cycle, under search_path path.
+type capturePass struct {
+	up    *upstream
+	cycle uint64
+	path  string
+}
+
+// captureRefusalStmt is captureRefusal for a prepared statement of the
+// extended protocol: a statement the gate let through in this same batch on
+// this connection, under the same search_path, is not checked again. A
+// driver sends Parse, Describe, Bind and Execute of one statement in one
+// batch, and once the first of them went to the source the batch is open
+// there and no check can be sent. A batch is short and the names were
+// resolved there when the statement was parsed, right after its check.
+func (s *session) captureRefusalStmt(up *upstream, st *preparedStatement) *pgErr {
+	if s.bound == nil || s.bound.Forward == nil || !s.bound.Forward.CaptureAccount {
+		return nil
+	}
+	if p := st.capturePassed; p != nil && up != nil && p.up == up && up.inCycle && p.cycle == up.cycle &&
+		up.stmts[st.name] == st && up.sent != nil && p.path == up.sent["search_path"] {
+		return nil
+	}
+	st.capturePassed = nil
+	if perr := s.captureRefusal(up, st.query); perr != nil {
+		return perr
+	}
+	st.capturePassed = &capturePass{up: up, cycle: up.cycle, path: up.sent["search_path"]}
 	return nil
 }
