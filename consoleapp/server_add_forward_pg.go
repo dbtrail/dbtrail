@@ -10,9 +10,9 @@ import (
 )
 
 // The forwarding user of a PostgreSQL in `server add` (#3020). What is given
-// is settled by resolveForward, as for a MySQL: --forward-user,
-// [dbtrail-forward] in the option file, or a question once the server is
-// added. It is saved by setForwardUser, the one `server forward-user` saves
+// is settled by resolveForward, as for a MySQL: --forward-user or
+// [dbtrail-forward] in the option file (the question once the server is added
+// is about the capture account since #3054, server_add_capture_pg.go). It is saved by setForwardUser, the one `server forward-user` saves
 // with, so a user that command refuses is refused here the same way. Only the
 // sentences are a PostgreSQL's: its port, and what it sends to the source.
 
@@ -24,43 +24,25 @@ func pgForwardsAsLine(name, user string) string {
 	return fmt.Sprintf("%q forwards as %s: the PostgreSQL port sends to your PostgreSQL, as that user and read-only, every statement the copy is not known to answer as PostgreSQL does, and a client's transaction blocks.\nThe login was not tried: a wrong password, or a role that cannot log in, shows with the first statement the port sends there. To check it, run BEGIN; SELECT 1; COMMIT; through the PostgreSQL port.", name, user)
 }
 
-// pgNoForwardYetLine says where a PostgreSQL server stands without a
-// forwarding user, and the command that sets one.
+// pgNoForwardYetLine says where a PostgreSQL server stands when it forwards
+// with nothing, and the two commands that change that.
 func pgNoForwardYetLine(name string) string {
-	return fmt.Sprintf("Until %q has a forwarding user, the copy answers its statements alone, and a statement it cannot answer gets an error:\n  bintrail-console server forward-user %s -u <user> -p", name, mysqlLineUser(name))
+	return fmt.Sprintf("Until %q forwards, the copy answers its statements alone, and a statement it cannot answer gets an error. Let the port forward with the user DBTrail connects with:\n  bintrail-console server forward-user %s --capture-account\nor set a forwarding user of its own:\n  bintrail-console server forward-user %s -u <user> -p", name, mysqlLineUser(name), mysqlLineUser(name))
 }
 
 // addForwardUserPG is addForwardUser for a PostgreSQL: it sets the
 // forwarding account of a server `server add` just added, the one
-// resolveForward settled or one asked for now. Enter at the question skips
-// it. A failure leaves the server added and recording, and says so
+// resolveForward settled from --forward-user or [dbtrail-forward]. It asks
+// for none: since #3054 the question at add is about the capture account. A
+// failure leaves the server added and recording, and says so
 // (errAddedNoForward).
 func addForwardUserPG(ctx context.Context, c *ctlClient, in addInput, res ctlCheckResponse, out io.Writer) error {
 	later := mysqlLineUser(res.Name)
 	user, password := in.FwdUser, in.FwdPassword
 	if user == "" {
-		if !in.FwdAsk || in.ask == nil {
-			return nil
-		}
-		fmt.Fprintf(out, "\nThe forwarding user: what DBTrail's PostgreSQL port runs statements as on your PostgreSQL, read-only, when the copy is not known to answer them as PostgreSQL does, and a client's transaction blocks. A role of its own that can log in, with SELECT on what the port should read and no more.\n")
-		var err error
-		if user, err = in.ask.Line("Forwarding user (Enter to skip)", ""); err != nil {
-			return fmt.Errorf("%w: %v", errAddedNoForward, err)
-		}
-		if user = strings.TrimSpace(user); user == "" {
-			fmt.Fprintf(out, "Skipped: the copy answers alone. Set it later:  bintrail-console server forward-user %s -u <user> -p\n\n", later)
-			return nil
-		}
-		if user == in.User {
-			return fmt.Errorf("%w. %s is the user DBTrail reads %q with, and the port never forwards as that one. Set another one:  bintrail-console server forward-user %s -u <user> -p",
-				errAddedNoForward, user, res.Name, later)
-		}
-		if password, err = in.ask.Secret(fmt.Sprintf("Password of %s on your PostgreSQL", user)); err != nil {
-			return fmt.Errorf("%w: %v", errAddedNoForward, err)
-		}
-		if password == "" {
-			return fmt.Errorf("%w: the password is empty. Set it:  bintrail-console server forward-user %s -u %s -p", errAddedNoForward, later, pgShellUser(user))
-		}
+		// Not asked for (#3054): the question at add is whether the port may
+		// forward with the capture account (addCaptureAnswerPG).
+		return nil
 	}
 	if res.Server == nil || res.Server.ID == "" {
 		return fmt.Errorf("%w: DBTrail did not say which server it saved. Set it:  bintrail-console server forward-user %s -u %s -p", errAddedNoForward, later, pgShellUser(user))
