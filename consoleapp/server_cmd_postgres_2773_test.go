@@ -25,14 +25,14 @@ func TestResolveAddInputPostgres(t *testing.T) {
 			flags: addFlags{Host: "pg1", User: "u", Flavor: "postgres", Database: " shop ", Publication: " shop_pub ", Slot: " shop_slot "},
 			ask:   fakeAsker{tty: true, secret: "pw"},
 			want: addInput{Host: "pg1", Port: "5432", User: "u", Password: "pw", Flavor: "postgres",
-				Database: "shop", Publication: "shop_pub", Slot: "shop_slot", FwdAsk: true},
+				Database: "shop", Publication: "shop_pub", Slot: "shop_slot"},
 		},
 		{
 			name:  "postgresql, in capitals, is postgres",
 			flags: addFlags{Host: "pg1", Port: "6432", User: "u", Flavor: " PostgreSQL ", Database: "shop", Publication: "p", Slot: "s"},
 			ask:   fakeAsker{tty: true, secret: "pw"},
 			want: addInput{Host: "pg1", Port: "6432", User: "u", Password: "pw", Flavor: "postgres",
-				Database: "shop", Publication: "p", Slot: "s", FwdAsk: true},
+				Database: "shop", Publication: "p", Slot: "s"},
 		},
 		{
 			name:  "the slot is named after the database when none is given, without a terminal",
@@ -47,14 +47,14 @@ func TestResolveAddInputPostgres(t *testing.T) {
 			ask: fakeAsker{tty: true, secret: "pw", lines: map[string]string{
 				"Database": "shop", "Publication (you create it; see docs/postgres.md)": "", "Replication slot (DBTrail creates it)": ""}},
 			want: addInput{Host: "pg1", Port: "5432", User: "u", Password: "pw", Flavor: "postgres",
-				Database: "shop", Publication: "bintrail_pub", Slot: "bintrail_shop", FwdAsk: true},
+				Database: "shop", Publication: "bintrail_pub", Slot: "bintrail_shop"},
 		},
 		{
 			name:  "a host asked for offers PostgreSQL's port",
 			flags: addFlags{User: "u", Flavor: "postgres", Database: "shop", Publication: "p", Slot: "s"},
 			ask:   fakeAsker{tty: true, secret: "pw", lines: map[string]string{"Host": "pg1", "Port": ""}},
 			want: addInput{Host: "pg1", Port: "5432", User: "u", Password: "pw", Flavor: "postgres",
-				Database: "shop", Publication: "p", Slot: "s", FwdAsk: true},
+				Database: "shop", Publication: "p", Slot: "s"},
 		},
 		{name: "no database, no terminal", flags: addFlags{Flavor: "postgres", Publication: "p"}, cnf: pgcnf, wantErr: "-d"},
 		{name: "no publication, no terminal", flags: addFlags{Flavor: "postgres", Database: "shop"}, cnf: pgcnf, wantErr: "--publication"},
