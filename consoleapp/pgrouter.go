@@ -541,6 +541,8 @@ func runPGRouter(cmd *cobra.Command, _ []string) error {
 	}
 	routes := newPGRouteStats(time.Now(), st.StatusStatements && st.StatusAddr != "")
 	routes.modes = srv
+	// One line a minute per server in this service's log (pgrouter_statuslog.go).
+	startPGPortStatusLog(ctx, func() map[string]pgRouterServerNumbers { return routes.doc(st.Listen).Servers }, srv.ServerName)
 	if st.StatusAddr != "" {
 		stopStatus, err := streamrun.StartMetricsServerWith(st.StatusAddr, map[string]http.Handler{
 			"GET " + routerStatusPath: pgRouterStatusHandler(routes, st.Listen),

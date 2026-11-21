@@ -511,7 +511,7 @@ leave out is asked for.
 | `--name` | What to call the server (default: made from its address). It is the user name on the MySQL port |
 | `--schemas` | Comma-separated schemas to record (default: every user schema) |
 | `--flavor` | `mysql` or `mariadb` (default: asked of the server) |
-| `--forward-user` | The forwarding user: what the MySQL port runs statements as on this database when the copy cannot answer (default: asked on a terminal, or `[dbtrail-forward]` in `--defaults-file`) |
+| `--forward-user` | The forwarding user: what the MySQL port, or the PostgreSQL port, runs statements as on this database when the copy cannot answer (default: asked on a terminal, or `[dbtrail-forward]` in `--defaults-file`) |
 | `--no-forward` | Do not ask for a forwarding user |
 | `-v`, `--verbose` | Also print how to turn on each optional improvement |
 
@@ -625,11 +625,21 @@ as the user DBTrail records changes with.
 printed the port's password: Enter skips it. Without a terminal it is taken
 from `--forward-user` and `[dbtrail-forward]`, and never asked for; with the
 Docker command, which sends the option file on standard input, that group is
-the way. Everything about it is checked before the server is saved: the
-capture user is refused, and so is a user with no password and nobody to ask.
-If DBTrail refuses the user itself (it cannot log in, or it lacks grants), the
-server stays added and recording, the command says so and exits 1, and
-`server forward-user` sets it once that is fixed.
+the way. What can be checked without the server is checked before it is
+saved: the capture user is refused, and so is a user with no password and
+nobody to ask. If DBTrail refuses the user when it saves it (the capture user,
+an empty password, a source the account cannot be built on), the server stays
+added and recording, the command says so and exits 1, and
+`server forward-user` sets it once that is fixed. No login is tried with the
+user when it is saved, by `server add` or by `server forward-user`: a wrong
+password, or a user that cannot log in or lacks grants, shows with the first
+statement the port forwards. In the web interface, Test connection on the
+server's form tries the login of a MySQL or MariaDB server's forwarding user.
+
+A PostgreSQL added with `--flavor postgres` takes its forwarding user the same
+way: the same question, the same two options and the same group in the option
+file, and the same refusals when it is saved. What its port does with it is in
+[docs/postgres.md](postgres.md#transactions-on-the-source-the-forwarding-user).
 
 To set or change it later:
 
@@ -654,11 +664,14 @@ its own log, of what it did in that minute:
 ```
 journalctl -u bintrail-router -f | grep msg=status      # Linux packages
 docker compose logs -f router | grep msg=status         # Docker Compose
+journalctl -u bintrail-pg-router -f | grep msg=status   # the PostgreSQL port, Linux packages
+docker compose logs -f pg-router | grep msg=status      # the PostgreSQL port, Docker Compose
 ```
 
 ```
 msg=status service=port server=shop interval=1m0s queries=124 dbtrail=110 mysql=12 refused=2 errors=2 dbtrail_avg_ms=420 mysql_avg_ms=30 copy_behind_s=45
 msg=status service=capture server=shop interval=1m0s changes=321 errors=2 behind_s=2 since_last_save_s=60
+msg=status service=pg-port server=shop interval=1m0s queries=124 dbtrail=110 postgresql=12 refused=2 errors=2 dbtrail_avg_ms=420 postgresql_avg_ms=30 copy_behind_s=45
 ```
 
 - `service=port` is written by the router (`bintrail-router`, the `router`
@@ -673,6 +686,12 @@ msg=status service=capture server=shop interval=1m0s changes=321 errors=2 behind
   saved in the interval. `behind_s` is the time from a commit on your MySQL to
   that change being readable here, at the last save. `since_last_save_s`
   keeps growing when capture stops, which `behind_s` does not: watch that one.
+- `service=pg-port` is written by the PostgreSQL router (`bintrail-pg-router`,
+  the `pg-router` container), one line per PostgreSQL server, whether or not a
+  statement reached it in the interval. The fields are those of
+  `service=port`; `postgresql` and `postgresql_avg_ms` are the statements your
+  PostgreSQL answered. `copy_behind_s` is how old the data of the copy's last
+  answer was, left out when that is not known (in fast mode, among others).
 - The numbers are per interval, not since the service started. A minute with
   nothing to say still writes a line, so silence means the service stopped.
 - `BINTRAIL_STATUS_LOG_INTERVAL` sets the interval (`30s`, `5m`); `off` writes

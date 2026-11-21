@@ -25,14 +25,14 @@ func TestResolveAddInputPostgres(t *testing.T) {
 			flags: addFlags{Host: "pg1", User: "u", Flavor: "postgres", Database: " shop ", Publication: " shop_pub ", Slot: " shop_slot "},
 			ask:   fakeAsker{tty: true, secret: "pw"},
 			want: addInput{Host: "pg1", Port: "5432", User: "u", Password: "pw", Flavor: "postgres",
-				Database: "shop", Publication: "shop_pub", Slot: "shop_slot"},
+				Database: "shop", Publication: "shop_pub", Slot: "shop_slot", FwdAsk: true},
 		},
 		{
 			name:  "postgresql, in capitals, is postgres",
 			flags: addFlags{Host: "pg1", Port: "6432", User: "u", Flavor: " PostgreSQL ", Database: "shop", Publication: "p", Slot: "s"},
 			ask:   fakeAsker{tty: true, secret: "pw"},
 			want: addInput{Host: "pg1", Port: "6432", User: "u", Password: "pw", Flavor: "postgres",
-				Database: "shop", Publication: "p", Slot: "s"},
+				Database: "shop", Publication: "p", Slot: "s", FwdAsk: true},
 		},
 		{
 			name:  "the slot is named after the database when none is given, without a terminal",
@@ -47,14 +47,14 @@ func TestResolveAddInputPostgres(t *testing.T) {
 			ask: fakeAsker{tty: true, secret: "pw", lines: map[string]string{
 				"Database": "shop", "Publication (you create it; see docs/postgres.md)": "", "Replication slot (DBTrail creates it)": ""}},
 			want: addInput{Host: "pg1", Port: "5432", User: "u", Password: "pw", Flavor: "postgres",
-				Database: "shop", Publication: "bintrail_pub", Slot: "bintrail_shop"},
+				Database: "shop", Publication: "bintrail_pub", Slot: "bintrail_shop", FwdAsk: true},
 		},
 		{
 			name:  "a host asked for offers PostgreSQL's port",
 			flags: addFlags{User: "u", Flavor: "postgres", Database: "shop", Publication: "p", Slot: "s"},
 			ask:   fakeAsker{tty: true, secret: "pw", lines: map[string]string{"Host": "pg1", "Port": ""}},
 			want: addInput{Host: "pg1", Port: "5432", User: "u", Password: "pw", Flavor: "postgres",
-				Database: "shop", Publication: "p", Slot: "s"},
+				Database: "shop", Publication: "p", Slot: "s", FwdAsk: true},
 		},
 		{name: "no database, no terminal", flags: addFlags{Flavor: "postgres", Publication: "p"}, cnf: pgcnf, wantErr: "-d"},
 		{name: "no publication, no terminal", flags: addFlags{Flavor: "postgres", Database: "shop"}, cnf: pgcnf, wantErr: "--publication"},
@@ -62,8 +62,8 @@ func TestResolveAddInputPostgres(t *testing.T) {
 			ask: fakeAsker{tty: true, secret: "pw", lines: map[string]string{"Database": ""}}, wantErr: "no database"},
 		{name: "a slot PostgreSQL would refuse", flags: addFlags{Flavor: "postgres", Database: "shop", Publication: "p", Slot: "Shop-Slot"}, cnf: pgcnf, wantErr: "cannot name a replication slot"},
 		{name: "a slot of 64 characters", flags: addFlags{Flavor: "postgres", Database: "shop", Publication: "p", Slot: strings.Repeat("a", 64)}, cnf: pgcnf, wantErr: "cannot name a replication slot"},
-		{name: "a forwarding user", flags: addFlags{Host: "pg1", User: "u", Flavor: "postgres", Database: "shop", Publication: "p", ForwardUser: "app"}, wantErr: "set once it is added"},
-		{name: "--no-forward", flags: addFlags{Host: "pg1", User: "u", Flavor: "postgres", Database: "shop", Publication: "p", NoForward: true}, wantErr: "set once it is added"},
+		// The forwarding user (#3020) has its own tests, in
+		// server_add_forward_pg_3020_test.go.
 		// A PostgreSQL's options on a MySQL say the flavor was left out.
 		{name: "--database without the flavor", flags: addFlags{Host: "db1", User: "u", Database: "shop"}, wantErr: "--flavor postgres"},
 		{name: "--publication on a mariadb", flags: addFlags{Host: "db1", User: "u", Flavor: "mariadb", Publication: "p"}, wantErr: "--flavor postgres"},
@@ -92,8 +92,8 @@ func TestResolveAddInputPostgres(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.FwdAsk || got.FwdUser != "" {
-				t.Errorf("a PostgreSQL was given a forwarding account to ask for: %+v", got)
+			if got.FwdAsk != c.ask.tty || got.FwdUser != "" {
+				t.Errorf("the forwarding user is asked for on a terminal and nowhere else: %+v", got)
 			}
 			got.ask = nil
 			if got != c.want {
@@ -121,7 +121,7 @@ func TestPGDefaultSlot(t *testing.T) {
 
 // What is sent for a PostgreSQL: its three fields, no question about what
 // answers at the address (it is asked in MySQL's protocol), no forwarding
-// account, and the psql line in place of the mysql one.
+// account when none was named, and the psql line in place of the mysql one.
 func TestServerAddPostgres(t *testing.T) {
 	on := true
 	d, c := newFakeDaemon(t)
@@ -155,7 +155,7 @@ func TestServerAddPostgres(t *testing.T) {
 			t.Errorf("output lacks %q:\n%s", s, text)
 		}
 	}
-	for _, s := range []string{"mysql -h", "Engine Routing", "forward", "3309", "s3cret"} {
+	for _, s := range []string{"mysql -h", "Engine Routing", "forwards as", "3309", "s3cret"} {
 		if strings.Contains(text, s) {
 			t.Errorf("output of a PostgreSQL add says %q:\n%s", s, text)
 		}
@@ -181,23 +181,28 @@ func TestServerAddMySQLSendsNoPostgresFields(t *testing.T) {
 func TestPrintNewServerPortPG(t *testing.T) {
 	on, off := true, false
 	for _, tc := range []struct {
-		name    string
-		port    *ctlNewServerPort
-		want    []string
-		wantNot []string
+		name         string
+		port         *ctlNewServerPort
+		noForwardYet bool
+		want         []string
+		wantNot      []string
 	}{
-		{"an older DBTrail says nothing", nil, nil, []string{"port"}},
-		{"already on, on another address", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on, Host: "10.0.0.5", Port: "3309"}},
-			[]string{"is on, and takes the password it already has", `psql "host=10.0.0.5 port=5433 dbname=shop `}, []string{"shown only now", "3309"}},
-		{"turned on and no password in the answer", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on}, TurnedOn: true},
-			[]string{"is on now", "port new-password"}, []string{"shown only now"}},
-		{"not turned on", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &off}, NotTurnedOn: "DBTrail already had servers."},
-			[]string{"was not turned on: DBTrail already had servers.\n"}, []string{"psql"}},
-		{"off, as saved", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &off}}, []string{"is off, as it was saved", "port on"}, []string{"psql"}},
+		{"an older DBTrail says nothing", nil, true, nil, []string{"port", "forward"}},
+		{"already on, on another address", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on, Host: "10.0.0.5", Port: "3309"}}, false,
+			[]string{"is on, and takes the password it already has", `psql "host=10.0.0.5 port=5433 dbname=shop `}, []string{"shown only now", "3309", "forward"}},
+		{"already on, and no forwarding user named", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on, Host: "10.0.0.5", Port: "3309"}}, true,
+			[]string{"sslmode=require\"\n\nUntil \"shop\" has a forwarding user, the copy answers its statements alone, and a statement it cannot answer gets an error:\n  bintrail-console server forward-user shop -u <user> -p\n\n"}, []string{"shown only now", "3309"}},
+		{"turned on and no password in the answer", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on}, TurnedOn: true}, false,
+			[]string{"is on now", "port new-password"}, []string{"shown only now", "forward"}},
+		{"turned on, and no forwarding user named", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on}, TurnedOn: true}, true,
+			[]string{"is on now", "ready.\nUntil \"shop\" has a forwarding user, the copy answers its statements alone, and a statement it cannot answer gets an error:\n  bintrail-console server forward-user shop -u <user> -p\n\n"}, nil},
+		{"not turned on", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &off}, NotTurnedOn: "DBTrail already had servers."}, true,
+			[]string{"was not turned on: DBTrail already had servers.\n"}, []string{"psql", "forward"}},
+		{"off, as saved", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &off}}, true, []string{"is off, as it was saved", "port on"}, []string{"psql", "forward"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out bytes.Buffer
-			printNewServerPortPG(&out, tc.port, "shop")
+			printNewServerPortPG(&out, tc.port, "shop", tc.noForwardYet)
 			for _, s := range tc.want {
 				if !strings.Contains(out.String(), s) {
 					t.Errorf("lacks %q:\n%s", s, out.String())
@@ -212,7 +217,7 @@ func TestPrintNewServerPortPG(t *testing.T) {
 	}
 	// A name that is not safe to paste is left to the person.
 	var out bytes.Buffer
-	printNewServerPortPG(&out, &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on}}, `shop"; rm`)
+	printNewServerPortPG(&out, &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on}}, `shop"; rm`, false)
 	if !strings.Contains(out.String(), "dbname=<server name>") {
 		t.Errorf("an unsafe name went into the psql line:\n%s", out.String())
 	}
