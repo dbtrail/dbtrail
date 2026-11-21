@@ -1359,7 +1359,7 @@ func (e *workingFolderFullError) Unwrap() []error { return []error{errFoldDiskFu
 // refusal comes first and can take the whole line.
 func (e *workingFolderFullError) summary() string {
 	s := fmt.Sprintf("The working folder %s filled up during the full read (%s free when the dump stopped). "+
-		"Free space there, or move it to a bigger disk with the \"Working folder\" setting and restart DBTrail.",
+		"Free space there, or move it to a bigger disk: set "+stagingSetWith+", and restart DBTrail.",
 		e.folder, humanSize(int64(e.free)))
 	if e.rmErr != nil {
 		// The one thing still taking that room is ours, and nothing else

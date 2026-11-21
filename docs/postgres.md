@@ -787,10 +787,14 @@ What to know:
   value from the old row of the same change, for an ordinary UPDATE and for
   one that changes the key. A change captured with the old row's key only
   (nothing captures one yet) keeps the marker, and a fold gives the row the
-  value of its newest earlier change, or, in a snapshot update, of its row
-  in the table's previous file. What neither holds is refused by name, as is
-  a marker in any other place (beside a whole old row, in an INSERT, in the
-  new row of a change of key); a value is never written as NULL in its
+  value of its newest earlier change, or of its row in the table's copy: in
+  a snapshot update the table's previous file, in fresh mode the snapshot
+  the statement reads (the table delta beside its file first, then the
+  file), read by key for all such rows of a table at once and within the
+  memory fresh mode may hold. What neither holds is refused by name (in
+  fresh mode the table then reads as of its snapshot until the next one), as
+  is a marker in any other place (beside a whole old row, in an INSERT, in
+  the new row of a change of key); a value is never written as NULL in its
   stead.
 - **A table with no change is carried forward** under
   `--carry-forward-unchanged`, as for MySQL: the new snapshot gets the previous

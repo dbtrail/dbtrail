@@ -582,7 +582,7 @@ var docs = map[string]Doc{
 	},
 	"BINTRAIL_CONSOLE_BASELINE_STAGING": {
 		Group:   "console",
-		Text:    "The working folder where backups started from DBTrail write their dump before it is converted and uploaded; full reads write there too. Point it at a disk with room. A folder saved in the web interface's backup settings wins over this. Read at startup, so a change needs a restart.",
+		Text:    "The working folder where backups started from DBTrail write their dump before it is converted and uploaded; full reads write there too. Point it at a disk with room. Read at startup, so a change needs a restart. The web interface has had no setting for it since 0.89.0. A folder saved there by 0.85 to 0.88 is still kept and wins over this: dbtrail config check names this line when that happens, and PUT /api/backup-settings/daemon/staging_dir with {\"use_startup\":true} removes the saved folder. Restart DBTrail after that.",
 		Default: "a folder named baseline-staging beside DBTrail's data (the servers file), or the system temp folder when that one cannot be used",
 		Example: "/data/dbtrail-work",
 		ReadBy:  "watch",
@@ -596,7 +596,7 @@ var docs = map[string]Doc{
 	},
 	"BINTRAIL_CONSOLE_BASELINE_LOCK_MODE": {
 		Group:   "console",
-		Text:    "How a MySQL or MariaDB backup started from DBTrail makes all its threads see one moment: ftwrl (a short global read lock), lock-all (locks the dumped tables; needs only LOCK TABLES), safe-no-lock (no extra privilege, refuses instead of producing an inconsistent copy) or no-lock (accepts an inconsistent copy). A mode saved in the web interface wins over this. An invalid value disables MySQL backups but never capture. No effect on PostgreSQL.",
+		Text:    "How a MySQL or MariaDB backup started from DBTrail makes all its threads see one moment: ftwrl (a short global read lock), lock-all (locks the dumped tables; needs only LOCK TABLES), safe-no-lock (no extra privilege, refuses instead of producing an inconsistent copy) or no-lock (accepts an inconsistent copy). A mode saved in the web interface, which had this setting from 0.85 to 0.88, wins over this; PUT /api/backup-settings/daemon/lock_mode with {\"use_startup\":true} removes it. An invalid value disables MySQL backups but never capture. No effect on PostgreSQL.",
 		Default: "automatic: lock-all on RDS or Aurora, ftwrl elsewhere with one retry in lock-all if ftwrl is refused",
 		Example: "lock-all",
 		ReadBy:  "watch",
@@ -624,7 +624,7 @@ var docs = map[string]Doc{
 	},
 	"BINTRAIL_CONSOLE_VERIFY_TABLES": {
 		Group:   "console",
-		Text:    "Limits the scheduled verification to these tables, as a comma-separated list of schema.table.",
+		Text:    "Limits the scheduled verification to these tables, as a comma-separated list of schema.table. A list saved in the web interface, which had this setting from 0.85 to 0.88, wins over this; PUT /api/backup-settings/daemon/verify_tables with {\"use_startup\":true} removes it.",
 		Default: "all tables",
 		Example: "shop.orders,shop.customers",
 		ReadBy:  "watch",

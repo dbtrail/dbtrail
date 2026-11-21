@@ -123,12 +123,13 @@ to the working folder, converts it into the server's local snapshot folder,
 and uploads the snapshot when the server has an S3 location. Leave `BINTRAIL_CONSOLE_BASELINE_STAGING` unset. Elsewhere an
 unset working folder sits beside DBTrail's data, but DBTrail does not put it
 on network storage: with the data on EFS it uses a folder under `/tmp`, which
-on Fargate is the task's ephemeral storage. The backup settings name that
-folder and say why it is in use.
+on Fargate is the task's ephemeral storage. The startup log names that
+folder and says why it is in use.
 Fargate gives 20 GiB by default and up to 200 GiB with `ephemeralStorage`.
 Size it to the largest dump: about the source's data size, uncompressed. A
-folder saved in the web interface for building `.sql` backups takes precedence
-over the variable; keep that one off EFS too.
+folder saved in the web interface by 0.85 to 0.88 (it has had no row for it
+since 0.89.0) takes precedence over the variable; keep that one off EFS too,
+or remove it as [capacity.md](capacity.md#disk-for-a-full-read-the-dump-is-on-disk-before-it-is-parquet) says.
 
 Hours of the change log on their way to S3 are staged the same way
 (`BINTRAIL_CONSOLE_ARCHIVE_STAGING`, also under `/tmp` when unset). Losing

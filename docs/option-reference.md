@@ -711,7 +711,7 @@ The older way to limit local baseline snapshots, still honored: delete local sna
 
 ### `console-baseline-staging`
 
-The working folder where backups started from DBTrail write their dump before it is converted and uploaded; full reads write there too. Point it at a disk with room. A folder saved in the web interface's backup settings wins over this. Read at startup, so a change needs a restart.
+The working folder where backups started from DBTrail write their dump before it is converted and uploaded; full reads write there too. Point it at a disk with room. Read at startup, so a change needs a restart. The web interface has had no setting for it since 0.89.0. A folder saved there by 0.85 to 0.88 is still kept and wins over this: dbtrail config check names this line when that happens, and PUT /api/backup-settings/daemon/staging_dir with {"use_startup":true} removes the saved folder. Restart DBTrail after that.
 
 - Default: a folder named baseline-staging beside DBTrail's data (the servers file), or the system temp folder when that one cannot be used.
 - Example: `console-baseline-staging = /data/dbtrail-work`
@@ -729,7 +729,7 @@ Set to 1 or true to let the web interface start new baseline backups itself. It 
 
 ### `console-baseline-lock-mode`
 
-How a MySQL or MariaDB backup started from DBTrail makes all its threads see one moment: ftwrl (a short global read lock), lock-all (locks the dumped tables; needs only LOCK TABLES), safe-no-lock (no extra privilege, refuses instead of producing an inconsistent copy) or no-lock (accepts an inconsistent copy). A mode saved in the web interface wins over this. An invalid value disables MySQL backups but never capture. No effect on PostgreSQL.
+How a MySQL or MariaDB backup started from DBTrail makes all its threads see one moment: ftwrl (a short global read lock), lock-all (locks the dumped tables; needs only LOCK TABLES), safe-no-lock (no extra privilege, refuses instead of producing an inconsistent copy) or no-lock (accepts an inconsistent copy). A mode saved in the web interface, which had this setting from 0.85 to 0.88, wins over this; PUT /api/backup-settings/daemon/lock_mode with {"use_startup":true} removes it. An invalid value disables MySQL backups but never capture. No effect on PostgreSQL.
 
 - Default: automatic: lock-all on RDS or Aurora, ftwrl elsewhere with one retry in lock-all if ftwrl is refused.
 - Example: `console-baseline-lock-mode = lock-all`
@@ -765,7 +765,7 @@ Run verification on a schedule for every server in the list, this often, and kee
 
 ### `console-verify-tables`
 
-Limits the scheduled verification to these tables, as a comma-separated list of schema.table.
+Limits the scheduled verification to these tables, as a comma-separated list of schema.table. A list saved in the web interface, which had this setting from 0.85 to 0.88, wins over this; PUT /api/backup-settings/daemon/verify_tables with {"use_startup":true} removes it.
 
 - Default: all tables.
 - Example: `console-verify-tables = shop.orders,shop.customers`
