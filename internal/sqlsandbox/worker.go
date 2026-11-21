@@ -750,7 +750,13 @@ func lockdownStatements(copyDirs []string, spill spillSpec) []string {
 // allowedTableFunctions are the table functions a statement may call, at any
 // depth: readers of files (DuckDB's own allowed_directories decides WHICH
 // files), Parquet metadata, generators, JSON walkers, and the read-only
-// pragma_* views. duckdb_* catalog functions are allowed by prefix below.
+// pragma_* views, and the engine's catalog functions a client lists schemas,
+// tables and columns with. Each is listed by name: a function a new engine
+// version adds is refused until it is reviewed and listed here
+// (TestTableFunctionsAreAllClassified). Left out on purpose, among the
+// engine's own duckdb_* functions: those that show the engine's settings,
+// secrets, extensions, file cache, temporary files, session variables or
+// logs, which name folders of the host and the copy's files (#3096).
 //
 // Everything else is refused by name, because a SELECT-shaped statement can
 // still change state through a table function after the lock (verified on
@@ -772,6 +778,97 @@ var allowedTableFunctions = map[string]bool{
 	"pragma_version": true, "pragma_platform": true, "pragma_database_size": true,
 	"pragma_storage_info": true, "pragma_table_info": true, "pragma_metadata_info": true,
 	"pragma_collations": true, "pragma_show": true, "pragma_user_agent": true,
+	"duckdb_columns": true, "duckdb_constraints": true, "duckdb_coordinate_systems": true,
+	"duckdb_databases": true, "duckdb_dependencies": true, "duckdb_functions": true,
+	"duckdb_indexes": true, "duckdb_keywords": true, "duckdb_schemas": true,
+	"duckdb_sequences": true, "duckdb_tables": true, "duckdb_types": true, "duckdb_views": true,
+}
+
+// refusedScalarFunctions are the scalar functions a statement may not call
+// at any depth, because they return the engine's settings (which hold the
+// copy's directories, the spill directory and the secrets directory) or the
+// session's variables (which the views set to the copy's directories). The
+// scalar functions are many and a statement needs them, so these are refused
+// by name; TestScalarFunctionsNamedLikeTheHostAreReviewed watches the
+// engine's list for one more of the kind.
+var refusedScalarFunctions = map[string]bool{"current_setting": true, "getvariable": true}
+
+// viewTextFunctions print a view's text, which names the copy's files and
+// the hidden columns: refused on a server with hidden rules (#2529), like
+// viewTextCatalogs.
+var viewTextFunctions = map[string]bool{"pg_get_viewdef": true}
+
+// settingsCatalogs are the engine's catalog views over its settings, refused
+// on every server (#3096): pg_settings is a view over duckdb_settings(), and
+// a table reference does not show the function it reads. Matched by name in
+// pg_catalog or unqualified, so a source table of that name in a schema of
+// the copy stays readable.
+var settingsCatalogs = map[string]bool{"pg_settings": true}
+
+// refusedFunctionCall returns the first function call in the statement tree
+// whose name is in names, or "". A call is a node of type FUNCTION at any
+// depth (the select list, WHERE, a CTE, a subquery, the arguments of a table
+// function); the name is compared without regard to case or to a schema
+// written before it.
+func refusedFunctionCall(node any, names map[string]bool) string {
+	switch x := node.(type) {
+	case map[string]any:
+		if x["type"] == "FUNCTION" {
+			name, _ := x["function_name"].(string)
+			if names[strings.ToLower(name)] {
+				return name
+			}
+		}
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if r := refusedFunctionCall(x[k], names); r != "" {
+				return r
+			}
+		}
+	case []any:
+		for _, e := range x {
+			if r := refusedFunctionCall(e, names); r != "" {
+				return r
+			}
+		}
+	}
+	return ""
+}
+
+// settingsCatalogRef returns the first table reference in the statement tree
+// that reads one of settingsCatalogs, or "".
+func settingsCatalogRef(node any) string {
+	switch x := node.(type) {
+	case map[string]any:
+		if x["type"] == "BASE_TABLE" {
+			name, _ := x["table_name"].(string)
+			schema, _ := x["schema_name"].(string)
+			if ls := strings.ToLower(schema); settingsCatalogs[strings.ToLower(name)] && (ls == "" || ls == "pg_catalog") {
+				return name
+			}
+		}
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if r := settingsCatalogRef(x[k]); r != "" {
+				return r
+			}
+		}
+	case []any:
+		for _, e := range x {
+			if r := settingsCatalogRef(e); r != "" {
+				return r
+			}
+		}
+	}
+	return ""
 }
 
 // fileReaderFunctions are the allowed table functions that read a file of the
@@ -867,7 +964,7 @@ func fileReaderFunction(node any) string {
 }
 
 func tableFunctionAllowed(name string) bool {
-	return allowedTableFunctions[name] || strings.HasPrefix(name, "duckdb_")
+	return allowedTableFunctions[name]
 }
 
 // refusedTableFunction walks the serialized statement tree and returns the
@@ -956,9 +1053,18 @@ func parseStatement(ctx context.Context, conn *sql.Conn, text string, noFileRead
 		if name := fileReaderFunction(parsed.Statements[0]); name != "" {
 			return nil, fmt.Sprintf("%s is not allowed on this server: it hides some tables and columns, and the copy's files hold them; query its tables by name", name)
 		}
+		if name := refusedFunctionCall(parsed.Statements[0], viewTextFunctions); name != "" {
+			return nil, fmt.Sprintf("%s is not allowed on this server: it hides some tables and columns, and the views' text holds them; query its tables by name", name)
+		}
 	}
 	if name := refusedTableFunction(parsed.Statements[0]); name != "" {
-		return nil, fmt.Sprintf("the table function %s is not allowed here; only readers (read_parquet, glob, the parquet_* metadata functions, range, unnest, json_each and the duckdb_* catalog) can run on the copy", name)
+		return nil, fmt.Sprintf("the table function %s is not allowed here; only readers (read_parquet, glob, the parquet_* metadata functions, range, unnest, json_each) and the catalog (duckdb_tables, duckdb_columns, duckdb_schemas, duckdb_views and the like) can run on the copy", name)
+	}
+	if name := refusedFunctionCall(parsed.Statements[0], refusedScalarFunctions); name != "" {
+		return nil, fmt.Sprintf("the function %s is not allowed here: the engine's settings and session variables are not shown on the copy", name)
+	}
+	if name := settingsCatalogRef(parsed.Statements[0]); name != "" {
+		return nil, fmt.Sprintf("%s is not allowed here: the engine's settings are not shown on the copy", name)
 	}
 	return parsed.Statements[0], ""
 }
