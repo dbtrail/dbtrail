@@ -16,8 +16,8 @@ import (
 // TestProbeHealth_Integration drives ProbeHealth (slot health + REPLICA IDENTITY
 // coverage, connect-per-call) against a live PostgreSQL — the source-side read the
 // streaming daemon persists for the console health panel (#599). It also exercises the
-// report-only QueryReplicaIdentityNotFull entry point and the shared replicaIdentityNotFull
-// helper end to end: a publication with one FULL and one default-identity table must
+// report-only QueryReplicaIdentityNotFull entry point (over QueryTableIdentities)
+// end to end: a publication with one FULL and one default-identity table must
 // report exactly the non-FULL one.
 //
 // Requires BINTRAIL_TEST_PG_DSN (e.g. postgres://postgres:testpg@localhost:15533/pgtest).

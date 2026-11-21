@@ -22,7 +22,7 @@ func TestGeneratedColumnsProblem(t *testing.T) {
 				`ALTER PUBLICATION "pub" SET (publish_generated_columns = stored);`, `public.orders.total (publication "pub")`},
 			lacks: []string{"VIRTUAL", "DROP TABLE"}},
 		{name: "a virtual column", found: []UnpublishedGenerated{virtual},
-			has: []string{`ALTER TABLE "public"."items" REPLICA IDENTITY DEFAULT;`, "VIRTUAL", "cannot be captured",
+			has: []string{`ALTER TABLE "public"."items" REPLICA IDENTITY DEFAULT;`, "VIRTUAL", "cannot be at REPLICA IDENTITY FULL while it is published", "captured, without undo",
 				`ALTER PUBLICATION "pub" DROP TABLE "public"."items";`, "FOR ALL TABLES"},
 			lacks: []string{"publish_generated_columns"}},
 		{name: "a virtual column of a table in two publications", found: []UnpublishedGenerated{

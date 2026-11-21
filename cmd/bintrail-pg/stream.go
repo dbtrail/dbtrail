@@ -38,12 +38,20 @@ Prerequisites on the source (validated at startup, fails loud otherwise):
   - wal_level = logical
   - a PUBLICATION covering the tables you want indexed (--publication)
 
-Every replicated table must also be at REPLICA IDENTITY FULL (so the WAL carries
-the full before-image and de-TOASTed unchanged values; without it recovery would
-lose columns). A table that is not, at startup or added later, does not stop the
-stream: its changes are skipped, the log names it with the ALTER TABLE to run,
-and 'status' reports capture as degraded under replica_identity_not_full. After
-the ALTER TABLE, capture of the table resumes by itself.
+REPLICA IDENTITY FULL is optional, and needed only for undo. A table without it
+is captured and everything else works on it (history, the copy, snapshots);
+PostgreSQL sends only the key of the row an UPDATE or a DELETE changed, so
+'recover' refuses those changes. The log names each such table as "without
+undo" with the ALTER TABLE that makes its later changes undoable (the table then
+writes more WAL).
+
+Two kinds of table are NOT captured, while the others keep flowing: one whose
+replica identity is an index that leaves a primary-key column out, and one whose
+primary key is DEFERRABLE (checked at startup, where it stops the stream, and
+again each time PostgreSQL describes a table). Their changes are skipped, the
+log names the table with the statement to run, and 'status' reports capture as
+degraded under replica_identity_index_without_primary_key or
+primary_key_deferrable. After the fix, capture of the table resumes by itself.
 
 The replication slot (--slot) is created on first run if absent and reused on
 restart. The durable checkpoint is the last committed LSN, persisted to
