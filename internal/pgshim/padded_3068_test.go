@@ -26,12 +26,12 @@ func paddedCatalog() []CatalogTable {
 	return []CatalogTable{
 		{Schema: "public", Name: "codes", Columns: []CatalogColumn{
 			col("id", "INTEGER", oidInt4, -1),
-			col("code", "VARCHAR", oidBpchar, 9),            // char(5)
-			col("label", "VARCHAR", oidText, -1),            // text
-			col("tags", "VARCHAR[]", oidBpcharArray, 7),     // char(3)[]
-			col("free", "VARCHAR", oidBpchar, -1),           // bpchar, no length
-			col("one", "VARCHAR", oidChar, -1),              // "char", one byte
-			col("kind", "VARCHAR", 16400, -1),               // a type of the user's (an enum)
+			col("code", "VARCHAR", oidBpchar, 9),        // char(5)
+			col("label", "VARCHAR", oidText, -1),        // text
+			col("tags", "VARCHAR[]", oidBpcharArray, 7), // char(3)[]
+			col("free", "VARCHAR", oidBpchar, -1),       // bpchar, no length
+			col("one", "VARCHAR", oidChar, -1),          // "char", one byte
+			col("kind", "VARCHAR", 16400, -1),           // a type of the user's (an enum)
 			col("k", "INTEGER", oidInt4, -1),
 		}},
 		{Schema: "public", Name: "plain", Columns: []CatalogColumn{
@@ -348,28 +348,28 @@ func TestPadded_use(t *testing.T) {
 		return paddedUse(toks, types)
 	}
 	for q, want := range map[string]bool{
-		`SELECT code FROM codes`:                      false,
-		`(SELECT code FROM codes)`:                    false,
-		`SELECT code FROM codes;`:                     false,
-		`SELECT ALL code FROM codes`:                  false,
-		`SELECT k * 2, 2 * k, (k) * (k) FROM codes`:   false,
-		`SELECT count(*), count(*) * 2 FROM codes`:    false,
+		`SELECT code FROM codes`:                       false,
+		`(SELECT code FROM codes)`:                     false,
+		`SELECT code FROM codes;`:                      false,
+		`SELECT ALL code FROM codes`:                   false,
+		`SELECT k * 2, 2 * k, (k) * (k) FROM codes`:    false,
+		`SELECT count(*), count(*) * 2 FROM codes`:     false,
 		`SELECT extract(year FROM d), code FROM codes`: false,
-		`SELECT 1`:                                     false,
-		`SELECT code + 1 FROM codes`:                   true,
-		`SELECT code, code FROM codes WHERE code = 'a'`: true,
-		`SELECT code AS x FROM codes ORDER BY code`:     true,
-		`SELECT code FROM codes; SELECT code FROM codes`: true,
-		`FROM codes SELECT code`:                        true,
-		`TABLE codes`:                                   false,
-		`VALUES (1)`:                                    false,
-		`SELECT * FROM codes, plain`:                    false,
-		`SELECT *, * FROM codes`:                        false,
-		`SELECT x.* FROM codes x`:                       false,
-		`SELECT f(*) FROM codes`:                        true,
-		`SELECT s.count(*) FROM codes`:                  true,
-		`SELECT DISTINCT ON (id) * FROM codes`:          true,
-		`SELECT * REPLACE (1 AS id) FROM codes`:         true,
+		`SELECT 1`:                   false,
+		`SELECT code + 1 FROM codes`: true,
+		`SELECT code, code FROM codes WHERE code = 'a'`:          true,
+		`SELECT code AS x FROM codes ORDER BY code`:              true,
+		`SELECT code FROM codes; SELECT code FROM codes`:         true,
+		`FROM codes SELECT code`:                                 true,
+		`TABLE codes`:                                            false,
+		`VALUES (1)`:                                             false,
+		`SELECT * FROM codes, plain`:                             false,
+		`SELECT *, * FROM codes`:                                 false,
+		`SELECT x.* FROM codes x`:                                false,
+		`SELECT f(*) FROM codes`:                                 true,
+		`SELECT s.count(*) FROM codes`:                           true,
+		`SELECT DISTINCT ON (id) * FROM codes`:                   true,
+		`SELECT * REPLACE (1 AS id) FROM codes`:                  true,
 		`SELECT id FROM codes WHERE id IN (SELECT * FROM plain)`: true,
 	} {
 		if got := use(q); (got != "") != want {
@@ -610,15 +610,15 @@ func TestPadded_route(t *testing.T) {
 	s := &session{bound: b, logger: discardLogger(), currentDB: "public"}
 	s.initSettings("public", "app")
 	for stmt, want := range map[string]routeDecision{
-		`SELECT id FROM codes WHERE code = 'ab'`:           {RouteSource, ReasonVeto},
+		`SELECT id FROM codes WHERE code = 'ab'`:                 {RouteSource, ReasonVeto},
 		`SELECT id FROM codes c JOIN plain p ON c.code = p.name`: {RouteSource, ReasonVeto},
-		`SELECT id, length(code) FROM codes`:               {RouteSource, ReasonVeto},
-		`SELECT code FROM codes`:                           {RouteCopy, ReasonAnswersTheSame},
-		`SELECT * FROM codes WHERE id = 1`:                 {RouteCopy, ReasonAnswersTheSame},
-		`SELECT id FROM plain WHERE code = 'ab'`:           {RouteCopy, ReasonAnswersTheSame},
-		`SELECT count(*) FROM (SELECT * FROM plain) s`:     {RouteCopy, ReasonAnswersTheSame},
-		`SELECT id FROM legacy WHERE word = 'x'`:           {RouteSource, ReasonVeto},
-		`SELECT id FROM legacy WHERE id = 1`:               {RouteCopy, ReasonAnswersTheSame},
+		`SELECT id, length(code) FROM codes`:                     {RouteSource, ReasonVeto},
+		`SELECT code FROM codes`:                                 {RouteCopy, ReasonAnswersTheSame},
+		`SELECT * FROM codes WHERE id = 1`:                       {RouteCopy, ReasonAnswersTheSame},
+		`SELECT id FROM plain WHERE code = 'ab'`:                 {RouteCopy, ReasonAnswersTheSame},
+		`SELECT count(*) FROM (SELECT * FROM plain) s`:           {RouteCopy, ReasonAnswersTheSame},
+		`SELECT id FROM legacy WHERE word = 'x'`:                 {RouteSource, ReasonVeto},
+		`SELECT id FROM legacy WHERE id = 1`:                     {RouteCopy, ReasonAnswersTheSame},
 	} {
 		if got := s.route(s.classify(stmt), stmt); got != want {
 			t.Errorf("%s: %+v, want %+v", stmt, got, want)
