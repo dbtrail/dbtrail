@@ -3,6 +3,7 @@ package pgshim
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -253,7 +254,9 @@ func catalogOf(names ...string) []CatalogTable {
 func newTablesPort(t *testing.T, opts ...func(*fakeSource)) *tablesPort {
 	t.Helper()
 	p := &tablesPort{knob: &copyAgeKnob{}, w: &copyWaitKnob{reach: true}}
-	src := &fakeSource{plans: costPlans, tables: map[string][2]string{
+	plans := maps.Clone(costPlans)
+	plans["FROM public.big"], plans["FROM other.big"] = costPlans["FROM big"], costPlans["FROM big"]
+	src := &fakeSource{plans: plans, tables: map[string][2]string{
 		"t": {"public", "t"}, "public.t": {"public", "t"}, "big": {"public", "big"}, "public.big": {"public", "big"},
 		"hb": {"public", "hb"}, "wide": {"public", "wide"}, "other.t": {"other", "t"}, "other.big": {"other", "big"},
 		`"Mixed"`: {"public", "Mixed"}, "mixed": {"public", "mixed"}, "rowsthenfail": {"public", "rowsthenfail"},

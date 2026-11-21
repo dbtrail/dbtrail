@@ -179,6 +179,15 @@ var pureFuncs = func() map[string]bool {
 // fromInCall are the functions whose arguments PostgreSQL writes with FROM.
 var fromInCall = map[string]bool{"extract": true, "substring": true, "trim": true, "overlay": true}
 
+// notATable are words that never start a FROM item: PostgreSQL keeps them
+// for itself.
+var notATable = map[string]bool{
+	"where": true, "group": true, "having": true, "order": true, "limit": true, "offset": true, "for": true,
+	"window": true, "union": true, "intersect": true, "except": true, "on": true, "using": true, "as": true,
+	"and": true, "or": true, "not": true, "natural": true, "left": true, "right": true, "full": true,
+	"inner": true, "outer": true, "cross": true,
+}
+
 // readsMaxRefs bounds the relations one statement may name and still be
 // read: past it, it marks every table.
 const readsMaxRefs = 32
@@ -452,7 +461,7 @@ func readsOf(q string, alsoPure map[string]bool) (r stmtReads, why string) {
 			top.clause = cSetOp
 		case expecting:
 			// A FROM item: a name, written with up to three parts.
-			if t.kind != rtWord && t.kind != rtQuoted {
+			if t.kind != rtWord && t.kind != rtQuoted || t.kind == rtWord && notATable[t.text] {
 				return r, "something other than a table's name in FROM"
 			}
 			ref := relRef{at: i}
