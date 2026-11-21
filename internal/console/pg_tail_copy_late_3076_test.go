@@ -48,7 +48,7 @@ func TestPGTailSource_aCopyReadOutOfTimeTwiceRefusesItsCut(t *testing.T) {
 		}
 		return tail.(*reconstruct.PGTail)
 	}
-	slowCopyReads(t)
+	slow := slowCopyReads(t)
 	// late is a build's context whose time runs out during the read.
 	late := func() context.Context {
 		c, stop := context.WithTimeout(ctx, 200*time.Millisecond)
@@ -104,9 +104,11 @@ func TestPGTailSource_aCopyReadOutOfTimeTwiceRefusesItsCut(t *testing.T) {
 	y := &pgTailSource{}
 	why, err = read(y, nil, cut)
 	tried("a first read out of time", why, err)
+	slow.Store(false)
 	if why, err := read(y, ctx, cut); why != "" || err != nil {
 		t.Fatalf("a read with time: %q, %v", why, err)
 	}
+	slow.Store(true)
 	why, err = read(y, nil, cut)
 	tried("the next read out of time, after one that ended", why, err)
 }
