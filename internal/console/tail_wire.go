@@ -293,13 +293,29 @@ const freshTailsWait = 3 * time.Second
 func (s *Server) statementTailsFresh(ctx context.Context, k *tailKeeper, tables, read []views.BaselineTable, wait time.Duration) (out []views.BaselineTable, through time.Time, throughID uint64, ok bool, missing string) {
 	deadline := time.Now().Add(wait)
 	woke := false
+	// publishedSince says whether an update published after ch was taken.
+	// The reads below (the tails, then what was published, then each
+	// table's state) are three holds of the lock, not one: an update
+	// published between them makes them disagree, and a verdict drawn from
+	// two updates is no one's (#3088). The statement then looks again.
+	publishedSince := func(ch <-chan struct{}) bool {
+		select {
+		case <-ch:
+			return true
+		default:
+			return false
+		}
+	}
+look:
 	for {
 		ch := k.nextPublish()
 		out, through, throughID, ok = s.statementTailsMark(ctx, k, tables, read)
 		if ok || len(read) == 0 {
 			return out, through, throughID, ok, ""
 		}
+		s.tailsFreshStep("marked")
 		pub, _ := k.published(read)
+		s.tailsFreshStep("published")
 		pending := ""
 		for _, t := range read {
 			if _, has := pub[tailKey(t.Schema, t.Table)]; has {
@@ -307,6 +323,9 @@ func (s *Server) statementTailsFresh(ctx context.Context, k *tailKeeper, tables,
 			}
 			switch k.stateOf(t) {
 			case tailNone:
+				if publishedSince(ch) {
+					continue look
+				}
 				// All or nothing: one table that cannot have a tail now
 				// keeps the statement from tails, however soon the others
 				// come.
@@ -318,6 +337,11 @@ func (s *Server) statementTailsFresh(ctx context.Context, k *tailKeeper, tables,
 			}
 		}
 		if pending == "" {
+			if publishedSince(ch) {
+				// The tails were read before an update that published
+				// views for them all: not two instants, one newer update.
+				continue
+			}
 			// Every table has a view, of one update, at two instants: a tail
 			// over its budget stopped advancing, until the next snapshot.
 			return tables, time.Time{}, 0, false, ""
@@ -340,6 +364,13 @@ func (s *Server) statementTailsFresh(ctx context.Context, k *tailKeeper, tables,
 		case <-k.life.Done():
 		}
 		t.Stop()
+	}
+}
+
+// tailsFreshStep runs the test hook of statementTailsFresh at step, if any.
+func (s *Server) tailsFreshStep(step string) {
+	if s.tailsFreshHook != nil {
+		s.tailsFreshHook(step)
 	}
 }
 

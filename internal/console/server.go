@@ -602,6 +602,10 @@ type Server struct {
 	// freshSavedHook, set by tests, reads capture's saved position in place
 	// of the index.
 	freshSavedHook savedPositionRead
+	// tailsFreshHook, set by tests, runs between statementTailsFresh's
+	// reads ("marked": after the tails, "published": after what was
+	// published), where an update can publish (#3088).
+	tailsFreshHook func(step string)
 	// captureStatus is Config.CaptureStatus (#1794); nil = never asked.
 	captureStatus   CaptureStatusReporter
 	sqlExport       SQLExporter
