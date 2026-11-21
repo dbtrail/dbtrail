@@ -67,6 +67,7 @@ func TestIntegrationPGRouterForwardScreen(t *testing.T) {
 			recursive + "SEARCH DEPTH FIRST BY a SET o " + ins,
 			recursive + "CYCLE a SET c USING p " + ins,
 			"WITH w AS (SELECT 1) " + ins,
+			"WITH x AS (WITH y AS (SELECT 1) DELETE FROM " + tbl + " WHERE id = 3 RETURNING *) SELECT * FROM x",
 			"WITH w AS (" + ins + " RETURNING id) SELECT * FROM w",
 			ins,
 			"EXPLAIN ANALYZE " + ins,

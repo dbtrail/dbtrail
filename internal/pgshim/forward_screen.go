@@ -54,6 +54,8 @@ var fwdNamed = map[string]bool{
 //   - the server itself: its files (pg_read_file, pg_ls_dir, pg_stat_file),
 //     large objects (lo_*), its WAL, backups, replication slots and origins,
 //     its configuration and its statistics counters;
+//   - indexes: brin_summarize_*, brin_desummarize_range and
+//     gin_clean_pending_list rewrite one;
 //   - counters: nextval and setval change a sequence, txid_current and
 //     pg_current_xact_id take a transaction number.
 var fwdFuncs = regexp.MustCompile(`^(set_config|pg_notify|pg_advisory_[a-z0-9_]*|pg_try_advisory_[a-z0-9_]*|dblink[a-z0-9_]*|` +
@@ -62,6 +64,7 @@ var fwdFuncs = regexp.MustCompile(`^(set_config|pg_notify|pg_advisory_[a-z0-9_]*
 	`pg_[a-z0-9_]*replication_[a-z0-9_]*|pg_logical_[a-z0-9_]*|pg_log_[a-z0-9_]*|` +
 	`pg_stat_[a-z0-9_]*reset[a-z0-9_]*|pg_stat_file|pg_read_[a-z0-9_]*file[a-z0-9_]*|pg_ls_[a-z0-9_]*|pg_file_[a-z0-9_]*|pg_import_system_collations|` +
 	`lo_[a-z0-9_]*|loread|lowrite|nextval|setval|txid_current|pg_current_xact_id|` +
+	`brin_summarize_[a-z0-9_]*|brin_desummarize_range|gin_clean_pending_list|pg_background[a-z0-9_]*|` +
 	`ts_rewrite|crosstab[a-z0-9_]*|connectby|xpath_table)$`)
 
 // fwdTextFuncs are functions that run their first argument, a text, as a
@@ -130,6 +133,12 @@ func forwardRefusal(qstr string) *pgErr {
 			return &pgErr{"0A000", `a name or string written with Unicode escapes (U&"..." or U&'...') is not sent to the source from this port; write it plainly`}
 		}
 		if (t.kind == scWord || t.kind == scQuoted) && i+1 < len(toks) && toks[i+1].isOp("(") {
+			if t.kind == scWord && strings.IndexFunc(t.text, func(r rune) bool { return r >= utf8.RuneSelf }) >= 0 {
+				// A database in a one-byte encoding folds letters past ASCII
+				// in a name without quotes, so the name the source would
+				// look up is not the one read here.
+				return &pgErr{"0A000", "a function whose name holds letters past ASCII is sent to the source from this port only with the name in double quotes"}
+			}
 			name := strings.ToLower(t.text)
 			if fwdFuncs.MatchString(name) {
 				return &pgErr{"0A000", fmt.Sprintf("this port does not send a statement that calls %s() to the source: it acts beyond a read", name)}
@@ -223,21 +232,16 @@ func readRefusal(st []scanTok) *pgErr {
 	}
 	// outer is set for a statement that can hold another statement after its
 	// own first words: WITH's list, with whatever clauses follow it (SEARCH,
-	// CYCLE), EXPLAIN's options, a cursor's declaration. There a write's first
-	// word outside every parenthesis is the statement's own, wherever it
-	// stands; a column or alias of that name has to be written in quotes.
+	// CYCLE) and a WITH of its own inside an entry, EXPLAIN's options, a
+	// cursor's declaration. There a write's first word is taken for one
+	// wherever it stands, inside parentheses or out; a column or alias of
+	// that name has to be written in quotes.
 	outer := verb == "with" || verb == "explain" || verb == "declare"
-	depth := 0
 	for i, t := range st {
 		next := func(k int, w string) bool { return i+k < len(st) && st[i+k].isWord(w) }
-		if t.isOp("(") {
-			depth++
-		} else if t.isOp(")") {
-			depth--
-		}
 		switch {
-		case outer && depth <= 0 && t.kind == scWord && fwdWrites[t.text] && !(t.text == "update" && i > 0 && (st[i-1].isWord("for") || st[i-1].isWord("key"))):
-			return &pgErr{"25006", fmt.Sprintf("this port is read-only toward the source: a statement that holds %s outside its parentheses is not sent (a column or alias of that name goes in double quotes)", strings.ToUpper(t.text))}
+		case outer && t.kind == scWord && fwdWrites[t.text] && !(t.text == "update" && i > 0 && (st[i-1].isWord("for") || st[i-1].isWord("key"))):
+			return &pgErr{"25006", fmt.Sprintf("this port is read-only toward the source: a WITH, an EXPLAIN or a cursor that holds %s is not sent (a column or alias of that name goes in double quotes)", strings.ToUpper(t.text))}
 		case verb == "declare" && t.isWord("with") && next(1, "hold"):
 			return &pgErr{"0A000", "a cursor WITH HOLD is not served on this port: it outlives its transaction block, and the connection to the source does not; declare it without HOLD inside the block"}
 		case t.isWord("into"):

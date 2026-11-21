@@ -196,16 +196,9 @@ func TestReadersAgreeOnGeneratedTexts(t *testing.T) {
 					t.Fatalf("%q: sent on with a statement that begins %q", q, st[0].text)
 				}
 				if v := st[0].text; v == "with" || v == "explain" || v == "declare" {
-					depth := 0
-					for k, tok := range st {
-						if tok.isOp("(") {
-							depth++
-						} else if tok.isOp(")") {
-							depth--
-						}
-						forUpdate := tok.isWord("update") && k > 0 && (st[k-1].isWord("for") || st[k-1].isWord("key"))
-						if depth <= 0 && tok.kind == scWord && fwdWrites[tok.text] && !forUpdate {
-							t.Fatalf("%q: sent on with %s outside the parentheses of a %s", q, tok.text, v)
+					for _, tok := range st {
+						if tok.kind == scWord && fwdWrites[tok.text] {
+							t.Fatalf("%q: sent on with %s in a %s", q, tok.text, v)
 						}
 					}
 				}
@@ -322,6 +315,12 @@ func TestForwardScreenReadsAsPostgreSQL(t *testing.T) {
 		"WITH w AS (SELECT 1) /* c */ DELETE FROM t", "WITH w AS (SELECT 1) --\r\nDELETE FROM t", "WITH w AS (SELECT 1), x AS (SELECT 2) UPDATE t SET v = 1",
 		"EXPLAIN (ANALYZE) WITH RECURSIVE w(a) AS (SELECT 1) SEARCH DEPTH FIRST BY a SET o DELETE FROM t",
 		"DECLARE c CURSOR FOR WITH RECURSIVE w(a) AS (SELECT 1) CYCLE a SET c USING p DELETE FROM t RETURNING id",
+		"WITH x AS (WITH y AS (SELECT 1) DELETE FROM t RETURNING *) SELECT * FROM x",
+		"WITH x AS (WITH y AS (SELECT 1) UPDATE t SET v = 1 RETURNING *) SELECT 1",
+		"EXPLAIN ANALYZE WITH x AS (WITH y AS (SELECT 1) DELETE FROM t RETURNING *) SELECT 1",
+		"WITH w AS (SELECT count(update) FROM t) SELECT * FROM w",
+		"SELECT brin_summarize_new_values('i')", "SELECT gin_clean_pending_list('i')", "SELECT pg_background_launch('select 1')",
+		"SELECT pg_term\u0130nate_backend(1)", "SELECT f\u00e9(1)",
 		// The keyword without quotes is the keyword, wherever it stands.
 		"WITH w AS (SELECT 1) SELECT 1 AS delete FROM w", "WITH w AS (SELECT 1) SELECT update FROM w",
 		"EXPLAIN ANALYZE INSERT INTO t VALUES (1)",
@@ -371,7 +370,8 @@ func TestForwardScreenReadsAsPostgreSQL(t *testing.T) {
 		"SELECT lo_count, nextval FROM t", "SELECT é FROM t",
 		"WITH RECURSIVE w(a) AS (SELECT 1 UNION ALL SELECT a + 1 FROM w WHERE a < 2) SEARCH DEPTH FIRST BY a SET o SELECT * FROM w",
 		"WITH RECURSIVE w(a) AS (SELECT 1 UNION ALL SELECT a + 1 FROM w WHERE a < 2) CYCLE a SET c USING p SELECT * FROM w",
-		`WITH w AS (SELECT 1 AS "delete") SELECT "delete", "update" FROM w`, "WITH w AS (SELECT count(update) FROM t) SELECT * FROM w",
+		`WITH w AS (SELECT 1 AS "delete") SELECT "delete", "update" FROM w`, "WITH w AS (SELECT count(\"update\") FROM t) SELECT * FROM w",
+		"WITH w AS (SELECT 1) SELECT * FROM w FOR READ ONLY", "SELECT \"f\u00e9\"(1), \u00e9 FROM t",
 		"WITH w AS (SELECT 1) TABLE w", "WITH w AS (SELECT 1) VALUES (1)", "EXPLAIN WITH w AS (SELECT 1) SELECT * FROM w",
 		"SELECT query_to_xml('select counter from t', true, false, '')", "SELECT ts_stat('select v from t')",
 		"SELECT query_to_xml('select query_to_xml(''select 1'', true, false, '''')', true, false, '')",
