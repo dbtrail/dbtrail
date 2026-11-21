@@ -687,6 +687,55 @@ func sqlNamedTables(in views.Input, refs sqlsandbox.Refs) []views.BaselineTable 
 	return in.SelectedBaselines()
 }
 
+// sqlTailTables is the tables a fresh-mode statement is given tails for, and
+// whether they are known. wanted is sqlWantedViews' answer and named
+// sqlNamedTables'.
+//
+// With the views narrowed (wanted not nil) they are the tables it names, as
+// ever. With every view installed they are still known when the only names
+// that matched no view are bare ones (#3043): a bare name is compared with
+// every view of every schema, so one that matched none is no table of the
+// copy, whatever else it is (a WITH that another WITH reads, which the parse
+// reports as a relation; a system table), and it has no tail to read. The
+// tables the statement does name get theirs, and only those: no tail is
+// built for the rest of the copy.
+//
+// Not known, and no tail read, as before: a statement that can read what it
+// does not name (Refs.Unsure: a table function, a catalog listing), one
+// that names no table of the copy, and a qualified name that matched no
+// view. That last one the engine may still resolve to a table of the copy
+// (memory.orders is the catalog and a table of the schema in use), and a
+// statement given tails for its other tables would read that one from the
+// snapshot while its answer says every table was read with its changes.
+func sqlTailTables(in views.Input, refs sqlsandbox.Refs, wanted views.ViewSet, named []views.BaselineTable) ([]views.BaselineTable, bool) {
+	if wanted != nil {
+		return named, true
+	}
+	if refs.Unsure || len(named) == 0 {
+		return nil, false
+	}
+	names := in.ViewNames()
+	for _, r := range refs.Tables {
+		if r.Catalog == "" && r.Schema == "" {
+			continue
+		}
+		schema, name := sqlFoldName(r.Schema), sqlFoldName(r.Name)
+		matched := false
+		if catalog := sqlFoldName(r.Catalog); catalog == "" || catalog == "memory" {
+			for _, n := range names {
+				if sqlFoldName(n.View) == name && sqlFoldName(n.Schema) == schema {
+					matched = true
+					break
+				}
+			}
+		}
+		if !matched {
+			return nil, false
+		}
+	}
+	return named, true
+}
+
 // sqlChainRefusalFor is the refusal for a statement whose tables hold more
 // unmerged changes than a query here can merge, "" when it may run.
 func sqlChainRefusalFor(in views.Input, refs sqlsandbox.Refs, memory string) string {
@@ -1300,19 +1349,22 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 				return "", viewsRefusal
 			}
 			// Not over a statement whose tables the parse could not tell: it
-			// would build a tail for every table of the copy.
+			// would build a tail for every table of the copy. Which tables
+			// get a tail is not which views are installed (#3043): see
+			// sqlTailTables.
+			tailTables, tailsKnown := sqlTailTables(in, refs, narrowed.OnlyViews, named)
 			var missing, olderNote string
 			switch {
-			case tails != nil && narrowed.OnlyViews != nil:
+			case tails != nil && tailsKnown:
 				tailsStart := time.Now()
 				waited := func(bool) {}
 				if id, ok := tailsFor(ctx); ok {
 					// Fresh mode's wait for the source (#2645), off unless
 					// BINTRAIL_SQL_FRESH_WAIT is set. Its time counts as
 					// the tails' step.
-					waited = s.waitForSource(ctx, id, b, tails, readTables)
+					waited = s.waitForSource(ctx, id, b, tails, tailTables)
 				}
-				narrowed.Baselines, tailThrough, tailThroughID, allTailed, missing = s.statementTailsFresh(ctx, tails, narrowed.Baselines, readTables, freshTailsWait)
+				narrowed.Baselines, tailThrough, tailThroughID, allTailed, missing = s.statementTailsFresh(ctx, tails, narrowed.Baselines, tailTables, freshTailsWait)
 				waited(allTailed && missing == "")
 				if missing == "" && allTailed && tailThroughID != 0 && tailThroughID < seenFloor(ctx) {
 					// An earlier answer of the copy on this connection read
