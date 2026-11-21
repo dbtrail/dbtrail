@@ -38,7 +38,9 @@ import (
 //
 // What the window does not hold stays as the marker, with no source: the
 // value is in the table's copy. A snapshot update reads it there
-// (pgFillFromBase); a tail refuses. It is never written as NULL.
+// (pgFillFromBase); a tail hands the keys to whoever drives it, to be read
+// from the copy's current cut (CopyWants, GiveCopyValues), and refuses when
+// no one does. It is never written as NULL.
 
 // pgColSrc is where the value of one column of a key's last change came
 // from, for a column that change did not carry itself.
@@ -54,6 +56,9 @@ type pgColSrc struct {
 	// line, so not what the change left as it was. The copy's row is not
 	// the row the change was made to.
 	NotLarge bool
+	// NoRow reports that the table's copy was asked and holds no row under
+	// the key (a tail's lookup, GiveCopyValues): the value is nowhere.
+	NoRow bool
 	// Gone reports that the change at (LSN, ID) deleted the row, or that
 	// the row had no such column then: the value is not in the table's copy
 	// either, only in a change after that one.

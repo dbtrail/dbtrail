@@ -195,9 +195,25 @@ func BaseValuesOf(ctx context.Context, db *sql.DB, basePath string, keyColumns, 
 	if len(keys) == 0 || len(columns) == 0 {
 		return found, nil
 	}
-	quote := func(c string) string { return `"` + strings.ReplaceAll(c, `"`, `""`) + `"` }
-	src := "read_parquet(" + file(basePath) + ", file_row_number=true" + noHive + ")"
-	shape, err := db.QueryContext(ctx, "SELECT * FROM "+src+" LIMIT 0")
+	in, err := baseColumnsOf(ctx, db, basePath)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range columns {
+		if !in[c] {
+			return nil, fmt.Errorf("%s has no column %s", basePath, c)
+		}
+	}
+	positions, err := BasePositionsOf(ctx, db, basePath, keyColumns, keys)
+	if err != nil {
+		return nil, err
+	}
+	return baseValuesAt(ctx, db, basePath, positions, columns, textLimit(maxBytes, 0))
+}
+
+// baseColumnsOf is the columns a table file has, as a set.
+func baseColumnsOf(ctx context.Context, db *sql.DB, basePath string) (map[string]bool, error) {
+	shape, err := db.QueryContext(ctx, "SELECT * FROM read_parquet("+file(basePath)+", file_row_number=true"+noHive+") LIMIT 0")
 	if err != nil {
 		return nil, fmt.Errorf("read the columns of %s: %w", basePath, err)
 	}
@@ -210,19 +226,31 @@ func BaseValuesOf(ctx context.Context, db *sql.DB, basePath string, keyColumns, 
 	for _, c := range has {
 		in[c] = true
 	}
-	sel := make([]string, len(columns))
-	for i, c := range columns {
-		if !in[c] {
-			return nil, fmt.Errorf("%s has no column %s", basePath, c)
-		}
-		sel[i] = "encode(bintrail_b." + quote(c) + ")"
+	return in, nil
+}
+
+// textLimit is how much more text an answer may hold that holds held bytes
+// already, of maxBytes (0: no limit) in all: -1 for no limit.
+func textLimit(maxBytes, held int64) int64 {
+	if maxBytes <= 0 {
+		return -1
 	}
-	positions, err := BasePositionsOf(ctx, db, basePath, keyColumns, keys)
-	if err != nil {
-		return nil, err
-	}
+	return max(maxBytes-held, 0)
+}
+
+// baseValuesAt is the second read of BaseValuesOf: the text of columns in
+// the rows of the base file at positions (key by row number). The columns
+// must be the file's. limit is how much text the answer may hold (textLimit:
+// below 0 for no limit).
+func baseValuesAt(ctx context.Context, db *sql.DB, basePath string, positions map[string]int64, columns []string, limit int64) (map[string]map[string]*string, error) {
+	found := map[string]map[string]*string{}
 	if len(positions) == 0 {
 		return found, nil
+	}
+	src := "read_parquet(" + file(basePath) + ", file_row_number=true" + noHive + ")"
+	sel := make([]string, len(columns))
+	for i, c := range columns {
+		sel[i] = "encode(bintrail_b." + quoteIdent(c) + ")"
 	}
 	keyAt := make(map[int64]string, len(positions))
 	nums := make([]string, 0, len(positions))
@@ -272,7 +300,7 @@ func BaseValuesOf(ctx context.Context, db *sql.DB, basePath string, keyColumns, 
 				row[c] = nil
 			}
 		}
-		if maxBytes > 0 && held > maxBytes {
+		if limit >= 0 && held > limit {
 			return nil, ErrBaseValuesTooLarge
 		}
 		found[key] = row
@@ -285,6 +313,8 @@ func BaseValuesOf(ctx context.Context, db *sql.DB, basePath string, keyColumns, 
 	}
 	return found, nil
 }
+
+func quoteIdent(c string) string { return `"` + strings.ReplaceAll(c, `"`, `""`) + `"` }
 
 // writeWantedKeys writes keys to a Parquet file of one column (KeyColumn) in
 // a folder of its own, and returns the file and what removes the folder.
