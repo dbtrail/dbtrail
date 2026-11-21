@@ -336,10 +336,12 @@ func TestIntegrationFreshNeverTailsHalfAStatement_3043(t *testing.T) {
 // sqlTailTables leaves a bare, plain name aside when it matched no view, on
 // the ground that it is then no table of the copy. That holds only while
 // the match here (names compared with A-Z folded) sees every name the
-// ENGINE takes for a view. This asks the engine, over real tables with
-// tails, under both kinds of session: for every spelling of a table's name,
-// the statement is answered with both tables' recent changes, or with
-// neither and the run saying so, or not at all. Never one of each.
+// ENGINE takes for a view. The engine is asked about every spelling, in
+// process, by internal/sqlsandbox
+// (TestTheEngineTakesANameForAViewOnlyWhenTheFoldDoes_3043); this is the
+// same question end to end over real tables with tails, for the spellings
+// that decide it: a statement is answered with both tables' recent changes
+// or not at all. Never one table with them and one without.
 func TestIntegrationFreshNamesTheEngineResolves_3043(t *testing.T) {
 	t.Setenv("BINTRAIL_SQL_TAILS", "on")
 	exe, err := os.Executable()
@@ -355,10 +357,9 @@ func TestIntegrationFreshNamesTheEngineResolves_3043(t *testing.T) {
 
 	const (
 		cafe   = "caf\u00e9"   // é as one code point
-		kelvin = "\u212aelvin" // the Kelvin sign, which lower-cases to k
-		longS  = "\u017ftats"  // the long s, which upper-cases to S
+		kelvin = "\u212aelvin" // the Kelvin sign, which Unicode lower-cases to k
 	)
-	names := []string{cafe, "Orders", kelvin, longS}
+	names := []string{cafe, "Orders", kelvin}
 	metas := map[string]*metadata.TableMeta{}
 	meta := func(name string) {
 		metas["shop."+name] = &metadata.TableMeta{Schema: "shop", Table: name, PKColumns: []string{"id"}, Columns: []metadata.ColumnMeta{
@@ -394,55 +395,51 @@ func TestIntegrationFreshNamesTheEngineResolves_3043(t *testing.T) {
 		}
 		return res.Rows[0][0].(string), q.LastRunAge(), nil
 	}
-	join := func(spelling string) string {
-		return "SELECT x.status || '/' || y.status FROM shop." + first.Table + " x JOIN " + spelling + " y ON y.id = x.id"
+	// Every table named exactly, in one statement: each has its tail.
+	all := "SELECT x.status"
+	from := " FROM shop." + first.Table + " x"
+	for i, name := range names {
+		alias := "y" + strconv.Itoa(i)
+		all += " || '/' || " + alias + ".status"
+		from += ` JOIN shop."` + name + `" ` + alias + " ON " + alias + ".id = x.id"
 	}
-	// Each table's tail is built and published: named exactly, every one is
-	// read with its changes.
-	for _, name := range names {
-		settleTails(t, r.s, func() {
-			if _, _, err := run(sqlsandbox.Session{}, join(`shop."`+name+`"`)); err != nil {
-				t.Fatalf("%s: %v", name, err)
-			}
-		})
-		if got, age, err := run(sqlsandbox.Session{}, join(`shop."`+name+`"`)); err != nil || got != "paid/paid" || !age.Tailed {
-			t.Fatalf("shop.%q named exactly: %q, read with its changes %v, %v", name, got, age.Tailed, err)
+	all += from
+	settleTails(t, r.s, func() {
+		if _, _, err := run(sqlsandbox.Session{}, all); err != nil {
+			t.Fatal(err)
 		}
+	})
+	if got, age, err := run(sqlsandbox.Session{}, all); err != nil || got != "paid/paid/paid/paid" || !age.Tailed {
+		t.Fatalf("every table named exactly: %q, read with its changes %v, %v", got, age.Tailed, err)
 	}
 
-	spellings := []string{
-		// 1. A letter outside ASCII, in another case, bare.
-		"caf\u00e9", "CAF\u00c9", "Caf\u00c9",
-		// 2. The same in quotes, in backticks, and with the accent as a
-		// code point of its own.
-		"\"caf\u00e9\"", "\"CAF\u00c9\"", "`caf\u00e9`", "`CAF\u00c9`", "cafe\u0301", "\"cafe\u0301\"", "CAFE\u0301",
-		// 3. ASCII, every quoting, mixed case.
-		"orders", "ORDERS", "oRdErS", `"Orders"`, `"ORDERS"`, `"orders"`, "`Orders`", "`orders`", "[orders]", "[Orders]",
-		// 4. A space or a quote inside the quotes.
-		`"Orders "`, `" Orders"`, `"orders "`, `"Or""ders"`, `"Orders"""`,
-		// A view whose name has a letter that folds into ASCII, named by
-		// the ASCII letter: plain names, which the match here does not take
-		// for the view.
-		"kelvin", "KELVIN", "Kelvin", `"kelvin"`, "stats", "STATS", "Stats", `"STATS"`,
-		// And each named as it is.
-		"\u212aelvin", "\u017ftats",
-	}
-	for _, sess := range []struct {
-		name string
-		s    sqlsandbox.Session
-	}{{"a MySQL session", sqlsandbox.Session{}}, {"a MySQL session that routes", sqlsandbox.Session{StrictStar: true}}, {"PostgreSQL's rules", sqlsandbox.Session{PostgresRules: true, PostgresNames: true}}} {
-		for _, sp := range spellings {
-			got, age, err := run(sess.s, join(sp))
-			switch {
-			case err != nil:
-				t.Logf("%s, %s: not answered", sess.name, sp)
-			case got == "paid/paid" && age.Tailed:
-				t.Logf("%s, %s: both tables with their changes", sess.name, sp)
-			case got == "new/new" && !age.Tailed:
-				t.Logf("%s, %s: the snapshot, and the run says so", sess.name, sp)
-			default:
-				t.Errorf("%s, %s: answered %q, and the run says every table was read with its changes: %v", sess.name, sp, got, age.Tailed)
-			}
+	mysql, pg := sqlsandbox.Session{}, sqlsandbox.Session{PostgresRules: true, PostgresNames: true}
+	for _, c := range []struct {
+		name     string
+		sess     sqlsandbox.Session
+		spelling string
+		answered bool // by the engine at all
+	}{
+		{"ASCII in another case", mysql, "oRdErS", true},
+		{"ASCII in another case, PostgreSQL's rules", pg, "oRdErS", true},
+		{"outside ASCII as it is", mysql, "\"caf\u00e9\"", true},
+		// The engine folds A-Z alone, as the match does: these name no view.
+		{"outside ASCII in another case", mysql, "CAF\u00c9", false},
+		{"outside ASCII in another case, PostgreSQL's rules", pg, "CAF\u00c9", false},
+		{"the accent as a code point of its own", mysql, "cafe\u0301", false},
+		{"the ASCII letter a Unicode fold gives", mysql, "kelvin", false},
+	} {
+		stmt := "SELECT x.status || '/' || y.status FROM shop." + first.Table + " x JOIN " + c.spelling + " y ON y.id = x.id"
+		got, age, err := run(c.sess, stmt)
+		switch {
+		case err != nil && !c.answered:
+		case err != nil:
+			t.Errorf("%s (%s): not answered: %v", c.name, c.spelling, err)
+		case got != "paid/paid" || !age.Tailed:
+			t.Errorf("%s (%s): answered %q, read with its changes: %v; want both tables with their changes%s", c.name, c.spelling, got, age.Tailed,
+				map[bool]string{false: ", or no answer: the engine now takes this name for a view the match here does not see"}[c.answered])
+		case !c.answered:
+			t.Errorf("%s (%s): the engine now resolves this name; it read both tables with their changes, so the match saw it too: move the case", c.name, c.spelling)
 		}
 	}
 }
