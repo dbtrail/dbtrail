@@ -62,6 +62,7 @@ func checkWithChainShapes(t *testing.T, value, table, noTail string, run func(st
 			if err != nil {
 				t.Fatalf("%s\n\tfailed: %v", stmt, err)
 			}
+			t.Logf("rows %v, note %q", rows, note)
 			if len(rows) != 1 {
 				t.Fatalf("%s\n\tanswered %v, want the table's one row", stmt, rows)
 			}
