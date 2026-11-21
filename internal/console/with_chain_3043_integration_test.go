@@ -210,7 +210,7 @@ func TestIntegrationFreshWithBlocksAsksOnlyForTheTablesNamed_3043(t *testing.T) 
 		r.change(tbl.Table, event.EventUpdate, "1", "paid", "binlog.000008", uint64(100*(i+1)), at)
 	}
 	q := &SQLOnCopy{s: r.s, b: r.b, user: "u", id: bootServerID}
-	stmt := "WITH x AS (SELECT * FROM shop." + names[1] + "), y AS (SELECT x.id, x.status || '/' || o.status AS both FROM x JOIN shop." + names[4] + " o ON o.id = x.id) SELECT both FROM y"
+	stmt := "WITH x AS (SELECT * FROM shop." + names[1] + "), y AS (SELECT x.id, x.status || '/' || o.status AS pair FROM x JOIN shop." + names[4] + " o ON o.id = x.id) SELECT pair FROM y"
 	read := func() string {
 		res, err := q.Run(context.Background(), stmt, "", sqlsandbox.Session{})
 		if err != nil {

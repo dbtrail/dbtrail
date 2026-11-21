@@ -32,23 +32,24 @@ func TestSQLTailTables(t *testing.T) {
 	for _, c := range []struct {
 		name   string
 		refs   sqlsandbox.Refs
-		want   []string // schema.table, in the copy's order
+		want   []string // schema.table, in the views' order
 		known  bool
 		narrow bool // sqlWantedViews narrows the views
 	}{
 		{"one table", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders")}}, []string{"shop.orders"}, true, true},
 		{"no table at all", sqlsandbox.Refs{}, nil, true, true},
-		{"a bare name in two schemas reads both", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("orders")}}, []string{"shop.orders", "crm.orders"}, true, true},
+		{"a bare name in two schemas reads both", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("orders")}}, []string{"crm.orders", "shop.orders"}, true, true},
 		{"a table and the name of a WITH", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("x")}}, []string{"shop.orders"}, true, false},
 		{"upper case, and the name twice", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("SHOP", "Orders"), ref("X"), ref("x")}}, []string{"shop.orders"}, true, false},
-		{"two tables of many and an unknown name", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("y"), ref("shop", "items")}}, []string{"shop.orders", "shop.items"}, true, false},
-		{"a WITH named as a table of the copy counts as the table", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("customers")}}, []string{"shop.orders", "shop.customers"}, true, true},
+		{"two tables of many and an unknown name", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("y"), ref("shop", "items")}}, []string{"shop.items", "shop.orders"}, true, false},
+		{"a WITH named as a table of the copy counts as the table", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("customers")}}, []string{"shop.customers", "shop.orders"}, true, true},
 		{"only unknown names", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("x"), ref("duckdb_views")}}, nil, false, false},
 		{"a table function beside the table", sqlsandbox.Refs{Unsure: true, Tables: []sqlsandbox.TableRef{ref("shop", "orders")}}, nil, false, false},
 		{"a table function and a WITH", sqlsandbox.Refs{Unsure: true, Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("x")}}, nil, false, false},
 		{"a name in a schema the copy does not have", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("memory", "customers")}}, nil, false, false},
 		{"a table the copy does not have, in a schema it has", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("shop", "nope")}}, nil, false, false},
-		{"a catalog and a table, no schema", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), {Catalog: "memory", Name: "customers"}}}, nil, false, false},
+		{"the engine's catalog and a table, no schema: the table in every schema", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), {Catalog: "memory", Name: "customers"}}}, []string{"shop.customers", "shop.orders"}, true, true},
+		{"the same beside the name of a WITH", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), {Catalog: "memory", Name: "customers"}, ref("x")}}, nil, false, false},
 		{"another catalog", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("other", "shop", "customers")}}, nil, false, false},
 		{"the engine's catalog, written out", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("memory", "shop", "orders"), ref("x")}}, []string{"shop.orders"}, true, false},
 		{"a system table in a schema", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("information_schema", "tables")}}, nil, false, false},
