@@ -106,7 +106,9 @@ func TestIntegrationPGRouterCaptureAccount(t *testing.T) {
 		{"a built-in that runs a query", "SELECT query_to_xml('select * from pgcap_secret.vip', true, true, '')", refused + "this statement is not one whose tables the port can tell from its text (the function query_to_xml()); nothing was sent to the source"},
 		{"information_schema", "SELECT table_name FROM information_schema.tables", refused + "the source did not confirm that the names in it are plain tables and that nothing of a user's runs in it; nothing was sent to the source"},
 		{"a name in another case, which is another table", `SELECT * FROM "PGCAP_T"`, refused + "the source did not confirm that the names in it are plain tables and that nothing of a user's runs in it; nothing was sent to the source"},
-		{"a locking read", "SELECT * FROM " + pgCapTable + " FOR SHARE", refused + "this statement is a locking read (FOR UPDATE, FOR SHARE), which takes locks on the source; nothing was sent to the source"},
+		// The port's screen refuses it first (#3057); the gate refuses it
+		// too (TestCaptureTextRefusal).
+		{"a locking read", "SELECT * FROM " + pgCapTable + " FOR SHARE", "error 25006 this port is read-only toward the source: a SELECT that locks its rows (FOR UPDATE, FOR SHARE) is not sent"},
 	} {
 		got := inBlock(c, tc.stmt)
 		if got != tc.want {
