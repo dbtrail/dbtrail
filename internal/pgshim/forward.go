@@ -54,6 +54,10 @@ type Forward struct {
 	// none the port may use, and Refused then says why.
 	DSN     string
 	Refused string
+	// CaptureAccount: DSN is the account DBTrail captures with (#3054), so
+	// every statement sent with it must pass the capture gate first
+	// (capture_gate.go).
+	CaptureAccount bool
 	// Acquire takes one of the connections to sources the port may hold
 	// (Limit of them); release gives it back. When none is free it waits for
 	// one, as a statement waits in line for the copy, for as long as the host
