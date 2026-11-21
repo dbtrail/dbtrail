@@ -448,5 +448,9 @@ func (s *Server) flashbackForwardDSN(id string) (dsn, refused string) {
 	case routeUnreadable:
 		return "", RouteRefusedUnreadable
 	}
+	if captureAnswerHolds(entry) {
+		// Saved, and not acted on here (#3054, capture_forward.go).
+		return "", RouteRefusedCaptureNotOnThisPort
+	}
 	return "", RouteRefusedNoAccount
 }

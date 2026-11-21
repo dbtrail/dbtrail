@@ -2497,9 +2497,17 @@ What this is and is not:
   and a credential handed out to read history must not reach that. So a
   server with no forwarding account is not forwarded for: the
   copy answers it alone, the light reads too, and `SHOW ROUTER STATUS` says
-  so. A forwarding
+  so (`forwarding_account` is `none`, and `forwarding_account_reason` says
+  why; with one it is `forwarding user <name>`). A forwarding
   account saved as the capture account itself, or one that cannot be read,
-  counts as none. Its grants are the most the port can do there:
+  counts as none. A server can also be allowed to forward with the capture
+  account (`dbtrail server forward-user <server> --capture-account`), which
+  the PostgreSQL port does, behind a check that sends only a `SELECT` of the
+  copy's own tables
+  ([PostgreSQL](postgres.md#forwarding-with-the-capture-account)). This port
+  does not do that yet: the answer is saved, a server with it and no
+  forwarding account is still not forwarded for, and `SHOW ROUTER STATUS`
+  says so. Its grants are the most the port can do there:
 
   ```sql
   CREATE USER 'report_ro'@'%' IDENTIFIED BY <choose a password>;
