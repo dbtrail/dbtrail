@@ -125,12 +125,10 @@ func TestIntegrationPGRouterCaptureAccount(t *testing.T) {
 		if got, want := inBlock(c, "SELECT card FROM vip"), refused+"the source did not confirm that the names in it are plain tables and that nothing of a user's runs in it; nothing was sent to the source"; got != want {
 			t.Errorf("got %s\nwant %s", got, want)
 		}
-		got := one(ctx, c, "SET search_path = pg_catalog")
-		t.Logf("SET search_path = pg_catalog: %s", got)
-		if got == "SET" {
-			if got, want := inBlock(c, "SELECT count(*) FROM public."+pgCapTable), refused+"this session's search_path names pg_catalog, which changes what a name in the statement is; nothing was sent to the source"; got != want {
-				t.Errorf("got %s\nwant %s", got, want)
-			}
+		// pg_catalog is refused by the port too; the gate's own refusal of
+		// it is TestCaptureTextRefusal's (pgshim).
+		if got, want := one(ctx, c, "SET search_path = pg_catalog"), "error 0A000 SET search_path with no schema of the copy is not supported on this port: name the one schema unqualified names resolve in"; got != want {
+			t.Errorf("SET search_path = pg_catalog: %s, want %s", got, want)
 		}
 	})
 
