@@ -736,6 +736,9 @@ func (s *session) localColumns(c *sessionCmd) ([]string, []colType, *pgErr) {
 	if c.all {
 		return []string{"name", "setting", "description"}, []colType{textColumn, textColumn, textColumn}, nil
 	}
+	if s.answersStatus(c) {
+		return statusColumns, []colType{textColumn, textColumn}, nil
+	}
 	g, perr := lookupGUC(c.param)
 	if perr != nil {
 		return nil, nil, perr
@@ -767,6 +770,8 @@ func (s *session) answerLocal(c *sessionCmd) (cols []string, types []colType, ro
 			rows = append(rows, [][]byte{[]byte(g.name), []byte(g.show(s, &s.set)), []byte(g.desc)})
 		}
 		return cols, types, rows, "SHOW", nil
+	case s.answersStatus(c):
+		return cols, types, s.statusRows(), "SHOW", nil
 	}
 	g := gucs[c.param]
 	return cols, types, [][][]byte{{[]byte(g.show(s, &s.set))}}, "SHOW", nil

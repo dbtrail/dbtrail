@@ -867,6 +867,9 @@ opens runs on your PostgreSQL as the server's forwarding user, read-only, when
 one is set (`bintrail-console server forward-user`; see
 [docs/postgres.md](postgres.md#transactions-on-the-source-the-forwarding-user));
 without one, the copy answers alone. A statement that is not a read is refused.
+To see which side answered a statement and why, send `SHOW
+dbtrail.router_status` on the same connection
+([docs/postgres.md](postgres.md#which-side-answered-a-statement-show-dbtrailrouter_status)).
 
 For another machine, open a tunnel, or widen the mapping to `"5433:5433"`
 behind a firewall: the port's password reads every server. If 5433 is taken

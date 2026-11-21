@@ -115,6 +115,12 @@ type Binding struct {
 	// of the source before lsn, a WAL position, and says whether it does, or
 	// why not (waitForCopy). nil: nothing waits, and RunAge alone decides.
 	CopyWait func(ctx context.Context, lsn uint64) (CopyWaitOutcome, string)
+	// Status, when set, answers SHOW dbtrail.router_status on this
+	// connection (portstatus.go): name and value pairs, in the order to
+	// show them. last is the connection's last answer, whose rows
+	// (LastAnswer.Rows) the host places among its own. Nil: the statement
+	// answers the last answer's rows alone.
+	Status func(ctx context.Context, last LastAnswer) [][2]string
 }
 
 // CopyWaitOutcome is what Binding.CopyWait found.

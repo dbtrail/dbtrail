@@ -104,6 +104,9 @@ type session struct {
 	proving    *sourceProof
 	knownLSN   uint64
 	knownValid bool
+	// last is which side answered the connection's last statement, and why
+	// (portstatus.go): what SHOW dbtrail.router_status says.
+	last LastAnswer
 }
 
 // initSettings sets a connection's settings before its start-up message is
@@ -315,6 +318,11 @@ func (s *session) abortedRefusal(qstr string) *pgErr {
 	if s.pinned() && isRollbackTo(qstr) {
 		return nil
 	}
+	// The port's status reads nothing of the block, and is how a client
+	// learns which side failed it (portstatus.go).
+	if s.isStatusStatement(qstr) {
+		return nil
+	}
 	return &pgErr{"25P02", "current transaction is aborted, commands ignored until end of transaction block"}
 }
 
@@ -390,6 +398,11 @@ var monitorRefusal = &pgErr{"0A000", "this is the port's monitor login, for a pr
 // asks it before a statement runs (to say whether it returns rows, and how
 // its arguments are written).
 func (s *session) classify(qstr string) classified {
+	// The port's own status statement, before anything else reads the text
+	// and can send it on (portstatus.go).
+	if c, own := s.classifyStatus(qstr); own {
+		return c
+	}
 	q, err := shim.Parse(qstr, s.schema())
 	tt := !errors.Is(err, shim.ErrNotTimeTravel)
 	if s.h == nil && tt {

@@ -923,6 +923,9 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		}
 		ages := routes.agesFor(tgt.ID)
 		bound := &pgshim.Binding{Actor: "server:" + tgt.ID, Schema: pgPortSchema, Routed: ages.routed()}
+		// SHOW dbtrail.router_status on this connection (#3021); it reads
+		// the binding when asked, so what is bound below is in its answer.
+		bound.Status = pgPortStatusFor(srv, tgt, bound, routes, ages)
 		// Time travel, by the engine the MySQL port binds per connection
 		// (flashbackShimConfig, called as it is): the server's index and its
 		// snapshots. The server's own gate goes with it: a server that hides

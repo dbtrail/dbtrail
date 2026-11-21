@@ -1290,6 +1290,7 @@ func (s *session) noteIfFailed(st *preparedStatement) {
 
 // routeNote tells the host how a statement was answered.
 func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, failed bool) {
+	s.noteLast(d, failed)
 	if s.bound == nil || s.bound.Routed == nil || d.side == "" {
 		return
 	}
