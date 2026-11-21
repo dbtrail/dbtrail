@@ -193,10 +193,16 @@ password copied from this page.
 - The role does **not** need to be a superuser.
 - **Capturing changes needs no `SELECT`**: logical replication delivers the
   row data over the WAL. **The first copy does.** It reads every table of the
-  publication with `COPY (SELECT ...)`, as this role, so without `SELECT` the
-  checks of `server add` pass and the first snapshot then fails with
-  `permission denied for table ...` (`42501`). The same goes for a table added
-  to the publication later, which is read in full once.
+  publication with `COPY (SELECT ...)`, as this role, so without `SELECT` it
+  would stop with `permission denied for table ...` (`42501`). `server add`
+  checks it (**Read access to the published tables**) and warns about a role
+  that cannot read one of them, showing the `GRANT` to run; DBTrail grants
+  nothing by itself. It is a warning: the server is added and its changes are
+  recorded, since that needs no `SELECT`. The copy is what is refused. A
+  snapshot asks before it starts, and stops with the same statement before
+  the slot or any file is created, until the permission is there. That also
+  covers a table added to the publication later, which is read in full once,
+  and a permission taken away since the server was added.
 - **Disk for the first copy.** It is written into the server's Local folder as
   compressed Parquet. Before it starts, DBTrail compares the tables' size
   with the free space there: it refuses below 1 GiB free and warns below 1.3×
@@ -353,6 +359,15 @@ bintrail-pg doctor --query-dsn "$PG" --slot bintrail_shop --publication bintrail
   retaining. The status progresses `reserved` (PASS) → `extended` / `unreserved`
   (**WARN** — retaining WAL and approaching the limit; doctor still exits 0) →
   `lost` (a loud **FAIL** with the re-baseline recovery path).
+- **Read access to the published tables** → WARN if the role cannot read a
+  table the first copy reads: no `USAGE` on its schema, or `SELECT` neither on
+  the table nor on every column the copy reads. Doctor still exits 0, and
+  capture starts: recording changes does not need it. A snapshot is refused
+  until it is granted. Ownership, a superuser, a role
+  inherited from another and `pg_read_all_data` count, as PostgreSQL itself
+  counts them. The check prints one `GRANT` per table, each name quoted; past
+  ten tables it prints `GRANT SELECT ON ALL TABLES IN SCHEMA` once per schema,
+  which also covers the tables of that schema that are not published.
 - **No UNLOGGED tables** → WARN if any captured table is `UNLOGGED` (under a
   `FOR ALL TABLES` publication, and under a `FOR TABLES IN SCHEMA` — PostgreSQL
   15+ — publication for its member schemas). UNLOGGED tables write no WAL, so
