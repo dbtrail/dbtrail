@@ -28,9 +28,9 @@ import (
 // That is a decision (2026-11-21, with #3043), not a gap, for two kinds:
 // a statement over a table that cannot have a tail (its age is in the
 // answer's lag, TestIntegrationFreshOverATableThatCannotHaveATail), and a
-// statement whose tables the parse cannot tell (a table function, which can
-// read a table it does not name; a qualified name that is no view of the
-// copy): giving it tails would build one for every table of the copy.
+// statement whose tables are not known: a table function, which can read a
+// table it does not name, and a qualified name that is no view of the copy,
+// which the engine may still resolve to one of its tables (sqlTailTables).
 var withChainShapes = []struct {
 	name, stmt string
 	snapshot   bool
@@ -311,21 +311,29 @@ func TestIntegrationFreshNeverTailsHalfAStatement_3043(t *testing.T) {
 	if got, age, err := run(both); err != nil || got != "paid/paid" || !age.Tailed {
 		t.Fatalf("both tables named in full: %q, tailed %v, %v", got, age.Tailed, err)
 	}
-	// And the table's own file, by its path: the parse reports a relation of
-	// that name, which is no view and is the table all the same.
-	for _, other := range []string{"memory." + b.Table, "memory.shop." + b.Table, b.Table, "'" + b.Path + "'"} {
-		stmt := "SELECT x.status || '/' || y.status FROM shop." + a.Table + " x JOIN " + other + " y ON y.id = x.id"
+	// Each way of naming the second table, and what the statement is then
+	// answered with: both tables with their tails, or both from the snapshot
+	// and the run saying so. Never one of each.
+	for _, c := range []struct {
+		other  string
+		want   string // "" when the engine does not resolve the name
+		tailed bool
+	}{
+		{b.Table, "paid/paid", true},                // bare: the view, in the schema in use
+		{"memory.shop." + b.Table, "paid/paid", true}, // the engine's catalog written out: the view
+		{"memory." + b.Table, "", false},             // no view of that name: the engine has none either
+		// The table's own file, by its path: the parse reports a relation
+		// of that name, which is no view and is the table all the same.
+		{"'" + b.Path + "'", "new/new", false},
+	} {
+		stmt := "SELECT x.status || '/' || y.status FROM shop." + a.Table + " x JOIN " + c.other + " y ON y.id = x.id"
 		got, age, err := run(stmt)
-		if err != nil {
-			t.Logf("%s: not answered (%v)", stmt, err)
-			continue
-		}
-		t.Logf("%s: %q, tailed %v", stmt, got, age.Tailed)
 		switch {
-		case got == "paid/paid" && age.Tailed:
-		case got == "new/new" && !age.Tailed:
-		default:
-			t.Errorf("%s\n\tanswered %q and says every table was read with its changes: %v", stmt, got, age.Tailed)
+		case c.want == "" && err != nil:
+		case err != nil:
+			t.Errorf("%s\n\tnot answered: %v", stmt, err)
+		case got != c.want || age.Tailed != c.tailed:
+			t.Errorf("%s\n\tanswered %q, read with its changes: %v; want %q and %v", stmt, got, age.Tailed, c.want, c.tailed)
 		}
 	}
 }

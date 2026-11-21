@@ -709,7 +709,9 @@ func sqlNamedTables(in views.Input, refs sqlsandbox.Refs) []views.BaselineTable 
 // FROM) is the table's own file, which the parse reports as a relation of
 // that name. A statement given tails for its other tables would read that
 // one from the snapshot while its answer says every table was read with its
-// changes.
+// changes. A name with a catalog and no schema is held to the same rule and
+// never matches here, though sqlWantedViews installs the view of that name
+// in every schema for it: fewer tails, never a table without one.
 func sqlTailTables(in views.Input, refs sqlsandbox.Refs, wanted views.ViewSet, named []views.BaselineTable) ([]views.BaselineTable, bool) {
 	if wanted != nil {
 		return named, true
