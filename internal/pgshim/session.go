@@ -93,11 +93,15 @@ type session struct {
 	// stmtCtx is the context of the message being handled (beginMessage),
 	// nil between messages.
 	stmtCtx context.Context
-	// sourceRead: the source sent this connection rows or a statement's
-	// end (markSourceRead), so the copy must not answer it with less.
+	// src is which tables the source sent this connection rows or a
+	// statement's end about (markSourceRead, source_tables.go): the copy
+	// must not answer it with less of those. proving is the statement the
+	// source is answering now when its tables may be confirmed, nil when
+	// they cannot: what it sends then marks every table.
 	// knownLSN is the source's WAL position read after the last such answer
 	// on this connection, valid while knownValid.
-	sourceRead bool
+	src        sourceReads
+	proving    *sourceProof
 	knownLSN   uint64
 	knownValid bool
 }

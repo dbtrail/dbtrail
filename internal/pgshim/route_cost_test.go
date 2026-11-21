@@ -2,6 +2,7 @@ package pgshim
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -163,12 +164,54 @@ type fakeSource struct {
 	// noPosition, when set, refuses the read of its WAL position.
 	delay      time.Duration
 	noPosition bool
+	// tables, when set, are the plain tables it confirms a statement read
+	// (proofSQL), by the name as written, each with the [schema, table] it
+	// answers; a name it does not know is not confirmed. nil: it confirms
+	// nothing, and every table counts as read.
+	tables map[string][2]string
 
 	mu       sync.Mutex
 	explains []string
 	queries  []string
-	// positions counts the reads of its WAL position.
+	// positions counts the reads of its WAL position, proofs the
+	// statements it was asked to confirm the tables of.
 	positions int
+	proofs    []string
+}
+
+// proofRef is one name of a proofSQL statement and whether it may stay
+// unresolved.
+var proofRef = regexp.MustCompile(`\('((?:[^']|'')*)', (true|false)\)`)
+
+// proved are the statements the source was asked to confirm the tables of.
+func (f *fakeSource) proved() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.proofs...)
+}
+
+// proofCell answers a proofSQL statement as a PostgreSQL holding f.tables
+// would: nil for NULL.
+func (f *fakeSource) proofCell(q string) []byte {
+	if f.tables == nil {
+		return nil
+	}
+	_, values, ok := strings.Cut(q, "FROM (VALUES ")
+	if !ok {
+		return []byte("[]")
+	}
+	out := [][]string{}
+	for _, m := range proofRef.FindAllStringSubmatch(values, -1) {
+		t, known := f.tables[strings.ReplaceAll(m[1], "''", "'")]
+		switch {
+		case known:
+			out = append(out, []string{t[0], t[1]})
+		case m[2] == "false":
+			return nil
+		}
+	}
+	cell, _ := json.Marshal(out)
+	return cell
 }
 
 // fakeWALPosition is the WAL position a fakeSource says it stands at.
@@ -284,6 +327,17 @@ func (f *fakeSource) serve(c net.Conn) {
 					be.Send(&pgproto3.DataRow{Values: [][]byte{[]byte(answer)}})
 					be.Send(&pgproto3.CommandComplete{CommandTag: []byte("EXPLAIN")})
 				}
+			case strings.Contains(q, "FROM pg_catalog.pg_operator o"):
+				f.mu.Lock()
+				f.proofs = append(f.proofs, q)
+				f.mu.Unlock()
+				if tx == 'E' {
+					be.Send(&pgproto3.ErrorResponse{Severity: "ERROR", Code: "25P02", Message: "current transaction is aborted"})
+					break
+				}
+				be.Send(&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{{Name: []byte("case"), DataTypeOID: 25, DataTypeSize: -1, TypeModifier: -1}}})
+				be.Send(&pgproto3.DataRow{Values: [][]byte{f.proofCell(q)}})
+				be.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")})
 			case strings.Contains(q, "pg_current_wal_lsn()"):
 				f.mu.Lock()
 				f.positions++
@@ -398,6 +452,8 @@ type costLogin struct {
 	age  func() CopyAge
 	wait func(ctx context.Context, lsn uint64) (CopyWaitOutcome, string)
 	runs atomic.Int32
+	// catalog, when set, is the copy's tables (Binding.Catalog).
+	catalog func() []CatalogTable
 }
 
 func (l *costLogin) run(_ context.Context, st string, _ RunOptions) (sqlsandbox.Result, error) {
@@ -445,6 +501,9 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 		}}
 	}
 	b.RunAge = l.age
+	if l.catalog != nil {
+		b.Catalog = func(context.Context) ([]CatalogTable, error) { return l.catalog(), nil }
+	}
 	if l.wait != nil {
 		b.CopyWait = l.wait
 	}

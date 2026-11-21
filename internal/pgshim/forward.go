@@ -312,12 +312,26 @@ func (s *session) closeSource() {
 
 // markSourceRead notes that the source just sent the client a row or a
 // statement's end: from now on the copy may not answer this connection with
-// less (waitForCopy), and the position known for it is from before this
-// answer until the next one is read. Rows before an error count too.
+// less of the tables it read (waitForCopy), and the position known for it is
+// from before this answer until the next one is read. Rows before an error
+// count too. Which tables: the ones the source confirms for the statement
+// being proven (session.proving), and every table for any other.
 func (s *session) markSourceRead() {
-	s.sourceRead = true
 	s.knownValid = false
 	s.sourceAnsweredAt = time.Now()
+	if s.src.all {
+		return
+	}
+	p := s.proving
+	if p == nil {
+		s.src.markAll()
+		return
+	}
+	if !p.answered {
+		p.answered = true
+		// Not confirmed yet: every table counts as read until it is.
+		s.src.pending = append(s.src.pending, p)
+	}
 }
 
 // readKnownPosition reads the answer of the position query sent behind a
@@ -359,6 +373,10 @@ func (s *session) loseSource(why string) {
 		return
 	}
 	pinned := s.up.inTx
+	if len(s.src.pending) > 0 {
+		// What the source sent on it will never be confirmed.
+		s.src.markAll()
+	}
 	s.logger.Warn("pgshim: the connection to the source is closed", "reason", why)
 	s.closeSource()
 	s.upLost = why
@@ -830,6 +848,15 @@ func (s *session) forwardSimple(qstr string) (ok bool) {
 	if position {
 		msgs = append(msgs, &pgproto3.Query{String: sourceWALPositionSQL})
 	}
+	// And behind it, which tables the statement read, when its text lets
+	// them be told (source_tables.go): the source resolves the names as it
+	// just did for the statement.
+	proof := s.proveReads(qstr)
+	if proof != nil {
+		msgs = append(msgs, &pgproto3.Query{String: proofSQL(proof.reads)})
+	}
+	s.proving = proof
+	defer func() { s.proving = nil }()
 	if err := up.send(msgs...); err != nil {
 		s.loseSource("it could not be written to: " + err.Error())
 		s.fail(s.lostError(&errSourceLost{"it could not be written to"}))
@@ -840,6 +867,13 @@ func (s *session) forwardSimple(qstr string) (ok bool) {
 	srcErr, lost := s.relay(up, relayClient, k.done)
 	if lost == nil && position {
 		lost = s.readKnownPosition(up)
+	}
+	if lost == nil && proof != nil {
+		var cell []byte
+		var perr *pgErr
+		if cell, perr, lost = s.readCell(up); lost == nil {
+			s.confirmProof(proof, cell, perr)
+		}
 	}
 	if lost != nil {
 		s.loseSource(lost.why)

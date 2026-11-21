@@ -297,7 +297,7 @@ func (s *session) routeByCostPlan(text string, generic bool) (d routeDecision, k
 		return routeDecision{RouteSource, ReasonCheapPlan}, true, nil, &pl
 	}
 	s.logger.Debug("pgshim: sent to the copy", "plan", why)
-	if s.sourceRead && !s.knownValid && s.bound != nil && s.bound.CopyWait != nil {
+	if s.src.any() && !s.knownValid && s.bound != nil && s.bound.CopyWait != nil {
 		// The copy will wait for the source's position (waitForCopy): read
 		// on this connection while it is open, not on one opened again.
 		if cell, perr, lost := s.cellOnSource(up, sourceWALPositionSQL); lost != nil {

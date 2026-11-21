@@ -257,14 +257,17 @@ func (s *session) copyFallback(err error, perr *pgErr) string {
 // from its snapshot alone says nothing of how far it reaches, and goes to
 // the source. Nothing is decided where the statement cannot go to the
 // source, nor when the host does not say what the answer read
-// (Binding.RunAge nil).
+// (Binding.RunAge nil). Nor for a statement that reads no table the source
+// answered this connection about (apart, apartFromSource): what the copy
+// holds of other tables is not older than anything this connection was
+// shown.
 //
 // It is the MySQL port's rule for the copy against itself (#2913: the copy
 // never answers a connection with less of the index than an earlier answer
 // of the copy held, and the statement goes to MySQL as copy_too_old), with
 // the source's answer as the earlier one.
-func (s *session) copyOlderThanSource(waited bool) string {
-	if !s.sourceRead || s.bound == nil || s.bound.RunAge == nil || !s.canFallBack() {
+func (s *session) copyOlderThanSource(waited, apart bool) string {
+	if apart || !s.src.any() || s.bound == nil || s.bound.RunAge == nil || !s.canFallBack() {
 		return ""
 	}
 	a := s.bound.RunAge()
@@ -303,11 +306,15 @@ func (s *session) warnNoPosition(why string) {
 	}
 }
 
-// copyWaitLimit is how long a statement for the copy waits for the copy to
-// reach the source's position on a connection the source answered
-// (waitForCopy), never past the statement's own time. A variable so a test
-// can shorten it.
-var copyWaitLimit = 2 * time.Second
+// DefaultCopyWaitLimit is how long a statement for the copy waits for the
+// copy to reach the source's position on a connection the source answered
+// (waitForCopy), never past the statement's own time: the read of that
+// position, when one is needed, and the wait after it, together.
+const DefaultCopyWaitLimit = 6 * time.Second
+
+// copyWaitLimit is DefaultCopyWaitLimit, a variable so a test can shorten
+// it.
+var copyWaitLimit = DefaultCopyWaitLimit
 
 // waitForCopy is the wait of a statement about to run on the copy, on a
 // connection the source answered (#2985): the copy answers only once its
@@ -324,8 +331,16 @@ var copyWaitLimit = 2 * time.Second
 // answer of the source on this connection, a host without the wait, a
 // position that could not be read), and copyOlderThanSource decides after
 // the run, as without the wait.
-func (s *session) waitForCopy(ctx context.Context, qstr string) (waited bool, stop *pgErr) {
-	if !s.sourceRead || s.bound == nil || s.bound.CopyWait == nil || !s.canFallBack() {
+//
+// apart: the statement reads no table the source answered this connection
+// about (apartFromSource), and waits for nothing.
+//
+// While it waits a statement holds its client connection and nothing else:
+// no worker of the copy (the copy has not been asked yet), no connection to
+// the source (the one its position was read on is given back first), and
+// nothing of the port's result budget.
+func (s *session) waitForCopy(ctx context.Context, qstr string, apart bool) (waited bool, stop *pgErr) {
+	if apart || !s.src.any() || s.bound == nil || s.bound.CopyWait == nil || !s.canFallBack() {
 		return false, nil
 	}
 	if !isSelectLike(qstr) || readsCatalog(qstr) {
@@ -340,6 +355,8 @@ func (s *session) waitForCopy(ctx context.Context, qstr string) (waited bool, st
 	// asked on, else read now. A position read before that answer would
 	// let an older answer through, so none of those is used, and with none
 	// the source answers: never the copy unproven.
+	// One limit for the position's read and the wait after it.
+	limit := time.Now().Add(copyWaitLimit)
 	want, why := uint64(0), ""
 	switch {
 	case s.knownValid:
@@ -358,7 +375,7 @@ func (s *session) waitForCopy(ctx context.Context, qstr string) (waited bool, st
 		s.fallTo(ReasonCopyTooOld)
 		return false, &pgErr{"55000", "the source's position after its last answer on this connection is not known (" + why + "), so the copy does not answer it"}
 	}
-	wctx, cancel := context.WithTimeout(ctx, copyWaitLimit)
+	wctx, cancel := context.WithDeadline(ctx, limit)
 	outcome, why := s.bound.CopyWait(wctx, want)
 	cancel()
 	if perr := stoppedError(ctx); perr != nil {

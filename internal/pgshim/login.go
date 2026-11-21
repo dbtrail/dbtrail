@@ -315,7 +315,10 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	// On a connection the source answered, the copy first waits to reach
 	// what the source showed it (#2985), or the source answers instead,
 	// before the copy does any work.
-	waited, stop := s.waitForCopy(ctx, qstr)
+	// Unless it reads no table the source answered this connection about:
+	// then it neither waits nor is held back.
+	apart, named := s.apartFromSource(qstr)
+	waited, stop := s.waitForCopy(ctx, qstr, apart)
 	if stop != nil {
 		return nil, nil, nil, "", stop
 	}
@@ -334,7 +337,9 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		}
 		return nil, nil, nil, "", perr
 	}
-	if why := s.copyOlderThanSource(waited); why != "" {
+	// A statement read as apart that names no table, when the copy says it
+	// read one, was read wrong: it is held back as any other.
+	if why := s.copyOlderThanSource(waited, apart && named > 0); why != "" {
 		// Nothing of it was sent: the source answers instead (#2985).
 		s.logger.Debug("pgshim: the copy's answer is older than the source's last one on this connection; the source answers", "why", why)
 		s.fallTo(ReasonCopyTooOld)

@@ -434,6 +434,10 @@ func (s *session) executeOnSource(p *portal, maxRows uint32) {
 	defer done()
 	up.ctx = ctx
 	defer func() { up.ctx = nil }()
+	// Which tables it reads is confirmed once the batch is over
+	// (syncOnSource): until then what the source sends marks every table.
+	s.proving = s.proveReads(p.stmt.query)
+	defer func() { s.proving = nil }()
 	if err := up.send(&pgproto3.Execute{Portal: p.name, MaxRows: maxRows}, &pgproto3.Flush{}); err != nil {
 		s.sourceLostExt(&errSourceLost{"it could not be written to: " + err.Error()})
 		return
@@ -510,7 +514,16 @@ func (s *session) syncOnSource() {
 		return
 	}
 	s.followSourceStatus(up, tx)
-	if s.sourceRead && !s.knownValid && s.bound.CopyWait != nil && !up.unsafe {
+	if !up.unsafe {
+		if lost := s.confirmPending(up); lost != nil {
+			s.loseSource(lost.why)
+			s.afterSource(up)
+			return
+		}
+	} else if len(s.src.pending) > 0 {
+		s.src.markAll()
+	}
+	if s.src.any() && !s.knownValid && s.bound.CopyWait != nil && !up.unsafe {
 		// The batch sent the client the source's rows: where the source
 		// stands now, once the batch is over (#2985, knownLSN).
 		if _, perr, lost := s.positionAfter(up); lost != nil {
