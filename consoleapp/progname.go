@@ -26,23 +26,40 @@ const canonicalProg = "bintrail-console"
 var prog = programName(os.Args)
 
 // progNameEnv lets a caller that runs this program on someone's behalf say
-// what that someone typed. The dbtrail command of a Docker install runs
-// bintrail-console inside the container and sets it to dbtrail.
+// what that someone can type. The dbtrail command of a Docker install runs
+// bintrail-console inside the container and sets it to dbtrail when that
+// word runs it, or else to its own absolute path on the host: until the
+// person links it into their PATH, a suggested "dbtrail snapshot run" would
+// be a command not found.
 const progNameEnv = "DBTRAIL_PROG"
 
 var progNameShape = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}$`)
 
-// programName is the name in progNameEnv when it is a plain word, else the
-// base name of the command line's first word. A test binary, or an empty
-// command line, is the canonical name.
+// progPathShape is an absolute path: no control characters, quotes,
+// backslashes, dollar signs or backticks, which a shell would read as
+// something else, and a last element of its own.
+var progPathShape = regexp.MustCompile("^/[^\\x00-\\x1f\\x7f'\"\\\\$`]{0,1000}[^/\\x00-\\x1f\\x7f'\"\\\\$`]$")
+
+// shellWordUnsafe is what a shell would split or expand in a path, escaped
+// with a backslash so the path prints as one word that can be pasted.
+var shellWordUnsafe = regexp.MustCompile(`[^A-Za-z0-9_./+:@%,=-]`)
+
+// programName is the name in progNameEnv when it is a plain word or an
+// absolute path (printed as one shell word), else the base name of the
+// command line's first word. A test binary, or an empty command line, is
+// the canonical name.
 func programName(args []string) string {
-	if name := os.Getenv(progNameEnv); progNameShape.MatchString(name) {
+	name := os.Getenv(progNameEnv)
+	if progNameShape.MatchString(name) {
 		return name
+	}
+	if progPathShape.MatchString(name) {
+		return shellWordUnsafe.ReplaceAllStringFunc(name, func(c string) string { return `\` + c })
 	}
 	if len(args) == 0 {
 		return canonicalProg
 	}
-	name := filepath.Base(args[0])
+	name = filepath.Base(args[0])
 	name = strings.TrimSuffix(name, ".exe")
 	if name == "" || name == "." || name == string(filepath.Separator) || strings.HasSuffix(name, ".test") {
 		return canonicalProg
@@ -61,7 +78,8 @@ func useProgName(text string) string {
 	if prog == canonicalProg {
 		return text
 	}
-	return progVerbs.ReplaceAllString(text, "${1}"+prog+"${2}${3}")
+	// A path may hold a $ no more, but the replacement reads $ as a group.
+	return progVerbs.ReplaceAllString(text, "${1}"+strings.ReplaceAll(prog, "$", "$$")+"${2}${3}")
 }
 
 // progWriter applies useProgName to what a command prints. Each message is
@@ -87,7 +105,13 @@ func applyProgName(root *cobra.Command) {
 	if prog == canonicalProg {
 		return
 	}
+	// cobra takes the root's name up to its first space, so a path that
+	// holds one (escaped or not) would be cut: the usage line then names
+	// the file alone. The texts below still name the whole path.
 	root.Use = prog
+	if strings.Contains(prog, " ") {
+		root.Use = filepath.Base(strings.ReplaceAll(prog, `\`, ""))
+	}
 	var walk func(*cobra.Command)
 	walk = func(c *cobra.Command) {
 		c.Short, c.Long, c.Example = useProgName(c.Short), useProgName(c.Long), useProgName(c.Example)

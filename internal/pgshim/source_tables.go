@@ -743,17 +743,17 @@ func (s *session) confirmPending(up *upstream) *errSourceLost {
 	return nil
 }
 
-// apartFromSource reports whether the statement the copy is about to run
-// reads no table this connection read from its source, so that it neither
+// apartFromSource reports whether the statement the copy is about to run,
+// text as the copy is handed it (copyText), reads no table this connection read from its source, so that it neither
 // waits for the copy nor is held back (#2985). named is how many tables of
 // the copy it names. False whenever that cannot be told: its text is not
 // read whole, a name in it is not a table of the copy's catalog, or the
 // catalog cannot be read.
-func (s *session) apartFromSource(qstr string) (apart bool, named int) {
+func (s *session) apartFromSource(text string) (apart bool, named int) {
 	if s.src.all || len(s.src.pending) > 0 || s.bound == nil || s.bound.Catalog == nil {
 		return false, 0
 	}
-	reads, why := readsOf(s.copyText(qstr), copyFuncs)
+	reads, why := readsOf(text, copyFuncs)
 	if why != "" {
 		return false, 0
 	}

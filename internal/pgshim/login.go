@@ -312,17 +312,22 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	if refusal := s.admitResult(); refusal != nil {
 		return nil, nil, nil, "", refusal
 	}
-	// On a connection the source answered, the copy first waits to reach
-	// what the source showed it (#2985), or the source answers instead,
-	// before the copy does any work.
-	// Unless it reads no table the source answered this connection about:
-	// then it neither waits nor is held back.
-	apart, named := s.apartFromSource(qstr)
-	waited, stop := s.waitForCopy(ctx, qstr, apart)
-	if stop != nil {
-		return nil, nil, nil, "", stop
+	var res sqlsandbox.Result
+	waited, apart, named := false, false, 0
+	text, err := s.copyText(qstr)
+	if err == nil {
+		// On a connection the source answered, the copy first waits to
+		// reach what the source showed it (#2985), or the source answers
+		// instead, before the copy does any work. Unless it reads no table
+		// the source answered this connection about: then it neither waits
+		// nor is held back.
+		apart, named = s.apartFromSource(text)
+		var stop *pgErr
+		if waited, stop = s.waitForCopy(ctx, qstr, apart); stop != nil {
+			return nil, nil, nil, "", stop
+		}
+		res, err = s.bound.Run(ctx, text, s.runOptions())
 	}
-	res, err := s.bound.Run(ctx, s.copyText(qstr), s.runOptions())
 	if res.Spool != nil {
 		// Only a bug gets here: this port asks for no result in a file.
 		_ = res.Spool.Close()

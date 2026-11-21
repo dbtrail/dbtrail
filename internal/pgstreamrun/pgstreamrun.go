@@ -572,6 +572,12 @@ var (
 // variable so a test can change it.
 var commitWithin = indexer.CommitWithinFromEnv
 
+// checkpointSoonest is how soon after one save of the position the next may
+// be made because the position moved (saveSoon): the MySQL capture's value
+// (streamrun.checkpointSoonest, #2645). The interval's save stays. A
+// variable so a test can change it.
+var checkpointSoonest = 150 * time.Millisecond
+
 // streamLoopPG batches row events into the indexer and checkpoints the durable LSN.
 //
 // The checkpoint cursor is the last COMPLETE transaction's commit LSN (lastCommitLSN)
@@ -754,23 +760,17 @@ func streamLoopPG(
 		},
 	})
 	defer w.Close()
-	within := commitWithin()
-	w.SetCommitWithin(within)
+	w.SetCommitWithin(commitWithin())
 
-	// positionC saves the position within the same wait as the rows. WithinC
-	// alone does not: a batch that fills commits inside the writer and stops
-	// its timer, so under a steady load, where every batch fills before the
-	// wait, the saved position moved only on the checkpoint ticker (10 s in
-	// watch). The PostgreSQL port's wait for the source (#2985) reads the
-	// saved position, so with a 2 s limit most statements on a connection
-	// the source had answered went to the source. Nil when the wait is off
-	// or not shorter than the checkpoint interval.
-	var positionC <-chan time.Time
-	if within > 0 && within < checkpointInterval {
-		positionTicker := time.NewTicker(within)
-		defer positionTicker.Stop()
-		positionC = positionTicker.C
-	}
+	// lastSave is when the position was last saved; soon fires when a save
+	// was held back by checkpointSoonest (saveSoon).
+	var lastSave time.Time
+	var soon *time.Timer
+	defer func() {
+		if soon != nil {
+			soon.Stop()
+		}
+	}()
 
 	// checkpoint commits the rows of complete transactions, then persists the
 	// last commit LSN. The order is commit → saveCheckpointPG → AckCommitted:
@@ -817,6 +817,7 @@ func streamLoopPG(
 			return err
 		}
 		commitsSince = false
+		lastSave = time.Now()
 		state.metrics.checkpointSaved(lastCommitLSN, stamping)
 		// Only now is it safe to let PostgreSQL release WAL up to lastCommitLSN.
 		if cap != nil {
@@ -839,7 +840,42 @@ func streamLoopPG(
 		return checkpoint()
 	}
 
+	// saveSoon saves the position once it moved, at most every
+	// checkpointSoonest: the MySQL capture's rule (#2645, streamrun), so a
+	// reader comparing the source's position with the saved one (the
+	// PostgreSQL port's wait for the source, #2985) is held back by about
+	// checkpointSoonest, not by the checkpoint interval (10 s in watch). It
+	// moved: a transaction ended since the last save, or the walsender's
+	// position passed the saved one (a quiet source). Only when no complete
+	// transaction waits in the writer: a batch that filled committed its
+	// rows inside the writer (and stopped the WithinC timer), so every
+	// transaction lastCommitLSN names is in the index and the save adds no
+	// INSERT; rows still waiting are saved by WithinC's checkpoint.
+	saveSoon := func() error {
+		if !(commitsSince || pendingSent > state.sentThrough) || w.CompleteRows() > 0 {
+			return nil
+		}
+		if wait := checkpointSoonest - time.Since(lastSave); wait > 0 {
+			if soon == nil {
+				soon = time.NewTimer(wait)
+			}
+			return nil
+		}
+		return checkpoint()
+	}
+
 	for {
+		// After whatever the last turn committed. Not on a stop: stop()
+		// saves on its own.
+		if ctx.Err() == nil {
+			if err := saveSoon(); err != nil {
+				return err
+			}
+		}
+		var soonC <-chan time.Time
+		if soon != nil {
+			soonC = soon.C
+		}
 		select {
 		case <-ctx.Done():
 			if err := stop(); err != nil {
@@ -863,16 +899,10 @@ func streamLoopPG(
 				return err
 			}
 
-		case <-positionC:
-			// Only when there is something to save: a transaction ended since
-			// the last save, or the walsender's position moved past the saved
-			// one (a quiet source). Otherwise the checkpoint ticker keeps its
-			// own pace.
-			if commitsSince || pendingSent > state.sentThrough {
-				if err := checkpoint(); err != nil {
-					return err
-				}
-			}
+		case <-soonC:
+			// The held-back save: saveSoon at the top of the loop makes it,
+			// if nothing saved in between.
+			soon = nil
 
 		case <-ticker.C:
 			if err := checkpoint(); err != nil {

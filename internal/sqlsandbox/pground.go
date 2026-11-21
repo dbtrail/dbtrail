@@ -74,6 +74,49 @@ package sqlsandbox
 // The engine's // and % of whole numbers truncate toward zero, so a
 // negative a with a remainder is one below its quotient.
 //
+// round(x, k) of anything else, round(x) and avg(x) on their own are the
+// port's too, on every connection (pgshim.RewriteForCopy):
+//
+//   - round(x, k), k from 0 to 15, is _bintrail_pg_round_k: a numeric of
+//     exactly k decimals, as PostgreSQL's round(numeric, k) writes it (500 is
+//     500.00, 12.50 to 3 is 12.500), where the engine keeps x's own type (500,
+//     12.50). x is taken to a DECIMAL(38,s) first, a whole number to
+//     DECIMAL(38,0): the engine's round of a BIGINT overflows in silence
+//     (9223372036854775807 to tens comes out negative). The engine rounds a
+//     DECIMAL half away from zero, as PostgreSQL does, and adding a zero of k
+//     decimals gives the result k: the zero is DECIMAL(1,0) times the unit,
+//     so the width stays within 38 and a value that does not fit fails.
+//   - round(x, -k) is _bintrail_pg_round_neg: to tens, hundreds..., no
+//     decimals. The engine's round of a narrow DECIMAL with decimals to a
+//     negative k is wrong (-5.0, a DECIMAL(2,1), to tens is 0, PostgreSQL's
+//     -10). Taken to DECIMAL(38,s) first it measured right, and the decimals
+//     are cut too (trunc), which cannot change the answer: the half it
+//     compares with, 5 * 10^(k-1), is a whole number, so cutting the
+//     decimals never moves a value across it.
+//   - round(x) is _bintrail_pg_round_whole: the engine's, which matches
+//     PostgreSQL's round(numeric) for a DECIMAL. Refused for anything else:
+//     PostgreSQL's round(double precision) rounds a half to even, and a whole
+//     number is a double precision there (round(5) is a double, and
+//     9007199254740993 is written 9.007199254740992e+15).
+//   - avg(x) is _bintrail_pg_avg: the engine's for a float, which PostgreSQL
+//     averages as a double precision too. Of a numeric or a whole number
+//     PostgreSQL writes as many decimals as the quotient needs, from 16 to
+//     20 and more (500.0000000000000000, 0.50000000000000000000), which is
+//     not one type the copy can give a column: refused.
+//
+// round(x, k) and round(x, -k) refuse a float: round(double precision, k)
+// does not exist on PostgreSQL, and a float here may stand for a numeric
+// there (1e2).
+//
+// A CASE or a COALESCE that holds one of these (pgshim packMixedScale) has
+// one type here for all its values, where PostgreSQL keeps each value's own
+// decimals: CASE WHEN c THEN round(x, 2) ELSE 0 END is 0 there and 0.00
+// here. Each value is packed with the decimals of its own type
+// (_bintrail_pg_pack; _bintrail_pg_packn for a COALESCE, which takes the
+// first value that is not NULL), and _bintrail_pg_unpack refuses a value
+// whose decimals are not the type's. A float on either side makes the CASE a
+// float, as on PostgreSQL, and nothing is checked.
+//
 // TEMP, as the other macros. A macro takes no DISTINCT, and the port leaves
 // avg(DISTINCT x) alone.
 const pgRoundMacros = `CREATE OR REPLACE TEMP MACRO _bintrail_pg_exact(x) AS (
@@ -178,4 +221,47 @@ CREATE OR REPLACE TEMP MACRO _bintrail_pg_round_div(n, d, k, unit) AS (
 );
 CREATE OR REPLACE TEMP MACRO _bintrail_pg_round_avg(x, kk, unit) AS (
   CAST(_bintrail_pg_round_q(sum(x), count(x), kk, 'avg') AS DECIMAL(38,0)) * unit
+);
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_dec38(x) AS (
+  CASE WHEN typeof(x) IN ('DOUBLE', 'FLOAT')
+    THEN error('the copy cannot round this as PostgreSQL does: a double precision, which PostgreSQL rounds only to a whole number, half to even')
+  WHEN NOT _bintrail_pg_exact(x)
+    THEN error('the copy cannot round this as PostgreSQL does: it is not a numeric or a whole number')
+  ELSE x + CAST(0 AS DECIMAL(38,0)) END
+);
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_round_k(x, kk, unit) AS (
+  round(_bintrail_pg_dec38(x), kk) + CAST(0 AS DECIMAL(1,0)) * unit
+);
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_round_neg(x, kk) AS (
+  round(trunc(_bintrail_pg_dec38(x)), kk)
+);
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_round_whole(x) AS (
+  CASE WHEN typeof(x) LIKE 'DECIMAL(%' THEN round(x)
+  WHEN typeof(x) IN ('DOUBLE', 'FLOAT')
+    THEN error('the copy cannot round this as PostgreSQL does: a double precision, which PostgreSQL rounds half to even')
+  WHEN _bintrail_pg_exact(x)
+    THEN error('the copy cannot round this as PostgreSQL does: a whole number, which PostgreSQL rounds as a double precision')
+  ELSE error('the copy cannot round this as PostgreSQL does: it is not a numeric') END
+);
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_avg(x) AS (
+  CASE WHEN typeof(min(x)) IN ('DOUBLE', 'FLOAT') THEN avg(x)
+  ELSE error('the copy cannot write avg() of this as PostgreSQL does: of a numeric or a whole number PostgreSQL writes as many decimals as each average needs; round(avg(x), k) the copy answers') END
+);
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_tscale(t) AS (
+  CASE WHEN t LIKE 'DECIMAL(%' THEN CAST(regexp_extract(t, ',([0-9]+)[)]$', 1) AS INTEGER)
+  WHEN t IN ('TINYINT', 'SMALLINT', 'INTEGER', 'BIGINT', 'HUGEINT', 'UTINYINT', 'USMALLINT', 'UINTEGER', 'UBIGINT', 'UHUGEINT') THEN 0
+  ELSE -1 END
+);
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_pack(x) AS (
+  struct_pack(v := x, s := _bintrail_pg_tscale(typeof(x)))
+);
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_packn(x) AS (
+  CASE WHEN x IS NULL THEN NULL ELSE struct_pack(v := x, s := _bintrail_pg_tscale(typeof(x))) END
+);
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_unpack(p) AS (
+  CASE WHEN struct_extract(p, 'v') IS NOT NULL AND struct_extract(p, 's') >= 0
+      AND _bintrail_pg_tscale(typeof(struct_extract(p, 'v'))) >= 0
+      AND struct_extract(p, 's') <> _bintrail_pg_tscale(typeof(struct_extract(p, 'v')))
+    THEN error('the copy cannot write this as PostgreSQL does: a CASE or COALESCE around a round() whose values have different numbers of decimals, which PostgreSQL keeps for each value')
+  ELSE struct_extract(p, 'v') END
 );`
