@@ -146,6 +146,15 @@ func TestPGCopyDiskVerdict(t *testing.T) {
 		if err != nil || check != dumpDiskUnchecked || note != want {
 			t.Errorf("check %q err %v\n got %s\nwant %s", check, err, note, want)
 		}
+		// Either one alone is enough to take the pass away.
+		for _, one := range []pgbaseline.CopyEstimate{
+			{Bytes: int64(10 * gib), Tables: 3, Unsized: 1},
+			{Bytes: int64(10 * gib), Tables: 3, OtherStorage: 1, OtherStorageTop: []string{"ts.metrics"}},
+		} {
+			if check, note, err := verdict(t, 100*gib, one, nil); err != nil || check != dumpDiskUnchecked || !strings.HasPrefix(note, "Disk check cannot tell whether this snapshot fits. ") {
+				t.Errorf("%+v: check %q err %v note %s", one, check, err, note)
+			}
+		}
 		// Low stays low, and says both.
 		check, note, err = verdict(t, 5*gib, part, nil)
 		if err != nil || check != dumpDiskLow || !strings.Contains(note, "no size for 1 table(s)") || !strings.Contains(note, "ts.metrics") || strings.Count(note, diskRisk) != 1 {
