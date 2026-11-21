@@ -664,11 +664,14 @@ its own log, of what it did in that minute:
 ```
 journalctl -u bintrail-router -f | grep msg=status      # Linux packages
 docker compose logs -f router | grep msg=status         # Docker Compose
+journalctl -u bintrail-pg-router -f | grep msg=status   # the PostgreSQL port, Linux packages
+docker compose logs -f pg-router | grep msg=status      # the PostgreSQL port, Docker Compose
 ```
 
 ```
 msg=status service=port server=shop interval=1m0s queries=124 dbtrail=110 mysql=12 refused=2 errors=2 dbtrail_avg_ms=420 mysql_avg_ms=30 copy_behind_s=45
 msg=status service=capture server=shop interval=1m0s changes=321 errors=2 behind_s=2 since_last_save_s=60
+msg=status service=pg-port server=shop interval=1m0s queries=124 dbtrail=110 postgresql=12 refused=2 errors=2 dbtrail_avg_ms=420 postgresql_avg_ms=30 copy_behind_s=45
 ```
 
 - `service=port` is written by the router (`bintrail-router`, the `router`
@@ -683,6 +686,12 @@ msg=status service=capture server=shop interval=1m0s changes=321 errors=2 behind
   saved in the interval. `behind_s` is the time from a commit on your MySQL to
   that change being readable here, at the last save. `since_last_save_s`
   keeps growing when capture stops, which `behind_s` does not: watch that one.
+- `service=pg-port` is written by the PostgreSQL router (`bintrail-pg-router`,
+  the `pg-router` container), one line per PostgreSQL server, whether or not a
+  statement reached it in the interval. The fields are those of
+  `service=port`; `postgresql` and `postgresql_avg_ms` are the statements your
+  PostgreSQL answered. `copy_behind_s` is how old the data of the copy's last
+  answer was, left out when that is not known (in fast mode, among others).
 - The numbers are per interval, not since the service started. A minute with
   nothing to say still writes a line, so silence means the service stopped.
 - `BINTRAIL_STATUS_LOG_INTERVAL` sets the interval (`30s`, `5m`); `off` writes

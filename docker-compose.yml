@@ -866,6 +866,11 @@ services:
       # Memory each statement on the copy may use: the same setting as
       # `bintrail`, from the same .env.
       BINTRAIL_CONSOLE_SQL_MEMORY: ${SQL_MEMORY:-}
+      # The status log: one line a minute per PostgreSQL server of the
+      # statements the port saw and who answered them (docker compose logs -f
+      # pg-router | grep msg=status). STATUS_LOG_INTERVAL in .env changes how
+      # often, or off, as for the two services above.
+      BINTRAIL_STATUS_LOG_INTERVAL: ${STATUS_LOG_INTERVAL:-}
       # The fraction of this machine's memory the PostgreSQL router plans with
       # (#2513): its statements and the recent changes it keeps in fresh
       # mode come out of that one number. Empty (the default) is the whole
