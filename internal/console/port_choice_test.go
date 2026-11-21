@@ -250,9 +250,16 @@ func TestFlashbackFile_anOlderVersionRewritesAFileWithTheMarks(t *testing.T) {
 		rewrite(t, path, func(f *flashbackFileBeforeMarks) {
 			f.Enabled, f.Listen, f.Password = true, "127.0.0.1:3309", "bfp_old"
 		})
+		raw, _ := os.ReadFile(path)
+		// The status is this process's own picture of the port, which a file
+		// rewritten under it does not change: what is asked here is that
+		// nothing is turned on, made or saved.
 		got := s.portOnForNewServer(newServerRequest(), true)
-		if got.TurnedOn || !got.Enabled || got.Password != "" {
+		if got.TurnedOn || got.Password != "" {
 			t.Fatalf("%+v", got)
+		}
+		if after, _ := os.ReadFile(path); string(after) != string(raw) {
+			t.Fatalf("the file changed:\n%s", after)
 		}
 	})
 	t.Run("it saved another monitor login: the first server still turns the port on", func(t *testing.T) {
