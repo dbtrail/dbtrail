@@ -102,7 +102,7 @@ func TestResolveAddInputPostgres(t *testing.T) {
 			if got.FwdAsk || got.FwdUser != "" || got.Capture != wantCapture {
 				t.Errorf("the capture account is asked about on a terminal and nowhere else: %+v", got)
 			}
-			got.ask, got.Capture = nil, 0
+			got.ask, got.Capture, got.captureWhy = nil, 0, ""
 			if got != c.want {
 				t.Fatalf("got %+v\nwant %+v", got, c.want)
 			}

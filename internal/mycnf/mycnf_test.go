@@ -262,7 +262,7 @@ func TestParseCaptureAccount(t *testing.T) {
 		"[dbtrail-forward]\ncapture-account\n":              "1",
 		"[dbtrail-forward]\nloose-capture-account\n":        "1",
 		"[dbtrail-forward]\ncapture-account=\n":             "",
-		"[dbtrail-forward]\ncapture-account = \"\"\n":        "",
+		"[dbtrail-forward]\ncapture-account = \"\"\n":       "",
 		"[dbtrail-forward]\nuser=a\n":                       "",
 		"[client]\ncapture-account=yes\n":                   "",
 	} {
