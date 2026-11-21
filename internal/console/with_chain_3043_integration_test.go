@@ -5,11 +5,15 @@ package console
 import (
 	"context"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/event"
+	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
 
@@ -325,6 +329,120 @@ func TestIntegrationFreshNeverTailsHalfAStatement_3043(t *testing.T) {
 			t.Errorf("%s\n\tnot answered: %v", stmt, err)
 		case got != c.want || age.Tailed != c.tailed:
 			t.Errorf("%s\n\tanswered %q, read with its changes: %v; want %q and %v", stmt, got, age.Tailed, c.want, c.tailed)
+		}
+	}
+}
+
+// sqlTailTables leaves a bare, plain name aside when it matched no view, on
+// the ground that it is then no table of the copy. That holds only while
+// the match here (names compared with A-Z folded) sees every name the
+// ENGINE takes for a view. This asks the engine, over real tables with
+// tails, under both kinds of session: for every spelling of a table's name,
+// the statement is answered with both tables' recent changes, or with
+// neither and the run saying so, or not at all. Never one of each.
+func TestIntegrationFreshNamesTheEngineResolves_3043(t *testing.T) {
+	t.Setenv("BINTRAIL_SQL_TAILS", "on")
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _ := newTailRig(t)
+	r.s.sqlRunner = sandboxRunner{sqlsandbox.New(sqlsandbox.Config{Exe: exe, Args: []string{}, Limits: sqlsandbox.Limits{Timeout: 60 * time.Second}})}
+	r.s.sqlLimits = resolveSQLLimits(sqlsandbox.Limits{})
+	r.b.baselineConfigured = true
+	r.s.tailCapturesHook = func(string) (func(string, string) bool, bool) { return nil, true }
+	at := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+
+	const (
+		cafe   = "caf\u00e9"   // é as one code point
+		kelvin = "\u212aelvin" // the Kelvin sign, which lower-cases to k
+		longS  = "\u017ftats"  // the long s, which upper-cases to S
+	)
+	names := []string{cafe, "Orders", kelvin, longS}
+	metas := map[string]*metadata.TableMeta{}
+	meta := func(name string) {
+		metas["shop."+name] = &metadata.TableMeta{Schema: "shop", Table: name, PKColumns: []string{"id"}, Columns: []metadata.ColumnMeta{
+			{Name: "id", OrdinalPosition: 1, IsPK: true, DataType: "int", ColumnType: "int"},
+			{Name: "status", OrdinalPosition: 2, DataType: "varchar", ColumnType: "varchar(32)"},
+		}}
+	}
+	first := r.table(nil)
+	meta(first.Table)
+	r.change(first.Table, event.EventUpdate, "1", "paid", "binlog.000008", 100, at)
+	stamp := r.stamp.Format(time.RFC3339)
+	for i, name := range names {
+		ddl := "CREATE TABLE `" + name + "` (\n  `id` int NOT NULL,\n  `status` varchar(32) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n"
+		r.write(filepath.Join(r.root, unchangedSnapshotDir, "shop", name+".parquet"), ddl, map[string]string{
+			baseline.MetaKeyBinlogFile: r.anchor.File, baseline.MetaKeyBinlogPos: strconv.FormatUint(r.anchor.Pos, 10),
+			baseline.MetaKeySnapshotTimestamp: stamp, baseline.MetaKeyLastDumpAt: stamp, baseline.MetaKeyFoldGeneration: "0",
+			baseline.MetaKeySnapshotProducer: baseline.ProducerDump, baseline.MetaKeyLockMode: string(baseline.LockModeFTWRL),
+			baseline.MetaKeyCreateTableSQL: ddl,
+		})
+		meta(name)
+		r.change(name, event.EventUpdate, "1", "paid", "binlog.000008", uint64(200+100*i), at)
+	}
+	r.b.resolver = metadata.NewResolverFromTables(1, metas)
+
+	run := func(sess sqlsandbox.Session, stmt string) (string, CopyRunAge, error) {
+		q := &SQLOnCopy{s: r.s, b: r.b, user: "u", id: bootServerID}
+		res, err := q.Run(context.Background(), stmt, "shop", sess)
+		if err != nil {
+			return "", CopyRunAge{}, err
+		}
+		if len(res.Rows) != 1 {
+			t.Fatalf("%s: rows %v", stmt, res.Rows)
+		}
+		return res.Rows[0][0].(string), q.LastRunAge(), nil
+	}
+	join := func(spelling string) string {
+		return "SELECT x.status || '/' || y.status FROM shop." + first.Table + " x JOIN " + spelling + " y ON y.id = x.id"
+	}
+	// Each table's tail is built and published: named exactly, every one is
+	// read with its changes.
+	for _, name := range names {
+		settleTails(t, r.s, func() {
+			if _, _, err := run(sqlsandbox.Session{}, join(`shop."`+name+`"`)); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+		})
+		if got, age, err := run(sqlsandbox.Session{}, join(`shop."`+name+`"`)); err != nil || got != "paid/paid" || !age.Tailed {
+			t.Fatalf("shop.%q named exactly: %q, read with its changes %v, %v", name, got, age.Tailed, err)
+		}
+	}
+
+	spellings := []string{
+		// 1. A letter outside ASCII, in another case, bare.
+		"caf\u00e9", "CAF\u00c9", "Caf\u00c9",
+		// 2. The same in quotes, in backticks, and with the accent as a
+		// code point of its own.
+		`"caf\u00e9"`, `"CAF\u00c9"`, "`caf\u00e9`", "`CAF\u00c9`", "cafe\u0301", `"cafe\u0301"`, "CAFE\u0301",
+		// 3. ASCII, every quoting, mixed case.
+		"orders", "ORDERS", "oRdErS", `"Orders"`, `"ORDERS"`, `"orders"`, "`Orders`", "`orders`", "[orders]", "[Orders]",
+		// 4. A space or a quote inside the quotes.
+		`"Orders "`, `" Orders"`, `"orders "`, `"Or""ders"`, `"Orders"""`,
+		// A view whose name has a letter that folds into ASCII, named by
+		// the ASCII letter: plain names, which the match here does not take
+		// for the view.
+		"kelvin", "KELVIN", "Kelvin", `"kelvin"`, "stats", "STATS", "Stats", `"STATS"`,
+		// And each named as it is.
+		"\u212aelvin", "\u017ftats",
+	}
+	for _, sess := range []struct {
+		name string
+		s    sqlsandbox.Session
+	}{{"a MySQL session", sqlsandbox.Session{}}, {"a MySQL session that routes", sqlsandbox.Session{StrictStar: true}}, {"PostgreSQL's rules", sqlsandbox.Session{PostgresRules: true, PostgresNames: true}}} {
+		for _, sp := range spellings {
+			got, age, err := run(sess.s, join(sp))
+			switch {
+			case err != nil:
+				t.Logf("%s, %s: not answered", sess.name, sp)
+			case got == "paid/paid" && age.Tailed:
+				t.Logf("%s, %s: both tables with their changes", sess.name, sp)
+			case got == "new/new" && !age.Tailed:
+				t.Logf("%s, %s: the snapshot, and the run says so", sess.name, sp)
+			default:
+				t.Errorf("%s, %s: answered %q, and the run says every table was read with its changes: %v", sess.name, sp, got, age.Tailed)
+			}
 		}
 	}
 }

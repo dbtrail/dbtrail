@@ -18,7 +18,7 @@ func TestSQLTailTables(t *testing.T) {
 		return views.BaselineTable{Schema: schema, Table: name, Path: "/c/" + schema + "/" + name + ".parquet"}
 	}
 	in := views.Input{Baselines: []views.BaselineTable{
-		table("shop", "orders"), table("shop", "customers"), table("shop", "items"), table("crm", "orders"),
+		table("shop", "orders"), table("shop", "customers"), table("shop", "items"), table("crm", "orders"), table("shop", "café"),
 	}}
 	ref := func(parts ...string) sqlsandbox.TableRef {
 		switch len(parts) {
@@ -56,7 +56,13 @@ func TestSQLTailTables(t *testing.T) {
 		{"files by a pattern", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("/c/shop/*")}}, nil, false, false},
 		{"a file in the working directory", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("customers.parquet")}}, nil, false, false},
 		{"a name with a space", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("my block")}}, nil, false, false},
-		{"a WITH named in another alphabet", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("año_2026$")}}, []string{"shop.orders"}, true, false},
+		{"a WITH with every plain character", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("Block_2026$")}}, []string{"shop.orders"}, true, false},
+		// A letter outside ASCII is not plain: the name may be a view's in
+		// another case, which the match here (A-Z folded) does not see.
+		{"a name with a letter outside ASCII", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("año")}}, nil, false, false},
+		{"a view's name in another case, outside ASCII", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("CAFÉ")}}, nil, false, false},
+		{"the same accent as two code points", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("cafe\u0301")}}, nil, false, false},
+		{"a view with a letter outside ASCII, named as it is", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("café")}}, []string{"shop.café", "shop.orders"}, true, true},
 		{"a system table in a schema", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("information_schema", "tables")}}, nil, false, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
