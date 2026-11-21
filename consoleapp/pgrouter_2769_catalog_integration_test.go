@@ -103,7 +103,11 @@ func TestIntegrationPGRouterCatalog(t *testing.T) {
 			run := func(u string) string {
 				out, err := exec.CommandContext(ctx, psql, u, "-X", "-A", "-c", c).CombinedOutput()
 				if err != nil {
-					t.Fatalf("psql %s against %s: %v\n%s", c, u, err, out)
+					// Each psql version writes these statements its own way:
+					// which one this is, and what it sent (-E echoes it).
+					version, _ := exec.CommandContext(ctx, psql, "--version").CombinedOutput()
+					sent, _ := exec.CommandContext(ctx, psql, u, "-X", "-A", "-E", "-c", c).CombinedOutput()
+					t.Fatalf("psql %s against %s: %v\n%s\n%s\nwhat it sent:\n%s", c, u, err, out, version, sent)
 				}
 				return psqlLines(string(out))
 			}
