@@ -67,6 +67,12 @@ import (
 // the rewrite read every column of it per pass and wrote it again.
 const tableDeltaMaxAge = 24 * time.Hour
 
+// TableDeltaMaxAge is tableDeltaMaxAge for the daemon's rule about the
+// retention table deltas need (#2959): a copy updated this far apart or more
+// has every chain ended by age at the update after the one that began it,
+// whatever the index keeps, so no retention makes room for one.
+const TableDeltaMaxAge = tableDeltaMaxAge
+
 // The size rule: rewrite once the chain's files together pass
 // tableDeltaMaxFraction of the base, but never while they are under
 // tableDeltaMinCompactBytes. The floor is for small tables: a 40 KB base with a

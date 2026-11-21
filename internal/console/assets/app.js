@@ -12534,6 +12534,11 @@ function backupScheduleCard(cur, b) {
       "Could not tell whether the newest snapshot is waiting on this machine for the S3 interval: its folder could not be read in full." }));
   }
 
+  // Every update writes every table in full, and why (#2959): in every view
+  // of the card, since the cost is paid whoever is looking.
+  const deltasWarn = scheduleDeltasWarning(sch);
+  if (deltasWarn) body.append(deltasWarn);
+
   if (!canEdit) {
     // The read-only console, or a daemon with every backup feature off:
     // nothing here can change the schedule, and the state line already says
@@ -17945,6 +17950,8 @@ async function showRotationDialog() {
   else if (cur.source === "default") note.textContent = "Currently using DBTrail's built-in defaults. Saving creates a custom setting that takes effect immediately.";
   else note.textContent = "A custom setting is active and takes effect immediately.";
   form.append(note);
+  const deltasLine = rotationDeltasLine(cur);
+  if (deltasLine) form.append(deltasLine);
 
   form.append(el("p", { class: "form-hint", text: "One schedule for every monitored server; changes take effect on the next run." }));
   const msg = el("div", { class: "form-msg" });
@@ -17964,6 +17971,28 @@ async function showRotationDialog() {
   scrim.addEventListener("click", (e) => { if (e.target === scrim) closeRotationDialog(); });
   mount.replaceChildren(scrim);
   focusModal(scrim);
+}
+
+// rotationDeltasLine is what table deltas ask of the retention (#2959), as
+// the server words it: the shortest retention a save accepts, or, in red,
+// that the one in use is already below it (it got there by another door: the
+// daemon's own setting, an earlier version, a schedule made longer). Null
+// when table deltas ask nothing.
+function rotationDeltasLine(cur) {
+  const d = cur && cur.deltas;
+  if (!d || !d.note) return null;
+  return el("p", { class: d.too_short ? "form-msg err" : "form-hint", text: d.note });
+}
+
+// scheduleDeltasWarning is the same finding on a server's schedule card: the
+// index retention in use is too short for table deltas at this schedule, so
+// every update writes every table again in full. Null when there is nothing
+// to say.
+function scheduleDeltasWarning(sch) {
+  if (sch && sch.deltas_warning) return el("p", { class: "form-msg err", text: sch.deltas_warning });
+  // In grey, and asking for nothing: updates a day apart or more write every
+  // table in full on any retention.
+  return sch && sch.deltas_note ? el("p", { class: "form-hint", text: sch.deltas_note }) : null;
 }
 
 function closeRotationDialog() { document.getElementById("modal").replaceChildren(); }
