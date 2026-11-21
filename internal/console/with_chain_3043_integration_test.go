@@ -53,16 +53,31 @@ var withChainShapes = []struct {
 // checkWithChainShapes runs every shape and holds each answer to the rule:
 // the recent change is in it, or the answer carries a note. run returns the
 // rows as text and the note.
+//
+// Today (2026-11-21) these fail, on both families alike: every shape in
+// which a block's body names another block (or itself, a recursive one),
+// because the parse reports that name as a relation, it matches no view, and
+// a statement with such a name is given every view and no tail
+// (runSQLVouched: the tails step runs only when OnlyViews is not nil); and
+// the three over a table that cannot have a tail, which
+// TestIntegrationFreshOverATableThatCannotHaveATail pins as answered with
+// no note.
 func checkWithChainShapes(t *testing.T, value, table, noTail string, run func(stmt string) (rows []string, note string, err error)) {
 	bare := table[strings.LastIndex(table, ".")+1:]
 	for _, c := range withChainShapes {
 		stmt := strings.NewReplacer("{V}", value, "{T}", table, "{N}", noTail, "{t}", bare).Replace(c.stmt)
 		t.Run(c.name, func(t *testing.T) {
+			// Twice, and the second answer is the one held to the rule: a
+			// connection whose last answer read the recent changes is told
+			// once when the next one does not (snapshotAloneNote), whatever
+			// the statement, and that is not this statement saying so.
+			if _, _, err := run(stmt); err != nil {
+				t.Fatalf("%s\n\tfailed: %v", stmt, err)
+			}
 			rows, note, err := run(stmt)
 			if err != nil {
 				t.Fatalf("%s\n\tfailed: %v", stmt, err)
 			}
-			t.Logf("rows %v, note %q", rows, note)
 			if len(rows) != 1 {
 				t.Fatalf("%s\n\tanswered %v, want the table's one row", stmt, rows)
 			}
