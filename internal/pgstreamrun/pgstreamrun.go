@@ -151,8 +151,10 @@ type pgStreamState struct {
 	checkpointEvent uint64
 	stampEvent      bool
 	// skips is the capture-skip ledger (the MySQL path's #1034 counters): the
-	// capturer records each change it drops (a table not at REPLICA IDENTITY
-	// FULL) and every checkpoint persists it to stream_state.capture_skips, so
+	// capturer records each change it drops (a table whose primary key is
+	// DEFERRABLE, or whose replica identity leaves the primary key out; in an
+	// index written by an earlier version, every table that was not at REPLICA
+	// IDENTITY FULL) and every checkpoint persists it to stream_state.capture_skips, so
 	// `status` reports degraded capture and names the table. Seeded from the
 	// persisted document at start. nil writes NULL, which the save keeps as
 	// whatever is there.
@@ -307,7 +309,7 @@ func One(ctx context.Context, cfg Config) error {
 	// The health probe reads slot/RI state on its own short-lived catalog connection
 	// (connect-per-poll), independent of the capturer's replication and query conns.
 	probe := func(c context.Context) (pgcapture.HealthSnapshot, error) {
-		return pgcapture.ProbeHealth(c, cfg.QueryDSN, cfg.SlotName, cfg.Publication)
+		return pgcapture.ProbeHealth(c, cfg.QueryDSN, cfg.SlotName, cfg.Publication, cliutil.BuildIndexFilters(cfg.Schemas, cfg.Tables))
 	}
 	loopErr := streamLoopPG(ctx, events, idx, indexDB, cap, checkpointInterval, probe, healthPollInterval, state, logger, cfg.Hooks)
 	cancel() // loop exited first → unblock the capturer's emit/receive so it returns
@@ -393,7 +395,11 @@ type sourceHealthJSON struct {
 	RestartLSN             string   `json:"restart_lsn"`
 	ConfirmedFlushLSN      string   `json:"confirmed_flush_lsn"`
 	ReplicaIdentityNotFull []string `json:"replica_identity_not_full"`
-	CheckedAt              string   `json:"checked_at"`
+	// NotCaptured lists the tables whose changes capture does not take, each
+	// with why (pgcapture.HealthSnapshot.NotCaptured). The page shows them in
+	// red, and shows "all FULL" only when both lists are empty.
+	NotCaptured []string `json:"not_captured"`
+	CheckedAt   string   `json:"checked_at"`
 	// ProbeError, when set, means this snapshot records a FAILED probe rather than a
 	// reading — the slot fields are absent/zero. Persisted so the console shows an
 	// explicit "probe failing" state instead of a blank panel (see buildProbeErrorJSON).
@@ -505,6 +511,7 @@ func buildSourceHealthJSON(snap pgcapture.HealthSnapshot, checkedAt time.Time) (
 		RestartLSN:             snap.Slot.RestartLSN.String(),
 		ConfirmedFlushLSN:      snap.Slot.ConfirmedFlushLSN.String(),
 		ReplicaIdentityNotFull: snap.ReplicaIdentityNotFull,
+		NotCaptured:            snap.NotCaptured,
 		CheckedAt:              checkedAt.UTC().Format(time.RFC3339),
 	}
 	if snap.Slot.SafeWalSize.Valid {
@@ -513,6 +520,9 @@ func buildSourceHealthJSON(snap pgcapture.HealthSnapshot, checkedAt time.Time) (
 	}
 	if h.ReplicaIdentityNotFull == nil {
 		h.ReplicaIdentityNotFull = []string{} // marshal as [] not null — a cleaner contract for the frontend
+	}
+	if h.NotCaptured == nil {
+		h.NotCaptured = []string{}
 	}
 	return json.Marshal(h)
 }
@@ -528,6 +538,7 @@ func buildSourceHealthJSON(snap pgcapture.HealthSnapshot, checkedAt time.Time) (
 func buildProbeErrorJSON(probeErr string, checkedAt time.Time) ([]byte, error) {
 	return json.Marshal(sourceHealthJSON{
 		ReplicaIdentityNotFull: []string{},
+		NotCaptured:            []string{},
 		CheckedAt:              checkedAt.UTC().Format(time.RFC3339),
 		ProbeError:             probeErr,
 	})

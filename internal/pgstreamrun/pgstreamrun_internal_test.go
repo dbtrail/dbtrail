@@ -30,6 +30,7 @@ func TestBuildSourceHealthJSON(t *testing.T) {
 			SafeWalSize: sql.NullInt64{}, // invalid → null
 		},
 		ReplicaIdentityNotFull: []string{"app.t1 (relreplident=d)"},
+		NotCaptured:            []string{"app.t2 (primary key DEFERRABLE)"},
 	}
 	var got map[string]any
 	if b, err := buildSourceHealthJSON(snap, checkedAt); err != nil {
@@ -63,6 +64,9 @@ func TestBuildSourceHealthJSON(t *testing.T) {
 	if nf, _ := got["replica_identity_not_full"].([]any); len(nf) != 1 || nf[0] != "app.t1 (relreplident=d)" {
 		t.Errorf("replica_identity_not_full = %v", got["replica_identity_not_full"])
 	}
+	if nc, _ := got["not_captured"].([]any); len(nc) != 1 || nc[0] != "app.t2 (primary key DEFERRABLE)" {
+		t.Errorf("not_captured = %v", got["not_captured"])
+	}
 
 	// Valid SafeWalSize → a number; empty not-full → [] (a non-nil slice), never null.
 	snap2 := pgcapture.HealthSnapshot{
@@ -80,6 +84,9 @@ func TestBuildSourceHealthJSON(t *testing.T) {
 	}
 	if nf, ok := got2["replica_identity_not_full"].([]any); !ok || nf == nil {
 		t.Errorf("empty replica_identity_not_full must marshal as [], got %v", got2["replica_identity_not_full"])
+	}
+	if nc, ok := got2["not_captured"].([]any); !ok || nc == nil {
+		t.Errorf("empty not_captured must marshal as [], got %v", got2["not_captured"])
 	}
 }
 

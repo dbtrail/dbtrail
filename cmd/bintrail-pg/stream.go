@@ -38,12 +38,37 @@ Prerequisites on the source (validated at startup, fails loud otherwise):
   - wal_level = logical
   - a PUBLICATION covering the tables you want indexed (--publication)
 
-Every replicated table must also be at REPLICA IDENTITY FULL (so the WAL carries
-the full before-image and de-TOASTed unchanged values; without it recovery would
-lose columns). A table that is not, at startup or added later, does not stop the
-stream: its changes are skipped, the log names it with the ALTER TABLE to run,
-and 'status' reports capture as degraded under replica_identity_not_full. After
-the ALTER TABLE, capture of the table resumes by itself.
+REPLICA IDENTITY FULL is optional, and needed only for undo. A table without it
+is captured and everything else works on it (history, the copy, snapshots);
+PostgreSQL sends only the key of the row an UPDATE or a DELETE changed, so
+'recover' refuses those changes. The log names each such table as "without
+undo" with the ALTER TABLE that makes its later changes undoable (the table then
+writes more WAL).
+
+Some tables are NOT captured, while the others keep flowing. Their changes are
+skipped, the log names the table with the statement to run, and 'status' reports
+capture as degraded under one of these reasons:
+
+  replica_identity_index_without_primary_key
+      the table's replica identity (or that of one of its partitions) is an
+      index that leaves a primary-key column out
+  primary_key_deferrable
+      the table's primary key is DEFERRABLE; checked when capture starts and
+      each time PostgreSQL describes a table, and never a reason to refuse the
+      start: capture skips that table. 'doctor' does fail on it, and
+      'server add' and the web interface's Start run 'doctor' first, so they
+      do not add or start the server until the key is fixed
+  primary_key_not_in_description
+      capture is behind, and since the changes it is reading were written a
+      primary-key column was renamed, or the key was moved to another column.
+      No statement brings them back: they are missing from the copy until the
+      table's next full read, and from history for good
+  replica_identity_key_not_sent
+      one change (not a table) arrived without a value for a primary-key
+      column; PostgreSQL is not known to send one
+
+After the fix, capture of the table resumes by itself. The changes skipped
+before it are never recorded.
 
 The replication slot (--slot) is created on first run if absent and reused on
 restart. The durable checkpoint is the last committed LSN, persisted to

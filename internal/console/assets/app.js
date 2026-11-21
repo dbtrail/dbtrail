@@ -7146,7 +7146,7 @@ const PG_HEALTH_STALE_SEC = 90;
 
 // pgHealthCard renders the persisted PostgreSQL replication-health snapshot. h is the
 // parsed stream.source_health object {exists,active,wal_status,retained_bytes,
-// safe_wal_size,restart_lsn,confirmed_flush_lsn,replica_identity_not_full,checked_at,
+// safe_wal_size,restart_lsn,confirmed_flush_lsn,replica_identity_not_full,not_captured,checked_at,
 // probe_error}. probe_error is the failed-probe discriminator: when set, this snapshot
 // records a probe failure (the slot fields are absent) and the card shows "probe failing".
 function pgHealthCard(h) {
@@ -7176,11 +7176,28 @@ function pgHealthCard(h) {
       card.append(healthKV("consumer", el("span", { class: "kv-v", text: h.active ? "connected" : "—" })));
     }
 
+    // Tables capture does not take at all (a replica identity without the
+    // primary key, a deferrable primary key): a fault, in red, and never
+    // under a green "all FULL". A snapshot written before this list existed
+    // has none.
+    const nc = h.not_captured || [];
+    if (nc.length > 0) {
+      card.append(healthKV("capture", el("span", { class: "hstat hstat-err",
+        text: "✗ " + nc.length + (nc.length === 1 ? " table" : " tables") + " NOT captured" })));
+      card.append(el("div", { class: "hlist", text: "Their changes are skipped and counted; the other tables are recorded. The server's checks show the statement that fixes each." }));
+      const ncList = el("div", { class: "hlist" });
+      nc.forEach((t) => ncList.append(el("div", { text: t })));
+      card.append(ncList);
+    }
     const nf = h.replica_identity_not_full || [];
     if (nf.length === 0) {
-      card.append(healthKV("replica identity", el("span", { class: "hstat hstat-ok", text: "all FULL ✓" })));
+      if (nc.length === 0) card.append(healthKV("replica identity", el("span", { class: "hstat hstat-ok", text: "all FULL ✓" })));
     } else {
-      card.append(healthKV("replica identity", el("span", { class: "hstat hstat-warn", text: "⚠ " + nf.length + " not FULL" })));
+      // Not a fault: a table below REPLICA IDENTITY FULL is recorded, and only
+      // undo of its UPDATE and DELETE is refused. Amber, with what it means.
+      card.append(healthKV("replica identity", el("span", { class: "hstat hstat-warn",
+        text: "⚠ " + nf.length + (nf.length === 1 ? " table" : " tables") + " without undo" })));
+      card.append(el("div", { class: "hlist", text: "Not at REPLICA IDENTITY FULL: recorded, and everything else works. Undo of an UPDATE or a DELETE is refused; ALTER TABLE ... REPLICA IDENTITY FULL makes later changes undoable." }));
       const list = el("div", { class: "hlist" });
       nf.forEach((t) => list.append(el("div", { text: t })));
       card.append(list);
@@ -18511,12 +18528,17 @@ function buildServerForm(offered, familyLine) {
   pgHint.append(el("code", { text: "wal_level=logical" }));
   pgHint.append(", a role with the ");
   pgHint.append(el("code", { text: "REPLICATION" }));
-  pgHint.append(" attribute, a publication you create, and ");
-  pgHint.append(el("code", { text: "REPLICA IDENTITY FULL" }));
-  pgHint.append(" on replicated tables; copy and run on the source:");
+  pgHint.append(" attribute, and a publication you create; copy and run on the source:");
   mon.append(pgHint);
   mon.append(tagFlavor(el("pre", { class: "form-code", text:
-    "CREATE PUBLICATION bintrail_pub FOR ALL TABLES;\n" +
+    "CREATE PUBLICATION bintrail_pub FOR ALL TABLES;" }), "postgres"));
+  // REPLICA IDENTITY FULL is not a prerequisite: a table without it is
+  // recorded, and only undo of its UPDATE and DELETE is refused.
+  const pgUndoHint = tagFlavor(el("p", { class: "form-hint", style: "margin-top:10px" }), "postgres");
+  pgUndoHint.append(el("code", { text: "REPLICA IDENTITY FULL" }));
+  pgUndoHint.append(" is optional, only for undo: without it a table is recorded and everything else works, but its UPDATE and DELETE cannot be undone. To make a table's later changes undoable (the table then writes more WAL):");
+  mon.append(pgUndoHint);
+  mon.append(tagFlavor(el("pre", { class: "form-code", text:
     "ALTER TABLE your_table REPLICA IDENTITY FULL;" }), "postgres"));
   mon.append(el("p", { class: "form-hint", style: "margin-top:10px", text: "Archive to S3: old data is uploaded to S3 before it's deleted locally, so your history is kept and can still be searched. Needs AWS credentials set up where DBTrail runs (environment variables or an IAM role)." }));
   form.append(mon);

@@ -18,18 +18,16 @@ import (
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
-// TestCapturer_TableAddedNotFull_SkippedThenResumes is the bug this reason exists
-// for, step by step on a live PostgreSQL. Capture runs on table A (FULL); table B is
-// created at the default replica identity and added to the publication; both are
-// written. Before: Run returned "relation public.b is not at REPLICA IDENTITY FULL"
-// and stopped for every table, and after ALTER TABLE b REPLICA IDENTITY FULL a
-// restart on the same slot failed the same way forever, because PostgreSQL decodes
-// the old WAL with the replica identity B had when it was written. Now: Run keeps
-// running, A's rows before and after B's change arrive, B's change is skipped and
-// recorded; and a restart on the same slot, unacknowledged so PostgreSQL re-sends
-// that old WAL, skips B's old change again, then captures B's changes made after
-// the ALTER.
-func TestCapturer_TableAddedNotFull_SkippedThenResumes(t *testing.T) {
+// TestCapturer_TableAddedNotFull_CapturedThenWhole is the scenario the old skip
+// was written for, step by step on a live PostgreSQL, with the answer it has now.
+// Capture runs on table A (FULL); table B is created at the default replica
+// identity and added to the publication; both are written. Once, Run stopped for
+// every table; then B's changes were skipped and recorded. Now B is captured like
+// A: its INSERT whole, its UPDATE with the earlier row's key only. And after
+// ALTER TABLE b REPLICA IDENTITY FULL a restart on the same slot, unacknowledged
+// so PostgreSQL re-sends the old WAL, delivers B's old changes again as they were
+// made (below FULL) and the new ones with whole rows: exact at the boundary.
+func TestCapturer_TableAddedNotFull_CapturedThenWhole(t *testing.T) {
 	baseDSN := testutil.SkipIfNoPostgres(t)
 	ctx := context.Background()
 	const slot = "bintrail_pgcap_riadd"
@@ -84,28 +82,36 @@ func TestCapturer_TableAddedNotFull_SkippedThenResumes(t *testing.T) {
 	mustExec("ALTER PUBLICATION " + pub + " ADD TABLE " + tb)
 	mustExec("INSERT INTO " + ta + " VALUES (1, 'before')")
 	mustExec("INSERT INTO " + tb + " VALUES (1, 'not full')")
+	mustExec("UPDATE " + tb + " SET note = 'not full, updated' WHERE id = 1")
 	mustExec("INSERT INTO " + ta + " VALUES (2, 'after')")
 
+	var bUpd event.Event
 	got := collectUntil(t, events, runErr, 20*time.Second, func(seen map[string]bool) bool {
 		return seen[key(ta, event.EventInsert, "1")] && seen[key(ta, event.EventInsert, "2")]
+	}, func(ev event.Event) {
+		if ev.Table == tb && ev.EventType == event.EventUpdate {
+			bUpd = ev
+		}
 	})
-	if got[key(tb, event.EventInsert, "1")] {
-		t.Fatal("B's change made below FULL was emitted")
+	if !got[key(tb, event.EventInsert, "1")] || !got[key(tb, event.EventUpdate, "1")] {
+		t.Fatalf("B's changes made below FULL must be captured; rows seen: %v", got)
+	}
+	if bUpd.RowBefore["id"] != "1" || !event.IsNotCapturedMarker(bUpd.RowBefore["note"]) || bUpd.RowAfter["note"] != "not full, updated" {
+		t.Errorf("B's UPDATE below FULL: before must hold the key and the not-captured marker, after the new row: before=%v after=%v", bUpd.RowBefore, bUpd.RowAfter)
 	}
 	assertRunning(t, runErr)
-	if n := skips.Count(pgcapture.SkipReplicaIdentityNotFull); n != 1 {
-		t.Fatalf("want 1 recorded skip for B's change, got %d", n)
+	if n := skips.Total(); n != 0 {
+		t.Fatalf("nothing is skipped for a table below FULL, got %d recorded skips", n)
 	}
-	assertLedgerNames(t, skips, "public."+tb)
 
 	// Stop WITHOUT acknowledging anything: the slot keeps the old WAL, so the
-	// restart below receives B's below-FULL change again.
+	// restart below receives B's below-FULL changes again.
 	cancel()
 	if err := <-runErr; err != nil {
 		t.Fatalf("Run returned non-nil on graceful cancel: %v", err)
 	}
 
-	// ── fix B, write, restart on the same slot ──
+	// ── B to FULL, write, restart on the same slot ──
 	mustExec("ALTER TABLE " + tb + " REPLICA IDENTITY FULL")
 	mustExec("INSERT INTO " + tb + " VALUES (2, 'full')")
 	mustExec("UPDATE " + tb + " SET note = 'full, updated' WHERE id = 2")
@@ -113,23 +119,29 @@ func TestCapturer_TableAddedNotFull_SkippedThenResumes(t *testing.T) {
 
 	events, runErr, cancel = start(true)
 	defer cancel()
-	var upd event.Event
+	var upd, oldUpd event.Event
 	got = collectUntil(t, events, runErr, 20*time.Second, func(seen map[string]bool) bool {
 		return seen[key(tb, event.EventInsert, "2")] && seen[key(tb, event.EventUpdate, "2")] && seen[key(ta, event.EventInsert, "3")]
 	}, func(ev event.Event) {
 		if ev.Table == tb && ev.EventType == event.EventUpdate {
-			upd = ev
+			if ev.PKValues == "2" {
+				upd = ev
+			} else {
+				oldUpd = ev
+			}
 		}
 	})
-	if got[key(tb, event.EventInsert, "1")] {
-		t.Fatal("B's old change, re-sent from the WAL written below FULL, was emitted")
+	// PostgreSQL decodes the old WAL with the identity B had when it was
+	// written: the change comes again exactly as it came the first time.
+	if !got[key(tb, event.EventUpdate, "1")] || !event.IsNotCapturedMarker(oldUpd.RowBefore["note"]) {
+		t.Errorf("B's old UPDATE, re-sent from the WAL written below FULL, must come again with its key-only earlier row: seen=%v before=%v", got, oldUpd.RowBefore)
 	}
 	if upd.RowBefore["note"] != "full" || upd.RowAfter["note"] != "full, updated" {
-		t.Errorf("B's UPDATE after the fix must carry full images: before=%v after=%v", upd.RowBefore, upd.RowAfter)
+		t.Errorf("B's UPDATE made at FULL must carry whole images: before=%v after=%v", upd.RowBefore, upd.RowAfter)
 	}
 	assertRunning(t, runErr)
-	if n := skips.Count(pgcapture.SkipReplicaIdentityNotFull); n != 2 {
-		t.Errorf("the re-sent below-FULL change is skipped again: want 2 skips in total, got %d", n)
+	if n := skips.Total(); n != 0 {
+		t.Errorf("want no recorded skip, got %d", n)
 	}
 	cancel()
 	if err := <-runErr; err != nil {
@@ -227,8 +239,8 @@ func collectUntil(t *testing.T, ch chan event.Event, runErr chan error, timeout 
 	return seen
 }
 
-// assertLedgerNames checks the ledger's skip entry names exactly these tables.
-func assertLedgerNames(t *testing.T, c *parser.SkipCounters, tables ...string) {
+// assertLedgerNames checks the ledger's entry for reason names exactly these tables.
+func assertLedgerNames(t *testing.T, c *parser.SkipCounters, reason string, tables ...string) {
 	t.Helper()
 	raw, err := c.Snapshot()
 	if err != nil {
@@ -238,9 +250,9 @@ func assertLedgerNames(t *testing.T, c *parser.SkipCounters, tables ...string) {
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		t.Fatal(err)
 	}
-	st := m[pgcapture.SkipReplicaIdentityNotFull]
+	st := m[reason]
 	if !slices.Equal(st.Tables, tables) {
-		t.Errorf("ledger names %v, want %v (ledger %s)", st.Tables, tables, raw)
+		t.Errorf("ledger names %v under %q, want %v (ledger %s)", st.Tables, reason, tables, raw)
 	}
 	if st.LastFile == "" || st.LastPos == 0 {
 		t.Errorf("the skip is not attributed to an LSN: %s", raw)

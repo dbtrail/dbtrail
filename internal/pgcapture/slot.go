@@ -190,25 +190,32 @@ func missingPublishedOps(ins, upd, del bool) []string {
 //   - wal_level must be 'logical' (global) — logical replication is impossible
 //     otherwise. This one is fatal.
 //   - Every table in pg_publication_tables (which expands FOR ALL TABLES to the actual
-//     set PostgreSQL will stream — NOT the narrower client-side Filters) should have
-//     pg_class.relreplident = 'f' (FULL). Under any weaker identity ('d' default,
-//     'i' using-index, 'n' nothing) an unchanged out-of-line TOAST value is GONE from
-//     the before-image (proven in the spike, Part A). Those tables are RETURNED, not
-//     refused: the decoder's cacheRelation skips the changes of every relation it is
-//     handed below FULL (and records each one in the capture-skip ledger), at start
-//     and mid-stream alike, so refusing here would stop every table over one. The
-//     caller warns with the list. Only the tables filters accepts are returned: the
-//     decoder neither warns about nor counts the others, whose rows are dropped by
-//     the filter anyway.
+//     set PostgreSQL will stream — NOT the narrower client-side Filters) that is not
+//     at REPLICA IDENTITY FULL (pg_class.relreplident 'd' default, 'i' using-index,
+//     'n' nothing) is RETURNED, never refused. Such a table is captured: PostgreSQL
+//     sends at most the key of the row an UPDATE or a DELETE changed, the decoder
+//     stores that earlier row in part, and only undo needs it whole. The caller
+//     warns with the list. Only the tables filters accepts are returned: the
+//     decoder neither warns about nor captures the others.
 //
-// The report-only CheckReplicaIdentity (doctor, console preflight) still FAILS on
-// the whole publication's list: there, it is the advice to fix before capture, not
-// a stop.
-func validateReplicaIdentity(ctx context.Context, conn *pgx.Conn, publication string, filters event.Filters) (notFull []string, err error) {
+// The one table below FULL that is NOT captured, a replica identity that leaves a
+// primary-key column out (TableIdentity.MissesKey), is skipped by the decoder at each
+// description of the table (cacheRelation); here it is only named.
+func validateReplicaIdentity(ctx context.Context, conn *pgx.Conn, publication string, filters event.Filters) ([]TableIdentity, error) {
 	if err := checkWALLevel(ctx, conn); err != nil {
 		return nil, err
 	}
-	return replicaIdentityNotFullWhere(ctx, conn, publication, filters.Matches)
+	all, err := QueryTableIdentities(ctx, conn, publication)
+	if err != nil {
+		return nil, err
+	}
+	var kept []TableIdentity
+	for _, t := range all {
+		if filters.Matches(t.Schema, t.Table) {
+			kept = append(kept, t)
+		}
+	}
+	return kept, nil
 }
 
 // ErrWALLevelNotLogical marks the "wal_level is readable but not 'logical'" case (a
@@ -245,58 +252,118 @@ func checkWALLevel(ctx context.Context, conn *pgx.Conn) error {
 	return nil
 }
 
-// replicaIdentityNotFull returns the sorted "schema.table (relreplident=x)" of every
-// published table NOT at REPLICA IDENTITY FULL. It is the single catalog-query source
-// of truth shared by the capture-time validator (which warns with a non-empty list),
-// the doctor check (which fails on one) and the report-only QueryReplicaIdentityNotFull (which surfaces the list
-// for the console health panel). An empty result means every published table is FULL.
-func replicaIdentityNotFull(ctx context.Context, conn *pgx.Conn, publication string) ([]string, error) {
-	return replicaIdentityNotFullWhere(ctx, conn, publication, nil)
+// TableIdentity is one published table whose UPDATE and DELETE cannot be
+// undone, as the catalog has it now: a table that is not at REPLICA IDENTITY
+// FULL, or a partitioned one whose partitions are not all at FULL.
+type TableIdentity struct {
+	Schema, Table string
+	// Identity is pg_class.relreplident: "d" default, "i" using index, "n"
+	// nothing.
+	Identity string
+	// NoIdentity reports that PostgreSQL has no identity to send for the table:
+	// NOTHING, DEFAULT with no usable primary key, or USING INDEX on an index
+	// that is gone. PostgreSQL itself then refuses UPDATE and DELETE on the
+	// table while a publication that publishes them holds it.
+	NoIdentity bool
+	// MissesKey names the primary-key columns the identity leaves out; empty
+	// when it holds them all (always, under DEFAULT with an ordinary key). A
+	// table with any is not captured: see SkipReplicaIdentityIndexWithoutPrimaryKey.
+	MissesKey []string
+	// PartitionsBelowFull names, each quoted and schema-qualified, the
+	// partitions under a partitioned table that are not at FULL themselves.
+	// REPLICA IDENTITY is set per partition, and the old row of a change is
+	// what its partition logs, so the table's changes are undoable only when
+	// this is empty AND the table itself is at FULL. A partitioned table at
+	// FULL with any is listed for that reason alone (Identity is then "f").
+	PartitionsBelowFull []string
+	// PartitionsMissKey names, the same way, the partitions whose own replica
+	// identity is an index that leaves a primary-key column out. A
+	// partitioned table published through its root with any is not captured,
+	// as a table with such an identity is not.
+	PartitionsMissKey []string
 }
 
-// replicaIdentityNotFullWhere is replicaIdentityNotFull limited to the tables
-// keep accepts (nil: every published table).
-func replicaIdentityNotFullWhere(ctx context.Context, conn *pgx.Conn, publication string, keep func(schema, table string) bool) ([]string, error) {
-	rows, err := conn.Query(ctx, `
-		SELECT pt.schemaname, pt.tablename, c.relreplident::text
-		FROM pg_publication_tables pt
-		JOIN pg_namespace n ON n.nspname = pt.schemaname
-		JOIN pg_class c ON c.relname = pt.tablename AND c.relnamespace = n.oid
-		WHERE pt.pubname = $1`, publication)
+// Captured reports whether capture takes the table's changes, as far as its
+// replica identity says.
+func (t TableIdentity) Captured() bool {
+	return len(t.MissesKey) == 0 && len(t.PartitionsMissKey) == 0
+}
+
+// tableIdentitiesQuery lists the tables of publication $1 below REPLICA
+// IDENTITY FULL, and the partitioned ones with a partition below it (read
+// through pg_inherits, which takes no lock on any partition: see
+// partitionsQuery), with the index PostgreSQL takes their identity from: the
+// primary key under DEFAULT, the chosen index under USING INDEX, and only one
+// that is valid and not deferrable (relcache's own rule, RelationGetIndexList).
+// The identity is that index's KEY columns (not its INCLUDE columns); the
+// primary-key columns are read the way the capture reads them (pkColumnsQuery).
+const tableIdentitiesQuery = `
+	SELECT pt.schemaname, pt.tablename, c.relreplident::text,
+	       c.relreplident <> 'f' AND ri.indexrelid IS NULL,
+	       COALESCE((SELECT array_agg(a.attname::text ORDER BY a.attnum)
+	                 FROM pg_index pk
+	                 JOIN pg_attribute a ON a.attrelid = pk.indrelid AND a.attnum = ANY(pk.indkey)
+	                 WHERE pk.indrelid = c.oid AND pk.indisprimary AND ri.indexrelid IS NOT NULL
+	                   AND NOT EXISTS (SELECT 1 FROM unnest(ri.indkey::int2[]) WITH ORDINALITY AS k(att, ord)
+	                                   WHERE k.ord <= ri.indnkeyatts AND k.att = a.attnum)), '{}')::text[],
+	       parts.below, parts.misses
+	FROM pg_publication_tables pt
+	JOIN pg_namespace n ON n.nspname = pt.schemaname
+	JOIN pg_class c ON c.relname = pt.tablename AND c.relnamespace = n.oid
+	LEFT JOIN pg_index ri ON ri.indrelid = c.oid AND ri.indisvalid AND ri.indimmediate
+	     AND ((c.relreplident = 'd' AND ri.indisprimary) OR (c.relreplident = 'i' AND ri.indisreplident))
+	CROSS JOIN LATERAL (
+	     WITH RECURSIVE tree AS (
+	          SELECT c.oid AS oid, c.relkind AS relkind, c.relreplident AS ident
+	          UNION ALL
+	          SELECT ch.oid, ch.relkind, ch.relreplident
+	          FROM tree t
+	          JOIN pg_inherits i ON i.inhparent = t.oid
+	          JOIN pg_class ch ON ch.oid = i.inhrelid
+	          WHERE t.relkind = 'p'
+	     ), leaves AS (
+	          SELECT t.oid, t.ident,
+	                 '"' || replace(ln.nspname, '"', '""') || '"."' || replace(lc.relname, '"', '""') || '"' AS quoted
+	          FROM tree t
+	          JOIN pg_class lc ON lc.oid = t.oid
+	          JOIN pg_namespace ln ON ln.oid = lc.relnamespace
+	          WHERE t.relkind <> 'p' AND t.oid <> c.oid
+	     )
+	     SELECT COALESCE((SELECT array_agg(l.quoted ORDER BY l.quoted) FROM leaves l WHERE l.ident <> 'f'), '{}')::text[] AS below,
+	            COALESCE((SELECT array_agg(l.quoted ORDER BY l.quoted)
+	                      FROM leaves l
+	                      JOIN pg_index lri ON lri.indrelid = l.oid AND lri.indisreplident AND lri.indisvalid AND lri.indimmediate
+	                      WHERE l.ident = 'i'
+	                        AND EXISTS (SELECT 1 FROM pg_index lpk, unnest(lpk.indkey::int2[]) AS a(att)
+	                                    WHERE lpk.indrelid = l.oid AND lpk.indisprimary AND a.att > 0
+	                                      AND NOT EXISTS (SELECT 1 FROM unnest(lri.indkey::int2[]) WITH ORDINALITY AS k(att, ord)
+	                                                      WHERE k.ord <= lri.indnkeyatts AND k.att = a.att))), '{}')::text[] AS misses
+	) parts
+	WHERE pt.pubname = $1 AND (c.relreplident <> 'f' OR cardinality(parts.below) > 0)
+	ORDER BY 1, 2`
+
+// QueryTableIdentities returns the published tables that are not at REPLICA
+// IDENTITY FULL, with what the doctor and the capture's startup warnings say
+// about each; empty when every table is at FULL. Report-only: capture decides
+// from what PostgreSQL sends (cacheRelation), which is the same rule.
+func QueryTableIdentities(ctx context.Context, conn *pgx.Conn, publication string) ([]TableIdentity, error) {
+	rows, err := conn.Query(ctx, tableIdentitiesQuery, publication)
 	if err != nil {
 		return nil, fmt.Errorf("pgcapture: checking replica identity for publication %q: %w", publication, err)
 	}
 	defer rows.Close()
-
-	var notFull []string
+	var out []TableIdentity
 	for rows.Next() {
-		var schema, table, relreplident string
-		if err := rows.Scan(&schema, &table, &relreplident); err != nil {
+		var t TableIdentity
+		if err := rows.Scan(&t.Schema, &t.Table, &t.Identity, &t.NoIdentity, &t.MissesKey, &t.PartitionsBelowFull, &t.PartitionsMissKey); err != nil {
 			return nil, fmt.Errorf("pgcapture: scanning replica identity for publication %q: %w", publication, err)
 		}
-		if relreplident != "f" && (keep == nil || keep(schema, table)) {
-			notFull = append(notFull, fmt.Sprintf("%s.%s (relreplident=%s)", schema, table, relreplident))
-		}
+		out = append(out, t)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("pgcapture: checking replica identity for publication %q: %w", publication, err)
 	}
-	sort.Strings(notFull)
-	return notFull, nil
-}
-
-// checkReplicaIdentityTables verifies every table the publication streams is at
-// REPLICA IDENTITY FULL (the per-table loop; wal_level is checked separately).
-func checkReplicaIdentityTables(ctx context.Context, conn *pgx.Conn, publication string) error {
-	notFull, err := replicaIdentityNotFull(ctx, conn, publication)
-	if err != nil {
-		return err
-	}
-	if len(notFull) > 0 {
-		return fmt.Errorf("pgcapture: table(s) not at REPLICA IDENTITY FULL [%s] — before-images would be partial (an unchanged out-of-line TOAST value is lost under a weaker identity, so recovery would be wrong); run ALTER TABLE <t> REPLICA IDENTITY FULL",
-			strings.Join(notFull, ", "))
-	}
-	return nil
+	return out, nil
 }
 
 // The exported Check* functions are the report-only form of the capture-time
@@ -313,21 +380,6 @@ func CheckWALLevel(ctx context.Context, conn *pgx.Conn) error {
 // CheckPublication verifies the publication exists and covers the requested tables.
 func CheckPublication(ctx context.Context, conn *pgx.Conn, publication string, filters event.Filters) error {
 	return validatePublication(ctx, conn, publication, filters)
-}
-
-// CheckReplicaIdentity verifies every table the publication streams is at REPLICA
-// IDENTITY FULL. It does NOT re-check wal_level (use CheckWALLevel for that), so the
-// doctor can report the two distinctly.
-func CheckReplicaIdentity(ctx context.Context, conn *pgx.Conn, publication string) error {
-	return checkReplicaIdentityTables(ctx, conn, publication)
-}
-
-// QueryReplicaIdentityNotFull is the report-only sibling of CheckReplicaIdentity: it
-// returns the published tables NOT at REPLICA IDENTITY FULL (empty = all FULL) instead
-// of folding them into a fatal error. The streaming daemon polls it for the console
-// health panel (#599) — a coverage signal the operator reads, not a startup gate.
-func QueryReplicaIdentityNotFull(ctx context.Context, conn *pgx.Conn, publication string) ([]string, error) {
-	return replicaIdentityNotFull(ctx, conn, publication)
 }
 
 // listUnloggedCaptureTables returns the "schema.table" of every UNLOGGED base table in
@@ -483,8 +535,8 @@ type CascadeChild struct {
 //
 // A FOR ALL TABLES publication covers every child by construction, so this finds
 // nothing there; the gap is an explicit FOR TABLE publication that lists a parent but
-// forgets its cascade child. A PUBLISHED child is already forced to RI FULL by
-// checkReplicaIdentityTables, so only the not-published case needs surfacing here.
+// forgets its cascade child. A PUBLISHED child is captured whatever its replica
+// identity, so only the not-published case needs surfacing here.
 //
 // Residual (documented, not covered here): a row that was deleted-by-cascade but never
 // existed in our captured history (it predates capture) is recoverable only from a
@@ -763,4 +815,32 @@ func queryScopedSlotState(ctx context.Context, conn *pgx.Conn, slotName string) 
 		return false, "", fmt.Errorf("pgcapture: replication slot %q exists but is not a pgoutput logical slot on database %q (slot_type=%q, plugin=%q, database=%q) — it cannot anchor this source; use a different --slot name or remove the conflicting slot", slotName, curDB, slotType, plugin, database)
 	}
 	return true, walStatus, nil
+}
+
+// Name is the table as "schema.table (relreplident=x)", the form the health
+// panel's list uses, with how many of its partitions are below FULL when
+// some are.
+func (t TableIdentity) Name() string {
+	if n := len(t.PartitionsBelowFull); n > 0 {
+		return fmt.Sprintf("%s.%s (relreplident=%s, %d partition(s) not FULL)", t.Schema, t.Table, t.Identity, n)
+	}
+	return fmt.Sprintf("%s.%s (relreplident=%s)", t.Schema, t.Table, t.Identity)
+}
+
+// SplitTableIdentities sorts the tables below REPLICA IDENTITY FULL by what
+// it means for each: captured without undo; not captured because the
+// identity leaves the primary key out; and with no identity at all, where
+// PostgreSQL itself refuses UPDATE and DELETE. A table is in one list only.
+func SplitTableIdentities(all []TableIdentity) (withoutUndo, missesKey, noIdentity []TableIdentity) {
+	for _, t := range all {
+		switch {
+		case t.NoIdentity:
+			noIdentity = append(noIdentity, t)
+		case !t.Captured():
+			missesKey = append(missesKey, t)
+		default:
+			withoutUndo = append(withoutUndo, t)
+		}
+	}
+	return withoutUndo, missesKey, noIdentity
 }

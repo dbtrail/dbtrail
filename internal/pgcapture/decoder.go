@@ -17,8 +17,9 @@ import (
 
 // UnchangedToastKey is the single key of the structurally-distinct marker the
 // decoder emits for an unchanged-TOAST value ('u') that could NOT be resolved from
-// the before-image. The canonical constant and its full rationale (why a one-key
-// map, the RI-FULL never-persisted invariant, the #533 forward constraint) live in
+// the before-image: always under a partly captured earlier row (a table below
+// REPLICA IDENTITY FULL), never under a whole one. The canonical constant and its
+// full rationale (why a one-key map, the #533 forward constraint) live in
 // the source-neutral internal/event package: the read side — recovery, reconstruct,
 // the shim — must detect a residual marker and fail loud (#592), and the #528
 // depguard bans those packages from linking pgcapture. Aliased here so the decoder
@@ -60,17 +61,110 @@ type Decoder struct {
 	timescaleWarned bool
 
 	// skips is the capture-skip ledger (WithSkipCounters): every dropped change of
-	// a relation not at REPLICA IDENTITY FULL is recorded there, and every emitted
-	// row breaks the consecutive-skip run. nil records nothing (all methods are
-	// nil-safe).
+	// a skipped relation (relationInfo.skipped) is recorded there under the
+	// relation's reason, and every emitted row breaks the consecutive-skip run.
+	// nil records nothing (all methods are nil-safe).
 	skips *parser.SkipCounters
+
+	// deferrable, when set (WithDeferrableResolver), says whether a relation's
+	// primary key is declared DEFERRABLE, asked each time PostgreSQL describes
+	// the relation. nil = not asked (the check at capture start is then the
+	// only one).
+	deferrable DeferrableResolver
+
+	// partitions, when set (WithPartitionsResolver), says what the catalog
+	// knows of a relation's partitions, asked at every description whatever
+	// its identity: their old tuples arrive labeled by the root's identity
+	// whatever they hold (judgePartitions). nil = not asked.
+	partitions PartitionsResolver
+
+	// now dates a failed read of a relation's partitions. time.Now outside
+	// tests.
+	now func() time.Time
+	// partsDownUntil is until when NO relation's partitions are read, after a
+	// read that failed: one wait for every table, so a catalog that hangs
+	// costs one attempt a minute and not one per table (each attempt runs in
+	// the loop that also tells the server the stream is alive).
+	partsDownUntil time.Time
+	// partsFailures counts the failed reads in a row, for a warning given at
+	// the first and then every partitionsWarnEvery-th.
+	partsFailures int
 }
 
-// SkipReplicaIdentityNotFull is the capture-skip reason (parser.SkipCounters,
-// persisted in stream_state.capture_skips) for a row change dropped because its
-// table was not at REPLICA IDENTITY FULL when PostgreSQL decoded it. A stable
-// string: `status` shows it verbatim, and renaming it would split its history.
-const SkipReplicaIdentityNotFull = "replica_identity_not_full"
+// partitionsRetryAfter is how long after a failed read of a relation's
+// partitions any such read is tried again.
+const partitionsRetryAfter = time.Minute
+
+// partitionsWarnEvery spaces the warning of a read of the partitions that
+// keeps failing: the first failure, then every tenth.
+const partitionsWarnEvery = 10
+
+// keyNotSentWarnEvery spaces the warning of changes dropped under
+// SkipReplicaIdentityKeyNotSent, per table: the first, then every thousandth.
+// Each one is counted in the ledger all the same.
+const keyNotSentWarnEvery = 1000
+
+// The capture-skip reasons (parser.SkipCounters, persisted in
+// stream_state.capture_skips). Stable strings: `status` shows them verbatim, and
+// renaming one would split its history.
+const (
+	// SkipReplicaIdentityNotFull is the reason earlier versions recorded for
+	// every change of a table that was not at REPLICA IDENTITY FULL, which they
+	// dropped. Such a table is captured now (its earlier rows in part), so
+	// nothing records this reason any more. It stays for the entries an index
+	// already holds: those changes are still missing, and the readers of the
+	// ledger still send their tables to a full read.
+	SkipReplicaIdentityNotFull = "replica_identity_not_full"
+
+	// SkipReplicaIdentityIndexWithoutPrimaryKey is recorded for a change of a
+	// table whose replica identity does not hold every primary-key column: in
+	// practice REPLICA IDENTITY USING INDEX on an index that leaves a
+	// primary-key column out. PostgreSQL then sends no earlier row at all for an
+	// UPDATE that changes the primary key, and an earlier row without the
+	// primary key for a DELETE, so the change cannot be filed under the row it
+	// changed. The table's changes are dropped until it is described again
+	// with an identity that holds the key (DEFAULT, FULL, or a wider index).
+	SkipReplicaIdentityIndexWithoutPrimaryKey = "replica_identity_index_without_primary_key"
+
+	// SkipDeferrablePrimaryKey is recorded for a change of a table whose primary
+	// key the catalog said was DEFERRABLE when PostgreSQL described the table
+	// (deferrable.go: inside a transaction two rows can then hold one key, and
+	// the copy is kept by key).
+	SkipDeferrablePrimaryKey = "primary_key_deferrable"
+
+	// SkipReplicaIdentityKeyNotSent is recorded for ONE change whose earlier
+	// row, captured in part, came without a usable value for a primary-key
+	// column. PostgreSQL is not known to send such a change (the identity
+	// columns of a key-only old row are never NULL and never left out); should
+	// one arrive, it is dropped and counted, never stored under a made-up key
+	// and never the end of the stream.
+	SkipReplicaIdentityKeyNotSent = "replica_identity_key_not_sent"
+
+	// SkipPrimaryKeyNotInDescription is recorded for a change of a table whose
+	// primary key, as the catalog has it now, names a column that PostgreSQL's
+	// description of the table does not hold: capture is behind, and since
+	// these changes were written a primary-key column was renamed (the common
+	// case), or the key was moved to a column added later. No statement brings
+	// them back: the description that follows the change holds the column, and
+	// the table is captured again from there. The changes skipped before it
+	// are missing from the copy until its next full read, and from history for
+	// good.
+	SkipPrimaryKeyNotInDescription = "primary_key_not_in_description"
+)
+
+// WithPartitionsResolver wires the catalog-backed read of a relation's
+// partitions, asked on every description of a relation. The capturer passes
+// it.
+func WithPartitionsResolver(r PartitionsResolver) DecoderOption {
+	return func(d *Decoder) { d.partitions = r }
+}
+
+// WithDeferrableResolver wires the catalog-backed check of a deferrable primary
+// key, asked on every description of a relation. The capturer passes it; tests
+// that do not exercise it leave it out.
+func WithDeferrableResolver(r DeferrableResolver) DecoderOption {
+	return func(d *Decoder) { d.deferrable = r }
+}
 
 // WithSkipCounters wires the capture-skip ledger the decoder records into. The
 // capturer passes Config.Skips; tests pass their own.
@@ -122,6 +216,7 @@ func NewDecoder(resolvePK PKResolver, filters event.Filters, logger *slog.Logger
 		filters:   filters,
 		logger:    logger,
 		relations: make(map[uint32]*relationInfo),
+		now:       time.Now,
 	}
 	for _, opt := range opts {
 		opt(d)
@@ -154,10 +249,11 @@ func (d *Decoder) Decode(msg pglogrepl.Message) (event.Event, bool, error) {
 		if err := d.cacheRelation(m); err != nil {
 			return event.Event{}, false, err
 		}
-		// A relation below REPLICA IDENTITY FULL is cached as skipped and produces
-		// nothing: no schema snapshot (no row will reference it) and no DDL
-		// inference (the FULL description that resumes it is then its first
-		// observed shape, the same as a table entering capture).
+		// A skipped relation (a deferrable primary key, or a replica identity
+		// without the primary key) produces nothing: no schema snapshot (no row
+		// will reference it) and no DDL inference (the description that resumes
+		// it is then its first observed shape, the same as a table entering
+		// capture).
 		if d.relations[m.RelationID].skipped {
 			return event.Event{}, false, nil
 		}
@@ -281,52 +377,51 @@ func (d *Decoder) cacheRelation(m *pglogrepl.RelationMessage) error {
 	// index changes under _timescaledb_internal._hyper_* rather than the logical
 	// hypertable (a decode-granularity mismatch). We do NOT silently skip them, but the
 	// operator MUST know the captured target is the chunk, not the parent table — warn
-	// once, before the RI check below so the signal survives even if the chunk is not at
-	// FULL. This is BEFORE the cache write: the warning is about target identity, not a
-	// reason to stop.
+	// once, before the checks below so the signal survives a chunk that ends up
+	// skipped. This is BEFORE the cache write: the warning is about target identity,
+	// not a reason to stop.
 	if !d.timescaleWarned && isTimescaleChunk(m.Namespace, m.RelationName) {
 		d.logger.Warn("pgcapture: TimescaleDB hypertable chunk detected — bintrail indexes raw chunk relations under _timescaledb_internal, NOT the logical hypertable; TimescaleDB is out of scope (decode-granularity mismatch)",
 			"schema", m.Namespace, "table", m.RelationName)
 		d.timescaleWarned = true
 	}
 
-	// REPLICA IDENTITY FULL at the LIVE boundary, not just startup: a table added to
-	// the publication after Run started (or any mid-stream new relation) arrives here
-	// as a fresh RelationMessage at PostgreSQL's default identity ('d'). Without FULL
-	// the before-image is partial — an unchanged out-of-line TOAST value is gone — so
-	// its rows are never indexed (their recovery WHERE would carry the unchanged-TOAST
-	// marker and match nothing). 'f' = FULL; 'd' default, 'i' using-index, 'n' nothing.
-	//
-	// The table is SKIPPED, not fatal. Failing the stream here stopped capture of
-	// EVERY table, and for good: PostgreSQL decodes the WAL with the catalog as it was
-	// when the change was written, so the slot re-sends the same 'd' description on
-	// every restart, even after the ALTER. The MySQL path does the same for a table it
-	// cannot read: drop its rows, warn, record an attributed skip in the ledger that
-	// `status` reports as degraded capture. After ALTER TABLE ... REPLICA IDENTITY
-	// FULL, PostgreSQL describes the relation again at 'f' (cache invalidation), which
-	// lands below as a normal entry: capture of the table resumes by itself.
-	if m.ReplicaIdentity != 'f' {
-		d.relations[m.RelationID] = &relationInfo{
-			oid:             m.RelationID,
-			schema:          m.Namespace,
-			table:           m.RelationName,
-			skipped:         true,
-			replicaIdentity: m.ReplicaIdentity,
+	inScope := d.filters.Matches(m.Namespace, m.RelationName)
+
+	// A primary key declared DEFERRABLE, asked of the catalog at every
+	// description of the relation and not only when capture starts: a table
+	// that joins the publication, or whose key is rebuilt as deferrable while
+	// capture runs, is described before its next change. The table is SKIPPED
+	// under a reason of its own; every other table keeps flowing. What this
+	// reads is the catalog as it is now, which is all that can be asked: a
+	// change PostgreSQL does not describe the relation again for is seen when
+	// the next run describes the relation, before its first change. (Nothing
+	// refuses the start over such a key: CheckDeferrableKeys is the doctor's.)
+	if d.deferrable != nil {
+		constraint, err := d.deferrable(m.RelationID, m.Namespace, m.RelationName)
+		if err != nil {
+			return fmt.Errorf("pgcapture: deferrable-key lookup for %s.%s (oid %d): %w",
+				m.Namespace, m.RelationName, m.RelationID, err)
 		}
-		// A table the operator filtered out is dropped anyway: no warning, and no
-		// skip is recorded for it (recordSkip is only reached for in-scope rows).
-		if d.filters.Matches(m.Namespace, m.RelationName) {
-			d.logger.Warn("pgcapture: table is not at REPLICA IDENTITY FULL; its changes are NOT captured (each one is counted as skipped in capture health) until it is, the other tables keep flowing. On PostgreSQL 18, run `bintrail-pg doctor` first: a generated column the publication does not publish makes the source refuse UPDATE and DELETE on a FULL table",
-				"table", m.Namespace+"."+m.RelationName,
-				"replica_identity", replicaIdentityName(m.ReplicaIdentity),
-				"fix", replicaIdentityFix(m.Namespace, m.RelationName))
+		if constraint != "" {
+			fix := deferrableKeyFix(m.Namespace, m.RelationName, constraint)
+			d.skipRelation(m, SkipDeferrablePrimaryKey,
+				fmt.Sprintf("primary key (constraint %s) is declared DEFERRABLE; fix: %s", pgx.Identifier{constraint}.Sanitize(), fix))
+			if inScope {
+				d.logger.Warn("pgcapture: table has a primary key declared DEFERRABLE; its changes are NOT captured (each one is counted as skipped in capture health) until the key is not deferrable, the other tables keep flowing. Inside a transaction such a key lets two rows hold the same value, and the copy is kept by key",
+					"table", m.Namespace+"."+m.RelationName,
+					"constraint", constraint,
+					"fix", fix)
+			}
+			return nil
 		}
-		return nil
 	}
 
 	cols := make([]relColumn, len(m.Columns))
+	hasIdentity := false
 	for i, c := range m.Columns {
-		cols[i] = relColumn{name: c.Name, typeOID: c.DataType, typeMod: c.TypeModifier}
+		cols[i] = relColumn{name: c.Name, typeOID: c.DataType, typeMod: c.TypeModifier, inIdentity: c.Flags&1 != 0}
+		hasIdentity = hasIdentity || cols[i].inIdentity
 	}
 
 	// Identity/generated flags (#557) — not in the RelationMessage, so a catalog
@@ -355,17 +450,36 @@ func (d *Decoder) cacheRelation(m *pglogrepl.RelationMessage) error {
 
 	// The catalog PK lookup reads the CURRENT schema on a separate connection, while
 	// the in-band column names belong to this RelationMessage. If a PK column name is
-	// absent from the relation's columns, the two have diverged (a PK-changing DDL
-	// during stream lag) — fail loud rather than build a wrong/empty PK.
+	// absent from the relation's columns, the two have diverged: capture is
+	// behind, and since these changes were written a primary-key column was
+	// renamed, or the key was moved to a column added later. A key cannot be
+	// built for them, so the TABLE is
+	// skipped under a reason of its own, and the other tables go on. It used to
+	// be an error that ended the stream, which PostgreSQL then repeated at
+	// every restart (it re-sends the same description) for every table; while
+	// only tables at FULL reached this line that was rare, and tables at
+	// DEFAULT reach it now. The description that follows the change of key
+	// replaces this entry.
 	colSet := make(map[string]bool, len(cols))
 	for _, c := range cols {
 		colSet[c.name] = true
 	}
+	var absent []string
 	for _, pk := range pkCols {
 		if !colSet[pk.Name] {
-			return fmt.Errorf("pgcapture: primary-key column %q absent from relation %s.%s columns (schema drift?)",
-				pk.Name, m.Namespace, m.RelationName)
+			absent = append(absent, pk.Name)
 		}
+	}
+	if len(absent) > 0 {
+		d.skipRelation(m, SkipPrimaryKeyNotInDescription,
+			fmt.Sprintf("primary-key column(s) %s of the catalog are not among the columns PostgreSQL described for these changes (a primary-key column was renamed, or the key was moved to another column, after they were written); they cannot be filed under a key. No statement brings them back: capture of the table resumes by itself at the changes made after the key was changed, and the changes skipped before it are missing from the copy until the table's next full read, and from history for good",
+				strings.Join(absent, ", ")))
+		if inScope {
+			d.logger.Warn("pgcapture: table's primary key is not among the columns PostgreSQL described for its changes (capture is behind, and a primary-key column was renamed, or the key was moved to another column, after they were written); these changes are NOT captured (each one is counted as skipped in capture health), the other tables keep flowing, and the table resumes by itself at the changes made after the key was changed. The skipped changes are missing from the copy until the table's next full read, and from history for good",
+				"table", m.Namespace+"."+m.RelationName,
+				"primary_key_columns_not_described", strings.Join(absent, ", "))
+		}
+		return nil
 	}
 
 	// Order PK columns by their table-column (ordinal) position. The catalog query
@@ -387,20 +501,279 @@ func (d *Decoder) cacheRelation(m *pglogrepl.RelationMessage) error {
 		})
 	}
 
-	d.relations[m.RelationID] = &relationInfo{
-		oid:     m.RelationID,
-		schema:  m.Namespace,
-		table:   m.RelationName,
-		columns: cols,
-		pkCols:  pkCols,
+	// Below REPLICA IDENTITY FULL ('d' default, 'i' using index, 'n' nothing)
+	// PostgreSQL sends, of the row as it was before an UPDATE or a DELETE, the
+	// identity columns only, or no earlier row at all. The table is captured
+	// all the same (decodeUpdate / decodeDelete store that earlier row in part,
+	// and only undo needs it whole), on one condition: the identity holds every
+	// primary-key column. Where it does not (USING INDEX on an index that leaves
+	// a primary-key column out; or a description whose key differs from the
+	// primary key the catalog has now), an UPDATE of the primary key arrives
+	// with no earlier row and a DELETE with one that lacks the key, so the
+	// change could not be filed under the row it changed, and the copy would
+	// keep a row the source no longer has. Such a table stays SKIPPED, under a
+	// reason of its own. A table with no identity at all sends INSERT and
+	// TRUNCATE only (PostgreSQL refuses the rest) and needs no key.
+	//
+	// Skipped, not fatal, for the reason the old gate was: PostgreSQL decodes
+	// the WAL with the catalog as it was when the change was written, so the
+	// slot re-sends the same description on every restart, even after the
+	// ALTER. The next description of the table replaces this entry.
+	if m.ReplicaIdentity != 'f' && hasIdentity {
+		var missing []string
+		for _, pk := range pkCols {
+			for _, c := range cols {
+				if c.name == pk.Name && !c.inIdentity {
+					missing = append(missing, pk.Name)
+				}
+			}
+		}
+		if len(missing) > 0 {
+			fix := identityWithoutKeyFix(m.Namespace, m.RelationName, m.ReplicaIdentity)
+			d.skipRelation(m, SkipReplicaIdentityIndexWithoutPrimaryKey,
+				fmt.Sprintf("replica identity %s does not hold primary-key column(s) %s; fix: %s",
+					replicaIdentityName(m.ReplicaIdentity), strings.Join(missing, ", "), fix))
+			if inScope {
+				d.logger.Warn("pgcapture: table's replica identity does not hold its primary key; its changes are NOT captured (each one is counted as skipped in capture health) until it does, the other tables keep flowing. PostgreSQL would send no earlier row for an UPDATE of the primary key, and one without the key for a DELETE",
+					"table", m.Namespace+"."+m.RelationName,
+					"replica_identity", replicaIdentityName(m.ReplicaIdentity),
+					"primary_key_columns_left_out", strings.Join(missing, ", "),
+					"fix", fix)
+			}
+			return nil
+		}
+	}
+
+	// A description at FULL flags every column, which says nothing about what
+	// a key-only tuple would hold. One can still arrive, labeled as a whole
+	// row: a partition below FULL under a root at FULL (PartitionsResolver).
+	// The columns such a tuple is trusted for are the primary key's, the
+	// identity of a partition left at DEFAULT.
+	if m.ReplicaIdentity == 'f' {
+		isPK := make(map[string]bool, len(pkCols))
+		for _, pk := range pkCols {
+			isPK[pk.Name] = true
+		}
+		for i := range cols {
+			cols[i].inIdentity = isPK[cols[i].name]
+		}
+	}
+
+	rel := &relationInfo{
+		oid:             m.RelationID,
+		schema:          m.Namespace,
+		table:           m.RelationName,
+		columns:         cols,
+		pkCols:          pkCols,
+		replicaIdentity: m.ReplicaIdentity,
+	}
+	// Changes stored while the catalog could not say what the relation's
+	// partitions are stay to be accounted for until it does (judgePartitions).
+	if prev := d.relations[m.RelationID]; prev != nil && !prev.partsRetryAt.IsZero() {
+		rel.unsureStored, rel.unsureFrom = prev.unsureStored, prev.unsureFrom
+	}
+	d.relations[m.RelationID] = rel
+	d.judgePartitions(rel)
+	if rel.skipped {
+		return nil
+	}
+	if m.ReplicaIdentity != 'f' && inScope {
+		if !hasIdentity && rel.partitioned {
+			// PostgreSQL checks the identity in the PARTITION a statement
+			// changes, not in the root it is published through.
+			keyed := "the table has no primary key, so they are stored with no key at all (the copy cannot follow them); give the table a primary key"
+			if len(pkCols) > 0 {
+				keyed = "they are captured under the table's primary key, which every partition that accepts them sends"
+			}
+			d.logger.Warn("pgcapture: partitioned table whose root has no replica identity (NOTHING, or DEFAULT without a primary key), published through that root. PostgreSQL checks the replica identity in each partition, so the UPDATE and DELETE made in a partition that has one are accepted and arrive; "+keyed+". Undo refuses them. The statement in fix, run on the root and on each partition, makes later changes undoable",
+				"table", m.Namespace+"."+m.RelationName,
+				"replica_identity", replicaIdentityName(m.ReplicaIdentity),
+				"fix", replicaIdentityFix(m.Namespace, m.RelationName))
+		} else if hasIdentity {
+			d.logger.Warn("pgcapture: table without undo: not at REPLICA IDENTITY FULL. Its changes are captured and everything else works on them; undo refuses its UPDATE and DELETE. The statement in fix makes later changes undoable (the table then writes more WAL; on PostgreSQL 18 run `bintrail-pg doctor` first, a FULL table with a generated column the publication does not publish refuses UPDATE and DELETE)",
+				"table", m.Namespace+"."+m.RelationName,
+				"replica_identity", replicaIdentityName(m.ReplicaIdentity),
+				"fix", replicaIdentityFix(m.Namespace, m.RelationName))
+		} else {
+			d.logger.Warn("pgcapture: table has no replica identity (NOTHING, or DEFAULT without a primary key): PostgreSQL itself refuses UPDATE and DELETE on it while it is published, so only its INSERT and TRUNCATE are captured (a partitioned table is the exception: PostgreSQL checks each partition's identity). Give it a primary key, or run the statement in fix",
+				"table", m.Namespace+"."+m.RelationName,
+				"replica_identity", replicaIdentityName(m.ReplicaIdentity),
+				"fix", replicaIdentityFix(m.Namespace, m.RelationName))
+		}
 	}
 	return nil
+}
+
+// judgePartitions asks the catalog for rel's partitions and sets from the
+// answer how the earlier rows of rel are read (partial, byShape), or skips
+// rel. It runs at every description of the relation, whatever its identity,
+// and again after a read that failed (relationFor); nothing is remembered
+// from an earlier answer.
+//
+// THE RULE. Under a partitioned root the label of an old tuple is the root's
+// and what it holds is the partition's (PartitionsResolver). In a relation
+// that is partitioned, or that the catalog did not answer for, an old row
+// labeled whole is stored whole only when NONE of its columns arrives empty
+// ('n'); with any empty column it is stored with its key only (holdsEmpty).
+// A key-only row holds a value in the columns of the identity it was logged
+// under and nothing in any other, WHATEVER that identity was when the change
+// was made: so the rule does not depend on the catalog, which is today's while
+// capture that is behind reads changes made under an earlier one (a partition
+// put at FULL since, an identity index dropped, a primary key made narrower).
+// What it costs: a row of a partitioned table that really holds a NULL is
+// stored key-only, and undo refuses that change. NULL is never stored where
+// PostgreSQL did not send a value.
+//
+// The catalog is asked for the two things the rows cannot show:
+//   - whether the relation is partitioned. A table that is not, described at
+//     FULL, keeps every old row whole, as ever, NULLs and all;
+//   - a partition whose own identity index leaves the primary key out. The
+//     table is then SKIPPED, whatever the root's identity, as a table with
+//     such an identity is: an UPDATE of the primary key made there arrives
+//     with no earlier row, and stored from the new row it would leave the old
+//     row in the copy for good.
+//
+// A root below FULL is stored in part by its description. A partitioned root
+// whose description flags no identity column at all (NOTHING, or an identity
+// index that is gone) still receives UPDATE and DELETE: PostgreSQL checks the
+// identity in the partition. Every partition that accepts one sends the
+// primary key (one that does not skips the table, above), so the primary key
+// is taken as the identity of such a root (seen on PostgreSQL 16,
+// TestCapturer_RootAtNothing_Partitioned_Integration).
+//
+// No answer (the read failed or timed out, or the catalog no longer holds
+// the relation) is read as "may be partitioned": each old row by what it
+// holds. After a failed read no relation's partitions are read for
+// partitionsRetryAfter (Decoder.partsDownUntil).
+func (d *Decoder) judgePartitions(rel *relationInfo) {
+	full := rel.replicaIdentity == 'f'
+	rel.partial, rel.byShape, rel.partitioned, rel.partsRetryAt = !full, false, false, time.Time{}
+	if d.partitions == nil {
+		return
+	}
+	name := rel.schema + "." + rel.table
+	now := d.now()
+	if now.Before(d.partsDownUntil) {
+		// Another read failed less than partitionsRetryAfter ago.
+		rel.byShape, rel.partsRetryAt = full, d.partsDownUntil
+		return
+	}
+	parts, err := d.partitions(rel.oid, rel.schema, rel.table)
+	if err != nil {
+		d.partsDownUntil = now.Add(partitionsRetryAfter)
+		rel.byShape, rel.partsRetryAt = full, d.partsDownUntil
+		d.partsFailures++
+		if d.partsFailures%partitionsWarnEvery == 1 {
+			d.logger.Warn("pgcapture: could not read a table's partitions from the catalog; capture goes on, and no table's partitions are read for the next minute (one attempt a minute for all tables). Until the catalog answers, for each table described meanwhile: an earlier row labelled whole that holds an empty column is stored with its key only (undo refuses that change), and a partition whose own replica identity leaves the primary key out is not seen (a change of the primary key made there is stored under its new key; it is accounted for when the catalog answers). This warning is given at the first failure and then every tenth",
+				"table", name, "error", err, "failures_in_a_row", d.partsFailures)
+		}
+		return
+	}
+	if d.partsFailures > 0 {
+		d.logger.Info("pgcapture: the catalog answers again for the partitions of tables", "failures_in_a_row", d.partsFailures)
+		d.partsFailures = 0
+	}
+	unsureStored, unsureFrom := rel.unsureStored, rel.unsureFrom
+	rel.unsureStored, rel.unsureFrom = 0, 0
+	switch {
+	case !parts.Known:
+		rel.byShape = full
+		return
+	case parts.MissesKey > 0:
+		detail := fmt.Sprintf("%d partition(s) of the table have a replica identity of their own (USING INDEX) that does not hold the primary key; fix: ALTER TABLE <partition> REPLICA IDENTITY DEFAULT (or FULL) on each (`bintrail-pg doctor` lists them)", parts.MissesKey)
+		*rel = relationInfo{
+			oid:             rel.oid,
+			schema:          rel.schema,
+			table:           rel.table,
+			replicaIdentity: rel.replicaIdentity,
+			skipped:         true,
+			skipReason:      SkipReplicaIdentityIndexWithoutPrimaryKey,
+			skipDetail:      detail,
+		}
+		inScope := d.filters.Matches(rel.schema, rel.table)
+		stretch := ""
+		if unsureStored > 0 && inScope {
+			// The catalog did not answer when the table was described, and
+			// its changes were stored meanwhile. One ledger entry for that
+			// stretch: the table's copy is then brought up to date by a full
+			// read, like after any skipped change.
+			stretch = fmt.Sprintf("%d change(s) of the table were stored from %s on, while the catalog could not be read: an UPDATE of the primary key among them made in such a partition is filed under its NEW key, and the row under its old key stays in the copy until the table's next full read",
+				unsureStored, pglogrepl.LSN(unsureFrom))
+			d.recordSkip(rel, SkipReplicaIdentityIndexWithoutPrimaryKey, detail+"; "+stretch)
+		}
+		if inScope {
+			d.logger.Warn("pgcapture: a partition of the table has a replica identity of its own that does not hold the primary key; the table's changes are NOT captured (each one is counted as skipped in capture health) until it does, the other tables keep flowing. PostgreSQL would send no earlier row for an UPDATE of the primary key made in that partition. Run ALTER TABLE <partition> REPLICA IDENTITY DEFAULT (or FULL) on each such partition; `bintrail-pg doctor` lists them",
+				"table", name,
+				"partitions", parts.MissesKey,
+				"stored_before_the_catalog_answered", stretch)
+		}
+		return
+	case !parts.Partitioned:
+		return
+	}
+	rel.partitioned = true
+	if !full {
+		// See above: a root that flags no identity column.
+		flagged := false
+		for _, c := range rel.columns {
+			flagged = flagged || c.inIdentity
+		}
+		if !flagged {
+			for i := range rel.columns {
+				for _, pk := range rel.pkCols {
+					if rel.columns[i].name == pk.Name {
+						rel.columns[i].inIdentity = true
+					}
+				}
+			}
+		}
+		return
+	}
+	rel.byShape = true
+	if parts.BelowFull > 0 && d.filters.Matches(rel.schema, rel.table) {
+		d.logger.Warn("pgcapture: partitioned table with partitions without undo: it is published through its root, which is at REPLICA IDENTITY FULL, and some of its partitions are not (REPLICA IDENTITY is set per partition; ALTER TABLE on the parent does not reach them). The changes of every partition are captured and everything else works on them; undo refuses the UPDATE and DELETE made in a partition that is not at FULL. Run ALTER TABLE <partition> REPLICA IDENTITY FULL on each to make its later changes undoable",
+			"table", name,
+			"partitions_not_at_full", parts.BelowFull)
+	}
+}
+
+// skipRelation caches m as a relation whose changes are dropped and recorded
+// under reason, with detail as what the ledger shows for it.
+func (d *Decoder) skipRelation(m *pglogrepl.RelationMessage, reason, detail string) {
+	d.relations[m.RelationID] = &relationInfo{
+		oid:             m.RelationID,
+		schema:          m.Namespace,
+		table:           m.RelationName,
+		replicaIdentity: m.ReplicaIdentity,
+		skipped:         true,
+		skipReason:      reason,
+		skipDetail:      detail,
+	}
 }
 
 // replicaIdentityFix is the statement that puts a table at REPLICA IDENTITY FULL,
 // with both names quoted so a mixed-case or unusual name works as printed.
 func replicaIdentityFix(schema, table string) string {
 	return "ALTER TABLE " + pgx.Identifier{schema, table}.Sanitize() + " REPLICA IDENTITY FULL"
+}
+
+// identityWithoutKeyFix is what to run on a table whose replica identity leaves
+// a primary-key column out: the whole row, or, when the identity is an index,
+// back to the primary key. (A table already at DEFAULT is here when its
+// primary key has a column the identity does not send: FULL is its way out.)
+func identityWithoutKeyFix(schema, table string, identity uint8) string {
+	name := pgx.Identifier{schema, table}.Sanitize()
+	if identity != 'i' {
+		return "ALTER TABLE " + name + " REPLICA IDENTITY FULL"
+	}
+	return "ALTER TABLE " + name + " REPLICA IDENTITY DEFAULT (or ALTER TABLE " + name + " REPLICA IDENTITY FULL, which also makes its changes undoable)"
+}
+
+// deferrableKeyFix is what to run on a table whose primary key is deferrable.
+func deferrableKeyFix(schema, table, constraint string) string {
+	name := pgx.Identifier{schema, table}.Sanitize()
+	return "ALTER TABLE " + name + " DROP CONSTRAINT " + pgx.Identifier{constraint}.Sanitize() +
+		", ADD PRIMARY KEY (<the same columns>) (it rebuilds the key's index and locks the table while it does), or take the table out of the publication"
 }
 
 // replicaIdentityName renders a pg_class.relreplident code for a person: the code
@@ -420,18 +793,17 @@ func replicaIdentityName(code uint8) string {
 	return fmt.Sprintf("'%c' (%s)", rune(code), meaning)
 }
 
-// recordSkip records one dropped change of a skipped relation, attributed to the
+// recordSkip records one dropped change of rel under reason, attributed to the
 // table and to the transaction's commit LSN (in the shape the PostgreSQL
 // checkpoint uses: the LSN text as the file, its number as the position).
-func (d *Decoder) recordSkip(rel *relationInfo) {
+func (d *Decoder) recordSkip(rel *relationInfo, reason, detail string) {
 	lsn := d.txn.commitLSN
-	d.skips.RecordSkipAttributed(SkipReplicaIdentityNotFull, parser.SkipAttribution{
+	d.skips.RecordSkipAttributed(reason, parser.SkipAttribution{
 		File:   lsn.String(),
 		Pos:    uint64(lsn),
 		Schema: rel.schema,
 		Table:  rel.table,
-		Detail: fmt.Sprintf("replica identity %s, not FULL; fix: %s",
-			replicaIdentityName(rel.replicaIdentity), replicaIdentityFix(rel.schema, rel.table)),
+		Detail: detail,
 	})
 }
 
@@ -506,9 +878,8 @@ func (d *Decoder) decodeInsert(m *pglogrepl.InsertMessage) (event.Event, bool, e
 		return event.Event{}, false, nil
 	}
 	if rel.skipped {
-		// Before any tuple is decoded: a weaker identity's old tuple can carry the
-		// unchanged-TOAST datum, which decodeTuple refuses.
-		d.recordSkip(rel)
+		// Before any tuple is decoded: nothing of a skipped relation is read.
+		d.recordSkip(rel, rel.skipReason, rel.skipDetail)
 		return event.Event{}, false, nil
 	}
 	// INSERT carries only a new tuple, fully written — pgoutput never emits 'u' in
@@ -529,23 +900,21 @@ func (d *Decoder) decodeUpdate(m *pglogrepl.UpdateMessage) (event.Event, bool, e
 		return event.Event{}, false, nil
 	}
 	if rel.skipped {
-		// Before any tuple is decoded: a weaker identity's old tuple can carry the
-		// unchanged-TOAST datum, which decodeTuple refuses.
-		d.recordSkip(rel)
+		// Before any tuple is decoded: nothing of a skipped relation is read.
+		d.recordSkip(rel, rel.skipReason, rel.skipDetail)
 		return event.Event{}, false, nil
 	}
-	// OldTuple is the full old tuple ('O') under REPLICA IDENTITY FULL, a key-only
-	// tuple ('K') when a replica-identity column changed under a weaker identity, or
-	// absent when an UPDATE under a weaker identity (e.g. RI DEFAULT) left the
-	// replica-identity columns unchanged. Decoded as a
-	// before-image: a 'u' here fails loud (see decodeTuple) — under RI FULL it can't
-	// occur, and under a weaker identity it would mean a lost value.
-	var before map[string]any
-	if m.OldTuple != nil {
-		before, err = d.decodeTuple(rel, m.OldTuple, roleBefore, nil)
-		if err != nil {
-			return event.Event{}, false, err
-		}
+	// With no old tuple the earlier row was not sent at all: REPLICA IDENTITY
+	// FULL always sends it whole.
+	if m.OldTuple == nil || earlierRowIsPartial(rel, m.OldTupleType) || holdsEmpty(rel, m.OldTuple) {
+		return d.decodePartialUpdate(rel, m)
+	}
+	// REPLICA IDENTITY FULL: OldTuple is the whole old row ('O'). Decoded as a
+	// before-image: a 'u' here fails loud (see decodeTuple), since under FULL it
+	// cannot occur.
+	before, err := d.decodeTuple(rel, m.OldTuple, roleBefore, nil)
+	if err != nil {
+		return event.Event{}, false, err
 	}
 	// Resolve any 'u' in the new tuple from the before-image (Option B): under RI
 	// FULL the unchanged column's real value is in the (now guaranteed 'u'-free)
@@ -554,6 +923,76 @@ func (d *Decoder) decodeUpdate(m *pglogrepl.UpdateMessage) (event.Event, bool, e
 	after, err := d.decodeTuple(rel, m.NewTuple, roleAfter, before)
 	if err != nil {
 		return event.Event{}, false, err
+	}
+	return d.rowEvent(rel, event.EventUpdate, before, after), true, nil
+}
+
+// earlierRowIsPartial reports whether the old tuple of a change holds the
+// earlier row in part: the relation's earlier rows are (relationInfo.partial),
+// or PostgreSQL labels this tuple as holding the key only ('K').
+// Decided per change, so a table that goes DEFAULT, FULL, DEFAULT in mid
+// stream is exact at each boundary: every description of the relation
+// replaces its entry before the next change.
+func earlierRowIsPartial(rel *relationInfo, oldTupleType uint8) bool {
+	return rel.partial || oldTupleType == pglogrepl.UpdateMessageTupleTypeKey
+}
+
+// holdsEmpty reports whether an old tuple of a relation read row by row
+// (relationInfo.byShape: described at FULL, and partitioned or not answered
+// for by the catalog; judgePartitions) holds an empty column ('n'). Such a
+// tuple is not taken as a whole row: a key-only row, which a partition below
+// FULL logs under a root whose description says FULL (PartitionsResolver),
+// holds nothing in any column outside the identity it was logged under,
+// whatever that identity was. A tuple with a value in every column is whole.
+//
+// A key-only tuple cannot be told from a whole row that really holds a NULL,
+// so that row is stored in part too: undo refuses a change it could have
+// undone, and never writes NULL over values that were there. A table the
+// catalog says is not partitioned is never asked: its description is its own.
+func holdsEmpty(rel *relationInfo, t *pglogrepl.TupleData) bool {
+	if !rel.byShape || len(t.Columns) != len(rel.columns) {
+		return false
+	}
+	for _, col := range t.Columns {
+		if col.DataType == pglogrepl.TupleDataTypeNull {
+			return true
+		}
+	}
+	return false
+}
+
+// decodePartialUpdate is decodeUpdate for a change whose earlier row was not
+// sent whole: a table below REPLICA IDENTITY FULL.
+//
+// PostgreSQL sends the old row only when an identity column changed (or an
+// unchanged identity column is stored out of line), and then with the
+// identity columns alone ('K'). The before-image stored is partialBefore of
+// that tuple; with no old tuple at all the identity did not change, so it is
+// partialBefore of the NEW tuple: the same key, every other column not
+// captured. Either way it holds exactly the columns the after-image holds,
+// which the fold's whole-row checks rely on (reconstruct.checkPGEventMarkers,
+// splitPGKeyChange, and the dropped-column guard).
+//
+// A value the UPDATE left as it was and PostgreSQL did not send ('u') is
+// stored as the unchanged-TOAST marker, never taken from this before-image:
+// it does not hold it, and a NULL stored in its stead would be carried by
+// every reader as the row's value. The one exception is an identity column,
+// whose value the 'K' tuple carries in full.
+func (d *Decoder) decodePartialUpdate(rel *relationInfo, m *pglogrepl.UpdateMessage) (event.Event, bool, error) {
+	src := m.OldTuple
+	if src == nil {
+		src = m.NewTuple
+	}
+	before, err := d.partialBefore(rel, src)
+	if err != nil {
+		return event.Event{}, false, err
+	}
+	after, err := d.decodeTuple(rel, m.NewTuple, roleAfterPartial, before)
+	if err != nil {
+		return event.Event{}, false, err
+	}
+	if d.skipKeyNotSent(rel, before, after) {
+		return event.Event{}, false, nil
 	}
 	return d.rowEvent(rel, event.EventUpdate, before, after), true, nil
 }
@@ -567,9 +1006,8 @@ func (d *Decoder) decodeDelete(m *pglogrepl.DeleteMessage) (event.Event, bool, e
 		return event.Event{}, false, nil
 	}
 	if rel.skipped {
-		// Before any tuple is decoded: a weaker identity's old tuple can carry the
-		// unchanged-TOAST datum, which decodeTuple refuses.
-		d.recordSkip(rel)
+		// Before any tuple is decoded: nothing of a skipped relation is read.
+		d.recordSkip(rel, rel.skipReason, rel.skipDetail)
 		return event.Event{}, false, nil
 	}
 	// A DELETE's before-image is the ONLY source for its reversal INSERT. pgoutput
@@ -580,11 +1018,109 @@ func (d *Decoder) decodeDelete(m *pglogrepl.DeleteMessage) (event.Event, bool, e
 	if m.OldTuple == nil {
 		return event.Event{}, false, fmt.Errorf("pgcapture: DELETE on %s.%s carries no before-image (no replica identity?) — cannot index an un-reversible delete", rel.schema, rel.table)
 	}
+	if earlierRowIsPartial(rel, m.OldTupleType) || holdsEmpty(rel, m.OldTuple) {
+		// Below REPLICA IDENTITY FULL: the key of the deleted row and nothing
+		// else. Enough to delete it from the copy and to show it in history;
+		// undo refuses it (event.CheckUnresolvedToast).
+		before, err := d.partialBefore(rel, m.OldTuple)
+		if err != nil {
+			return event.Event{}, false, err
+		}
+		if d.skipKeyNotSent(rel, before, nil) {
+			return event.Event{}, false, nil
+		}
+		return d.rowEvent(rel, event.EventDelete, before, nil), true, nil
+	}
 	before, err := d.decodeTuple(rel, m.OldTuple, roleBefore, nil)
 	if err != nil {
 		return event.Event{}, false, err
 	}
 	return d.rowEvent(rel, event.EventDelete, before, nil), true, nil
+}
+
+// partialBefore builds the before-image of a change whose earlier row
+// PostgreSQL sent in part, from t: the 'K' old tuple, or, for an UPDATE with
+// no old tuple, the new tuple (the identity did not change, so its identity
+// values are the earlier row's).
+//
+// THE CONTRACT, which the readers are built on and a test pins: the image
+// holds every column of the relation, the same set an after-image holds. An
+// identity column holds its real value; EVERY other column holds the
+// not-captured marker (event.NotCapturedKey), whatever t carries there. Never
+// nil, never absent: nil would be read as a NULL the row held.
+//
+// An identity column that t does not give a value for ('n' or 'u') is the
+// marker too, never NULL. PostgreSQL is not known to send one (identity
+// columns are NOT NULL, and a key-only tuple carries them in full even when
+// stored out of line); skipKeyNotSent drops the change when it is a
+// primary-key column.
+func (d *Decoder) partialBefore(rel *relationInfo, t *pglogrepl.TupleData) (map[string]any, error) {
+	if len(t.Columns) != len(rel.columns) {
+		return nil, fmt.Errorf("pgcapture: tuple has %d columns but relation %s.%s has %d",
+			len(t.Columns), rel.schema, rel.table, len(rel.columns))
+	}
+	row := make(map[string]any, len(t.Columns))
+	for i, col := range t.Columns {
+		c := rel.columns[i]
+		if !c.inIdentity {
+			row[c.name] = notCapturedMarker()
+			continue
+		}
+		switch col.DataType {
+		case pglogrepl.TupleDataTypeText:
+			row[c.name] = string(col.Data)
+		case pglogrepl.TupleDataTypeNull, pglogrepl.TupleDataTypeToast:
+			// No value for an identity column: see the comment above.
+			row[c.name] = notCapturedMarker()
+		case pglogrepl.TupleDataTypeBinary:
+			return nil, fmt.Errorf("pgcapture: binary tuple datum for column %q in %s.%s — pgcapture streams text format only",
+				c.name, rel.schema, rel.table)
+		default:
+			return nil, fmt.Errorf("pgcapture: unknown tuple data type %q for column %q in %s.%s",
+				col.DataType, c.name, rel.schema, rel.table)
+		}
+	}
+	return row, nil
+}
+
+// skipKeyNotSent drops, and records under SkipReplicaIdentityKeyNotSent, a
+// change of a table below REPLICA IDENTITY FULL whose images do not give a
+// real value for every primary-key column: the earlier row (before), and for
+// an UPDATE the row it leaves (after; nil for a DELETE). It reports whether
+// it dropped the change. Stored, such a change would sit in the index under a
+// key spelled from a marker. See SkipReplicaIdentityKeyNotSent.
+func (d *Decoder) skipKeyNotSent(rel *relationInfo, before, after map[string]any) bool {
+	var missing []string
+	for _, pk := range rel.pkCols {
+		_, okBefore := before[pk.Name].(string)
+		okAfter := true
+		if after != nil {
+			_, okAfter = after[pk.Name].(string)
+		}
+		if !okBefore || !okAfter {
+			missing = append(missing, pk.Name)
+		}
+	}
+	if len(missing) == 0 {
+		return false
+	}
+	detail := fmt.Sprintf("replica identity %s: PostgreSQL sent a change without a value for primary-key column(s) %s; fix: %s",
+		replicaIdentityName(rel.replicaIdentity), strings.Join(missing, ", "), replicaIdentityFix(rel.schema, rel.table))
+	d.recordSkip(rel, SkipReplicaIdentityKeyNotSent, detail)
+	// Every such change is in the ledger; the log gets the first of a table
+	// and then one in keyNotSentWarnEvery, so a table that sends them all the
+	// time does not fill it.
+	rel.keyNotSent++
+	if rel.keyNotSent%keyNotSentWarnEvery == 1 {
+		d.logger.Warn("pgcapture: a change arrived without a value for a primary-key column of its row; it is NOT captured (counted as skipped in capture health), the stream goes on. This warning is given for the first such change of a table and then every thousandth; capture health counts them all",
+			"table", rel.schema+"."+rel.table,
+			"replica_identity", replicaIdentityName(rel.replicaIdentity),
+			"primary_key_columns", strings.Join(missing, ", "),
+			"commit_lsn", d.txn.commitLSN.String(),
+			"such_changes_of_the_table", rel.keyNotSent,
+			"fix", replicaIdentityFix(rel.schema, rel.table))
+	}
+	return true
 }
 
 // relationFor returns the cached relation for a row message, erroring if no
@@ -599,6 +1135,13 @@ func (d *Decoder) relationFor(oid uint32) (*relationInfo, error) {
 	if !ok {
 		return nil, fmt.Errorf("pgcapture: row event for unknown relation OID %d (no preceding Relation message)", oid)
 	}
+	// A read of the relation's partitions that failed is tried again, once it
+	// is due, before the change is decoded: the answer can say the relation
+	// is not partitioned (its old rows are then whole, NULLs and all), or
+	// skip it (judgePartitions).
+	if !rel.partsRetryAt.IsZero() && !d.now().Before(rel.partsRetryAt) && d.filters.Matches(rel.schema, rel.table) {
+		d.judgePartitions(rel)
+	}
 	return rel, nil
 }
 
@@ -611,10 +1154,17 @@ const (
 	// decodeTuple): under REPLICA IDENTITY FULL the before-image always carries the
 	// real value, so a 'u' means the value bintrail needs for recovery is absent.
 	roleBefore tupleRole = iota
-	// roleAfter = a new/after-image tuple. A 'u' is resolved from the before-image
-	// (guaranteed real, since roleBefore rejects 'u'), falling back to the marker
-	// only when no before-image is available (a weaker-than-FULL replica identity).
+	// roleAfter = a new/after-image tuple beside a WHOLE before-image (REPLICA
+	// IDENTITY FULL), or with none (an INSERT). A 'u' is resolved from the
+	// before-image (guaranteed real, since roleBefore rejects 'u'), falling back
+	// to the marker only when there is no before-image.
 	roleAfter
+	// roleAfterPartial = a new/after-image tuple beside a before-image captured
+	// in part (partialBefore). A 'u' is the unchanged-TOAST marker, except in a
+	// column whose real value the before-image does hold (an identity column):
+	// what the before-image holds elsewhere is the not-captured marker, and
+	// taking that, or a NULL, for the value would store it as the row's.
+	roleAfterPartial
 )
 
 // decodeTuple converts a pgoutput tuple to a column-name→value map in the cached
@@ -624,11 +1174,15 @@ const (
 //   - 'b' (binary) → error: the slice-2 capturer requests text format, so a binary
 //     datum is a misconfiguration we refuse rather than silently mishandle;
 //   - 'u' (unchanged TOAST) → in a before-image (roleBefore) a HARD ERROR; in an
-//     after-image (roleAfter) resolved from the before-image (Option B), else the
-//     structurally distinct unchanged-TOAST marker (never a plain string).
+//     after-image beside a whole before-image (roleAfter) resolved from it
+//     (Option B); in an after-image beside a partial one (roleAfterPartial) the
+//     structurally distinct unchanged-TOAST marker (never a plain string, never
+//     NULL), unless the partial before-image holds the column's real value.
 //
-// Why a 'u' in a before-image is a hard error: under REPLICA IDENTITY FULL — the
-// required mode (#531) — PostgreSQL detoasts and WAL-logs every replica-identity
+// A before-image captured in part is not decoded here: see partialBefore.
+//
+// Why a 'u' in a before-image is a hard error: under REPLICA IDENTITY FULL
+// PostgreSQL detoasts and WAL-logs every replica-identity
 // column (all columns, under FULL), so the before-image carries the real value,
 // never 'u' (proven at the protocol level in the spike; PG commit 1cd5802, back-
 // patched to PG10+). A 'u' in a before-image therefore means the real value — the
@@ -657,6 +1211,17 @@ func (d *Decoder) decodeTuple(rel *relationInfo, t *pglogrepl.TupleData, role tu
 				return nil, fmt.Errorf("pgcapture: unchanged-TOAST datum in the before-image of %s.%s column %q — the source must use REPLICA IDENTITY FULL so the real value is captured for recovery",
 					rel.schema, rel.table, name)
 			}
+			if role == roleAfterPartial {
+				// Only a value the partial before-image really holds: text
+				// in an identity column. Its other columns are the
+				// not-captured marker, which is no value.
+				if v, ok := before[name].(string); ok {
+					row[name] = v
+					continue
+				}
+				row[name] = unchangedToastMarker()
+				continue
+			}
 			if before != nil {
 				if v, ok := before[name]; ok {
 					row[name] = v
@@ -680,7 +1245,9 @@ func (d *Decoder) decodeTuple(rel *relationInfo, t *pglogrepl.TupleData, role tu
 func (d *Decoder) rowEvent(rel *relationInfo, typ event.EventType, before, after map[string]any) event.Event {
 	// PKValues from the before-image for UPDATE/DELETE (under RI FULL it is complete
 	// and free of the unchanged-TOAST marker, so a TOASTed-but-unchanged PK column
-	// still yields its real value), from the after-image for INSERT (no before-image)
+	// still yields its real value; below FULL it holds the identity columns, which
+	// include every primary-key column, each checked to be real by skipKeyNotSent),
+	// from the after-image for INSERT (no before-image)
 	// — mirroring the MySQL parser (parser.go emitInserts/emitDeletes/emitUpdates).
 	pkSource := before
 	if pkSource == nil {
@@ -698,6 +1265,15 @@ func (d *Decoder) rowEvent(rel *relationInfo, typ event.EventType, before, after
 	// compares on (see event.Event); the durable cursor advances on EventCommit.
 	if d.infer != nil {
 		d.infer.noteChange(rel.oid, d.txn)
+	}
+	// A change stored while the catalog could not say what the relation's
+	// partitions are: counted, for the ledger, should the answer be that the
+	// table had to be skipped (judgePartitions).
+	if !rel.partsRetryAt.IsZero() {
+		if rel.unsureStored == 0 {
+			rel.unsureFrom = uint64(d.txn.commitLSN)
+		}
+		rel.unsureStored++
 	}
 	// A captured row breaks the ledger's consecutive-skip run, so a busy skipped
 	// table beside captured ones does not read as "capture stopped".
@@ -771,4 +1347,11 @@ func (d *Decoder) TakePending() []event.Event {
 // value that could not be resolved from the before-image. See UnchangedToastKey.
 func unchangedToastMarker() map[string]any {
 	return map[string]any{UnchangedToastKey: true}
+}
+
+// notCapturedMarker is the stand-in for a column of an earlier row that
+// PostgreSQL did not send (event.NotCapturedKey). A map of its own per column:
+// the consumer serializes each, and none is shared.
+func notCapturedMarker() map[string]any {
+	return map[string]any{event.NotCapturedKey: true}
 }

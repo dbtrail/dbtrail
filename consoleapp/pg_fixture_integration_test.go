@@ -77,6 +77,29 @@ func pgTestSource(t *testing.T, ctx context.Context, table, slot, pub, columns s
 	return baseDSN, source, exec1
 }
 
+// pgTestWhileKeyDeferrable runs changes while table's primary key (id) is
+// DEFERRABLE (how is INITIALLY IMMEDIATE or INITIALLY DEFERRED) in a way
+// capture does not see: capture is stopped, the key is rebuilt as deferrable,
+// the changes are made, the key is rebuilt as it was, and capture is started
+// again. Capture checks a key when it starts and each time PostgreSQL
+// describes the table, against the catalog as it is at that moment, so it
+// reads these changes under a key that is no longer deferrable. That is the
+// stated limit of its check, and what is left for the fold's own refusal.
+// (Made deferrable while capture runs, the table is skipped by capture
+// instead: pgcapture's TestCapturer_DeferrableKeyMidStream_Integration.)
+func pgTestWhileKeyDeferrable(t *testing.T, ctx context.Context, mon *monitorSupervisor, e console.ServerEntry, exec1 func(string), table, how string, changes func()) {
+	t.Helper()
+	if err := mon.Stop(ctx, e.ID); err != nil {
+		t.Fatalf("stop capture: %v", err)
+	}
+	exec1("ALTER TABLE " + table + " DROP CONSTRAINT " + table + "_pkey, ADD PRIMARY KEY (id) DEFERRABLE " + how)
+	changes()
+	exec1("ALTER TABLE " + table + " DROP CONSTRAINT " + table + "_pkey, ADD PRIMARY KEY (id)")
+	if err := mon.Start(ctx, e); err != nil {
+		t.Fatalf("start capture again: %v", err)
+	}
+}
+
 // pgTestMonitor is the daemon's capture supervisor over a fresh boot index.
 // The one change from the daemon is the checkpoint period, 10 s there.
 func pgTestMonitor(t *testing.T, ctx context.Context, checkpoint time.Duration) (mon *monitorSupervisor, bootDSN string) {

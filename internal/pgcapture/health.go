@@ -5,10 +5,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/dbtrail/dbtrail/internal/event"
 )
 
 // PostgreSQL pg_replication_slots.wal_status values. They are named constants so the
@@ -150,8 +153,15 @@ func QuerySlotHealth(ctx context.Context, conn *pgx.Conn, slotName string) (Slot
 // serialized wire shape written to stream_state.source_health; this is the in-memory
 // form the probe returns.
 type HealthSnapshot struct {
-	Slot                   SlotHealth
+	Slot SlotHealth
+	// ReplicaIdentityNotFull lists the tables that are captured without undo:
+	// "schema.table (relreplident=x)" of each one in the capture's scope that is
+	// not at REPLICA IDENTITY FULL (or has a partition that is not).
 	ReplicaIdentityNotFull []string
+	// NotCaptured lists the tables in the capture's scope whose changes capture
+	// does not take, each with why: a replica identity that leaves the primary
+	// key out, a primary key declared DEFERRABLE. A table is in one list only.
+	NotCaptured []string
 	// FlushedLSN is how far the source's WAL was flushed when the probe ran
 	// (QueryFlushedLSN): where a capture has to have read to for it to hold
 	// everything the source had at that moment (#2845). 0 when it could not
@@ -209,12 +219,44 @@ func QueryPublishedTables(ctx context.Context, conn *pgx.Conn, publication strin
 	return out, nil
 }
 
+// HealthTableLists sorts the published tables the health panel names into
+// the two lists of HealthSnapshot: captured without undo, and not captured.
+// Only tables in the capture's scope (filters) are in either: the rest are
+// neither recorded nor skipped. A table whose key is deferrable is not
+// captured whatever its replica identity. Both lists are sorted and never
+// nil. Pure.
+func HealthTableLists(ids []TableIdentity, deferrable []DeferrableKey, filters event.Filters) (withoutUndo, notCaptured []string) {
+	withoutUndo, notCaptured = []string{}, []string{}
+	isDeferrable := map[[2]string]bool{}
+	for _, k := range deferrable {
+		if filters.Matches(k.Schema, k.Table) {
+			isDeferrable[[2]string{k.Schema, k.Table}] = true
+			notCaptured = append(notCaptured, fmt.Sprintf("%s.%s (primary key DEFERRABLE)", k.Schema, k.Table))
+		}
+	}
+	for _, t := range ids {
+		switch {
+		case !filters.Matches(t.Schema, t.Table), isDeferrable[[2]string{t.Schema, t.Table}]:
+		case len(t.PartitionsMissKey) > 0:
+			notCaptured = append(notCaptured, fmt.Sprintf("%s.%s (%d partition(s) with a replica identity without the primary key)", t.Schema, t.Table, len(t.PartitionsMissKey)))
+		case len(t.MissesKey) > 0:
+			notCaptured = append(notCaptured, fmt.Sprintf("%s.%s (replica identity without the primary key)", t.Schema, t.Table))
+		default:
+			withoutUndo = append(withoutUndo, t.Name())
+		}
+	}
+	sort.Strings(withoutUndo)
+	sort.Strings(notCaptured)
+	return withoutUndo, notCaptured
+}
+
 // ProbeHealth opens a short-lived plain connection to queryDSN and reads current source
-// health: the slot's WAL-retention state (QuerySlotHealth) and the published tables not
-// at REPLICA IDENTITY FULL (QueryReplicaIdentityNotFull). Connect-per-call — the daemon
+// health: the slot's WAL-retention state (QuerySlotHealth) and, of the published tables
+// in the capture's scope (filters), the ones captured without undo and the ones not
+// captured (HealthTableLists). Connect-per-call — the daemon
 // polls infrequently, so a dropped connection self-heals on the next poll; the caller
 // bounds the whole probe with a timeout. It never mutates the source.
-func ProbeHealth(ctx context.Context, queryDSN, slotName, publication string) (HealthSnapshot, error) {
+func ProbeHealth(ctx context.Context, queryDSN, slotName, publication string, filters event.Filters) (HealthSnapshot, error) {
 	conn, err := pgx.Connect(ctx, queryDSN)
 	if err != nil {
 		return HealthSnapshot{}, fmt.Errorf("pgcapture: health probe connect: %w", err)
@@ -225,11 +267,16 @@ func ProbeHealth(ctx context.Context, queryDSN, slotName, publication string) (H
 	if err != nil {
 		return HealthSnapshot{}, err
 	}
-	notFull, err := QueryReplicaIdentityNotFull(ctx, conn, publication)
+	ids, err := QueryTableIdentities(ctx, conn, publication)
 	if err != nil {
 		return HealthSnapshot{}, err
 	}
-	snap := HealthSnapshot{Slot: slot, ReplicaIdentityNotFull: notFull}
+	deferrable, err := QueryDeferrableKeys(ctx, conn, publication)
+	if err != nil {
+		return HealthSnapshot{}, err
+	}
+	notFull, notCaptured := HealthTableLists(ids, deferrable, filters)
+	snap := HealthSnapshot{Slot: slot, ReplicaIdentityNotFull: notFull, NotCaptured: notCaptured}
 	snap.FlushedLSN, snap.FlushedSourceAt, snap.FlushedLSNErr = QueryFlushed(ctx, conn)
 	snap.Published, snap.PublishedErr = QueryPublishedTables(ctx, conn, publication)
 	return snap, nil
