@@ -355,7 +355,8 @@ func (s *session) waitForCopy(ctx context.Context, qstr string, apart bool) (wai
 	// asked on, else read now. A position read before that answer would
 	// let an older answer through, so none of those is used, and with none
 	// the source answers: never the copy unproven.
-	// One limit for the position's read and the wait after it.
+	// The limit counts from here: a read of the position that took all of
+	// it leaves the wait none, and the source answers.
 	limit := time.Now().Add(copyWaitLimit)
 	want, why := uint64(0), ""
 	switch {

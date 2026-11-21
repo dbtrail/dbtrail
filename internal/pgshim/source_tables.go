@@ -28,15 +28,18 @@ import (
 //  2. the source itself confirms it (proofSQL), on the same connection and
 //     right behind the statement: each name resolves, as PostgreSQL resolves
 //     it under the session's search_path, to a plain permanent table that
-//     has no child table and no row-level security; and nothing in the
-//     database can run a user's code where the text shows none (an operator
-//     or a cast made in SQL or PL/pgSQL, a domain with a constraint, a
-//     function of one row called as a column, a function of the user's with
-//     the name of one the statement calls). The tables marked are the ones
-//     the source names in that answer, not the ones read from the text.
+//     has no child table, is nobody's child or partition, and has no
+//     row-level security; and nothing in the database can run a user's code
+//     where the text shows none (an operator or a cast made in SQL or
+//     PL/pgSQL, a domain with a constraint, a function of the user's with a
+//     name the statement calls or writes after a dot, since x.f calls
+//     f(x)). The tables marked are the ones the source names in that
+//     answer, not the ones read from the text.
 //
 // A view, a temporary table, a foreign table, a partitioned table, an
-// inheritance parent, a name that another schema of the path shadows: each
+// inheritance parent, a partition or an inheritance child (the copy can hold
+// its rows under its parent's name), a name that another schema of the path
+// shadows: each
 // fails the second check, and every table is marked. Functions and operators
 // written in C (an extension's) are taken to read no table of the user's
 // when they stand behind an operator or a cast; called by name they are not
@@ -80,7 +83,8 @@ type cteDef struct {
 // stmtReads is what a statement's text says it reads.
 type stmtReads struct {
 	refs []relRef
-	// funcs are the functions it calls by name, lowercased, each once.
+	// funcs are the names it may call a function by, each once: the word
+	// before each parenthesis, and each name after a dot.
 	funcs []string
 	ctes  []cteDef
 	// recursive: WITH RECURSIVE, whose names are in scope in every body.
@@ -340,7 +344,8 @@ func readsOf(q string, alsoPure map[string]bool) (r stmtReads, why string) {
 		if !word(i-1, "distinct") {
 			return false, false
 		}
-		return word(i-2, "is") || word(i-2, "not") && word(i-3, "is"), true
+		// After a dot, "is" is a column's name, and DISTINCT its alias.
+		return word(i-2, "is") && !isOpTok(toks, i-3, ".") || word(i-2, "not") && word(i-3, "is") && !isOpTok(toks, i-4, "."), true
 	}
 
 	for i := 0; i < len(toks); i++ {
@@ -383,8 +388,10 @@ func readsOf(q string, alsoPure map[string]bool) (r stmtReads, why string) {
 					switch {
 					case isOpTok(toks, i-2, "."):
 						return r, "a function written with its schema"
-					case syntaxParen[opener]:
-					case pureFuncs[opener] || alsoPure[opener]:
+					case syntaxParen[opener] || pureFuncs[opener] || alsoPure[opener]:
+						// A word of the grammar too: IS, LIKE, FILTER, OVER
+						// and BY can name a function of the user's, which
+						// the source is then asked about like any other.
 						if !seenFunc[opener] {
 							seenFunc[opener] = true
 							r.funcs = append(r.funcs, opener)
@@ -411,9 +418,15 @@ func readsOf(q string, alsoPure map[string]bool) (r stmtReads, why string) {
 			// The copy's engine reads "alias: table" in FROM; nothing here
 			// does.
 			return r, "a colon"
-		case t.kind == rtWord && !expecting && isOpTok(toks, i-1, "."):
+		case (t.kind == rtWord || t.kind == rtQuoted) && !expecting && isOpTok(toks, i-1, "."):
 			// A name after a dot is a column's, whatever word it is: a
-			// column may be called "order" or "from" there.
+			// column may be called "order" or "from" there. Or a function's:
+			// PostgreSQL calls f(x) for x.f when x has no column f, so the
+			// name goes with the functions the source is asked about.
+			if !seenFunc[t.text] {
+				seenFunc[t.text] = true
+				r.funcs = append(r.funcs, t.text)
+			}
 		case t.kind == rtOp && t.text == ",":
 			if top.kind == fItems || top.kind == fQuery && top.clause == cFrom {
 				if top.expect {
@@ -518,8 +531,7 @@ func proofSQL(r stmtReads) string {
 	b.WriteString("SELECT CASE WHEN" +
 		" EXISTS (SELECT 1 FROM pg_catalog.pg_operator o JOIN pg_catalog.pg_proc p ON p.oid = o.oprcode WHERE o.oid >= 16384 AND p.prolang NOT IN (12, 13))" +
 		" OR EXISTS (SELECT 1 FROM pg_catalog.pg_cast k JOIN pg_catalog.pg_proc p ON p.oid = k.castfunc WHERE k.oid >= 16384 AND p.prolang NOT IN (12, 13))" +
-		" OR EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k WHERE k.contypid <> 0 AND k.oid >= 16384)" +
-		" OR EXISTS (SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_type y ON y.oid = p.proargtypes[0] WHERE p.oid >= 16384 AND p.prolang NOT IN (12, 13) AND p.pronargs = 1 AND y.typtype IN ('c', 'p'))")
+		" OR EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k WHERE k.contypid <> 0 AND k.oid >= 16384)")
 	if len(r.funcs) > 0 {
 		names := make([]string, len(r.funcs))
 		for i, f := range r.funcs {
@@ -546,7 +558,8 @@ func proofSQL(r stmtReads) string {
 	b.WriteString("(SELECT CASE WHEN pg_catalog.count(*) = pg_catalog.count(*) FILTER (WHERE r.ok) THEN" +
 		" COALESCE(pg_catalog.json_agg(pg_catalog.json_build_array(r.nspname, r.relname)) FILTER (WHERE r.relname IS NOT NULL), '[]'::pg_catalog.json)::pg_catalog.text END" +
 		" FROM (SELECT n.nspname, c.relname, CASE WHEN c.oid IS NULL THEN v.optional" +
-		" ELSE c.relkind = 'r' AND c.relpersistence = 'p' AND NOT c.relhassubclass AND NOT c.relrowsecurity END AS ok" +
+		" ELSE c.relkind = 'r' AND c.relpersistence = 'p' AND NOT c.relhassubclass AND NOT c.relrowsecurity AND NOT c.relispartition" +
+		" AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhrelid = c.oid) END AS ok" +
 		" FROM (VALUES " + strings.Join(rows, ", ") + ") AS v(ref, optional)" +
 		" LEFT JOIN pg_catalog.pg_class c ON c.oid = pg_catalog.to_regclass(v.ref)" +
 		" LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace) r) END")

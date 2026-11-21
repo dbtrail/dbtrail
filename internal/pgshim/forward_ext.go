@@ -122,6 +122,7 @@ func (s *session) portalToSource(p *portal) (ok bool) {
 		return false
 	}
 	p.onSource = true
+	p.sourcePath = up.sent["search_path"]
 	p.cols, p.types, p.rows, p.tag = nil, nil, nil, ""
 	return true
 }
@@ -319,7 +320,7 @@ func (s *session) bindOnSource(st *preparedStatement, m *pgproto3.Bind) {
 	}
 	s.dropPortal(m.DestinationPortal)
 	s.ext.portals[m.DestinationPortal] = &portal{
-		name: m.DestinationPortal, stmt: st, onSource: true,
+		name: m.DestinationPortal, stmt: st, onSource: true, sourcePath: up.sent["search_path"],
 		resultFormats: append([]int16(nil), m.ResultFormatCodes...),
 		route:         s.stmtRoute(st),
 	}
@@ -436,7 +437,11 @@ func (s *session) executeOnSource(p *portal, maxRows uint32) {
 	defer func() { up.ctx = nil }()
 	// Which tables it reads is confirmed once the batch is over
 	// (syncOnSource): until then what the source sends marks every table.
-	s.proving = s.proveReads(p.stmt.query)
+	if proof := s.proveReads(p.stmt.query); proof != nil && proof.path == p.sourcePath {
+		// Only for a portal bound under the search_path of now: the source
+		// resolved its names when it was bound.
+		s.proving = proof
+	}
 	defer func() { s.proving = nil }()
 	if err := up.send(&pgproto3.Execute{Portal: p.name, MaxRows: maxRows}, &pgproto3.Flush{}); err != nil {
 		s.sourceLostExt(&errSourceLost{"it could not be written to: " + err.Error()})

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgproto3"
 )
 
 // #2985: "never read back after the source" holds for the tables a
@@ -69,6 +70,8 @@ func TestReadsOf_theTablesAStatementNames(t *testing.T) {
 		{"IS DISTINCT FROM", "SELECT a IS DISTINCT FROM b, a IS NOT DISTINCT FROM c FROM t WHERE x IS DISTINCT FROM y", []string{"t"}, nil},
 		{"IS DISTINCT FROM in ON", "SELECT 1 FROM a JOIN b ON a.x IS DISTINCT FROM b.x, c", []string{"a", "b", "c"}, nil},
 		{"a column named as a clause, after a dot", "SELECT 1 FROM a JOIN b ON a.id = b.for AND a.order = b.where, c", []string{"a", "b", "c"}, nil},
+		{"a name after a dot may be a function's", `SELECT x.peek, (x.id).leak, x."Quoted" FROM t x`, []string{"t"}, []string{"peek", "leak", "Quoted"}},
+		{"a word of the grammar that can name a function", "SELECT filter(id), is(id, 1) FROM t WHERE id IN (1, 2)", []string{"t"}, []string{"filter", "is", "in"}},
 		{"a cast, a typed literal and a window", "SELECT n::numeric(10,2), DATE '2026-01-01', row_number() OVER (PARTITION BY g ORDER BY n) FROM t", []string{"t"}, []string{"numeric", "row_number"}},
 		{"an aggregate with ORDER BY and FILTER", "SELECT string_agg(s, ',' ORDER BY s) FILTER (WHERE n > 1) FROM t GROUP BY g HAVING count(*) > 1 ORDER BY 1 LIMIT 5 OFFSET 2", []string{"t"}, []string{"string_agg", "count"}},
 		{"a parameter", "SELECT n FROM t WHERE id = $1", []string{"t"}, nil},
@@ -83,8 +86,10 @@ func TestReadsOf_theTablesAStatementNames(t *testing.T) {
 			if got := writtenRefs(r); !slices.Equal(got, append([]string{}, tc.refs...)) {
 				t.Errorf("tables %q, want %q", got, tc.refs)
 			}
-			if !slices.Equal(r.funcs, tc.funcs) {
-				t.Errorf("functions %q, want %q", r.funcs, tc.funcs)
+			for _, f := range tc.funcs {
+				if !slices.Contains(r.funcs, f) {
+					t.Errorf("the names the source is asked about are %q, without %s", r.funcs, f)
+				}
 			}
 		})
 	}
@@ -134,6 +139,8 @@ func TestReadsOf_whatMarksEveryTable(t *testing.T) {
 		{"a string in FROM", "SELECT 1 FROM 'file.parquet'"},
 		{"FROM first, the copy's own syntax", "FROM t SELECT n"},
 		{"FROM first in a subquery", "SELECT (FROM t SELECT count(*))"},
+		{"FROM first after a set operation, the copy's own syntax", "SELECT 1 UNION ALL FROM t"},
+		{"FROM after WHERE", "SELECT 1 FROM a WHERE true FROM t"},
 		{"an alias before a table, the copy's own syntax", "WITH a AS (SELECT 1) SELECT 1 FROM a: t"},
 		{"SELECT DISTINCT FROM", "SELECT DISTINCT FROM t"},
 		{"four parts", "SELECT 1 FROM a.b.c.d"},
@@ -169,8 +176,9 @@ func TestProofSQL(t *testing.T) {
 	got := proofSQL(r)
 	for _, want := range []string{
 		`('"it''s"', false)`, `('w', true)`, `('public.t', false)`,
-		`p.proname = ANY (ARRAY['count']::pg_catalog.name[])`,
-		`c.relkind = 'r' AND c.relpersistence = 'p' AND NOT c.relhassubclass AND NOT c.relrowsecurity`,
+		`p.proname = ANY (ARRAY['select', 'count']::pg_catalog.name[])`,
+		`c.relkind = 'r' AND c.relpersistence = 'p' AND NOT c.relhassubclass AND NOT c.relrowsecurity AND NOT c.relispartition`,
+		`pg_catalog.pg_inherits i WHERE i.inhrelid = c.oid`,
 		`pg_catalog.to_regclass(v.ref)`,
 	} {
 		if !strings.Contains(got, want) {
@@ -178,7 +186,7 @@ func TestProofSQL(t *testing.T) {
 		}
 	}
 	none, _ := readsOf("SELECT 1", nil)
-	if got := proofSQL(none); !strings.HasSuffix(got, "THEN NULL ELSE '[]'::pg_catalog.text END") || strings.Contains(got, "proname") {
+	if got := proofSQL(none); !strings.HasSuffix(got, "THEN NULL ELSE '[]'::pg_catalog.text END") {
 		t.Errorf("the proof of a statement that names nothing:\n%s", got)
 	}
 }
@@ -583,6 +591,63 @@ func TestSourceTables_2985_aBatchUnderTwoSearchPaths(t *testing.T) {
 	}
 	if got := costSimple(ctx, c, p.l, "SELECT sum(n) FROM public.big"); got != tablesTooOld {
 		t.Errorf("a report on another table: %+v, want %+v: every table is marked", got, tablesTooOld)
+	}
+}
+
+// A portal bound on the source under one search_path and run after the
+// session set another: the source resolved its names when it was bound, so
+// they are not confirmed under the new one.
+func TestSourceTables_2985_aPortalBoundBeforeTheSearchPathChanged(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	p := newTablesPort(t)
+	c := costPortConn(t, ctx, p.l)
+	fe := c.Frontend()
+	// until reads to the next ReadyForQuery, and returns the first cell of
+	// each row and any error's code.
+	until := func() (cells []string, code string) {
+		t.Helper()
+		for {
+			msg, err := c.ReceiveMessage(ctx)
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			switch m := msg.(type) {
+			case *pgproto3.DataRow:
+				cells = append(cells, string(m.Values[0]))
+			case *pgproto3.ErrorResponse:
+				code = m.Code
+			case *pgproto3.ReadyForQuery:
+				return cells, code
+			}
+		}
+	}
+	// One batch: bind a under the first path, set another, bind b (which
+	// brings the source to the new path), run a, run b.
+	fe.Send(&pgproto3.Parse{Name: "k", Query: "SELECT n FROM t WHERE id = 1"})
+	fe.Send(&pgproto3.Bind{DestinationPortal: "a", PreparedStatement: "k"})
+	fe.Send(&pgproto3.Parse{Name: "sp", Query: "SET search_path = other"})
+	fe.Send(&pgproto3.Bind{DestinationPortal: "s", PreparedStatement: "sp"})
+	fe.Send(&pgproto3.Execute{Portal: "s"})
+	fe.Send(&pgproto3.Bind{DestinationPortal: "b", PreparedStatement: "k"})
+	fe.Send(&pgproto3.Execute{Portal: "a"})
+	fe.Send(&pgproto3.Execute{Portal: "b"})
+	fe.Send(&pgproto3.Sync{})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if cells, code := until(); code != "" || len(cells) != 2 {
+		t.Fatalf("the batch: %q %s", cells, code)
+	}
+	fe.Send(&pgproto3.Query{String: "SELECT sum(n) FROM public.big"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if cells, code := until(); code != "" || len(cells) != 1 || cells[0] != "42" {
+		t.Errorf("a report on another table: %q %s, want the source's 42: every table is marked", cells, code)
+	}
+	if n := p.l.last(); n.Reason != ReasonCopyTooOld {
+		t.Errorf("noted %s/%s, want copy_too_old", n.Side, n.Reason)
 	}
 }
 

@@ -86,6 +86,9 @@ type portal struct {
 	// onSource is set for a portal bound on the source (forward_ext.go):
 	// its Describe, Execute and Close are sent there.
 	onSource bool
+	// sourcePath is the search_path the source had when the portal was
+	// bound there, under which it resolved the statement's names.
+	sourcePath string
 	// ran is set once the statement ran; what it answered is below.
 	ran   bool
 	empty bool

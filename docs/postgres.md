@@ -1287,9 +1287,10 @@ What this costs and where it can go wrong:
   it; the copy waits for it.** The copy is a second or two behind the source
   in fresh mode: a counter the source just showed a connection as 37413
   could read 37405 on the copy the next moment. So once the source answered
-  a connection, a statement for the copy on it first reads where the
-  source's WAL stands, then waits, up to 2 seconds and never past its own
-  `statement_timeout`, until capture's saved position has reached it (the
+  a connection about a table, a statement for the copy that reads that
+  table on it first reads where the source's WAL stands, then waits, up to
+  6 seconds and never past its own `statement_timeout`, until capture's
+  saved position has reached it (the
   commit of its last whole transaction, or on a quiet source the position
   the source's walsender last reported) and the copy's recent changes have
   been brought up to date after that; then the copy answers. When capture
@@ -1315,7 +1316,63 @@ What this costs and where it can go wrong:
   every connection with a forwarding user, routing by plan or not: one that
   ran a transaction block on the source waits for the copy after its
   `COMMIT` too. A connection the source never answered, or answered only
-  with an error, reads the copy without waiting.
+  with an error, reads the copy without waiting. While a statement waits it
+  holds its own connection to the port and nothing else: no worker of the
+  copy, which has not been asked yet, and no connection to the source.
+- **That holds table by table, not for the whole connection.** The port
+  keeps, per connection, which tables the source answered it about, and a
+  statement for the copy waits, or goes to the source, only when it reads
+  one of them. A statement that reads other tables is answered by the copy
+  at once, however far behind the copy is. What this means for a reader:
+  two answers on one connection about *different* tables can be of
+  different moments. An example: `SELECT balance FROM accounts WHERE id = 7`
+  is cheap, so the source answers it, as of now; the next statement,
+  `SELECT sum(amount) FROM payments`, is expensive, reads no table the
+  source answered this connection about, and is answered by the copy, a
+  second or two behind (in fast mode, as old as the last snapshot). A
+  payment committed together with a change of that balance can be in the
+  first answer and not in the second. A value of one table still never
+  goes back: after the source showed `accounts`, a report that reads
+  `accounts` waits for the copy as before. To have two tables read at one
+  moment, read them in one statement, or in a transaction block, which the
+  source answers whole.
+- **Which tables a statement read is told only when it can be proven; when
+  it cannot, the statement counts as having read every table**, and the
+  rule is the connection's again, as before. It is proven in two steps.
+  First its text: one `SELECT` (a `WITH` at its start, subqueries, joins and
+  set operations included) whose tables are all named in `FROM`, calling
+  only functions of PostgreSQL's own that read no table (`count`, `sum`,
+  `coalesce`, `now`, `date_trunc` and the like). Then the source itself, in
+  the same write as the statement and right behind it, with one query of
+  its catalog: each name must resolve, under the session's `search_path`,
+  to a plain permanent table with no child table and no row-level
+  security, and the database must hold none of the things that run a
+  user's code where the text shows none. The tables kept are the ones the
+  source names in that answer. So each of these, answered by the source,
+  marks every table: a view, a temporary or foreign table, a partitioned
+  table or an inheritance parent (reading it reads its children), a table
+  with row-level security, a function in `FROM`, a function the port does
+  not know to read no table (a function of yours, `nextval`,
+  `query_to_xml`), a function written with its schema, `TABLE x`,
+  `LATERAL`, `ONLY`, `TABLESAMPLE`, `FOR UPDATE`, a `WITH` that is not at
+  the start of the statement, a cursor (`DECLARE`, `FETCH`), `SHOW`,
+  `VALUES` alone, `EXPLAIN`, several statements in one text, text the port
+  does not read whole (a dollar-quoted string, `E'...'`), a table name
+  written outside ASCII without quotes, more than 32 tables in one
+  statement, a `search_path` that names `pg_catalog` or `pg_temp`, and
+  any statement at all while the database holds an operator or a cast
+  written in SQL or PL/pgSQL, a domain with a constraint, a function in
+  one of those languages that takes one row (PostgreSQL lets it be called
+  as a column, `t.f`), or a function or aggregate of yours with the name
+  of a function the statement calls. Past 64 tables a connection stops
+  keeping names and every table is marked. In an extended-protocol batch
+  the tables are confirmed once the batch is over (its `Sync`): a statement
+  for the copy inside the same batch, before that, is held back. Names are
+  compared without regard to case, and a name the statement for the copy
+  writes without a schema counts for every schema that has a table of that
+  name: the copy matches names that way, so more is held back, never less.
+  Operators and casts an extension wrote in C are taken to read no table
+  of yours.
 - **An `EXPLAIN` the source refuses** (a table it does not have, a syntax it
   does not take) sends the statement to the source, which answers it with
   its own error (`explain_failed` in `/status`). So does a text of more than

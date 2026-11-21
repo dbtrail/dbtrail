@@ -51,6 +51,8 @@ func TestIntegrationPGRouterOnlyTheSourcesTablesAreHeldBack_2985(t *testing.T) {
 	baseDSN, source, exec1 := pgTestSource(t, ctx, pgApartA, pgApartSlot, pgApartPub, "id int PRIMARY KEY, counter int NOT NULL")
 	extras := []string{
 		"DROP FUNCTION IF EXISTS pgapart_eq(" + pgApartA + ")",
+		"DROP FUNCTION IF EXISTS pgapart_eq(" + pgApartA + ", int)",
+		"DROP FUNCTION IF EXISTS filter(int)",
 		"DROP OPERATOR IF EXISTS === (int, text)",
 		"DROP AGGREGATE IF EXISTS sum(text)",
 		"DROP FUNCTION IF EXISTS pgapart_sf(int, text)",
@@ -87,6 +89,7 @@ func TestIntegrationPGRouterOnlyTheSourcesTablesAreHeldBack_2985(t *testing.T) {
 		"CREATE TABLE pgapart_parent (id int, counter int)",
 		"CREATE TABLE pgapart_child () INHERITS (pgapart_parent)",
 		"CREATE TABLE pgapart_part (id int, counter int) PARTITION BY RANGE (id)",
+		"CREATE TABLE pgapart_leaf PARTITION OF pgapart_part FOR VALUES FROM (0) TO (100)",
 		"CREATE TABLE pgapart_rls (id int, counter int)",
 		"ALTER TABLE pgapart_rls ENABLE ROW LEVEL SECURITY",
 		"CREATE POLICY pgapart_all ON pgapart_rls USING (true)",
@@ -96,7 +99,7 @@ func TestIntegrationPGRouterOnlyTheSourcesTablesAreHeldBack_2985(t *testing.T) {
 	exec1(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '` + pgApartRole + `') THEN EXECUTE 'DROP OWNED BY ` + pgApartRole + `'; END IF; END $$`)
 	exec1("DROP ROLE IF EXISTS " + pgApartRole)
 	exec1("CREATE ROLE " + pgApartRole + " LOGIN PASSWORD '" + pgApartPass + "'")
-	exec1("GRANT SELECT ON " + pgApartA + ", " + pgApartB + `, "PgApart_Mixed", pgapart_view, pgapart_parent, pgapart_child, pgapart_part, pgapart_rls TO ` + pgApartRole)
+	exec1("GRANT SELECT ON " + pgApartA + ", " + pgApartB + `, "PgApart_Mixed", pgapart_view, pgapart_parent, pgapart_child, pgapart_part, pgapart_leaf, pgapart_rls TO ` + pgApartRole)
 	t.Cleanup(func() {
 		bg := context.Background()
 		for _, s := range []string{"DROP OWNED BY " + pgApartRole, "DROP ROLE IF EXISTS " + pgApartRole} {
@@ -306,6 +309,8 @@ func TestIntegrationPGRouterOnlyTheSourcesTablesAreHeldBack_2985(t *testing.T) {
 	everyTable("a view, which reads table b", "SELECT counter FROM pgapart_view WHERE id = 1"+bySource, "20")
 	everyTable("an inheritance parent", "SELECT count(*) FROM pgapart_parent WHERE now() IS NOT NULL", "0")
 	everyTable("a partitioned table", "SELECT count(*) FROM pgapart_part WHERE now() IS NOT NULL", "0")
+	everyTable("an inheritance child, which the copy can hold under its parent", "SELECT count(*) FROM pgapart_child WHERE now() IS NOT NULL", "0")
+	everyTable("a partition, which the copy can hold under its parent", "SELECT count(*) FROM pgapart_leaf WHERE now() IS NOT NULL", "0")
 	everyTable("a table with row-level security", "SELECT count(*) FROM pgapart_rls WHERE now() IS NOT NULL", "0")
 	everyTable("a function in FROM", "SELECT g FROM generate_series(1, 1) g WHERE now() IS NOT NULL", "1")
 	everyTable("a built-in function that reads a table by its text",
@@ -354,6 +359,14 @@ func TestIntegrationPGRouterOnlyTheSourcesTablesAreHeldBack_2985(t *testing.T) {
 				"CREATE AGGREGATE sum(text) (SFUNC = pgapart_sf, STYPE = int)"},
 			[]string{"DROP AGGREGATE sum(text)", "DROP FUNCTION pgapart_sf(int, text)"},
 			"SELECT sum(counter) FROM " + pgApartA + " WHERE id = 1" + bySource},
+		{"a function named with a word of the grammar",
+			[]string{"CREATE FUNCTION filter(int) RETURNS int LANGUAGE sql AS 'SELECT counter FROM " + pgApartB + " LIMIT 1'"},
+			[]string{"DROP FUNCTION filter(int)"},
+			"SELECT x.counter FROM " + pgApartA + " x WHERE x.id = 1 AND filter(x.id) = 20" + bySource},
+		{"a function with a default argument, called as a column",
+			[]string{"CREATE FUNCTION pgapart_eq(r " + pgApartA + ", k int DEFAULT 1) RETURNS int LANGUAGE sql AS 'SELECT counter FROM " + pgApartB + " LIMIT 1'"},
+			[]string{"DROP FUNCTION pgapart_eq(" + pgApartA + ", int)"},
+			"SELECT x.counter FROM " + pgApartA + " x WHERE x.id = 1 AND x.pgapart_eq = 20" + bySource},
 		{"a function of one row, which a statement can call as a column",
 			[]string{"CREATE FUNCTION pgapart_eq(" + pgApartA + ") RETURNS int LANGUAGE sql AS 'SELECT counter FROM " + pgApartB + " LIMIT 1'"},
 			[]string{"DROP FUNCTION pgapart_eq(" + pgApartA + ")"},
