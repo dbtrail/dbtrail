@@ -191,6 +191,26 @@ A disk can also fill later, while the dump is being converted to Parquet. A full
 
 **What is not checked.** A dump you run yourself with `bintrail dump`. A PostgreSQL snapshot writes Parquet directly, with no dump in between, and has its own check: the next section.
 
+**Why both are on disk at once.** A full read (the web interface's **Read database now**, or a scheduled full read) runs mydumper, which writes the **whole dump, uncompressed**, into the working folder. Only after the dump finishes is it converted to Parquet, and the dump is deleted when the run ends. So for a short while both are on disk at once:
+
+```
+peak = the uncompressed dump  +  the Parquet being written
+```
+
+A full read started by DBTrail (the web interface's **Read database now**, or a schedule) lowers that peak: as soon as a table's Parquet file is written, that table's part of the dump is deleted, so what is on disk is the whole dump at the start and less of it as the conversion goes, plus the Parquet written so far. The dump on its own still has to fit. How much the peak drops depends on the data: tables are converted as many at once as the host has CPUs and a table's dump goes only when that table is done, so a database that is mostly one table, or one with fewer tables than CPUs, gains little. When the snapshot folder is on another disk the working folder only ever held the dump, and that does not change. The numbers below were measured **before** this, with the whole dump kept to the end, and the check still uses them: it warns earlier than it now needs to. `bintrail baseline`, which converts a dump you made, never deletes any of it.
+
+**The measurement behind those numbers.** It is synthetic (MySQL 8.4, mydumper 1.0.5 with the flags DBTrail passes, five tables of different shapes, one machine; not yet confirmed on real datasets, and not repeated on mydumper 1.0.3-1, the version the DBTrail images ship). Ratios are against `DATA_LENGTH + INDEX_LENGTH`, the number DBTrail reads before a full read:
+
+| Table shape | Dump ÷ (data + indexes) | Peak (dump + Parquet) ÷ (data + indexes) |
+|---|---|---|
+| Random strings, 1 secondary index | 0.82 | 1.21 |
+| Numbers and dates, 3 secondary indexes | 0.60 | 0.75 |
+| Repetitive text and JSON | 0.98 | 1.02 |
+| Random binary | 0.95 | 1.80 |
+| 90% of rows deleted | stale sizes | stale sizes |
+
+In every case the dump alone stayed below `DATA_LENGTH + INDEX_LENGTH`. `DATA_LENGTH` alone is not a safe bound: numbers and dates are written as text, and one table dumped to 1.6× its `DATA_LENGTH`. With the Parquet copy on the same disk, data that does not compress (random strings, binary) peaked above the tables' size, up to 1.8×. Compressible data stayed near or below it. The table with 90% of its rows deleted kept its file size and reported sizes from before the delete, while its dump held only the live rows (0.08× the file): sizes that lag make the estimate too high, not too low. Compressed storage was not measured: `ROW_FORMAT=COMPRESSED` and MyRocks report their compressed size, so their dump can be larger than the estimate (see "Compressed tables" above, which also says what is not known about InnoDB page compression).
+
 ## Disk for a PostgreSQL snapshot: the snapshot folder is the one that fills
 
 A snapshot of a PostgreSQL server has no dump. Each table is copied straight into a Parquet file in the server's **Local folder**, so the working folder is not involved and the snapshot folder is the only one that has to have the room.
@@ -222,27 +242,6 @@ No fraction of the tables' size is a line every real snapshot stays above, so re
 **More room.** Free space in the snapshot folder, or give the server a Local folder on a bigger disk (Snapshots page, under Where and how often).
 
 **From the command line.** `bintrail-pg baseline` writes where `--output` says and does not run this check, as `bintrail baseline` does not for MySQL: the check belongs to the snapshots DBTrail takes for a server it manages. `bintrail-pg doctor` does not report it either: it does not know the snapshot folder, and may run on another machine.
-
-
-**Why both are on disk at once.** A full read (the web interface's **Read database now**, or a scheduled full read) runs mydumper, which writes the **whole dump, uncompressed**, into the working folder. Only after the dump finishes is it converted to Parquet, and the dump is deleted when the run ends. So for a short while both are on disk at once:
-
-```
-peak = the uncompressed dump  +  the Parquet being written
-```
-
-A full read started by DBTrail (the web interface's **Read database now**, or a schedule) lowers that peak: as soon as a table's Parquet file is written, that table's part of the dump is deleted, so what is on disk is the whole dump at the start and less of it as the conversion goes, plus the Parquet written so far. The dump on its own still has to fit. How much the peak drops depends on the data: tables are converted as many at once as the host has CPUs and a table's dump goes only when that table is done, so a database that is mostly one table, or one with fewer tables than CPUs, gains little. When the snapshot folder is on another disk the working folder only ever held the dump, and that does not change. The numbers below were measured **before** this, with the whole dump kept to the end, and the check still uses them: it warns earlier than it now needs to. `bintrail baseline`, which converts a dump you made, never deletes any of it.
-
-**The measurement behind those numbers.** It is synthetic (MySQL 8.4, mydumper 1.0.5 with the flags DBTrail passes, five tables of different shapes, one machine; not yet confirmed on real datasets, and not repeated on mydumper 1.0.3-1, the version the DBTrail images ship). Ratios are against `DATA_LENGTH + INDEX_LENGTH`, the number DBTrail reads before a full read:
-
-| Table shape | Dump ÷ (data + indexes) | Peak (dump + Parquet) ÷ (data + indexes) |
-|---|---|---|
-| Random strings, 1 secondary index | 0.82 | 1.21 |
-| Numbers and dates, 3 secondary indexes | 0.60 | 0.75 |
-| Repetitive text and JSON | 0.98 | 1.02 |
-| Random binary | 0.95 | 1.80 |
-| 90% of rows deleted | stale sizes | stale sizes |
-
-In every case the dump alone stayed below `DATA_LENGTH + INDEX_LENGTH`. `DATA_LENGTH` alone is not a safe bound: numbers and dates are written as text, and one table dumped to 1.6× its `DATA_LENGTH`. With the Parquet copy on the same disk, data that does not compress (random strings, binary) peaked above the tables' size, up to 1.8×. Compressible data stayed near or below it. The table with 90% of its rows deleted kept its file size and reported sizes from before the delete, while its dump held only the live rows (0.08× the file): sizes that lag make the estimate too high, not too low. Compressed storage was not measured: `ROW_FORMAT=COMPRESSED` and MyRocks report their compressed size, so their dump can be larger than the estimate (see "Compressed tables" above, which also says what is not known about InnoDB page compression).
 
 ## Monitoring
 
