@@ -120,10 +120,13 @@ and the publication that names its tables, which you create first:
   bintrail-console server add --flavor postgres -h pg1 -u dbtrail -p -d shop --publication bintrail_pub
 
 DBTrail creates the replication slot (--slot, bintrail_<database> unless
-named). No forwarding user is asked for, so at first the PostgreSQL port
-answers from the copy alone and sends nothing to your PostgreSQL. To have it
-send what the copy is not known to answer as PostgreSQL does, and a client's
-transaction blocks, set one once the server is added:
+named). The forwarding user is taken as for a MySQL: asked for once the
+server is added, or named with --forward-user or [dbtrail-forward]. On a
+PostgreSQL it is a role of its own that can log in, with SELECT on what the
+port should read. The PostgreSQL port sends to your PostgreSQL, as that role
+and read-only, what the copy is not known to answer as PostgreSQL does, and
+a client's transaction blocks. Without one the copy answers alone, and a
+statement it cannot answer gets an error. To set or change it later:
 
   bintrail-console server forward-user <server> -u <user> -p
 
@@ -232,7 +235,7 @@ func init() {
 	f.StringVarP(&srvAdd.Database, "database", "d", "", "PostgreSQL: the database to record")
 	f.StringVar(&srvAdd.Publication, "publication", "", "PostgreSQL: the publication that names the tables to record. You create it; DBTrail checks it")
 	f.StringVar(&srvAdd.Slot, "slot", "", "PostgreSQL: the replication slot, which DBTrail creates (default: bintrail_<database>)")
-	f.StringVar(&srvAdd.ForwardUser, "forward-user", "", "The user the MySQL port runs statements as on this database when the copy cannot answer (default: asked, or [dbtrail-forward] in --defaults-file)")
+	f.StringVar(&srvAdd.ForwardUser, "forward-user", "", "The user the MySQL port, or the PostgreSQL port, runs statements as on this database when the copy cannot answer (default: asked, or [dbtrail-forward] in --defaults-file)")
 	f.BoolVar(&srvAdd.NoForward, "no-forward", false, "Do not ask for a forwarding user")
 	f.BoolVarP(&srvVerbose, "verbose", "v", false, "Also print how to turn on each optional improvement")
 	serverAddCmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
@@ -392,7 +395,7 @@ func runServerForwardUser(ctx context.Context, c *ctlClient, name string, f fwdF
 		return err
 	}
 	if s.Flavor == console.FlavorPostgres {
-		fmt.Fprintf(out, "%q forwards as %s: the PostgreSQL port sends to your PostgreSQL, as that user and read-only, every statement the copy is not known to answer as PostgreSQL does, and a client's transaction blocks.\n", s.Name, user)
+		fmt.Fprintln(out, pgForwardsAsLine(s.Name, user))
 		return nil
 	}
 	fmt.Fprintf(out, "%q forwards as %s. Engine Routing uses it once it is on:  bintrail-console port routing on\n", s.Name, user)
@@ -521,11 +524,8 @@ func resolveAddInput(f addFlags, ask asker, stdin io.Reader) (addInput, error) {
 	}
 	pg := in.Flavor == console.FlavorPostgres
 	in.Database, in.Slot, in.Publication = strings.TrimSpace(f.Database), strings.TrimSpace(f.Slot), strings.TrimSpace(f.Publication)
-	switch {
-	case !pg && (in.Database != "" || in.Slot != "" || in.Publication != ""):
+	if !pg && (in.Database != "" || in.Slot != "" || in.Publication != "") {
 		return addInput{}, errors.New("--database, --slot and --publication are a PostgreSQL's: add --flavor postgres")
-	case pg && (strings.TrimSpace(f.ForwardUser) != "" || f.NoForward):
-		return addInput{}, errors.New("a PostgreSQL's forwarding user is set once it is added, with its own command: bintrail-console server forward-user <server> -u <user> -p. Leave --forward-user and --no-forward out")
 	}
 	defaultPort := "3306"
 	if pg {
@@ -652,6 +652,10 @@ func resolveAddInput(f addFlags, ask asker, stdin io.Reader) (addInput, error) {
 	}
 	if pg {
 		if err := resolvePostgres(&in, ask, interactive); err != nil {
+			return addInput{}, err
+		}
+		// The forwarding user, settled as a MySQL's is (#3020).
+		if err := resolveForward(&in, f, fwdFile, ask, interactive); err != nil {
 			return addInput{}, err
 		}
 		return in, nil
@@ -950,9 +954,12 @@ func runServerAdd(ctx context.Context, c *ctlClient, in addInput, verbose bool, 
 		// forwarding user is asked for or set, so neither a Ctrl-C at the
 		// question nor a refused account loses it.
 		if pg {
-			printNewServerPortPG(out, res.Port, res.Name)
+			// Not said when the question comes next: it says it itself,
+			// whether it is answered or skipped.
+			printNewServerPortPG(out, res.Port, res.Name, in.FwdUser == "" && !in.FwdAsk)
+			err := addForwardUserPG(ctx, c, in, res, out)
 			fmt.Fprintf(out, "Next, the first copy of its tables:  bintrail-console snapshot run %s\n", res.Name)
-			return nil
+			return err
 		}
 		printNewServerPort(out, res.Port, res.Name, in.FwdUser == "")
 		if err := addForwardUser(ctx, c, in, res, out); err != nil {
@@ -1027,9 +1034,9 @@ func printNewServerPort(out io.Writer, p *ctlNewServerPort, name string, noForwa
 // client connects to is the PostgreSQL router, which listens on 5433 unless
 // its own setting says otherwise, and this command cannot see that setting:
 // the line says so. The database a client names is the server's name. No
-// Engine Routing, and no forwarding user yet (server forward-user sets one
-// afterwards): until then the copy answers alone.
-func printNewServerPortPG(out io.Writer, p *ctlNewServerPort, name string) {
+// Engine Routing. noForwardYet: no forwarding user was named and none is
+// about to be asked for (#3020), so until one is set the copy answers alone.
+func printNewServerPortPG(out io.Writer, p *ctlNewServerPort, name string, noForwardYet bool) {
 	if p == nil || p.Enabled == nil {
 		return
 	}
@@ -1048,8 +1055,16 @@ func printNewServerPortPG(out io.Writer, p *ctlNewServerPort, name string) {
 			fmt.Fprintln(out, "No password came with the answer. Make one:  bintrail-console port new-password")
 		}
 		fmt.Fprintf(out, "Statements for %q are answered once its first copy is ready.\n", name)
+		if noForwardYet {
+			fmt.Fprintln(out, pgNoForwardYetLine(name))
+		}
 	case *p.Enabled:
 		fmt.Fprintf(out, "\nThe port for SQL clients is on, and takes the password it already has. %s\n\n%s\n", where, line)
+		// A second PostgreSQL server: the port was on already, and this
+		// server still starts with the copy answering alone.
+		if noForwardYet {
+			fmt.Fprintf(out, "\n%s\n", pgNoForwardYetLine(name))
+		}
 	case p.NotTurnedOn != "":
 		fmt.Fprintf(out, "\nThe port for SQL clients was not turned on: %s.\n", strings.TrimRight(p.NotTurnedOn, "."))
 	default:
