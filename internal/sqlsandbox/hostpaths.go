@@ -18,22 +18,33 @@ const hiddenPathWord = "<hidden>"
 // message or follows a character that cannot be part of a path, and it ends
 // the message, a path component or the path, so /tmp does not match
 // /tmpfiles or /mnt/tmp. Longer folders go first, so one inside another is
-// replaced whole. The root folder and empty entries are skipped: they would
-// match every path.
+// replaced whole. Each folder is also hidden in the form its links resolve
+// to. The root folder and empty entries are skipped: they would match every
+// path.
 func hideHostPaths(msg string, roots []string) string {
 	if msg == "" {
 		return msg
 	}
-	clean := make([]string, 0, len(roots))
+	clean := make([]string, 0, 2*len(roots))
+	add := func(r string) {
+		r = filepath.Clean(r)
+		if r == "/" || r == "." || !strings.HasPrefix(r, "/") || slices.Contains(clean, r) {
+			return
+		}
+		clean = append(clean, r)
+	}
 	for _, r := range roots {
 		if r == "" {
 			continue
 		}
-		r = filepath.Clean(r)
-		if r == "/" || r == "." || !strings.HasPrefix(r, "/") || slices.Contains(clean, r) {
-			continue
+		add(r)
+		// The engine may name a folder by the path its links resolve to
+		// (a temporary folder that is a link, a data folder mounted
+		// through one): that form is hidden too. A folder that cannot be
+		// resolved (gone, unreadable) is hidden as configured only.
+		if resolved, err := filepath.EvalSymlinks(r); err == nil {
+			add(resolved)
 		}
-		clean = append(clean, r)
 	}
 	slices.SortFunc(clean, func(a, b string) int { return len(b) - len(a) })
 	for _, r := range clean {
@@ -62,7 +73,10 @@ func replaceWholePath(msg, root string) string {
 		if end < len(rest) {
 			after = rest[end]
 		}
-		if !pathByte(before) && before != ':' && (after == 0 || after == '/' || !pathByte(after)) {
+		// A URL keeps its path: after "scheme://host" the folder follows a
+		// letter of the host or a slash, both of which can be part of a
+		// path, so it is not taken for a folder of the host.
+		if !pathByte(before) && (after == 0 || after == '/' || !pathByte(after)) {
 			b.WriteString(rest[:i])
 			b.WriteString(hiddenPathWord)
 		} else {

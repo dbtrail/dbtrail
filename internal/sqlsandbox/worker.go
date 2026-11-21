@@ -305,6 +305,12 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 			return wireResult{Error: &wireError{Kind: errQuery, Message: err.Error()}}
 		}
 	}
+	// A settings name qualified with a schema of the copy is the copy's
+	// only if that schema has it, which is known now that the views are in
+	// (#3096); the others were refused with the parse.
+	if reason := copyOwnSettingsName(ctx, conn, settingsCatalogRefs(stmt)); reason != "" {
+		return wireResult{Error: &wireError{Kind: errRefused, Message: reason}}
+	}
 	// The port's USE, before the lock like every other SET. A schema the
 	// views did not create (a default seeded from the source DSN, a typo in
 	// -D) is NOT applied: SET search_path refuses it, and refusing every
@@ -800,10 +806,29 @@ var viewTextFunctions = map[string]bool{"pg_get_viewdef": true}
 
 // settingsCatalogs are the engine's catalog views over its settings, refused
 // on every server (#3096): pg_settings is a view over duckdb_settings(), and
-// a table reference does not show the function it reads. Matched by name in
-// pg_catalog or unqualified, so a source table of that name in a schema of
-// the copy stays readable.
+// a table reference does not show the function it reads. A reference of that
+// name is refused however it is qualified or spelled, with one exception: a
+// schema of the copy that really holds a relation of that name, named with
+// that schema (copyOwnSettingsName). The engine resolves a name through more
+// catalogs and schemas than a spelling shows, so what is refused is the name,
+// not one way of writing it.
 var settingsCatalogs = map[string]bool{"pg_settings": true}
+
+// engineSchemas are the schemas of the engine's own catalog views: a
+// settings name in one of them is never the copy's.
+var engineSchemas = map[string]bool{"pg_catalog": true, "information_schema": true}
+
+// settingsRef is a table reference whose name is one of settingsCatalogs.
+type settingsRef struct{ catalog, schema, name string }
+
+// mayBeTheCopys says whether the reference could name a relation of the
+// copy: qualified with a schema that is not one of the engine's, in the
+// copy's own database or in none. Whether that schema really holds one is
+// asked of the session once the views are in (copyOwnSettingsName).
+func (r settingsRef) mayBeTheCopys() bool {
+	c, s := strings.ToLower(r.catalog), strings.ToLower(r.schema)
+	return s != "" && !engineSchemas[s] && (c == "" || c == "memory")
+}
 
 // refusedFunctionCall returns the first function call in the statement tree
 // whose name is in names, or "". A call is a node of type FUNCTION at any
@@ -839,33 +864,59 @@ func refusedFunctionCall(node any, names map[string]bool) string {
 	return ""
 }
 
-// settingsCatalogRef returns the first table reference in the statement tree
-// that reads one of settingsCatalogs, or "".
-func settingsCatalogRef(node any) string {
-	switch x := node.(type) {
-	case map[string]any:
-		if x["type"] == "BASE_TABLE" {
-			name, _ := x["table_name"].(string)
-			schema, _ := x["schema_name"].(string)
-			if ls := strings.ToLower(schema); settingsCatalogs[strings.ToLower(name)] && (ls == "" || ls == "pg_catalog") {
-				return name
+// settingsCatalogRefs returns every table reference in the statement tree
+// whose name is one of settingsCatalogs, however it is qualified.
+func settingsCatalogRefs(node any) []settingsRef {
+	var out []settingsRef
+	var walk func(any)
+	walk = func(node any) {
+		switch x := node.(type) {
+		case map[string]any:
+			if x["type"] == "BASE_TABLE" {
+				name, _ := x["table_name"].(string)
+				if settingsCatalogs[strings.ToLower(name)] {
+					schema, _ := x["schema_name"].(string)
+					catalog, _ := x["catalog_name"].(string)
+					out = append(out, settingsRef{catalog: catalog, schema: schema, name: name})
+				}
+			}
+			keys := make([]string, 0, len(x))
+			for k := range x {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				walk(x[k])
+			}
+		case []any:
+			for _, e := range x {
+				walk(e)
 			}
 		}
-		keys := make([]string, 0, len(x))
-		for k := range x {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			if r := settingsCatalogRef(x[k]); r != "" {
-				return r
-			}
-		}
-	case []any:
-		for _, e := range x {
-			if r := settingsCatalogRef(e); r != "" {
-				return r
-			}
+	}
+	walk(node)
+	return out
+}
+
+// settingsRefusal is the reason a statement naming the engine's settings
+// view is refused.
+func settingsRefusal(name string) string {
+	return fmt.Sprintf("%s is not allowed here: the engine's settings are not shown on the copy", name)
+}
+
+// copyOwnSettingsName refuses, once the copy's views are in, a reference
+// that mayBeTheCopys but names no relation the copy really has: then the
+// engine would resolve it to its own settings view. "" when every one is the
+// copy's.
+func copyOwnSettingsName(ctx context.Context, conn *sql.Conn, refs []settingsRef) string {
+	for _, r := range refs {
+		var n int
+		err := conn.QueryRowContext(ctx, `SELECT count(*) FROM (
+			SELECT schema_name, view_name AS name FROM duckdb_views() WHERE NOT internal AND database_name = 'memory'
+			UNION ALL SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = 'memory')
+			WHERE lower(schema_name) = lower(?) AND lower(name) = lower(?)`, r.schema, r.name).Scan(&n)
+		if err != nil || n == 0 {
+			return settingsRefusal(r.name)
 		}
 	}
 	return ""
@@ -1063,8 +1114,10 @@ func parseStatement(ctx context.Context, conn *sql.Conn, text string, noFileRead
 	if name := refusedFunctionCall(parsed.Statements[0], refusedScalarFunctions); name != "" {
 		return nil, fmt.Sprintf("the function %s is not allowed here: the engine's settings and session variables are not shown on the copy", name)
 	}
-	if name := settingsCatalogRef(parsed.Statements[0]); name != "" {
-		return nil, fmt.Sprintf("%s is not allowed here: the engine's settings are not shown on the copy", name)
+	for _, ref := range settingsCatalogRefs(parsed.Statements[0]) {
+		if !ref.mayBeTheCopys() {
+			return nil, settingsRefusal(ref.name)
+		}
 	}
 	return parsed.Statements[0], ""
 }

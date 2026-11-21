@@ -95,6 +95,50 @@ func TestHostPaths_introspectionRefused(t *testing.T) {
 	}
 }
 
+// The engine's settings view is refused by what it is, however the reference
+// is qualified or spelled; a relation of the copy that only shares its name
+// stays readable when it is named in its own schema.
+func TestHostPaths_settingsViewEveryQualification(t *testing.T) {
+	f := newCopyFixture(t)
+	f.views += "\nCREATE VIEW shop.pg_settings AS SELECT 1 AS x;\n"
+	r := newTestRunner(t, testLimits())
+	for _, q := range []string{
+		"SELECT * FROM pg_settings",
+		`SELECT * FROM "pg_settings"`,
+		"SELECT * FROM PG_SETTINGS",
+		`SELECT * FROM "Pg_Settings"`,
+		"SELECT * FROM pg_catalog.pg_settings",
+		`SELECT * FROM "PG_CATALOG"."PG_SETTINGS"`,
+		"SELECT * FROM system.pg_catalog.pg_settings",
+		`SELECT * FROM "system"."pg_catalog"."pg_settings"`,
+		"SELECT * FROM SYSTEM.PG_CATALOG.PG_SETTINGS",
+		"SELECT * FROM system.main.pg_settings",
+		"SELECT * FROM main.pg_settings",
+		"SELECT * FROM memory.pg_catalog.pg_settings",
+		"SELECT * FROM temp.pg_catalog.pg_settings",
+		"SELECT * FROM information_schema.pg_settings",
+		"SELECT * FROM system.shop.pg_settings",
+		"SELECT * FROM nosuchschema.pg_settings",
+		"SELECT x FROM shop.orders o, LATERAL (SELECT 1 AS x FROM system.pg_catalog.pg_settings) s",
+		"SELECT 1 FROM shop.pg_settings, pg_catalog.pg_settings",
+	} {
+		_, err := r.Run(context.Background(), f.job(q))
+		var re *RefusedError
+		if !errors.As(err, &re) {
+			t.Errorf("%s: err = %v, want RefusedError", q, err)
+		}
+	}
+	for _, q := range []string{
+		"SELECT x FROM shop.pg_settings",
+		"SELECT x FROM memory.shop.pg_settings",
+		`SELECT x FROM "SHOP"."PG_SETTINGS"`,
+	} {
+		if _, err := r.Run(context.Background(), f.job(q)); err != nil {
+			t.Errorf("%s: %v, want the copy's own view read", q, err)
+		}
+	}
+}
+
 // What a client reads the catalog with still works, by name, qualified, and
 // in upper case: tools and the ports list schemas, tables and columns this
 // way, and plain reads of the copy are untouched.
@@ -230,6 +274,45 @@ func TestHideHostPaths(t *testing.T) {
 	}
 	if got := hideHostPaths("at /data/copy", nil); got != "at /data/copy" {
 		t.Errorf("no roots: %q", got)
+	}
+}
+
+// A folder is hidden in the form it was configured in and in the form its
+// links resolve to, after a colon, in quotes and at the end of the text; a
+// URL stays as written.
+func TestHideHostPaths_resolvedFormsAndColons(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "copy-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("cannot make a symbolic link here: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := []string{link}
+	h := hiddenPathWord
+	for _, form := range []string{link, resolved} {
+		cases := []struct{ in, want string }{
+			{"open " + form + "/a.parquet: no such file", "open " + h + "/a.parquet: no such file"},
+			{"open: " + form + "/a.parquet", "open: " + h + "/a.parquet"},
+			{"open:" + form + "/a.parquet", "open:" + h + "/a.parquet"},
+			{`pattern "` + form + `/x"`, `pattern "` + h + `/x"`},
+			{`pattern '` + form + `'`, `pattern '` + h + `'`},
+			{"looked in " + form, "looked in " + h},
+		}
+		for _, c := range cases {
+			if got := hideHostPaths(c.in, roots); got != c.want {
+				t.Errorf("hideHostPaths(%q)\n got %q\nwant %q", c.in, got, c.want)
+			}
+		}
+	}
+	for _, u := range []string{
+		"s3://bucket" + resolved + "/x", "https://example.com" + resolved, "file://" + resolved + "x",
+	} {
+		if got := hideHostPaths(u, roots); got != u {
+			t.Errorf("hideHostPaths(%q) = %q, want the URL as written", u, got)
+		}
 	}
 }
 
