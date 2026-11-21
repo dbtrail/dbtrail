@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/event"
@@ -99,13 +100,32 @@ func BasePositions(ctx context.Context, db *sql.DB, basePath string, keyColumns 
 // does not hold is absent, a wanted key the file holds twice is an error,
 // and so is a row of the file with a NULL in a key column, wanted or not.
 // keys need not be sorted; one named twice is asked once.
+//
+// Two passes over the file's key columns: one for a NULL, one for the join.
+// The first is skipped for a file this process already found to hold no
+// NULL in those columns (nullmemo.go says how a file is told from another,
+// and what is never remembered).
 func BasePositionsOf(ctx context.Context, db *sql.DB, basePath string, keyColumns []string, keys []string) (map[string]int64, error) {
+	found, moved, err := basePositionsOf(ctx, db, basePath, keyColumns, keys, true)
+	if moved {
+		// The file changed under a call that took it for one with no NULL:
+		// asked again, with both passes.
+		found, _, err = basePositionsOf(ctx, db, basePath, keyColumns, keys, false)
+	}
+	return found, err
+}
+
+// basePositionsOf is BasePositionsOf, with the memo of files with no NULL
+// key (useMemo) or without it. moved is true when the pass for a NULL was
+// skipped and the file was not, after the join, the file remembered: the
+// answer is then nil, and the caller asks again without the memo.
+func basePositionsOf(ctx context.Context, db *sql.DB, basePath string, keyColumns []string, keys []string, useMemo bool) (_ map[string]int64, moved bool, _ error) {
 	if len(keyColumns) == 0 {
-		return nil, errors.New("pgdelta: a table with no key column")
+		return nil, false, errors.New("pgdelta: a table with no key column")
 	}
 	found := map[string]int64{}
 	if len(keys) == 0 {
-		return found, nil
+		return found, false, nil
 	}
 	quoted := make([]string, len(keyColumns))
 	parts := make([]string, len(keyColumns))
@@ -117,25 +137,39 @@ func BasePositionsOf(ctx context.Context, db *sql.DB, basePath string, keyColumn
 		nulls[i] = quoted[i] + " IS NULL"
 	}
 	src := "read_parquet(" + file(basePath) + ", file_row_number=true" + noHive + ")"
-	var badRow sql.NullInt64
-	err := db.QueryRowContext(ctx, "SELECT min(file_row_number) FROM "+src+" WHERE "+strings.Join(nulls, " OR ")).Scan(&badRow)
-	if err != nil {
-		return nil, fmt.Errorf("read the keys of %s: %w", basePath, err)
+	var memoKey noNullKey
+	remembered, skipped := false, false
+	if useMemo {
+		memoKey, _, remembered = noNullKeyOf(basePath, keyColumns)
+		skipped = remembered && noNullRecalled(memoKey)
 	}
-	if badRow.Valid {
-		return nil, fmt.Errorf("row %d of %s has no value in a key column (%s)", badRow.Int64, basePath, strings.Join(keyColumns, ", "))
+	if !skipped {
+		nullPasses.Add(1)
+		var badRow sql.NullInt64
+		err := db.QueryRowContext(ctx, "SELECT min(file_row_number) FROM "+src+" WHERE "+strings.Join(nulls, " OR ")).Scan(&badRow)
+		if err != nil {
+			return nil, false, fmt.Errorf("read the keys of %s: %w", basePath, err)
+		}
+		if badRow.Valid {
+			return nil, false, fmt.Errorf("row %d of %s has no value in a key column (%s)", badRow.Int64, basePath, strings.Join(keyColumns, ", "))
+		}
+		if remembered {
+			noNullRemember(basePath, keyColumns, memoKey, time.Now())
+		}
 	}
 
 	// The wanted keys, in a file the engine reads. Where none can be written
 	// (no temporary folder to write in), the keys are found row by row: it
-	// costs time, not the pair.
+	// costs time, not the pair, and it looks at every row's key for a NULL
+	// itself.
 	wanted, cleanup, err := writeWantedKeys(keys)
 	if err != nil {
 		set := make(map[string]bool, len(keys))
 		for _, k := range keys {
 			set[k] = true
 		}
-		return BasePositions(ctx, db, basePath, keyColumns, func(k string) bool { return set[k] })
+		found, err := BasePositions(ctx, db, basePath, keyColumns, func(k string) bool { return set[k] })
+		return found, false, err
 	}
 	defer cleanup()
 
@@ -147,29 +181,43 @@ func BasePositionsOf(ctx context.Context, db *sql.DB, basePath string, keyColumn
 		" JOIN (SELECT DISTINCT encode("+KeyColumn+") AS bintrail_k FROM read_parquet("+file(wanted)+noHive+")) AS bintrail_w"+
 		" ON bintrail_b.bintrail_k = bintrail_w.bintrail_k")
 	if err != nil {
-		return nil, fmt.Errorf("find the changed keys in %s: %w", basePath, err)
+		return nil, false, fmt.Errorf("find the changed keys in %s: %w", basePath, err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var pos int64
 		var raw []byte
 		if err := rows.Scan(&pos, &raw); err != nil {
-			return nil, fmt.Errorf("find the changed keys in %s: %w", basePath, err)
+			return nil, false, fmt.Errorf("find the changed keys in %s: %w", basePath, err)
 		}
 		key := string(raw)
 		if at, twice := found[key]; twice {
 			if at > pos {
 				at, pos = pos, at
 			}
-			return nil, fmt.Errorf("%s holds key %q twice, at rows %d and %d", basePath, key, at, pos)
+			return nil, false, fmt.Errorf("%s holds key %q twice, at rows %d and %d", basePath, key, at, pos)
 		}
 		found[key] = pos
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("find the changed keys in %s: %w", basePath, err)
+		return nil, false, fmt.Errorf("find the changed keys in %s: %w", basePath, err)
 	}
-	return found, nil
+	afterKeyJoin(basePath)
+	// The join read the file by its name. With the pass for a NULL skipped,
+	// the answer is only good if that name was still the file remembered: a
+	// file put in its place may hold a NULL no pass looked for.
+	if skipped {
+		if again, _, ok := noNullKeyOf(basePath, keyColumns); !ok || again != memoKey {
+			noNullForget(memoKey)
+			return nil, true, nil
+		}
+	}
+	return found, false, nil
 }
+
+// afterKeyJoin runs when BasePositionsOf's join has read the file, before
+// the file is looked at again; a test puts another file in its place there.
+var afterKeyJoin = func(basePath string) {}
 
 // ErrBaseValuesTooLarge says the values BaseValuesOf was asked for are more
 // than it was allowed to hold.
