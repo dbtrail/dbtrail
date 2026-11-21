@@ -59,7 +59,8 @@ shard_list() {
 # that shard runs the tests whose name matches the pattern (-test.run), and
 # shard SPLIT_REST_SHARD runs every other test of the package (-test.skip with
 # all the patterns joined). Each part is its own run of the binary, with its
-# own 10 minutes. Measured on 2026-11-14 (8.0): SQLCompare 394 s, Flashback
+# own time limit (10 minutes when these were measured, 15 since 2026-11-21).
+# Measured on 2026-11-14 (8.0): SQLCompare 394 s, Flashback
 # 192 s, the rest 368 s. Keep each part under about 300 s. SQLCompare reached
 # 543 s in main's run of the same day, and one more test of its own took it
 # past the 600 s (#2849), so it runs in two parts: the tests whose name goes
@@ -427,11 +428,15 @@ run_shard() {
     fi
     start="$(now)"
     set +e
-    # The flags `go test -v -count=1` passes, with its default 10m timeout.
+    # The flags `go test -v -count=1` passes, with 15 minutes for a package
+    # (or a part of the split one) where `go test` gives 10: internal/console
+    # reached 558 s of 600 on 8.0 on 2026-11-21, and the next test of its own
+    # would have failed every pull request on time alone. Shard 1, which runs
+    # it, took about 1100 s of tests that day, inside the job's 40 minutes.
     # stdin is /dev/null: a test that read it would otherwise swallow the
     # package list this loop reads. `timeout` is the watchdog `go test` keeps
     # past the binary's own timer, for a hang that timer cannot interrupt.
-    (cd "$dir" && timeout -s QUIT 11m "$bin" -test.paniconexit0 -test.timeout=10m0s -test.count=1 -test.v=true ${part[@]+"${part[@]}"} </dev/null) 2>&1 | tee -a "$log"
+    (cd "$dir" && timeout -s QUIT 16m "$bin" -test.paniconexit0 -test.timeout=15m0s -test.count=1 -test.v=true ${part[@]+"${part[@]}"} </dev/null) 2>&1 | tee -a "$log"
     rc=${PIPESTATUS[0]}
     set -e
     if [ -n "$label" ]; then

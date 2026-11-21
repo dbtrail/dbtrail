@@ -147,7 +147,7 @@ func buildPGRouteDSN(req serverRequest, stored, oldSource, newSource string, ask
 			return "", errors.New("route_dsn names no user")
 		case r.path == "":
 			return "", errors.New("route_dsn must name the database (postgres://user:password@host:5432/dbname)")
-		case r.u.Query().Get("replication") != "":
+		case r.u.Query().Has("replication"):
 			return "", errors.New("route_dsn must be an ordinary connection; drop replication=")
 		case samePGAccount(r, src):
 			return "", errPGRouteIsCapture
@@ -241,7 +241,7 @@ func buildPGRouteDSN(req serverRequest, stored, oldSource, newSource string, ask
 	if !base.overTCP() {
 		return "", errors.New("a forwarding account needs a source reached over the network, and this one is a socket directory; " + routeOverNetwork)
 	}
-	if base.u.Query().Get("replication") != "" {
+	if base.u.Query().Has("replication") {
 		return "", errors.New("the forwarding account's URL must be an ordinary connection; drop replication=")
 	}
 	if k := base.accountParam(); k != "" {
@@ -265,9 +265,11 @@ func pgRouteAccountState(routeDSN, sourceDSN string) (routeState, *pgRouteURL) {
 		return routeNone, nil
 	}
 	cfg, err := parsePGRouteURL(routeDSN)
-	if err != nil || cfg.user == "" || !cfg.overTCP() || cfg.accountParam() != "" {
+	if err != nil || cfg.user == "" || !cfg.overTCP() || cfg.accountParam() != "" || cfg.u.Query().Has("replication") {
 		// A hand-edited value that names its account in its parameters is
-		// one this file cannot tell from the capture account: not used.
+		// one this file cannot tell from the capture account, and one that
+		// asks for a replication connection is not the ordinary connection
+		// the port forwards on (setting it refuses the same): not used.
 		return routeUnreadable, nil
 	}
 	if src, err := parsePGRouteURL(sourceDSN); err == nil && samePGAccount(cfg, src) {

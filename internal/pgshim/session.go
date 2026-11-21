@@ -260,7 +260,7 @@ func (s *session) run(qstr string) (cols []string, types []colType, rows [][][]b
 	}
 	// A transaction block the client opens lives on the source, when the
 	// connection can reach it: its start and end are sent there first.
-	srcTag, perr := s.forwardTxControl(qstr, c.cmd)
+	srcTag, perr := s.forwardTxControl(c.cmd)
 	if perr != nil {
 		return nil, nil, nil, "", perr
 	}

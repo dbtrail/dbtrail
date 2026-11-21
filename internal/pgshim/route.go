@@ -600,6 +600,11 @@ func lexSQLSpans(q string) (toks []rtToken, spans [][2]int, why string) {
 				for j < len(q) && isDigit(q[j]) {
 					j++
 				}
+				if j < len(q) && isWordStart(q[j]) {
+					// $1abc: an error on PostgreSQL 15 and later, a parameter
+					// and a name before.
+					return toks, spans, "a parameter run into a name"
+				}
 				toks = append(toks, rtToken{rtParam, q[i:j]})
 				i = j
 				break

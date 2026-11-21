@@ -679,56 +679,107 @@ func (s *session) syncCycle(up *upstream, out relayOut) (byte, *errSourceLost) {
 // the source's status; inside one it is a statement of the port's own name,
 // so the client's unnamed statement and portal are left as they are.
 func (s *session) internal(up *upstream, sql string) (tag string, perr *pgErr, lost *errSourceLost) {
+	tag, _, perr, lost = s.internalCell(up, sql)
+	return tag, perr, lost
+}
+
+// internalCell is internal with the first cell of the last row the statement
+// answered, nil when it answered none.
+func (s *session) internalCell(up *upstream, sql string) (tag string, cell []byte, perr *pgErr, lost *errSourceLost) {
 	keepTag := func(m pgproto3.BackendMessage) {
 		if c, ok := m.(*pgproto3.CommandComplete); ok {
 			tag = string(c.CommandTag)
 		}
 	}
+	// keepRow keeps a row's first cell and says whether m was a row.
+	keepRow := func(m pgproto3.BackendMessage) bool {
+		r, ok := m.(*pgproto3.DataRow)
+		if ok && len(r.Values) > 0 {
+			// The message's buffer is reused by the next one.
+			cell = append([]byte{}, r.Values[0]...)
+		}
+		return ok
+	}
 	if !up.inCycle {
 		if err := up.send(&pgproto3.Query{String: sql}); err != nil {
-			return "", nil, &errSourceLost{"it could not be written to: " + err.Error()}
+			return "", nil, nil, &errSourceLost{"it could not be written to: " + err.Error()}
 		}
 		// A simple query ends the source's unnamed statement.
 		delete(up.stmts, "")
 		k := &statusKeeper{}
-		perr, lost = s.relay(up, relayQuiet, func(m pgproto3.BackendMessage) bool {
+		perr, lost = s.relay(up, relayCapture, func(m pgproto3.BackendMessage) bool {
+			if keepRow(m) {
+				return false
+			}
 			keepTag(m)
 			return k.done(m)
 		})
 		if lost == nil && k.tx == 'I' {
 			clear(up.portals)
 		}
-		return tag, perr, lost
+		return tag, cell, perr, lost
 	}
 	if up.failed {
-		return "", &pgErr{"25P02", "current transaction is aborted, commands ignored until end of transaction block"}, nil
+		return "", nil, &pgErr{"25P02", "current transaction is aborted, commands ignored until end of transaction block"}, nil
 	}
 	// Closed first: one left by an earlier error (the Close after it was
-	// discarded with the rest of that batch) would refuse this Parse.
+	// discarded with the rest of that batch) would refuse this Parse, and the
+	// portal of an earlier statement of the port's in this batch, which lives
+	// as long as the batch's transaction, would refuse this Bind.
 	// Closing one that does not exist is not an error.
 	if err := up.send(
 		&pgproto3.Close{ObjectType: 'S', Name: internalStatement},
+		&pgproto3.Close{ObjectType: 'P', Name: internalStatement},
 		&pgproto3.Parse{Name: internalStatement, Query: sql},
 		&pgproto3.Bind{DestinationPortal: internalStatement, PreparedStatement: internalStatement},
 		&pgproto3.Execute{Portal: internalStatement},
 		&pgproto3.Close{ObjectType: 'S', Name: internalStatement},
 		&pgproto3.Flush{},
 	); err != nil {
-		return "", nil, &errSourceLost{"it could not be written to: " + err.Error()}
+		return "", nil, nil, &errSourceLost{"it could not be written to: " + err.Error()}
 	}
 	n := 0
-	perr, lost = s.relay(up, relayQuiet, func(m pgproto3.BackendMessage) bool {
+	perr, lost = s.relay(up, relayCapture, func(m pgproto3.BackendMessage) bool {
 		if _, ok := m.(*pgproto3.ErrorResponse); ok {
 			return true
 		}
+		if keepRow(m) {
+			return false
+		}
 		keepTag(m)
 		n++
-		return n == 5 // CloseComplete, ParseComplete, BindComplete, CommandComplete, CloseComplete
+		return n == 6 // CloseComplete twice, ParseComplete, BindComplete, CommandComplete, CloseComplete
 	})
 	if perr != nil {
 		up.failed = true
 	}
-	return tag, perr, lost
+	return tag, cell, perr, lost
+}
+
+// beginReadOnly opens the client's transaction block on the source with the
+// port's own BEGIN, and has the source say that the block is read-only before
+// anything of the client's runs in it. A block that is not is never used: the
+// connection is closed, which rolls it back.
+func (s *session) beginReadOnly(up *upstream, begin string) (perr *pgErr, lost *errSourceLost) {
+	const ask = "SHOW transaction_read_only"
+	var cell []byte
+	if !up.inCycle {
+		// One write and one answer: the question rides behind the BEGIN.
+		_, cell, perr, lost = s.internalCell(up, begin+"; "+ask)
+	} else if _, perr, lost = s.internal(up, begin); perr == nil && lost == nil {
+		if _, cell, perr, lost = s.internalCell(up, ask); perr != nil && lost == nil {
+			// The BEGIN was taken and the question was not answered: a block
+			// is open there that nothing vouches for.
+			return nil, &errSourceLost{"it did not say whether the transaction block is read-only: " + perr.msg}
+		}
+	}
+	if lost != nil || perr != nil {
+		return perr, lost
+	}
+	if string(cell) != "on" {
+		return nil, &errSourceLost{"it opened a transaction block that is not read-only"}
+	}
+	return nil, nil
 }
 
 // sourceSettings are the settings the source must have for this session, as
@@ -982,11 +1033,14 @@ func (s *session) followSourceStatus(up *upstream, tx byte) {
 	}
 }
 
-// forwardTxControl sends the client's BEGIN, SET TRANSACTION, COMMIT or
-// ROLLBACK to the source, before the port moves its own transaction status:
-// a block the client opens lives on the source until it ends. tag, when not
-// empty, is the command tag the source answered, which the client is given.
-func (s *session) forwardTxControl(qstr string, cmd *sessionCmd) (tag string, perr *pgErr) {
+// forwardTxControl sends the source the BEGIN, SET TRANSACTION, COMMIT or
+// ROLLBACK the client asked for, before the port moves its own transaction
+// status: a block the client opens lives on the source until it ends. What
+// is sent is the port's own text, written from what it read of the client's
+// (sessionCmd.sourceText), never the client's: nothing it did not read goes
+// along. tag, when not empty, is the command tag the source answered, which
+// the client is given.
+func (s *session) forwardTxControl(cmd *sessionCmd) (tag string, perr *pgErr) {
 	s.leaveBarredSource()
 	if !s.forwarding() {
 		return "", nil
@@ -1005,12 +1059,20 @@ func (s *session) forwardTxControl(qstr string, cmd *sessionCmd) (tag string, pe
 			s.loseSource("it was in a transaction block the client had not opened")
 			return "", &pgErr{"08006", "the connection to the source was out of step with this session and is closed; reconnect"}
 		}
-		_, srcErr, lost := s.internal(up, qstr)
+		begin, perr := cmd.sourceText()
+		if perr != nil {
+			return "", perr
+		}
+		srcErr, lost := s.beginReadOnly(up, begin)
 		if lost != nil {
 			s.loseSource(lost.why)
 			return "", s.lostError(lost)
 		}
 		if srcErr != nil {
+			if !up.inCycle && up.tx != 'I' {
+				// The BEGIN was taken and what followed it was not.
+				s.loseSource("it could not confirm that the transaction block is read-only")
+			}
 			return "", srcErr
 		}
 		up.inTx = true
@@ -1024,7 +1086,11 @@ func (s *session) forwardTxControl(qstr string, cmd *sessionCmd) (tag string, pe
 		if perr != nil {
 			return "", perr
 		}
-		_, srcErr, lost := s.internal(up, qstr)
+		stmt, perr := cmd.sourceText()
+		if perr != nil {
+			return "", perr
+		}
+		_, srcErr, lost := s.internal(up, stmt)
 		if lost != nil {
 			s.loseSource(lost.why)
 			return "", s.lostError(lost)
@@ -1035,7 +1101,10 @@ func (s *session) forwardTxControl(qstr string, cmd *sessionCmd) (tag string, pe
 		if up == nil || !up.inTx {
 			return "", nil
 		}
-		stmt := qstr
+		stmt, perr := cmd.sourceText()
+		if perr != nil {
+			return "", perr
+		}
 		if s.txStatus() == 'E' || up.failed {
 			// A failed block is rolled back, whatever ends it.
 			stmt = "ROLLBACK"

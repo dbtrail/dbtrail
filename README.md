@@ -121,7 +121,7 @@ All of them: [Limitations](https://www.dbtrail.com/docs/limitations/).
 | Amazon Aurora MySQL | Yes (verified) | Yes (verified) |
 | Google Cloud SQL for MySQL | Should work, please report issues | Should work |
 | MariaDB 10.11+, including Amazon RDS for MariaDB | Yes | Yes. See [MariaDB source](docs/mariadb.md) |
-| PostgreSQL 15+ | Beta. Scheduled updates run, and a table added to the publication later is read in | Beta. See [PostgreSQL source](docs/postgres.md) |
+| PostgreSQL 15+ | Yes. Scheduled updates run, and a table added to the publication later is read in | Yes. See [PostgreSQL source](docs/postgres.md) |
 
 On PostgreSQL 18, a table with a `VIRTUAL` generated column cannot be
 captured, and a table with a `STORED` one needs `publish_generated_columns =
@@ -132,7 +132,7 @@ DBTrail never needs the binlog files on disk, which is why managed cloud
 databases work.
 
 Each DBTrail installation serves one database family: MySQL and MariaDB, or
-PostgreSQL (beta). See
+PostgreSQL. See
 [one database family per installation](docs/install.md#one-database-family-per-installation).
 
 ## Who builds it

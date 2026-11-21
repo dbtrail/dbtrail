@@ -1015,7 +1015,10 @@ jobs:
       # The console's tests that need a MySQL index and a PostgreSQL source at
       # once (#2813). In the MySQL shards they skip for want of a PostgreSQL,
       # so this is where they run; selected by name, since the rest of
-      # consoleapp's integration tests have their own shards. On two
+      # consoleapp's integration tests have their own shards. The router's
+      # tests are taken by their prefix, every TestIntegrationPGRouter...: the
+      # bare name, anchored, ran the first of them alone and left the
+      # forwarding tests out. On two
       # PostgreSQL versions, 16 and the newest: what they exercise is the
       # console and the wire, and the snapshot under them is tested on every
       # version above, but 18 changed how generated columns travel. The
@@ -1028,12 +1031,16 @@ jobs:
           # psql is the client the port is for: the test runs it, and with
           # BINTRAIL_REQUIRE_PSQL its absence is a failure, not a skip.
           command -v psql >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends postgresql-client; }
-          BINTRAIL_REQUIRE_PSQL=1 go test -tags=integration -race -p 1 -count=1 -v \
-            -run '^(TestIntegrationPGRouter|TestIntegrationPGSnapshotUpdate|TestIntegrationPGCaptureStatus|TestIntegrationPGNewTableIsIncluded_2759|TestIntegrationPGSnapshotUpdateGeneratedColumn|TestIntegrationServerAddPostgresWarnsAboutARoleWithoutSelect_3022|TestIntegrationServerStartPostgresWithARoleWithoutSelect_3022)$' ./consoleapp/ 2>&1 | tee /tmp/pg-console-it.out
+          BINTRAIL_REQUIRE_PSQL=1 go test -tags=integration -race -p 1 -count=1 -v -timeout 30m \
+            -run '^(TestIntegrationPGRouter[A-Za-z0-9_]*|TestIntegrationPGSnapshotUpdate|TestIntegrationPGCaptureStatus|TestIntegrationPGNewTableIsIncluded_2759|TestIntegrationPGSnapshotUpdateGeneratedColumn|TestIntegrationServerAddPostgresWarnsAboutARoleWithoutSelect_3022|TestIntegrationServerStartPostgresWithARoleWithoutSelect_3022)$' ./consoleapp/ 2>&1 | tee /tmp/pg-console-it.out
           grep -q -- '--- PASS: TestIntegrationPGRouter/psql ' /tmp/pg-console-it.out \
             || { echo "FATAL: psql did not run against the PostgreSQL router — false-green tripwire" >&2; exit 1; }
           grep -q -- '^--- PASS: TestIntegrationPGRouter ' /tmp/pg-console-it.out \
             || { echo "FATAL: the PostgreSQL router end-to-end test did not run — false-green tripwire" >&2; exit 1; }
+          grep -q -- '^--- PASS: TestIntegrationPGRouterForward ' /tmp/pg-console-it.out \
+            || { echo "FATAL: the PostgreSQL router forwarding test did not run — false-green tripwire" >&2; exit 1; }
+          grep -q -- '^--- PASS: TestIntegrationPGRouterForwardScreen ' /tmp/pg-console-it.out \
+            || { echo "FATAL: the PostgreSQL router forwarding screen test did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '^--- PASS: TestIntegrationPGSnapshotUpdate ' /tmp/pg-console-it.out \
             || { echo "FATAL: the PostgreSQL scheduled snapshot update test did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '^--- PASS: TestIntegrationPGCaptureStatus ' /tmp/pg-console-it.out \
