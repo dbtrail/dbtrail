@@ -22,6 +22,9 @@ import (
 // copy.
 func (s *Server) RouterStatus(ctx context.Context, serverID string, sql *SQLOnCopy) [][2]string {
 	out := [][2]string{{"server", serverID}}
+	// Which account the port forwards with, or why it forwards nothing
+	// (#3054): the rows the PostgreSQL port's status has under these names.
+	out = append(out, s.forwardingRows(serverID)...)
 	// The copy is an asynchronous replica here: its age is the number to
 	// watch, first.
 	at := time.Time{}

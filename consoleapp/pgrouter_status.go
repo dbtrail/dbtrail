@@ -75,6 +75,11 @@ type pgRouterServerNumbers struct {
 	// it has a forwarding account (it hides tables or columns), as its last
 	// statement found; absent when statements may go there.
 	ForwardingOff string `json:"forwarding_off,omitempty"`
+	// ForwardingAccount is the account the server's statements are sent to
+	// its source with now (#3054): "forwarding user <name>", or "capture
+	// account, read-only, tables of the copy only". Absent when it has none,
+	// or when nothing is sent (ForwardingOff).
+	ForwardingAccount string `json:"forwarding_account,omitempty"`
 	// SQLMode is "fresh" or "fast" as this process answers the server now,
 	// and SQLModeFrom where that comes from ("environment", "saved",
 	// "default"), as in the MySQL router's document. Its warm-up is not
@@ -109,6 +114,12 @@ const (
 type pgModes interface {
 	SQLModeOf(id string) (mode, from string)
 	PostgresServerIDs() []string
+}
+
+// pgForwardAccounts is the console's answer to which account a server
+// forwards with (#3054).
+type pgForwardAccounts interface {
+	PostgresForwardTarget(id string) console.PGForwardTarget
 }
 
 // pgRouteStats is the tally.
@@ -375,6 +386,14 @@ func (r *pgRouteStats) doc(listen string) pgRouterStatusDoc {
 				n = pgRouterServerNumbers{Reasons: map[string]uint64{}, Answers: map[string]console.RouteAnswers{}}
 			}
 			n.SQLMode, n.SQLModeFrom = r.modes.SQLModeOf(id)
+			// Which account it forwards with now (#3054), read from the
+			// registry as a connection would be bound, so a change shows at
+			// once and not with the next connection.
+			if a, ok := r.modes.(pgForwardAccounts); ok {
+				if fwd := a.PostgresForwardTarget(id); fwd.DSN != "" && n.ForwardingOff == "" {
+					n.ForwardingAccount = fwd.Account
+				}
+			}
 			d.Servers[id] = n
 		}
 	}

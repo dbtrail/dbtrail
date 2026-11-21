@@ -56,6 +56,10 @@ type preparedStatement struct {
 	// describedOnSource says the Describe the client got came from the
 	// source, not from the copy.
 	describedOnSource bool
+	// capturePassed is where the capture gate let this statement through
+	// (#3054): the connection, its batch and its search_path. A later
+	// message of the same batch for it is not checked again.
+	capturePassed *capturePass
 	// rd is who reads the statement once its arguments are written in.
 	rd reader
 	// describedNames are the columns a Describe of the statement named,

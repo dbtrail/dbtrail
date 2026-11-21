@@ -69,6 +69,11 @@ const (
 	ReasonReadOnly = "read_only" // not a read, and the port is read-only toward the source
 )
 
+// ReasonCaptureGate: the server forwards with the account DBTrail captures
+// with (#3054), and the statement did not pass that account's gate
+// (capture_gate.go), so the copy answered it without the source's plan.
+const ReasonCaptureGate = "capture_gate"
+
 // RouteNote is one statement's decision, for the port's status.
 type RouteNote struct {
 	// Statement is the text the client sent.
