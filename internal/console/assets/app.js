@@ -7202,6 +7202,18 @@ function pgHealthCard(h) {
       nf.forEach((t) => list.append(el("div", { text: t })));
       card.append(list);
     }
+
+    // The publication does not publish TRUNCATE (#3108). Amber like the
+    // tables without undo: every row change is recorded, and only a
+    // TRUNCATE is not. Absent from a snapshot written before this existed.
+    if (h.truncate_fix) {
+      card.append(healthKV("TRUNCATE", el("span", { class: "hstat hstat-warn", text: "⚠ not recorded" })));
+      card.append(el("div", { class: "hlist", text: "The publication does not publish TRUNCATE: the rows a TRUNCATE removes stay in the copy and come back in every rebuild. Inserts, updates and deletes are recorded. Run this on the source, as the publication's owner:" }));
+      card.append(el("div", { class: "hlist" }, el("code", { text: h.truncate_fix })));
+    } else if (h.truncate_check_error) {
+      card.append(healthKV("TRUNCATE", el("span", { class: "hstat hstat-warn", text: "⚠ could not check" })));
+      card.append(el("div", { class: "hlist", text: "Whether the publication publishes TRUNCATE could not be read: " + h.truncate_check_error }));
+    }
   }
 
   const foot = el("div", { class: "hstale" + (stale ? " hstale-warn" : "") });
