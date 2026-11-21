@@ -39,8 +39,9 @@ func QueryPublishesTruncate(ctx context.Context, conn *pgx.Conn, publication str
 // TRUNCATE. SET (publish = ...) changes that one option and keeps the
 // publication's tables and its other options (publish_via_partition_root,
 // publish_generated_columns). It names all four operations because the
-// value replaces the list, and capture refuses to start without the other
-// three, so a publication this is shown for already publishes them.
+// value replaces the list: it is the fix both for a publication that leaves
+// TRUNCATE out (a warning) and for one that leaves out INSERT, UPDATE or
+// DELETE (capture refuses to start, validatePublication).
 func TruncateFixStatement(publication string) string {
 	return "ALTER PUBLICATION " + printable(quoteIdent(publication)) + " SET (publish = 'insert, update, delete, truncate');"
 }

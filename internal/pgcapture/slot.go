@@ -33,7 +33,7 @@ func validatePublication(ctx context.Context, conn *pgx.Conn, pubname string, fi
 	// can be created WITH (publish = 'insert'), which silently drops updates and deletes.
 	// Check before the allTables short-circuit.
 	if ops := missingPublishedOps(pubIns, pubUpd, pubDel); len(ops) > 0 {
-		return fmt.Errorf("pgcapture: publication %q does not publish %s — those changes would be silently lost; run %s (it keeps the publication's tables and other options), or leave publish unset for all operations",
+		return fmt.Errorf("pgcapture: publication %q does not publish %s — those changes would be silently lost; run %s (it keeps the publication's tables and other options), or recreate the publication leaving publish unset",
 			pubname, strings.Join(ops, ", "), TruncateFixStatement(pubname))
 	}
 	// FOR ALL TABLES covers everything and cannot carry per-table row filters or column
