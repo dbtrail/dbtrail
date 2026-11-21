@@ -1149,17 +1149,17 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 		return timeCol(col) && lit.kind == rtString && zonedLiteral.MatchString(lit.text)
 	}
 	// betweenAnd finds the AND of the BETWEEN at i: the first one outside
-	// any parenthesis opened after it, since a lower bound holds no AND of
-	// its own outside one. -1 when the statement ends, or the parenthesis
-	// the BETWEEN is in closes, before it.
+	// any parenthesis and any CASE ... END opened after it, since a lower
+	// bound holds no AND of its own outside those. -1 when the statement
+	// ends, or what the BETWEEN is in closes, before it.
 	betweenAnd := func(i int) int {
 		depth := 0
 		for j := i + 1; j < len(toks); j++ {
 			t := toks[j]
 			switch {
-			case t.kind == rtOp && (t.text == "(" || t.text == "["):
+			case t.kind == rtOp && (t.text == "(" || t.text == "[") || t.kind == rtWord && t.text == "case":
 				depth++
-			case t.kind == rtOp && (t.text == ")" || t.text == "]"):
+			case t.kind == rtOp && (t.text == ")" || t.text == "]") || t.kind == rtWord && t.text == "end":
 				if depth == 0 {
 					return -1
 				}
