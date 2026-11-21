@@ -45,9 +45,15 @@ import (
 // Directories of versions from before the lock are named without the mark and
 // were never locked, so a free lock does not prove them unused either: a
 // process of that version may still be folding. Those go by age alone, a long
-// one (workDirLegacyIdle), counted from the newest write in them. A directory
-// this version could not lock is made under that older name, so it gets the
-// same rule instead of looking like one whose owner died.
+// one (workDirLegacyIdle), counted from the newest write in them, and are
+// still removed only under the lock.
+//
+// A directory this version could not lock is made under that older name, so
+// it does not look like one whose owner died. Where the lock failed because
+// the filesystem has no flock, no sweep can take it either, so nothing removes
+// such a directory if its process is killed: it stays until someone removes it
+// by hand. That is the safe side, and the warning says the way out (a
+// temporary directory on a local disk).
 
 // The kinds of working directory: the middle of the name.
 const (
@@ -87,6 +93,8 @@ var (
 var (
 	// workDirLock is lockWorkDir.
 	workDirLock = lockWorkDir
+	// workDirOwned is ownedByThisUser.
+	workDirOwned = ownedByThisUser
 	// afterWorkDirLocked runs between taking a directory's lock and checking
 	// that its path still names it.
 	afterWorkDirLocked = func(string) {}
@@ -135,8 +143,9 @@ func newWorkDir(parent, kind string) (*workDir, error) {
 		return nil, err
 	}
 	workDirLockWarn.Do(func() {
-		slog.Warn("reconstruct: a working directory could not be locked; another DBTrail process starting on this machine "+
-			"keeps it only while something was written in it in the last 24 hours",
+		slog.Warn("reconstruct: a working directory could not be locked, so if this process is killed nothing removes what it "+
+			"leaves there, and it has to be removed by hand; point TMPDIR at a directory on a local disk to have it "+
+			"locked and cleaned up",
 			"dir", dir, "error", lockErr)
 	})
 	return &workDir{path: dir}, nil
@@ -213,37 +222,61 @@ var workDirSweep sync.Once
 
 // SweepDeadWorkDirs removes, once per process, the working directories that
 // processes killed in the middle of a fold left in the system's temporary
-// directory. It runs before this process makes its first one; the daemon also
-// calls it as it starts, so what a killed daemon left goes at the restart and
-// not at the next fold that happens to need the disk. It never fails: what it
-// cannot remove it says, and leaves.
+// directory. It runs before this process makes its first one; a daemon that
+// keeps snapshots also calls it as it starts (wireBaselineExtras), so what a
+// killed daemon left goes at the restart and not at the next fold that
+// happens to need the disk. It never fails: what it cannot remove it says,
+// and leaves.
 func SweepDeadWorkDirs() {
 	workDirSweep.Do(func() {
 		sweepWorkDirs(os.TempDir(), workDirHost(), time.Now().Add(-workDirLegacyIdle))
 	})
 }
 
+// ResetWorkDirSweepForTest makes the next SweepDeadWorkDirs of this process
+// sweep again. For tests of the callers.
+func ResetWorkDirSweepForTest() { workDirSweep = sync.Once{} }
+
 // sweepWorkDirs removes the working directories under parent that no process
 // uses: this user's, and either marked with host and held by no process, or
 // of a version from before the lock and with nothing written since
 // legacyCutoff. Anything else stays: another user's, another host's, a link,
-// a file, a name that only looks like one, and any directory whose state
-// could not be read.
+// a file, a name that only looks like one, a directory held by a live
+// process, and one whose lock could not be asked for. It warns when parent
+// cannot be listed, when a lock fails for a reason other than being held, and
+// when a removal fails; it says in one line how many directories it left for
+// being another host's or another user's.
 func sweepWorkDirs(parent, host string, legacyCutoff time.Time) {
 	entries, err := os.ReadDir(parent)
 	if err != nil {
-		slog.Debug("reconstruct: could not list the temporary directory for working directories a stopped process left", "dir", parent, "error", err)
+		slog.Warn("reconstruct: could not list the temporary directory, so working directories a stopped process left there were not looked for",
+			"dir", parent, "error", err)
 		return
 	}
+	otherHost, otherUser := 0, 0
+	defer func() {
+		if otherHost+otherUser > 0 {
+			slog.Info("reconstruct: working directories in the temporary directory were left alone: they are another host's or another user's to remove",
+				"dir", parent, "another_host", otherHost, "another_user", otherUser)
+		}
+	}()
 	for _, e := range entries {
 		h, legacy, ok := parseWorkDirName(e.Name())
-		if !ok || (!legacy && h != host) {
+		if !ok {
 			continue
 		}
 		dir := filepath.Join(parent, e.Name())
 		// Lstat: a link by that name is not a directory, and is left alone.
 		fi, err := os.Lstat(dir)
-		if err != nil || !fi.IsDir() || !ownedByThisUser(fi) {
+		if err != nil || !fi.IsDir() {
+			continue
+		}
+		if !legacy && h != host {
+			otherHost++
+			continue
+		}
+		if !workDirOwned(fi) {
+			otherUser++
 			continue
 		}
 		if legacy && !idleSince(dir, fi, legacyCutoff) {
@@ -255,7 +288,9 @@ func sweepWorkDirs(parent, host string, legacyCutoff time.Time) {
 			// Held: a live process uses it. Gone: nothing to do. Any other
 			// failure cannot tell it is unused, so it stays too.
 			if !errors.Is(lockErr, errWorkDirHeld) && !errors.Is(lockErr, errWorkDirGone) {
-				slog.Debug("reconstruct: a working directory was kept: whether a process still uses it is not known", "dir", dir, "error", lockErr)
+				slog.Warn("reconstruct: a working directory in the temporary directory was kept, because its lock could not be asked for: "+
+					"whether a process still uses it is not known; if none does, it can be removed by hand",
+					"dir", dir, "error", lockErr)
 			}
 			continue
 		}

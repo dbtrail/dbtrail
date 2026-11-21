@@ -536,6 +536,30 @@ func TestExecute_journalsTheDumpDirBeforeMydumperRuns(t *testing.T) {
 	}
 }
 
+// Wiring, boot: a daemon with a snapshot supervisor removes, as it starts,
+// the fold working directories a killed process left in the temporary
+// directory (#2513).
+func TestWireBaselineExtras_sweepsFoldDirsAtBoot_2513(t *testing.T) {
+	f := newJobsFixture(t)
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	left := filepath.Join(tmp, "bintrail-fold-123456")
+	if err := os.Mkdir(left, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(left, old, old); err != nil {
+		t.Fatal(err)
+	}
+	reconstruct.ResetWorkDirSweepForTest()
+	sup := newBaselineSupervisor(context.Background(), f.staging, baseline.DefaultLockMode)
+	var cfg console.Config
+	wireBaselineExtras(&cfg, sup, filepath.Join(f.state, "servers.yaml"))
+	if exists(left) {
+		t.Error("the boot wiring did not remove a fold directory a killed process left")
+	}
+}
+
 // Wiring, boot: wireBaselineExtras is where the history is attached, and the
 // reclaim runs there, before any loop can start a job.
 func TestWireBaselineExtras_reclaimsAtBoot(t *testing.T) {

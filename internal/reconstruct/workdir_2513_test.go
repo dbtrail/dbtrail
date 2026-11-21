@@ -420,6 +420,104 @@ func TestWorkDirSweep_aDirectoryItMayNotRemove_2513(t *testing.T) {
 	t.Logf("the warning as logged:\n%s", out)
 }
 
+// The sweep through its real entrance: the first working directory a process
+// makes removes what a dead one left in the temporary directory.
+func TestNewWorkDir_sweepsFirst_2513(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	left, _ := leftDir(t, tmp, markedName(workDirFold, 1))
+	ResetWorkDirSweepForTest()
+	w, err := newWorkDir("", workDirFold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.remove()
+	if there(left) {
+		t.Fatal("making a working directory did not remove the one a dead process left")
+	}
+	// Once per process: a second one does not sweep again.
+	again, _ := leftDir(t, tmp, markedName(workDirFold, 2))
+	w2, err := newWorkDir("", workDirFold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w2.remove()
+	if !there(again) {
+		t.Fatal("the sweep ran a second time in one process")
+	}
+}
+
+// Another user's directory is theirs, whoever runs the sweep: the answer of
+// the owner check is what keeps it, and the sweep says how many it left.
+func TestWorkDirSweep_notThisUsers_2513(t *testing.T) {
+	parent := t.TempDir()
+	theirs, _ := leftDir(t, parent, markedName(workDirFold, 1))
+	theirsOld, f := leftDir(t, parent, "bintrail-fold-77")
+	aged(t, 48*time.Hour, f, theirsOld)
+	own, _ := leftDir(t, parent, markedName(workDirFold, 2))
+	otherHost, _ := leftDir(t, parent, "bintrail-fold-v2-some-other-host-3")
+	workDirOwned = func(fi os.FileInfo) bool {
+		return fi.Name() != filepath.Base(theirs) && fi.Name() != filepath.Base(theirsOld)
+	}
+	t.Cleanup(func() { workDirOwned = ownedByThisUser })
+	logs := captureLogs(t)
+
+	sweepNow(parent)
+
+	for _, kept := range []string{theirs, theirsOld, otherHost} {
+		if !there(kept) {
+			t.Errorf("%s is not this user's or this host's, and was removed", filepath.Base(kept))
+		}
+	}
+	if there(own) {
+		t.Error("the control directory stayed")
+	}
+	out := logs.String()
+	if !strings.Contains(out, "another_host=1") || !strings.Contains(out, "another_user=2") {
+		t.Errorf("the sweep did not say how many directories it left:\n%s", out)
+	}
+	t.Logf("as logged:\n%s", out)
+}
+
+// Nothing left for another host or user: no such line.
+func TestWorkDirSweep_saysNothingWhenItLeftNone_2513(t *testing.T) {
+	parent := t.TempDir()
+	leftDir(t, parent, markedName(workDirFold, 1))
+	leftDir(t, parent, "bintrail-tails-5")
+	logs := captureLogs(t)
+	sweepNow(parent)
+	if out := logs.String(); strings.Contains(out, "left alone") {
+		t.Errorf("a count of zero was logged:\n%s", out)
+	}
+}
+
+// What the sweep cannot find out, it says: a temporary directory it cannot
+// list, and a lock that fails for a reason other than being held. The
+// directory stays.
+func TestWorkDirSweep_warnsWhenItCannotTell_2513(t *testing.T) {
+	parent := t.TempDir()
+	logs := captureLogs(t)
+	sweepNow(filepath.Join(parent, "not-there"))
+	if out := logs.String(); !strings.Contains(out, "level=WARN") || !strings.Contains(out, "could not list the temporary directory") {
+		t.Errorf("an unlistable temporary directory was not warned about:\n%s", out)
+	}
+
+	dir, file := leftDir(t, parent, markedName(workDirFold, 1))
+	workDirLock = func(string, bool) (*os.File, error) { return nil, errors.New("no locks on this filesystem") }
+	t.Cleanup(func() { workDirLock = lockWorkDir })
+	logs = captureLogs(t)
+	sweepNow(parent)
+	workDirLock = lockWorkDir
+	if !there(file) {
+		t.Fatal("a directory whose lock could not be asked for was removed")
+	}
+	out := logs.String()
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "its lock could not be asked for") || !strings.Contains(out, dir) || !strings.Contains(out, "no locks on this filesystem") {
+		t.Errorf("a lock that could not be asked for was not warned about with its directory:\n%s", out)
+	}
+	t.Logf("as logged:\n%s", out)
+}
+
 // Another user's directory is theirs: root's sweep leaves it.
 func TestWorkDirSweep_anotherUsersDirectory_2513(t *testing.T) {
 	if os.Getuid() != 0 {
@@ -626,7 +724,7 @@ func TestNewWorkDir_withoutALockTakesTheOlderName_2513(t *testing.T) {
 		t.Errorf("the directory that could not be locked was left beside the one in use: %v", entries)
 	}
 	out := logs.String()
-	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "could not be locked") || !strings.Contains(out, "no locks on this filesystem") {
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "could not be locked") || !strings.Contains(out, "removed by hand") || !strings.Contains(out, "TMPDIR") || !strings.Contains(out, "no locks on this filesystem") {
 		t.Errorf("no warning that the directory is not locked:\n%s", out)
 	}
 	t.Logf("the warning as logged:\n%s", out)
