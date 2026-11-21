@@ -52,6 +52,10 @@ type rotationDTO struct {
 	// that boot-time liveness, independent of whether an override exists. The UI
 	// warns that a restart is needed when this is false.
 	Enabled bool `json:"enabled"`
+	// Deltas is what table deltas ask of the retention (#2959): the shortest
+	// one a PUT accepts, and whether the one in use is below it. Absent when
+	// table deltas are off or no copy is updated on a cadence.
+	Deltas *rotationDeltasDTO `json:"deltas,omitempty"`
 }
 
 // rotationRequest is the PUT /api/rotation body.
@@ -109,7 +113,9 @@ func (s *Server) handleRotationGet(w http.ResponseWriter, r *http.Request) {
 // projection and the panel must say the defaults too — projecting over the
 // saved retain alone was the #2315 shape from the other side (#2315 review).
 func (s *Server) effectiveRotation() rotationDTO {
-	return s.rotationDefaults.withOrigins(s.effectiveRotationValues())
+	dto := s.rotationDefaults.withOrigins(s.effectiveRotationValues())
+	dto.Deltas = s.rotationDeltas()
+	return dto
 }
 
 // effectiveRotationValues is effectiveRotation without where the startup
@@ -170,7 +176,8 @@ func (s *Server) handleRotationUpdate(w http.ResponseWriter, r *http.Request) {
 	// Retain must be a concrete window (Nd/Nh). Disabling rotation entirely
 	// stays a daemon-level decision (--rotate-retain off); the panel tunes a
 	// running loop rather than turning it off (which would need a restart).
-	if _, err := cliutil.ParseRetain(retain); err != nil {
+	keep, err := cliutil.ParseRetain(retain)
+	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "retain must be a window like 30d or 24h: "+err.Error())
 		return
 	}
@@ -186,6 +193,18 @@ func (s *Server) handleRotationUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.AddFuture < 0 {
 		writeJSONError(w, http.StatusBadRequest, "future partitions cannot be negative")
 		return
+	}
+	// #2959: with table deltas on, a retention that ends every chain at the
+	// cycle after the one that began it is not saved. Last of the checks, so
+	// a typo in another field is named first. The retention already in use
+	// is let through whatever it is: a request that changes the interval or
+	// the future partitions does not make it shorter, and refusing it would
+	// lock those two fields behind a retention this form never saved.
+	if f, ok := s.deltaRetainFloor(); ok && !f.allows(keep) {
+		if inUse, _ := s.retainInUse(); keep != inUse {
+			writeJSONError(w, http.StatusBadRequest, f.refusal(retain))
+			return
+		}
 	}
 	if err := s.cm.reg.SetRotation(RotationConfig{Retain: retain, Interval: interval, AddFuture: req.AddFuture}); err != nil {
 		writeJSONError(w, registryErrStatus(err), err.Error())

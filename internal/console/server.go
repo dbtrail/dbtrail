@@ -481,6 +481,22 @@ type BaselineRefreshDefaults struct {
 	// change by linking its previous file too, so "every table is written
 	// again" is only true when BOTH are off.
 	TableDeltas bool
+	// MinRetainForTableDeltas is the daemon's own rule for the retention
+	// table deltas need when a copy is updated every `every` (#2959), the
+	// one its refresh ends chains by, handed over so the rotation form
+	// refuses on the same line: the retention has to be longer than must,
+	// and from comfortable on a chain survives an update wherever the
+	// index's floor sits in its hour. ok is false when no retention makes
+	// room (updates TableDeltaMaxAge apart or more). Nil when this process
+	// updates no copy.
+	MinRetainForTableDeltas func(every time.Duration) (must, comfortable time.Duration, ok bool)
+	// TableDeltaMaxAge is how old a chain of table deltas gets before the
+	// refresh ends it whatever the retention (reconstruct.TableDeltaMaxAge).
+	TableDeltaMaxAge time.Duration
+	// RefreshEvery is the daemon-wide --baseline-refresh-interval, zero
+	// when it is not set, and RefreshEveryRaw is how it was written.
+	RefreshEvery    time.Duration
+	RefreshEveryRaw string
 }
 
 // Server is a configured, ready-to-run console HTTP server. It holds only
