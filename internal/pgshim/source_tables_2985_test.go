@@ -176,7 +176,7 @@ func TestProofSQL(t *testing.T) {
 	got := proofSQL(r)
 	for _, want := range []string{
 		`('"it''s"', false)`, `('w', true)`, `('public.t', false)`,
-		`p.proname = ANY (ARRAY['select', 'count']::pg_catalog.name[])`,
+		`p.proname = ANY (ARRAY['count']::pg_catalog.name[])`,
 		`c.relkind = 'r' AND c.relpersistence = 'p' AND NOT c.relhassubclass AND NOT c.relrowsecurity AND NOT c.relispartition`,
 		`pg_catalog.pg_inherits i WHERE i.inhrelid = c.oid`,
 		`pg_catalog.to_regclass(v.ref)`,
