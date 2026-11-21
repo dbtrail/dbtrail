@@ -58,8 +58,6 @@ const (
 	ReasonTableNotOnCopy    = "table_not_on_copy"   // it reads a table the copy does not hold
 	ReasonCopyBehindSource  = "copy_behind_source"  // past the server's limit on the copy's lag
 	ReasonCopyAgeUnknown    = "copy_age_unknown"    // the copy's lag cannot be told, and the server has a limit
-	ReasonCopyQueueFull     = "copy_queue_full"     // every slot of the copy was taken, and the line was full
-	ReasonCopyWaitTimeout   = "copy_wait_timeout"   // it waited for a slot of the copy as long as it may
 	ReasonCopyColumnsDiffer = "copy_columns_differ" // the copy answered with a column it writes otherwise
 	ReasonCatalogNotOnCopy  = "catalog_not_on_copy" // a catalog statement the copy does not answer
 	ReasonCheapPlan         = "cheap_plan"          // the source's plan is below both thresholds (route_cost.go)
@@ -67,7 +65,9 @@ const (
 	ReasonCopyTooOld        = "copy_too_old"        // the copy's answer was older than one the source already gave this connection
 
 	// Nobody ran it.
-	ReasonReadOnly = "read_only" // not a read, and the port is read-only toward the source
+	ReasonReadOnly        = "read_only"         // not a read, and the port is read-only toward the source
+	ReasonCopyQueueFull   = "copy_queue_full"   // for the copy, whose workers were all taken and the line for one full (#3109)
+	ReasonCopyWaitTimeout = "copy_wait_timeout" // for the copy, it waited for a worker as long as it may (#3109)
 )
 
 // ReasonCaptureGate: the server forwards with the account DBTrail captures
@@ -127,6 +127,7 @@ func (s *session) route(c classified, qstr string) routeDecision {
 	// A rule saved while a block was open on the source: that block fails
 	// here, before another statement can read there.
 	s.leaveBarredSource()
+	s.screenBusy = ""
 	switch c.kind {
 	case kindRefused:
 		if s.forwarding() && c.perr == catalogRefusal {
@@ -181,6 +182,15 @@ func (s *session) routeFree(qstr string) routeDecision {
 		return routeDecision{RouteSource, ReasonVeto}
 	}
 	types, unread := s.columnTypes(text)
+	if unread && s.catalogBusy != "" {
+		// The copy is too busy to list its columns (#3109), so the screen
+		// cannot be run, and nothing of the statement can go to the copy.
+		// The source's plan still decides: what it finds cheap the source
+		// answers, as it would have; what it sends to the copy is refused as
+		// busy, not handed to the source (withScreenBusy).
+		s.screenBusy = s.catalogBusy
+		return routeDecision{RouteCopy, ReasonAnswersTheSame}
+	}
 	veto := ""
 	if unread {
 		if veto = catalogUnread(toks); veto != "" {
@@ -204,7 +214,11 @@ func (s *session) routeFree(qstr string) routeDecision {
 // (screenTypes). nil when there is no catalog to read, which screenForCopy
 // takes as "any column may be text"; unread says the host has one and it
 // could not be read, so that any column may be a char(n) too (catalogUnread).
+//
+// s.catalogBusy says, after it, whether the catalog was unread because the
+// copy was busy (catalog).
 func (s *session) columnTypes(stmt string) (types map[string][]string, unread bool) {
+	s.catalogBusy = ""
 	if s.bound == nil || s.bound.Catalog == nil {
 		return nil, false
 	}
@@ -238,7 +252,6 @@ func (s *session) copyFallback(err error, perr *pgErr) string {
 		return ""
 	}
 	var behind *sqlsandbox.BehindSourceError
-	var busy *sqlsandbox.BusyError
 	var stopped *stoppedErr
 	switch {
 	case errors.As(err, &stopped), errors.Is(err, errCanceledByUser), errors.Is(err, errStatementTimeout):
@@ -248,10 +261,9 @@ func (s *session) copyFallback(err error, perr *pgErr) string {
 			return ReasonCopyAgeUnknown
 		}
 		return ReasonCopyBehindSource
-	case errors.As(err, &busy):
-		return ReasonCopyWaitTimeout
-	case errors.Is(err, sqlsandbox.ErrBusy):
-		return ReasonCopyQueueFull
+	case busyReason(err) != "":
+		// Not a fallback: the statement is refused (copyFailed).
+		return busyReason(err)
 	case errors.Is(err, sqlsandbox.ErrResultTooLarge):
 		// Refused for its size, as before: the source would send it whole,
 		// past every cap the port keeps.
@@ -261,6 +273,127 @@ func (s *session) copyFallback(err error, perr *pgErr) string {
 	}
 	return ReasonCopyRefused
 }
+
+// A busy copy (#3109). A statement headed for the copy that finds every
+// worker of the copy taking a statement, and the line for one full
+// (copy_queue_full) or its wait over (copy_wait_timeout), is refused with an
+// error the client may send again, and is NOT handed to the source: a port
+// that keeps expensive reads off the source must not send them there when
+// they are many, which is when the source can least take them. It is the
+// MySQL router's rule (internal/shim RouterConfig.BusyRefuses, #2084), which
+// answers MySQL's "too many connections" there.
+//
+// What the source answers anyway goes on going there: a statement the
+// source's plan finds cheap, one the screen sends there, one in a
+// transaction block. So does one the copy cannot answer the way PostgreSQL
+// does (copy_refused, table_not_on_copy, copy_too_old and the rest): that is
+// the statement's, not the moment's. A connection that cannot reach its
+// source gets the copy's own error for a busy copy, as before.
+//
+// The copy is busy in three places on the way: when the statement runs
+// (runFree), when a prepared one is described (describeFree), and when the
+// copy's list of columns, which the screen needs, is read (catalog). The
+// last one comes before the source's plan is asked: the plan still decides,
+// and only a statement it would send to the copy is refused (screenBusy).
+
+// busyCode is the SQLSTATE of a statement refused because the copy is busy:
+// insufficient_resources, class 53, which drivers and retry policies treat
+// as a moment's shortage, not a fault of the statement or of the connection.
+// It is the code this port already answers a busy copy with on a connection
+// that does not route (freeError), and its result budget's (resultsHeldCode),
+// so one code says "busy, try again" on this port. Not 53300
+// (too_many_connections): the port answers that one at login and when every
+// connection to the source is taken, and routing reads it from a source as
+// "unreachable" (sourceUnreachable). Not 57P03 or class 08: pools take those
+// as a connection that cannot be used. Not 40001: nothing was serialized.
+const busyCode = "53000"
+
+// busyReason is ReasonCopyWaitTimeout or ReasonCopyQueueFull for an error of
+// the copy that says it was busy, "" for any other.
+func busyReason(err error) string {
+	var waited *sqlsandbox.BusyError
+	switch {
+	case errors.As(err, &waited):
+		return ReasonCopyWaitTimeout
+	case errors.Is(err, sqlsandbox.ErrBusy):
+		return ReasonCopyQueueFull
+	}
+	return ""
+}
+
+// busyError is an error of the copy that busyReason reads as reason.
+func busyError(reason string) error {
+	if reason == ReasonCopyWaitTimeout {
+		return &sqlsandbox.BusyError{}
+	}
+	return sqlsandbox.ErrBusy
+}
+
+// isBusyReason reports whether a reason is one of a busy copy's.
+func isBusyReason(reason string) bool {
+	return reason == ReasonCopyQueueFull || reason == ReasonCopyWaitTimeout
+}
+
+// busyRefusal is the client's error for a statement refused because the copy
+// is busy, reason one of a busy copy's.
+func busyRefusal(reason string) *pgErr {
+	what := "every worker of the copy is taking a statement, and the line for one is full"
+	more := "give the copy more workers (bintrail-console pg-router --workers, BINTRAIL_PG_ROUTER_WORKERS)"
+	if reason == ReasonCopyWaitTimeout {
+		what = "it waited as long as a statement may for a worker of the copy, and none came free"
+		more += " or let a statement wait longer for one (--max-wait, BINTRAIL_PG_ROUTER_MAX_WAIT)"
+	}
+	return &pgErr{busyCode, "the copy is busy (" + reason + "): " + what + ". The statement was not run, and was not sent to your PostgreSQL either, " +
+		"so that a peak of heavy reads does not land on it. Run it again in a moment; if this happens often, " + more}
+}
+
+// copyFailed is the client's error for a statement routed to the copy that
+// the copy did not answer (err, perr as freeError words it), and notes where
+// it goes: to the source (fallTo), or nowhere when the copy was busy
+// (busyRefused), which turns its decision into RouteRefused under that
+// reason.
+func (s *session) copyFailed(err error, perr *pgErr) *pgErr {
+	why := s.copyFallback(err, perr)
+	if isBusyReason(why) {
+		s.busyRefused = why
+		return busyRefusal(why)
+	}
+	s.fallTo(why)
+	return perr
+}
+
+// takeBusyRefused is the busy reason the statement that just failed was
+// refused for (copyFailed), "" when none, and forgets it.
+func (s *session) takeBusyRefused() string {
+	why := s.busyRefused
+	s.busyRefused = ""
+	return why
+}
+
+// takeScreenBusy is why the last statement route decided could not be
+// screened, "" when it was: the copy was too busy to list its columns
+// (routeFree). Forgotten once taken.
+func (s *session) takeScreenBusy() string {
+	why := s.screenBusy
+	s.screenBusy = ""
+	return why
+}
+
+// withScreenBusy is a decision made by the source's plan for a statement the
+// copy was too busy to screen (busy, from takeScreenBusy): one the plan sends
+// to the copy is refused under busy; the source answers the rest, as it
+// would have. A prepared statement's decision says so with the copy as its
+// side, so that nothing of it is sent to the source (stmtRoute).
+func withScreenBusy(d routeDecision, busy string) routeDecision {
+	if busy == "" || d.side != RouteCopy {
+		return d
+	}
+	return routeDecision{RouteCopy, busy}
+}
+
+// busyOnCopy reports whether a decision is a prepared statement's that the
+// copy was too busy to screen (withScreenBusy): refused where it would run.
+func busyOnCopy(d routeDecision) bool { return d.side == RouteCopy && isBusyReason(d.reason) }
 
 // copyOlderThanSource says why the copy's answer that was just read is not
 // given to a connection the source answered before (#2985), "" when it may
@@ -464,8 +597,10 @@ func parseLSN(s string) (uint64, bool) {
 }
 
 // transientFallback reports whether a reason a statement went to the
-// source is the moment's (a busy or lagging copy), which must not keep a
-// prepared statement on the source for good.
+// source is the moment's (a lagging copy), which must not keep a prepared
+// statement on the source for good. A busy copy's reasons are listed too,
+// though such a statement is refused and never goes there (copyFailed): were
+// one ever to, it must not stay.
 func transientFallback(reason string) bool {
 	switch reason {
 	case ReasonCopyBehindSource, ReasonCopyAgeUnknown, ReasonCopyQueueFull, ReasonCopyWaitTimeout, ReasonCopyTooOld:

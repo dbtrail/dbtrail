@@ -76,6 +76,16 @@ type session struct {
 	// fallback is why the statement the copy just failed goes to the
 	// source instead (route.go), "" when it does not; set by runFree.
 	fallback string
+	// busyRefused is the busy reason the statement the copy just failed
+	// was refused for instead (copyFailed, #3109), "" when it was not.
+	busyRefused string
+	// screenBusy is why the statement route just decided was not screened
+	// (routeFree): the copy was too busy to list its columns.
+	screenBusy string
+	// catalogBusy is the busy reason the copy's list of columns could not
+	// be read for at its last read (catalog), "" when it was read or failed
+	// otherwise.
+	catalogBusy string
 	// costVerdicts are the source's plans' verdicts this connection
 	// remembers, by statement shape (route_cost.go).
 	costVerdicts map[string]costVerdict
@@ -185,8 +195,10 @@ func (s *session) handleSimpleQuery(qstr string) error {
 	// it.
 	started := time.Now()
 	var d routeDecision
+	screenBusy := ""
 	if s.abortedRefusal(qstr) == nil {
 		d = s.route(s.classify(qstr), qstr)
+		screenBusy = s.takeScreenBusy()
 	}
 	if byCostApplies(d) {
 		// The screen lets the copy answer it: the source's plan says
@@ -198,14 +210,26 @@ func (s *session) handleSimpleQuery(qstr string) error {
 			return s.readyFlush()
 		}
 	}
+	if busyOnCopy(withScreenBusy(d, screenBusy)) {
+		// For the copy, which was too busy to list its columns (#3109,
+		// route.go): refused, not sent to the source.
+		s.fail(busyRefusal(screenBusy))
+		s.routeNote(qstr, routeDecision{RouteRefused, screenBusy}, time.Since(started), true)
+		return s.readyFlush()
+	}
 	if d.side == RouteSource || d.side == RouteRefused {
 		ok := s.forwardSimple(qstr)
 		s.routeNote(qstr, d, time.Since(started), !ok)
 		return s.readyFlush()
 	}
-	s.fallback = ""
+	s.fallback, s.busyRefused = "", ""
 	cols, types, rows, tag, perr := s.run(qstr)
 	if perr != nil {
+		if why := s.takeBusyRefused(); why != "" && d.side == RouteCopy {
+			// The copy was busy (#3109, route.go): refused, not sent to the
+			// source, and counted under its reason.
+			d = routeDecision{RouteRefused, why}
+		}
 		if why := s.fallback; why != "" && d.side == RouteCopy {
 			// The copy did not answer it, and nothing was sent yet: the
 			// source answers instead (route.go).

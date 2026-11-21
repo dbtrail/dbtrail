@@ -105,8 +105,14 @@ func (s *session) catalog() (*catalogView, *pgErr) {
 	if s.catalogAt.IsZero() || time.Since(s.catalogAt) > catalogCacheFor {
 		ctx, done := s.statementContext()
 		tables, err := s.bound.Catalog(ctx)
+		stopped := ctx.Err() != nil
 		done()
 		if err != nil {
+			if !stopped {
+				// Its list is read by the copy's workers: a busy copy is
+				// said apart, for routing (#3109, routeFree).
+				s.catalogBusy = busyReason(err)
+			}
 			return nil, s.statementError(ctx, err)
 		}
 		s.catalogTables, s.catalogAt = tables, time.Now()

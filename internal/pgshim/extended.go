@@ -267,7 +267,10 @@ func (s *session) handleBind(m *pgproto3.Bind) {
 		s.extFail(perr)
 		return
 	}
-	if s.stmtToSource(st) {
+	// Decided once for the Bind: asked again, it would read the copy's list
+	// of columns again, and a busy copy would make it wait twice.
+	route := s.stmtRoute(st)
+	if route.side == RouteSource || route.side == RouteRefused {
 		// The source reads the arguments and the formats itself; only the
 		// port's own limits are asked here.
 		if m.DestinationPortal != "" {
@@ -347,7 +350,7 @@ func (s *session) handleBind(m *pgproto3.Bind) {
 		name: m.DestinationPortal, stmt: st, text: text,
 		// The message's buffer is reused for the next one.
 		resultFormats: append([]int16(nil), m.ResultFormatCodes...),
-		route:         s.stmtRoute(st),
+		route:         route,
 	}
 	if p.route.side == RouteCopy && s.canFallBack() {
 		p.bind = cloneBind(m)
@@ -365,12 +368,27 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 			s.extFail(&pgErr{"26000", fmt.Sprintf("prepared statement %q does not exist", m.Name)})
 			return
 		}
-		if s.abortedRefusal(st.query) == nil && s.stmtToSource(st) {
-			s.describeOnSource(st)
-			s.noteIfFailed(st)
-			return
+		s.busyRefused = ""
+		var perr *pgErr
+		if s.abortedRefusal(st.query) == nil {
+			switch d := s.stmtRoute(st); {
+			case d.side == RouteSource || d.side == RouteRefused:
+				s.describeOnSource(st)
+				s.noteIfFailed(st)
+				return
+			case busyOnCopy(d):
+				// For the copy, which was too busy to list its columns
+				// (#3109, route.go): refused, not sent to the source.
+				s.busyRefused = d.reason
+				perr = busyRefusal(d.reason)
+			}
 		}
-		cols, types, held, perr := s.describeStatement(st)
+		var cols []string
+		var types []colType
+		held := false
+		if perr == nil {
+			cols, types, held, perr = s.describeStatement(st)
+		}
 		if perr == nil && st.fallback != "" && s.canFallBack() {
 			// The copy could not describe it (route.go): the source does.
 			s.describeOnSource(st)
@@ -384,6 +402,10 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 			// does, after an error) is not told it already exists.
 			s.closeStatement(m.Name)
 			s.extFail(perr)
+			if why := s.takeBusyRefused(); why != "" {
+				// It will not reach an Execute: its refusal is counted here.
+				s.routeNote(st.query, routeDecision{RouteRefused, why}, 0, true)
+			}
 			return
 		}
 		s.be.Send(&pgproto3.ParameterDescription{ParameterOIDs: st.paramOIDs})
@@ -528,9 +550,17 @@ func (s *session) describeFree(st *preparedStatement) (cols []string, types []co
 		return columnNames(got), types, true, nil
 	}
 	perr = freeError(err, s.logger)
-	if why := s.copyFallback(err, perr); selectLike && why != "" && !transientFallback(why) {
+	why := s.copyFallback(err, perr)
+	if selectLike && isBusyReason(why) {
+		// The copy is busy (#3109, route.go): the Describe is refused with
+		// the reason, and nothing is kept against the statement, so its
+		// next Describe tries the copy again.
+		s.busyRefused = why
+		return nil, nil, false, busyRefusal(why)
+	}
+	if selectLike && why != "" && !transientFallback(why) {
 		// The statement's own: it stays with the source. One the moment
-		// refused (a busy or lagging copy) fails its Describe, as before.
+		// refused (a lagging copy) fails its Describe, as before.
 		s.logger.Debug("pgshim: the copy cannot describe a statement; the source does", "reason", why, "code", perr.code, "err", perr.msg)
 		st.fallback = why
 		return nil, nil, false, nil
@@ -571,6 +601,11 @@ func (s *session) describeWith(st *preparedStatement, untyped string) (cols []sq
 	// uses a char(n) column where the copy counts its padding is not the
 	// copy's (#3068), and is not handed to it to be described either.
 	if veto := s.paddedVeto(RewriteForCopy(body)); veto != "" {
+		if why := s.catalogBusy; why != "" && s.canFallBack() {
+			// Unread because the copy was busy (#3109): the moment's, which
+			// must not keep the statement on the source (describeFree).
+			return nil, nil, busyError(why)
+		}
 		return nil, nil, s.paddedError(veto)
 	}
 	// On lines of their own: a statement that ends in a -- comment must not
@@ -619,6 +654,11 @@ func (s *session) untypedArgumentsAsText(st *preparedStatement, types []colType)
 		perr = freeError(err, s.logger)
 		if strings.HasPrefix(perr.code, "42") || perr.code == "0A000" {
 			return nil
+		}
+		if why := s.copyFallback(err, perr); isBusyReason(why) && isSelectLike(st.query) {
+			// As describeFree: the copy is busy (#3109).
+			s.busyRefused = why
+			return busyRefusal(why)
 		}
 		s.logger.Warn("pgshim: a statement could not be described a second time", "code", perr.code, "err", err)
 		return perr
@@ -692,8 +732,20 @@ func (s *session) runPortal(p *portal) *pgErr {
 		p.empty = true
 		return nil
 	}
-	s.fallback = ""
+	if busyOnCopy(p.route) {
+		// For the copy, which was too busy to list its columns when the
+		// portal was bound (#3109, route.go): refused, not sent to the
+		// source. The statement keeps nothing of it: its next Bind is
+		// decided again.
+		p.route = routeDecision{RouteRefused, p.route.reason}
+		return busyRefusal(p.route.reason)
+	}
+	s.fallback, s.busyRefused = "", ""
 	cols, types, rows, tag, perr := s.run(p.text)
+	if why := s.takeBusyRefused(); why != "" && perr != nil && p.route.side == RouteCopy {
+		// The copy was busy (#3109, route.go): refused, and counted so.
+		p.route = routeDecision{RouteRefused, why}
+	}
 	// What the statement counted in the port's budget is the portal's from
 	// here: the connection's next statement must not give it back while the
 	// portal still keeps these rows (an Execute with a row limit).
