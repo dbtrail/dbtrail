@@ -141,6 +141,11 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 	if err != nil {
 		return nil, "", fmt.Errorf("%s.%s: %w", schema, table, err)
 	}
+	// A file capture started after is known to miss changes (#3078): refused
+	// before anything is read or carried forward.
+	if err := pgRefuseFileBeforeCapture(db, cfg, schema, table, bmeta); err != nil {
+		return nil, "", err
+	}
 	// A full read's file that capture has not passed is published as it is
 	// (pgHeldForFullRead): its rows are newer than the changes this run
 	// could lay over them.

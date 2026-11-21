@@ -917,6 +917,23 @@ takes one full read of the source to bring it into the copy, as it does for a
 new table on a MySQL source: where the schedule may take full reads, and no
 more than a few times for the same table.
 
+A full read starts from the replication slot's position, so it needs the slot
+to have one. On a busy source capture can take a while to get its slot:
+PostgreSQL finishes creating a slot only when every transaction that was open
+when the creation began has ended. A snapshot asked for in that time (the
+Create button, `snapshot run`, `bintrail-pg baseline`) waits for the slot, up
+to 5 minutes, and then reads; it does not read while the slot has no position,
+because a change committed before the slot got one would be in neither the
+snapshot nor the captured changes. Past the 5 minutes the snapshot is refused
+with nothing read, and running it again once capture is attached works. A
+source whose slot already has its position is read at once, as before.
+
+The slot is looked at again when the tables are read. A snapshot whose slot
+was removed meanwhile, or whose changes start before the position capture
+started reading from, fails and is not kept. A snapshot taken by an earlier
+version that starts before capture did is not updated: the update is refused
+for its tables and the schedule reads the source again in its place.
+
 What to know:
 
 - **The output is a snapshot, or SQL psql loads.** A snapshot's values are
@@ -2692,6 +2709,10 @@ where you want undo), which are plain SQL.
 | `publication "…" applies a row filter or column list to table(s) […]` | A PG15+ `WHERE (...)` row filter or column list makes pgoutput emit only a subset of changes (silent data loss). Recreate the publication — or `ALTER PUBLICATION … SET TABLE …` re-listing the tables — without `WHERE (...)` / column lists. |
 | `publication "…" does not publish […] — those changes would be silently lost` | The publication was created with a narrowed `publish` option (e.g. `WITH (publish = 'insert')`). Run `ALTER PUBLICATION … SET (publish = 'insert, update, delete')`, or recreate it leaving `publish` unset (the default publishes all operations). |
 | `replication slot "…" is invalidated (wal_status=lost; max_slot_wal_keep_size exceeded)` | The source dropped WAL the slot still needed (slot was stopped too long). The data since the checkpoint is gone — `bintrail-pg reset` (drops the slot + clears the checkpoint), re-seed, and raise `max_slot_wal_keep_size` / keep the consumer running. `bintrail status` shows this as a loud `EVENTS PERMANENTLY LOST` banner. |
+| `no table was read: replication slot "…" is still being created after 5m0s` (or `could not be created within 5m0s`) | A snapshot was asked for while the slot had no position, and it did not get one in 5 minutes: transactions open on the source since before the slot's creation began are holding it back (`pg_stat_activity` shows them). Nothing was read. Run the snapshot again once the slot has a `confirmed_flush_lsn` in `pg_replication_slots`. |
+| `replication slot "…" no longer exists: it was removed while the snapshot was read` | The slot the snapshot started from was dropped before the read ended, so the changes made since may not be captured. The snapshot was not kept. Run it again once capture is attached. |
+| `the snapshot is not published: capture of this server started reading the source at …, after …` | The slot was replaced while the tables were read, and capture started from the new one. The snapshot was not kept. Run it again. |
+| `the table's snapshot holds its changes from … on, and capture of the server started reading the source at …, after it` | The snapshot was taken before capture had its slot (possible before this check existed), so changes between the two were never captured. The update is refused; a scheduled update is replaced by a full read of the source, and a snapshot taken by hand (`snapshot run`) repairs it too. |
 | `resuming from a saved checkpoint but replication slot "…" no longer exists` | The slot was dropped while a checkpoint still pointed at it. Creating a fresh slot would skip data, so bintrail-pg refuses — `bintrail-pg reset --index-only` to clear the checkpoint and start fresh if the gap is acceptable. |
 | `must include replication=database` (connection error on `--repl-dsn`) | Add `replication=database` to the `--repl-dsn` connection string. |
 | Permission denied opening replication / creating slot | The role needs the `REPLICATION` attribute (`ALTER ROLE <r> REPLICATION;`), or on managed PG the provider's replication grant. |

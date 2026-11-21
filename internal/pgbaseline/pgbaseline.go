@@ -12,17 +12,22 @@
 // for the Writer, markers, and metadata keys.
 //
 // Anchoring: the output embeds baseline.MetaKeyLSN — a delta-replay FLOOR
-// (pgcapture.SlotFloorLSN: the replication slot's confirmed_flush_lsn/
-// restart_lsn, read BEFORE the snapshot transaction opens) — so deltas AT OR
+// (pgcapture.AnchorOnSlot: the replication slot's confirmed_flush_lsn, read
+// BEFORE the snapshot transaction opens) — so deltas AT OR
 // AFTER that LSN, applied by reconstruct, yield the table state at any later
 // time (#771: the corrected contract is "from the floor forward", NOT
 // "strictly after the live pg_current_wal_lsn() anchor" — see Stats.AnchorLSN
 // and the snapshot-anchor comment below for why the live LSN alone cannot be
-// the cutoff). The replication slot is ensured to exist BEFORE the snapshot
-// opens (ordering invariant: the floor LSN, read at that point, is ≤ every
-// LSN read afterwards on the same connection, in particular the anchor LSN);
-// any resulting overlap is redelivered and is harmless because reconstruct's
-// merge is last-write-wins idempotent over full-row images.
+// the cutoff). The replication slot is ensured to exist AND to have its
+// position BEFORE the snapshot opens (ordering invariant: the floor LSN, read
+// at that point, is ≤ every LSN read afterwards on the same connection, in
+// particular the anchor LSN); any resulting overlap is redelivered and is
+// harmless because reconstruct's merge is last-write-wins idempotent over
+// full-row images. A slot that is still being created has no position and
+// anchors nothing: the run waits for it, up to Config.SlotWait, and is
+// refused past that, before any table is read (#3078). The slot is looked at
+// once more when the tables are read, and a snapshot whose slot is gone or is
+// not where it was is not published.
 //
 // Values are stored as raw PostgreSQL text (Column.RawText — COPY text output,
 // unescaped): identical to the pgoutput text rendering the delta path indexes,
@@ -70,6 +75,12 @@ type Config struct {
 	// missing slot with an empty ReplDSN is an actionable fatal error, never
 	// a silent skip — a baseline without a slot has no delta stream to anchor.
 	ReplDSN string
+	// SlotWait is how long the run waits for the slot to have its position
+	// when the slot is still being created, by capture or by this run
+	// (pgcapture.AnchorOnSlot); past it the run is refused before any table
+	// is read. Zero or negative is pgcapture.DefaultSlotWait. A slot that
+	// already has its position is never waited for.
+	SlotWait time.Duration
 	// SlotName and Publication mirror `bintrail-pg stream`'s. The publication
 	// defines the table set (narrowed by Filters); the slot is the ordering
 	// anchor.
@@ -93,6 +104,13 @@ type Config struct {
 	// directory there and removes it when the run then fails (#1938, #2180),
 	// as it does for a MySQL read. Nil for the command line.
 	DirStarting func(root, name string)
+
+	// BeforePublish, when set, is asked once every table is read and the
+	// slot was found where it should be, right before the snapshot is
+	// published: an error leaves the folder _INCOMPLETE and fails the run.
+	// The console asks its index there whether capture started after the
+	// snapshot's floor, which only the index knows (#3078).
+	BeforePublish func(Stats) error
 
 	Logger *slog.Logger // nil → slog.Default()
 }
@@ -119,7 +137,7 @@ type Stats struct {
 	// (also embedded in the Parquet metadata as baseline.MetaKeyLSN) instead.
 	AnchorLSN uint64
 	// DeltaStartLSN is the safe floor for delta replay: the replication slot's
-	// confirmed_flush_lsn/restart_lsn (pgcapture.SlotFloorLSN), read BEFORE the
+	// confirmed_flush_lsn (pgcapture.AnchorOnSlot), read BEFORE the
 	// snapshot transaction opened. It is always <= AnchorLSN. A consumer should
 	// replay deltas at or after DeltaStartLSN, not strictly after AnchorLSN;
 	// any overlap with data already in the baseline is harmless because the
@@ -127,6 +145,9 @@ type Stats struct {
 	DeltaStartLSN uint64
 	SnapshotTime  time.Time // DB now() at snapshot establishment (UTC)
 	SlotCreated   bool      // true when this run created the replication slot
+	// SlotWaited is how long the run waited for a slot that was still being
+	// created to have its position; zero when it had one at once.
+	SlotWaited time.Duration
 }
 
 // Run takes a consistent baseline snapshot of every table the publication
@@ -168,10 +189,14 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		return Stats{}, err
 	}
 
-	// Ensure the slot exists BEFORE the snapshot transaction opens — the
-	// ordering invariant that makes the baseline anchorable: the slot's
-	// consistent_point ≤ the anchor LSN read below, so no delta between them
-	// can be missed (overlap is redelivered; the merge is idempotent).
+	// The slot exists AND has its position BEFORE the snapshot transaction
+	// opens — the ordering invariant that makes the baseline anchorable: the
+	// slot delivers every commit at or after that position, which is ≤ the
+	// anchor LSN read below, so no delta between them can be missed (overlap
+	// is redelivered; the merge is idempotent). A slot that is still being
+	// created is waited for, and the run is refused past the wait with
+	// nothing read (#3078): read now, the rows would be older than where the
+	// slot starts delivering, and what commits in between is in neither.
 	var replConnect func(context.Context) (*pgconn.PgConn, error)
 	if cfg.ReplDSN != "" {
 		replConnect = func(ctx context.Context) (*pgconn.PgConn, error) {
@@ -179,25 +204,20 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 			return pgcapture.ConnectReplPinned(ctx, cfg.ReplDSN)
 		}
 	}
-	created, err := pgcapture.EnsureSlotExists(ctx, conn, cfg.SlotName, replConnect)
+	// The position is the delta-replay floor (#771), read BEFORE the snapshot
+	// transaction opens: the slot's own confirmed_flush_lsn only ever advances
+	// past transactions already fully resolved in WAL order. Read here, on
+	// this same connection before BEGIN, it is <= every LSN read afterwards
+	// (including the anchor below) — the invariant that makes "replay deltas
+	// from this floor" safe regardless of the snapshot-vs-concurrent-commit
+	// race described on SlotFloorLSN.
+	slotAnchor, err := pgcapture.AnchorOnSlot(ctx, conn, cfg.SlotName, replConnect, cfg.SlotWait, logger)
 	if err != nil {
 		return Stats{}, err
 	}
+	created, floorLSN := slotAnchor.Created, slotAnchor.Floor
 	if created {
 		logger.Info("pgbaseline: created replication slot", "slot", cfg.SlotName)
-	}
-
-	// Read the delta-replay floor (#771) BEFORE opening the snapshot
-	// transaction: pgcapture.SlotFloorLSN reports the slot's own
-	// confirmed_flush_lsn/restart_lsn, which only ever advances past
-	// transactions already fully resolved in WAL order. Reading it here, on
-	// this same connection before BEGIN, guarantees it is <= every LSN read
-	// afterwards (including the anchor below) — the invariant that makes
-	// "replay deltas from this floor" safe regardless of the snapshot-vs-
-	// concurrent-commit race described on SlotFloorLSN.
-	floorLSN, err := pgcapture.SlotFloorLSN(ctx, conn, cfg.SlotName)
-	if err != nil {
-		return Stats{}, err
 	}
 
 	// Open the snapshot transaction. The FIRST statement both establishes the
@@ -333,7 +353,7 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		return Stats{}, fmt.Errorf("pgbaseline: could not write incomplete-snapshot marker in %s (refusing to copy without the crash-safety marker): %w", snapDir, err)
 	}
 
-	stats := Stats{AnchorLSN: uint64(anchorLSN), DeltaStartLSN: uint64(deltaStartLSN), SnapshotTime: snapshotTime, SlotCreated: created}
+	stats := Stats{AnchorLSN: uint64(anchorLSN), DeltaStartLSN: uint64(deltaStartLSN), SnapshotTime: snapshotTime, SlotCreated: created, SlotWaited: slotAnchor.Waited}
 
 	var (
 		mu   sync.Mutex
@@ -414,6 +434,18 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		}
 		return stats, errs[0]
 	}
+	// The slot once more, now that the tables are read (#3078): one that is
+	// gone, lost, being created again or behind where it stood is not the
+	// slot this snapshot started under, and a gap known now is an error of
+	// the run, not a line for a later reader to find.
+	if err := checkSlotAtEnd(ctx, cfg, conn, floorLSN); err != nil {
+		return stats, fmt.Errorf("pgbaseline: %w", err)
+	}
+	if cfg.BeforePublish != nil {
+		if err := cfg.BeforePublish(stats); err != nil {
+			return stats, err
+		}
+	}
 	baseline.SignSnapshot(snapDir, cfg.WriterID)
 	if err := baselineintegrity.WriteManifest(snapDir); err != nil {
 		return stats, fmt.Errorf("pgbaseline: snapshot complete but could not write integrity manifest: %w", err)
@@ -422,6 +454,22 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		return stats, publishError(err)
 	}
 	return stats, nil
+}
+
+// checkSlotAtEnd asks pgcapture.CheckSlotStillAnchors on a connection of its
+// own. The anchor connection has sat idle in its transaction for the whole of
+// a parallel read, and a server that closed it meanwhile
+// (idle_in_transaction_session_timeout) would fail a snapshot that is whole
+// over a question that is not about its rows: pg_replication_slots is not
+// under the snapshot, so any connection shows the slot as it is. Only when no
+// new connection can be had is the anchor connection asked.
+func checkSlotAtEnd(ctx context.Context, cfg Config, anchor *pgx.Conn, floor pglogrepl.LSN) error {
+	fresh, err := pgcapture.ConnectQueryPinned(ctx, cfg.QueryDSN)
+	if err != nil {
+		return pgcapture.CheckSlotStillAnchors(ctx, anchor, cfg.SlotName, floor)
+	}
+	defer fresh.Close(context.Background())
+	return pgcapture.CheckSlotStillAnchors(ctx, fresh, cfg.SlotName, floor)
 }
 
 // publishError words a failed publish. A vanished marker is returned as it
@@ -499,7 +547,7 @@ func tableFooter(t tableInfo, tsStr string, deltaStartLSN, anchorLSN uint64) (ma
 		baseline.MetaKeyLockMode: baseline.LockStampPGRepeatableRead,
 		// The LSN delta-replay floor (#593 slice A, corrected by #771): deltas
 		// for this table replay from AT OR AFTER this point — the slot's own
-		// confirmed_flush_lsn/restart_lsn (pgcapture.SlotFloorLSN), NOT the
+		// confirmed_flush_lsn (pgcapture.AnchorOnSlot), NOT the
 		// live pg_current_wal_lsn() read when the snapshot was taken (that
 		// live LSN can be at-or-after a concurrently-committing transaction's
 		// commit record while the transaction is still invisible to the

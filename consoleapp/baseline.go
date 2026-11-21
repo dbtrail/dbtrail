@@ -1553,6 +1553,9 @@ func (s *baselineSupervisor) executePG(req console.BaselineRequest) (dumpOutcome
 			ownSnapshot = name
 		}
 	}
+	// A gap the index already knows of fails the read before it is
+	// published (#3078).
+	cfg.BeforePublish = func(st pgbaseline.Stats) error { return pgRefuseKnownGap(req, st) }
 	pgStats, err := pgBaselineRun(s.ctx, cfg)
 	if err != nil {
 		readErr := err
