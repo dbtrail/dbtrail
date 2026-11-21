@@ -842,6 +842,9 @@ be read back.
 Without this service nothing serves the MySQL port: the web interface can
 turn it on and nothing listens. The router itself is described in
 [The router](time-travel-sql.md#the-router-the-process-that-serves-the-port).
+What an application connected to the port sees while this service is down,
+and a proxy in front that falls back to MySQL, are in
+[When the router stops](time-travel-sql.md#when-the-router-stops).
 ### The PostgreSQL router: the service that answers the PostgreSQL port
 
 The stack starts a `pg-router` service too. PostgreSQL clients and

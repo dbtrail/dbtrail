@@ -86,9 +86,13 @@ Amazon ECS too.
   MySQL, and routing keeps transactions there.
 - **Lookups stay on your MySQL.** A read by key takes a few milliseconds on
   MySQL and about 100 on the copy, so routing leaves it on your MySQL.
-- **Not high availability, and not your backup.** Writes always go to your
-  MySQL and nothing fails over to DBTrail. History starts the day you install
-  it. Keep your replicas and your backups.
+- **Not high availability, and not your backup.** Your data stays on your
+  MySQL and nothing fails over to DBTrail. An application that connects to
+  DBTrail's MySQL port depends on that port: while it is down the application
+  gets connection errors there, with MySQL up and untouched. Keep a way to
+  MySQL that does not pass through it, or a proxy in front that falls back to
+  MySQL: [When the router stops](docs/time-travel-sql.md#when-the-router-stops).
+  History starts the day you install it. Keep your replicas and your backups.
 - **Needs a ROW binlog with full row images** (`binlog_format=ROW`,
   `binlog_row_image=FULL`), and a primary key on every InnoDB table. The
   connect form checks the binlog settings and shows the fix.
