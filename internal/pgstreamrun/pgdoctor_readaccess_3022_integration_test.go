@@ -78,7 +78,7 @@ func TestBuildPGReport_ReadAccess_3022(t *testing.T) {
 	if want := `The role "doctor_ra3022_role" cannot read 1 of the 1 table the copy reads: "public"."doctor_ra3022_customers" (no SELECT)`; c.Detail != want {
 		t.Errorf("detail:\n got %s\nwant %s", c.Detail, want)
 	}
-	if !strings.Contains(c.Remediation, "\n\n  "+grant+"\n") || c.Kind != doctor.KindMissingPrivilege {
+	if !strings.Contains(c.Remediation, "\n\n  "+grant+"\n") || c.Kind != "" {
 		t.Errorf("kind %q, remediation:\n%s", c.Kind, c.Remediation)
 	}
 

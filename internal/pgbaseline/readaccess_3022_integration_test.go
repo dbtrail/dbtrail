@@ -105,11 +105,17 @@ func TestPGBaseline_RoleWithoutSelect_3022(t *testing.T) {
 	t.Run("refused before anything is created", func(t *testing.T) {
 		outDir := t.TempDir()
 		err := run(outDir)
-		const want = `pgbaseline: this snapshot was not started, and nothing was read: the role cannot read a published table: ` +
-			`the role "pgbaseline_ra3022_role" cannot read 1 of the 2 tables the copy reads: "public"."pgbaseline_ra3022_customers" (no SELECT). ` +
+		const want = `pgbaseline: this snapshot was not started: no read access: ` +
+			`the role "pgbaseline_ra3022_role" cannot read 1 of the 2 tables the copy reads. ` +
 			`Run on the database, as the tables' owner or a superuser: GRANT SELECT ON TABLE "public"."pgbaseline_ra3022_customers" TO "pgbaseline_ra3022_role";`
 		if err == nil || err.Error() != want {
 			t.Fatalf("err:\n got %v\nwant %s", err, want)
+		}
+		// The web interface shows the first 300 characters of a failed
+		// snapshot's error, behind the prefix its supervisor adds: the
+		// statement to run has to be inside them.
+		if shown := "pg baseline: " + err.Error(); len(shown) > 300 {
+			t.Errorf("the refusal is %d characters long; past 300 the statement is cut on screen", len(shown))
 		}
 		if !errors.Is(err, pgcapture.ErrNoReadAccess) {
 			t.Error("the refusal does not wrap pgcapture.ErrNoReadAccess")

@@ -58,14 +58,15 @@ func readAccessResult(acc pgcapture.ReadAccess) doctor.CheckResult {
 			"it gives SELECT on every table of the schema, published or not.")
 	}
 	// The report prints a detail inside parentheses, so it ends without a
-	// full stop.
+	// full stop. No Kind: a screen draws a finding that has one from its own
+	// short text and the statements alone, and this one needs its prose too
+	// (why the permission is needed, and that a statement on a whole schema
+	// gives more than the publication).
 	detail := strings.TrimSuffix(strings.ToUpper(problem[:1])+problem[1:], ".")
 	return doctor.CheckResult{
 		Name:        readAccessCheck,
 		Status:      doctor.StatusFail,
 		Detail:      detail,
 		Remediation: rem.String(),
-		Kind:        doctor.KindMissingPrivilege,
-		Subjects:    acc.Missing(),
 	}
 }

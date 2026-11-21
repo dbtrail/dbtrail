@@ -31,15 +31,12 @@ func TestReadAccessGrantsQuoteEveryName(t *testing.T) {
 	if got := acc.Problem(); got != wantProblem {
 		t.Errorf("Problem:\n got %s\nwant %s", got, wantProblem)
 	}
-	if got, want := acc.Missing(), []string{"USAGE on 1 schema", "SELECT on 2 published tables"}; !slices.Equal(got, want) {
-		t.Errorf("Missing = %q, want %q", got, want)
-	}
 }
 
 func TestReadAccessNothingMissing(t *testing.T) {
 	for _, acc := range []ReadAccess{{}, {Role: "dbtrail", Tables: 7}} {
-		if p, g, m := acc.Problem(), acc.Grants(), acc.Missing(); p != "" || len(g) != 0 || len(m) != 0 {
-			t.Errorf("%+v: Problem %q, Grants %q, Missing %q, want nothing", acc, p, g, m)
+		if p, g := acc.Problem(), acc.Grants(); p != "" || len(g) != 0 {
+			t.Errorf("%+v: Problem %q, Grants %q, want nothing", acc, p, g)
 		}
 	}
 }
@@ -49,9 +46,6 @@ func TestReadAccessOneTable(t *testing.T) {
 	acc := ReadAccess{Role: "dbtrail", Tables: 1, Unreadable: []UnreadableTable{{Schema: "public", Table: "customers", NoSelect: true}}}
 	if got, want := acc.Problem(), `the role "dbtrail" cannot read 1 of the 1 table the copy reads: "public"."customers" (no SELECT).`; got != want {
 		t.Errorf("Problem:\n got %s\nwant %s", got, want)
-	}
-	if got, want := acc.Missing(), []string{"SELECT on 1 published table"}; !slices.Equal(got, want) {
-		t.Errorf("Missing = %q, want %q", got, want)
 	}
 	if got, want := acc.Grants(), []string{`GRANT SELECT ON TABLE "public"."customers" TO "dbtrail";`}; !slices.Equal(got, want) {
 		t.Errorf("Grants = %q, want %q", got, want)
@@ -110,9 +104,6 @@ func TestReadAccessHundredsOfTables(t *testing.T) {
 	if got := acc.Grants(); !slices.Equal(got, want) {
 		t.Errorf("Grants:\n got %q\nwant %q", got, want)
 	}
-	if got, want := acc.Missing(), []string{"USAGE on 1 schema", "SELECT on 500 published tables"}; !slices.Equal(got, want) {
-		t.Errorf("Missing = %q, want %q", got, want)
-	}
 }
 
 // Hundreds of schemas: the list of statements is cut too, and says so.
@@ -140,9 +131,6 @@ func TestReadAccessSchemasNamedOnce(t *testing.T) {
 	}}
 	if got, want := acc.Grants(), []string{`GRANT USAGE ON SCHEMA "a" TO "r";`, `GRANT USAGE ON SCHEMA "b" TO "r";`}; !slices.Equal(got, want) {
 		t.Errorf("Grants = %q, want %q", got, want)
-	}
-	if got, want := acc.Missing(), []string{"USAGE on 2 schemas"}; !slices.Equal(got, want) {
-		t.Errorf("Missing = %q, want %q", got, want)
 	}
 }
 

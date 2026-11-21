@@ -447,9 +447,8 @@ func TestCheckReadAccess_theIssue(t *testing.T) {
 	}
 
 	err = CheckReadAccess(ctx, conn, pub, event.Filters{})
-	const want = `the role cannot read a published table: the role "ra3022i_role" cannot read 1 of the 1 table the copy reads: ` +
-		`"public"."ra3022i_customers" (no SELECT). Run on the database, as the tables' owner or a superuser: ` +
-		`GRANT SELECT ON TABLE "public"."ra3022i_customers" TO "ra3022i_role";`
+	const want = `no read access: the role "ra3022i_role" cannot read 1 of the 1 table the copy reads. ` +
+		`Run on the database, as the tables' owner or a superuser: GRANT SELECT ON TABLE "public"."ra3022i_customers" TO "ra3022i_role";`
 	if err == nil || err.Error() != want {
 		t.Fatalf("CheckReadAccess:\n got %v\nwant %s", err, want)
 	}

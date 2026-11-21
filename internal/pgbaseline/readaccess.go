@@ -34,7 +34,7 @@ func refuseUnreadable(ctx context.Context, conn *pgx.Conn, publication string, f
 	case err == nil:
 		return nil
 	case errors.Is(err, pgcapture.ErrNoReadAccess):
-		return fmt.Errorf("pgbaseline: this snapshot was not started, and nothing was read: %w", err)
+		return fmt.Errorf("pgbaseline: this snapshot was not started: %w", err)
 	case ctx.Err() != nil:
 		return fmt.Errorf("pgbaseline: checking read access to the tables to copy: %w", err)
 	}

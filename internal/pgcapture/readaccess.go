@@ -28,7 +28,7 @@ import (
 
 // ErrNoReadAccess marks a role that cannot read a table the copy reads, so a
 // caller can tell it from a failed catalog read.
-var ErrNoReadAccess = errors.New("the role cannot read a published table")
+var ErrNoReadAccess = errors.New("no read access")
 
 // readAccessNamed is how many tables, and how many statements of one kind, a
 // message names. A publication can hold hundreds of tables; past this the
@@ -119,8 +119,11 @@ func QueryReadAccess(ctx context.Context, conn *pgx.Conn, publication string, fi
 }
 
 // CheckReadAccess refuses when the role of conn cannot read a table the copy
-// reads. The error wraps ErrNoReadAccess and carries, on one line, what is
-// missing and the statements to run.
+// reads. The error wraps ErrNoReadAccess and carries, on one line, how many
+// tables and the statements to run. The statements come early and the tables
+// are not listed apart (each statement names its own): a screen that shows a
+// failed snapshot cuts a long first line, and the statement is the part that
+// must survive the cut.
 func CheckReadAccess(ctx context.Context, conn *pgx.Conn, publication string, filters event.Filters) error {
 	acc, err := QueryReadAccess(ctx, conn, publication, filters)
 	if err != nil {
@@ -129,8 +132,14 @@ func CheckReadAccess(ctx context.Context, conn *pgx.Conn, publication string, fi
 	if len(acc.Unreadable) == 0 {
 		return nil
 	}
-	return fmt.Errorf("%w: %s Run on the database, as the tables' owner or a superuser: %s",
-		ErrNoReadAccess, acc.Problem(), strings.Join(acc.Grants(), " "))
+	return fmt.Errorf("%w: %s. Run on the database, as the tables' owner or a superuser: %s",
+		ErrNoReadAccess, acc.count(), strings.Join(acc.Grants(), " "))
+}
+
+// count says how many of the tables the role cannot read, without a full stop.
+func (a ReadAccess) count() string {
+	return fmt.Sprintf("the role %s cannot read %d of the %s the copy reads",
+		printable(quoteIdent(a.Role)), len(a.Unreadable), countTables(a.Tables))
 }
 
 // Problem says, in one line, which tables the role cannot read and what each
@@ -149,8 +158,7 @@ func (a ReadAccess) Problem() string {
 	if more := len(a.Unreadable) - len(named); more > 0 {
 		list += fmt.Sprintf(", and %d more", more)
 	}
-	return fmt.Sprintf("the role %s cannot read %d of the %s the copy reads: %s.",
-		printable(quoteIdent(a.Role)), len(a.Unreadable), countTables(a.Tables), list)
+	return a.count() + ": " + list + "."
 }
 
 func (t UnreadableTable) lacks() string {
@@ -161,24 +169,6 @@ func (t UnreadableTable) lacks() string {
 		return "no USAGE on its schema"
 	}
 	return "no SELECT"
-}
-
-// Missing names what is missing in a few words, one entry per permission:
-// "USAGE on 1 schema", "SELECT on 3 published tables". Pure.
-func (a ReadAccess) Missing() []string {
-	schemas, tables := a.lackingSchemas(), a.lackingSelect()
-	var out []string
-	if n := len(schemas); n == 1 {
-		out = append(out, "USAGE on 1 schema")
-	} else if n > 1 {
-		out = append(out, fmt.Sprintf("USAGE on %d schemas", n))
-	}
-	if n := len(tables); n == 1 {
-		out = append(out, "SELECT on 1 published table")
-	} else if n > 1 {
-		out = append(out, fmt.Sprintf("SELECT on %d published tables", n))
-	}
-	return out
 }
 
 // lackingSchemas are the schemas the role has no USAGE on, each once, in the

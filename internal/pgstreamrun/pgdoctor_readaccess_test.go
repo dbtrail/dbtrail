@@ -37,11 +37,10 @@ func TestReadAccessResult(t *testing.T) {
 				"and would stop with \"permission denied\" (42501). DBTrail grants nothing by itself. " +
 				"Run this on the database, as the tables' owner or a superuser:\n\n" +
 				"  GRANT SELECT ON TABLE \"public\".\"customers\" TO \"dbtrail\";\n",
-			Kind:     doctor.KindMissingPrivilege,
-			Subjects: []string{"SELECT on 1 published table"},
 		}
+		// No kind: a screen then shows the whole fix, prose included.
 		if got.Name != want.Name || got.Status != want.Status || got.Detail != want.Detail || got.Remediation != want.Remediation ||
-			got.Kind != want.Kind || !slices.Equal(got.Subjects, want.Subjects) || len(got.Statements) != 0 {
+			got.Kind != "" || len(got.Subjects) != 0 || len(got.Statements) != 0 {
 			t.Errorf("got  %+v\nwant %+v", got, want)
 		}
 	})
@@ -55,9 +54,6 @@ func TestReadAccessResult(t *testing.T) {
 			if !strings.Contains(got.Remediation, want) {
 				t.Errorf("remediation lacks %q:\n%s", want, got.Remediation)
 			}
-		}
-		if want := []string{"USAGE on 1 schema", "SELECT on 1 published table"}; !slices.Equal(got.Subjects, want) {
-			t.Errorf("subjects = %q, want %q", got.Subjects, want)
 		}
 	})
 	t.Run("hundreds of tables: a bounded message and one statement per schema", func(t *testing.T) {
