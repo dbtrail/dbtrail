@@ -75,6 +75,9 @@ type session struct {
 	// fallback is why the statement the copy just failed goes to the
 	// source instead (route.go), "" when it does not; set by runFree.
 	fallback string
+	// last is which side answered the connection's last statement, and why
+	// (portstatus.go): what SHOW dbtrail.router_status says.
+	last LastAnswer
 }
 
 // initSettings sets a connection's settings before its start-up message is
@@ -276,6 +279,11 @@ func (s *session) abortedRefusal(qstr string) *pgErr {
 	if s.pinned() && isRollbackTo(qstr) {
 		return nil
 	}
+	// The port's status reads nothing of the block, and is how a client
+	// learns which side failed it (portstatus.go).
+	if s.isStatusStatement(qstr) {
+		return nil
+	}
 	return &pgErr{"25P02", "current transaction is aborted, commands ignored until end of transaction block"}
 }
 
@@ -373,6 +381,11 @@ func (s *session) classify(qstr string) classified {
 		// (SET, SHOW, BEGIN, version()...) are answered here, on either
 		// port; on the time-travel port nothing else is.
 		cmd, ok, syntaxErr := parseSessionCmd(qstr)
+		// The port's own status statement, before anything else can send
+		// it on (portstatus.go).
+		if c, own := s.classifyStatus(qstr, cmd, ok); own {
+			return c
+		}
 		switch {
 		case syntaxErr != nil:
 			return classified{kind: kindRefused, perr: syntaxErr}
