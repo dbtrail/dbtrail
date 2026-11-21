@@ -28,6 +28,7 @@ func TestZonedTyped(t *testing.T) {
 			"2026-03-02 10:00:00 utc", "2026-03-02 10:00:00 GMT", "2026-03-02 10:00:00 Etc/UTC",
 			"2026-03-02 10:00:00 PST", "2026-03-02 10:00:00 America/Bogota", "2026-03-02 10:00:00+02:30:15",
 			"2026-03-02 10:00+02", "2026-03-02+02", "2026-03-02 10:00:00+16",
+			"2026-03-02 10:00:00 PST8PDT", "2026-03-02 10:00:00 Etc/GMT+5",
 		},
 		"date": {
 			"2026-03-02 23:30:00-05", "2026-03-02 00:30:00+05", "2026-03-02T23:30:00-05:00",
@@ -71,6 +72,8 @@ func TestCopyScreen_zoneInALiteral(t *testing.T) {
 		`SELECT name FROM ` + c + ` WHERE signup = DATE '2026-01-15 23:30:00-05'`:                                                     zonedTypedVeto,
 		`SELECT name FROM ` + c + ` WHERE signup = DATE '2026-01-15+02'`:                                                              zonedTypedVeto,
 		`SELECT name FROM ` + c + ` WHERE signup = '2026-01-15 23:30:00-05'::date`:                                                    zonedTypedVeto,
+		`SELECT name FROM ` + c + ` WHERE signup = CAST('2026-01-15 23:30:00-05' AS date)`: zonedTypedVeto,
+		`SELECT name FROM ` + c + ` WHERE signup = CAST('2026-01-15+16' AS date)`: zonedTypedVeto,
 		`SELECT id FROM ` + o + ` WHERE placed_at BETWEEN TIMESTAMP '2026-03-02 10:00:00' AND TIMESTAMP '2026-03-03 10:00:00+02'`:     zonedTypedVeto,
 		`SELECT id FROM ` + o + ` WHERE placed_at NOT BETWEEN TIMESTAMP '2026-03-02 10:00:00+02' AND TIMESTAMP '2026-03-03 10:00:00'`: zonedTypedVeto,
 		// A cast to a timestamp was the source's already, zone or none.
@@ -90,6 +93,7 @@ func TestCopyScreen_zoneInALiteral(t *testing.T) {
 		`SELECT id FROM ` + o + ` WHERE placed_at < TIMESTAMP '2026-02-01 00:00:00.5'`,
 		`SELECT name FROM ` + c + ` WHERE signup >= DATE '2026-01-01'`,
 		`SELECT name FROM ` + c + ` WHERE signup >= '2026-01-01'::date`,
+		`SELECT name FROM ` + c + ` WHERE signup >= CAST('2026-01-01' AS date)`,
 		`SELECT id FROM ` + o + ` WHERE placed_at = '2026-03-02 10:00:00'`,
 	}
 	for _, q := range copyOK {
@@ -137,6 +141,9 @@ func TestCopyScreen_bothBoundsOfBetween(t *testing.T) {
 		// its lower bound.
 		`SELECT id FROM ` + o + ` WHERE qty BETWEEN CASE WHEN id > 1 AND id < 5 THEN 1 ELSE 2 END AND note`:   text,
 		`SELECT CASE WHEN qty BETWEEN 1 END FROM ` + o:                                                        "AND was not found",
+		// A name given with AS, or a column after a dot, is not CASE or END.
+		`SELECT id FROM ` + o + ` WHERE qty BETWEEN (SELECT min(qty) AS end FROM ` + o + ` WHERE id > 1 AND id < 5) AND note`: text,
+		`SELECT id FROM ` + o + ` o WHERE (qty BETWEEN (SELECT 1 AS case) AND note) AND o.id = 1`: text,
 		`SELECT id FROM ` + o + ` WHERE qty BETWEEN (CASE WHEN id > 1 AND id < 5 THEN 1 ELSE 2 END) AND note`: text,
 		`SELECT id FROM ` + o + ` WHERE qty BETWEEN SYMMETRIC 9 AND 2`:                                        "SYMMETRIC",
 		`SELECT id FROM ` + o + ` WHERE qty BETWEEN 1`:                                                        "AND was not found",

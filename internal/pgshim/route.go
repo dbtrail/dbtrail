@@ -1153,13 +1153,22 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 	// bound holds no AND of its own outside those. -1 when the statement
 	// ends, or what the BETWEEN is in closes, before it.
 	betweenAnd := func(i int) int {
+		// keyword: the word at j is CASE or END itself, not a name given
+		// with AS or a column after a dot (x AS end, t.end).
+		keyword := func(j int, w string) bool {
+			if toks[j].kind != rtWord || toks[j].text != w {
+				return false
+			}
+			p := at(j - 1)
+			return !(p.kind == rtWord && p.text == "as") && !(p.kind == rtOp && p.text == ".")
+		}
 		depth := 0
 		for j := i + 1; j < len(toks); j++ {
 			t := toks[j]
 			switch {
-			case t.kind == rtOp && (t.text == "(" || t.text == "[") || t.kind == rtWord && t.text == "case":
+			case t.kind == rtOp && (t.text == "(" || t.text == "[") || keyword(j, "case"):
 				depth++
-			case t.kind == rtOp && (t.text == ")" || t.text == "]") || t.kind == rtWord && t.text == "end":
+			case t.kind == rtOp && (t.text == ")" || t.text == "]") || keyword(j, "end"):
 				if depth == 0 {
 					return -1
 				}
@@ -1288,6 +1297,10 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 					if w := in[len(in)-2]; w.kind != rtWord || w.text != "as" || in[len(in)-1].kind != rtWord || in[len(in)-1].text != "date" {
 						return "a CAST to a type other than date"
 					}
+					// The same literal as DATE '...' and '...'::date.
+					if in[0].kind == rtString && zonedTyped("date", in[0].text) {
+						return zonedTypedVeto
+					}
 					break
 				}
 				if !copyFuncs[t.text] {
@@ -1374,12 +1387,12 @@ var compareOps = map[string]bool{"=": true, "<>": true, "!=": true, "<": true, "
 var textMakers = map[string]bool{"concat": true, "string_agg": true, "substring": true, "trim": true}
 
 // zonedLiteral is a date and time written with a time zone: an offset, Z,
-// or a zone's name after the time.
-var zonedLiteral = regexp.MustCompile(`\d:\d\d(:\d\d(\.\d+)?)?\s*([+-]\d{1,2}(:?\d\d(:\d\d)?)?|[zZ]|[A-Za-z][A-Za-z_/+-]*)\s*$`)
+// or a zone's name after the time (Europe/Paris, PST8PDT, Etc/GMT+5).
+var zonedLiteral = regexp.MustCompile(`\d:\d\d(:\d\d(\.\d+)?)?\s*([+-]\d{1,2}(:?\d\d(:\d\d)?)?|[zZ]|[A-Za-z][A-Za-z0-9_/+-]*)\s*$`)
 
 // zonedDate is a date alone followed by a time zone (2026-03-02+02,
 // 2026-03-02 Z), which PostgreSQL reads as the date.
-var zonedDate = regexp.MustCompile(`^\s*\d+-\d{1,2}-\d{1,2}(\s*[+-]\d{1,2}(:?\d\d(:\d\d)?)?|\s+[A-Za-z][A-Za-z_/+-]*)\s*$`)
+var zonedDate = regexp.MustCompile(`^\s*\d+-\d{1,2}-\d{1,2}(\s*[+-]\d{1,2}(:?\d\d(:\d\d)?)?|\s+[A-Za-z][A-Za-z0-9_/+-]*)\s*$`)
 
 // zonedTyped reports whether a typed literal of a type that holds no time
 // zone (date, timestamp, time) is written with one. PostgreSQL 16 does not

@@ -748,7 +748,9 @@ func textCell(col string, v any) ([]byte, error) {
 // as its number and BC (0044-03-15 12:00:00 BC), and the two ends the
 // copy's engine holds as its largest and smallest microsecond counts as
 // infinity and -infinity. Finer than a microsecond is rounded to one, as
-// PostgreSQL rounds what it is given.
+// PostgreSQL rounds what it is given. textCell is not told a column's type:
+// a date or a timestamp with time zone that reaches it as a time.Time is
+// written as a timestamp too (2026-01-02 00:00:00), as before.
 func timestampText(t time.Time) []byte {
 	switch {
 	case t.Equal(engineInfinity):
