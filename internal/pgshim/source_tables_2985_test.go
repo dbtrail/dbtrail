@@ -267,7 +267,7 @@ func newTablesPort(t *testing.T, opts ...func(*fakeSource)) *tablesPort {
 	}
 	p.src = startFakeSourceWith(t, src)
 	p.l = &costLogin{src: p.src, age: p.knob.age, wait: p.w.wait, catalog: func() []CatalogTable {
-		return catalogOf("t", "big", "hb", "wide", "other.t", "other.big", "Mixed", "bigger", "rowsthenfail")
+		return catalogOf("t", "big", "hb", "wide", "other.t", "other.big", "mixed", "bigger", "rowsthenfail")
 	}}
 	// The copy's answers read a snapshot alone: held back whenever the rule
 	// applies, however the wait went.
@@ -556,6 +556,33 @@ func TestSourceTables_2985_aStatementOfTheCopyInTheSourcesBatch(t *testing.T) {
 	}
 	if got := string(res[1].Rows[0][0]); got != "42" {
 		t.Errorf("the report in the source's batch: %s, want the source's 42: nothing was confirmed yet", got)
+	}
+}
+
+// A batch whose statements for the source ran under two search_paths is not
+// confirmed: the names of the first would be resolved under the second.
+func TestSourceTables_2985_aBatchUnderTwoSearchPaths(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	p := newTablesPort(t)
+	c := costPortConn(t, ctx, p.l)
+	for name, stmt := range map[string]string{"byKey": "SELECT n FROM t WHERE id = $1", "path": "SET search_path = other"} {
+		if _, err := c.Prepare(ctx, name, stmt, nil); err != nil {
+			t.Fatalf("prepare %s: %v", name, err)
+		}
+	}
+	batch := &pgconn.Batch{}
+	batch.ExecPrepared("byKey", [][]byte{[]byte("1")}, nil, nil)
+	batch.ExecPrepared("path", nil, nil, nil)
+	batch.ExecPrepared("byKey", [][]byte{[]byte("2")}, nil, nil)
+	if res, err := c.ExecBatch(ctx, batch).ReadAll(); err != nil || len(res) != 3 {
+		t.Fatalf("the batch: %v %+v", err, res)
+	}
+	if n := len(p.src.proved()); n != 0 {
+		t.Errorf("the source was asked to confirm %d batches, want none", n)
+	}
+	if got := costSimple(ctx, c, p.l, "SELECT sum(n) FROM public.big"); got != tablesTooOld {
+		t.Errorf("a report on another table: %+v, want %+v: every table is marked", got, tablesTooOld)
 	}
 }
 
