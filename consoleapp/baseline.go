@@ -1531,6 +1531,15 @@ func (s *baselineSupervisor) executePG(req console.BaselineRequest) (dumpOutcome
 	if err != nil {
 		return dumpOutcome{}, err
 	}
+	// Before anything is created or read (#3029), as execute checks the
+	// working folder before mydumper: the verdict goes on the job's status
+	// now, so the history record carries a low-disk warning even if the
+	// snapshot then fails.
+	check, note, err := s.checkPGCopyDisk(req)
+	if err != nil {
+		return dumpOutcome{}, err
+	}
+	s.noteDumpDisk(req.ServerID, check, note)
 	// The snapshot folder this run alone writes, as execute keeps it for a
 	// MySQL read (#1938, #2180): journaled when it is vacant as the read is
 	// about to create it, so a kill leaves it for the next start to clean
