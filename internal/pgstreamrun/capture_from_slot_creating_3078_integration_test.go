@@ -108,7 +108,14 @@ func TestIntegrationPGCaptureFromSlotBeingCreated_3078(t *testing.T) {
 	})
 
 	// Right before capture starts replication, after it looked at the slot
-	// and found no position: the creation ends.
+	// and found no position: the creation ends. The hook runs in capture's
+	// goroutine, so it looks at the slot on a connection of its own (a pgx
+	// connection is not shared between goroutines).
+	watch, err := pgx.Connect(ctx, pgDSN)
+	if err != nil {
+		t.Fatalf("connect (watch the slot): %v", err)
+	}
+	t.Cleanup(func() { watch.Close(context.Background()) })
 	var once sync.Once
 	hooked := make(chan made, 1)
 	restore := pgcapture.SetBeforeStartReplicationForTest(func() {
@@ -127,7 +134,7 @@ func TestIntegrationPGCaptureFromSlotBeingCreated_3078(t *testing.T) {
 			// The creator lets the slot go when its command ends.
 			for range 100 {
 				var active bool
-				if pg.QueryRow(context.Background(), "SELECT active FROM pg_replication_slots WHERE slot_name = $1", slot).Scan(&active) == nil && !active {
+				if watch.QueryRow(context.Background(), "SELECT active FROM pg_replication_slots WHERE slot_name = $1", slot).Scan(&active) == nil && !active {
 					return
 				}
 				time.Sleep(50 * time.Millisecond)
