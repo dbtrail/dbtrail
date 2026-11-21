@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -131,13 +132,20 @@ func runPGBaseline(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	slog.Info("pg baseline complete",
+	done := []any{
 		"tables", stats.TablesProcessed,
 		"rows_written", stats.RowsWritten,
 		"files_written", stats.FilesWritten,
 		"anchor_lsn", stats.AnchorLSN,
 		"delta_start_lsn", stats.DeltaStartLSN,
-		"snapshot_time", stats.SnapshotTime)
+		"snapshot_time", stats.SnapshotTime,
+	}
+	// How long the replication slot took to have its position (#3078), when
+	// the run had to wait for it: the part of the run that read nothing.
+	if stats.SlotWaited > 0 {
+		done = append(done, "slot_waited", stats.SlotWaited.Round(time.Millisecond))
+	}
+	slog.Info("pg baseline complete", done...)
 
 	var uploaded int
 	if pgbUpload != "" {

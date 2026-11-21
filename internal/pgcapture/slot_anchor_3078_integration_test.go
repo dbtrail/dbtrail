@@ -5,6 +5,7 @@ package pgcapture_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -270,10 +271,19 @@ func TestAnchorOnSlot_RefusedWhenTheSlotNeverGetsItsPosition_3078(t *testing.T) 
 	a.holdOpen(t)
 	creating, _ := a.startCreating(t)
 
+	restore := pgcapture.SetSlotNoticesForTest(300 * time.Millisecond)
+	t.Cleanup(restore)
+	var logs syncBuffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	began := time.Now()
-	r := await3078(t, "AnchorOnSlot", a.anchorAsync(t, true, time.Second), 20*time.Second)
+	r := await3078(t, "AnchorOnSlot", a.anchorAsyncWith(t, context.Background(), time.Second, logger), 20*time.Second)
 	if !errors.Is(r.err, pgcapture.ErrSlotNotReady) {
 		t.Fatalf("err = %v, want ErrSlotNotReady", r.err)
+	}
+	// A wait for another session's creation is said at warning level once it
+	// lasts, not only as the Info line it starts with.
+	if text := logs.String(); !strings.Contains(text, "level=WARN") || !strings.Contains(text, "waiting for the replication slot to finish being created") {
+		t.Errorf("a long wait for a slot another session creates is not warned of:\n%s", text)
 	}
 	for _, want := range []string{"no table was read", `"` + a.slot + `" is still being created after 1s`, "confirmed_flush_lsn", "pg_stat_activity"} {
 		if !strings.Contains(r.err.Error(), want) {
@@ -327,19 +337,93 @@ func TestAnchorOnSlot_CreatesTheSlotItsCreatorGaveUp_3078(t *testing.T) {
 	}
 }
 
-// No slot, and the source never lets one be created: refused at the cap, and
-// no unfinished slot is left behind.
-func TestAnchorOnSlot_OwnCreationRefusedAtTheCap_3078(t *testing.T) {
-	a := newAnchor3078(t, "owncap")
+// syncBuffer is a log sink the test reads while AnchorOnSlot writes to it.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// anchorAsyncWith is anchorAsync with the caller's context and a logger.
+func (a *anchor3078) anchorAsyncWith(t *testing.T, ctx context.Context, wait time.Duration, logger *slog.Logger) <-chan anchored3078 {
+	t.Helper()
+	conn, err := pgx.Connect(context.Background(), a.baseDSN)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	out := make(chan anchored3078, 1)
+	go func() {
+		defer conn.Close(context.Background())
+		anchor, err := pgcapture.AnchorOnSlot(ctx, conn, a.slot, a.replConnect, wait, logger)
+		out <- anchored3078{anchor, err}
+	}()
+	return out
+}
+
+// No slot, and the source holds a write transaction open for longer than the
+// wait: the snapshot's OWN creation is not given up at the wait (that bounds
+// only a slot another session is creating). On a source with long write
+// transactions this creation can be the only way the slot is ever made, since
+// capture gives its whole start 30 seconds. It says, while it waits, how long
+// it has waited and where to see what holds it, and it ends with the slot's
+// position once the transaction ends.
+func TestAnchorOnSlot_OwnCreationOutlastsTheWait_3078(t *testing.T) {
+	a := newAnchor3078(t, "ownlong")
+	restore := pgcapture.SetSlotNoticesForTest(300 * time.Millisecond)
+	t.Cleanup(restore)
 	a.holdOpen(t)
-	r := await3078(t, "AnchorOnSlot", a.anchorAsync(t, true, 1500*time.Millisecond), 20*time.Second)
-	if !errors.Is(r.err, pgcapture.ErrSlotNotReady) || !strings.Contains(r.err.Error(), "could not be created within 1.5s") {
-		t.Fatalf("err = %v, want the refusal of a creation that did not end", r.err)
+	var logs syncBuffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	got := a.anchorAsyncWith(t, context.Background(), time.Second, logger)
+	select {
+	case r := <-got:
+		t.Fatalf("its own creation was given up at the wait, or ended while a transaction open before it is still open: %+v, err %v", r.anchor, r.err)
+	case <-time.After(3 * time.Second):
+	}
+	text := logs.String()
+	for _, want := range []string{"level=WARN", "still creating the replication slot", "waited=", "pg_stat_activity", "backend_xid IS NOT NULL", "xact_start"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the log of a creation that waits does not say %q:\n%s", want, text)
+		}
+	}
+	a.release(t)
+	r := await3078(t, "AnchorOnSlot", got, 30*time.Second)
+	if r.err != nil {
+		t.Fatalf("AnchorOnSlot after the transaction ended: %v", r.err)
+	}
+	if !r.anchor.Created || r.anchor.Floor == 0 || r.anchor.Floor != a.confirmed(t) || r.anchor.Waited < 3*time.Second {
+		t.Errorf("anchor = %+v, want the slot created here at its confirmed position %s, the wait recorded", r.anchor, a.confirmed(t))
+	}
+}
+
+// Its own creation given up by the caller (the console stopping, a cancelled
+// run): no unfinished slot is left behind.
+func TestAnchorOnSlot_OwnCreationCancelledLeavesNoSlot_3078(t *testing.T) {
+	a := newAnchor3078(t, "owncancel")
+	a.holdOpen(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	got := a.anchorAsyncWith(t, ctx, time.Second, nil)
+	time.Sleep(2 * time.Second)
+	cancel()
+	r := await3078(t, "AnchorOnSlot", got, 20*time.Second)
+	if !errors.Is(r.err, context.Canceled) {
+		t.Fatalf("err = %v, want the caller's cancellation", r.err)
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for a.listed(t) {
 		if time.Now().After(deadline) {
-			t.Fatal("the unfinished slot is still listed 10s after the refusal")
+			t.Fatal("the unfinished slot is still listed 10s after the cancellation")
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

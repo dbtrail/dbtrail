@@ -1,6 +1,7 @@
 package reconstruct
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -9,9 +10,11 @@ import (
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
-// pgCaptureStartLSN reads where the capture writing the index started
-// reading its source from; a variable so a test answers it without an index.
-var pgCaptureStartLSN = query.PGCaptureStartLSN
+// pgCaptureStartRead reads where the capture writing the index started
+// reading its source from, telling a failed read apart from nothing recorded
+// (query.PGCaptureStartRead, bounded to 5 seconds); a variable so a test
+// answers it without an index.
+var pgCaptureStartRead = query.PGCaptureStartRead
 
 // pgFileBeforeCapture reports whether a table file whose changes start at
 // floor is known to miss changes (#3078): the index records that its capture
@@ -37,12 +40,24 @@ func pgFileBeforeCapture(floor, start uint64, startKnown bool) bool {
 // source again, which is the repair: the new snapshot's floor is the slot's
 // position, at or after where capture started.
 //
-// A run told to go on over missing changes (AllowGaps) is warned and goes on.
+// A read of the capture's start that failed is an error of the update, never
+// "nothing recorded": letting the table through would rewrite it with a new
+// floor, after which a gap it carries could never be seen again. A run told
+// to go on over missing changes (AllowGaps) is warned and goes on, in both
+// cases.
 func pgRefuseFileBeforeCapture(db *sql.DB, cfg FullTableConfig, schema, table string, bmeta baseline.DumpMetadata) error {
 	if db == nil || bmeta.LSN == 0 {
 		return nil
 	}
-	start, known := pgCaptureStartLSN(db)
+	start, known, err := pgCaptureStartRead(context.Background(), db)
+	if err != nil {
+		if cfg.AllowGaps {
+			slog.Warn("where capture of the server started could not be read, so whether this table's snapshot starts before it is not known; going on as told to over missing changes",
+				"schema", schema, "table", table, "snapshot_from", lsnText(bmeta.LSN), "error", err)
+			return nil
+		}
+		return fmt.Errorf("%s.%s: whether the table's snapshot starts before capture of the server did could not be checked, so it is not brought up to date from it: %w", schema, table, err)
+	}
 	if !pgFileBeforeCapture(bmeta.LSN, start, known) {
 		return nil
 	}
@@ -52,6 +67,6 @@ func pgRefuseFileBeforeCapture(db *sql.DB, cfg FullTableConfig, schema, table st
 		return nil
 	}
 	return fmt.Errorf("%s.%s: the table's snapshot holds its changes from %s on, and capture of the server started reading the source at %s, after it: "+
-		"the changes committed between the two were never captured, so the table cannot be brought up to date from this snapshot. Take a new snapshot of the table",
+		"the changes committed between the two were never captured, so the table cannot be brought up to date from this snapshot. Take a new snapshot (`snapshot run`)",
 		schema, table, lsnText(bmeta.LSN), lsnText(start))
 }

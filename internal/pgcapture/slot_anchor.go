@@ -12,12 +12,27 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// DefaultSlotWait is how long a snapshot waits for its replication slot to
-// have a position before it is refused (AnchorOnSlot).
+// DefaultSlotWait is how long a snapshot waits for a replication slot that
+// another session is creating to have a position before it is refused
+// (AnchorOnSlot). A creation the snapshot does itself is not bounded by it.
 const DefaultSlotWait = 5 * time.Minute
 
 // slotAnchorPoll is how often a slot that is being created is looked at again.
 const slotAnchorPoll = 250 * time.Millisecond
+
+// slotNoticeEvery is how often a creation of the slot by AnchorOnSlot itself
+// says, at most, that it is still waiting; slotWaitWarnAfter is how long a
+// wait for another session's creation lasts before it is said at warning
+// level. Variables so a test does not wait a minute.
+var (
+	slotNoticeEvery   = time.Minute
+	slotWaitWarnAfter = 30 * time.Second
+)
+
+// slotBlockersHint names where to see what holds a slot's creation back: the
+// transactions with an id of their own (PostgreSQL waits for those; a read
+// with no write has none and does not hold it), oldest first.
+const slotBlockersHint = "pg_stat_activity shows what holds it: the session with the oldest xact_start among those WHERE backend_xid IS NOT NULL"
 
 // ErrSlotNotReady marks a replication slot that PostgreSQL lists but that has
 // no position yet: its creation has not ended. PostgreSQL ends the creation of
@@ -27,6 +42,42 @@ const slotAnchorPoll = 250 * time.Millisecond
 // removed if the creation is given up, so nothing may be anchored on it
 // (#3078).
 var ErrSlotNotReady = errors.New("replication slot is still being created")
+
+// SlotNotReadyError is AnchorOnSlot's refusal of a snapshot whose slot,
+// created by another session, had no position within the wait. Nothing was
+// read: it is returned before the snapshot transaction opens. It matches
+// ErrSlotNotReady; other errors that do (a slot found being created again
+// after the read, CheckSlotStillAnchors) are not this one.
+type SlotNotReadyError struct {
+	Slot string
+	Wait time.Duration
+}
+
+func (e *SlotNotReadyError) Error() string {
+	return fmt.Sprintf("pgcapture: no table was read: replication slot %q is still being created after %s. PostgreSQL finishes creating a slot only when every transaction that was open on the source when the creation began has ended, and a snapshot read before that would miss the changes committed until then. Run the snapshot again once the slot has a confirmed_flush_lsn in pg_replication_slots (capture is then attached); %s: %v",
+		e.Slot, e.Wait, slotBlockersHint, ErrSlotNotReady)
+}
+
+func (e *SlotNotReadyError) Unwrap() error { return ErrSlotNotReady }
+
+// slotUnreadableError is a catalog read of a slot that failed (a cut
+// connection, a query error), as opposed to an answer about the slot.
+type slotUnreadableError struct{ err error }
+
+func (e *slotUnreadableError) Error() string { return e.err.Error() }
+func (e *slotUnreadableError) Unwrap() error { return e.err }
+
+// SlotReadFailed marks err as a failed read of a slot, as querySlotStanding
+// marks its own: for a caller's seam (and its tests) that stands in for it.
+func SlotReadFailed(err error) error { return &slotUnreadableError{err} }
+
+// IsSlotUnreadable reports whether err is a failed read of a slot's catalog
+// row (querySlotStanding) rather than a verdict about the slot: a read that
+// may go through if asked again, where a verdict would not change.
+func IsSlotUnreadable(err error) bool {
+	var u *slotUnreadableError
+	return errors.As(err, &u)
+}
 
 // SlotAnchor is the slot a snapshot is anchored on, as AnchorOnSlot found it.
 type SlotAnchor struct {
@@ -53,7 +104,8 @@ type slotStanding struct {
 
 // querySlotStanding is queryScopedSlotState with the slot's position: the same
 // identity rule (a pgoutput logical slot of the current database, anything
-// else of that name is an error), catalog columns only.
+// else of that name is an error), catalog columns only. A read that failed is
+// a slotUnreadableError; a slot of the wrong kind is not.
 func querySlotStanding(ctx context.Context, conn *pgx.Conn, slotName string) (slotStanding, error) {
 	var slotType, plugin, database, walStatus, curDB string
 	var confirmed *string
@@ -65,7 +117,7 @@ func querySlotStanding(ctx context.Context, conn *pgx.Conn, slotName string) (sl
 		return slotStanding{}, nil
 	}
 	if err != nil {
-		return slotStanding{}, fmt.Errorf("pgcapture: checking replication slot %q: %w", slotName, err)
+		return slotStanding{}, &slotUnreadableError{fmt.Errorf("pgcapture: checking replication slot %q: %w", slotName, err)}
 	}
 	if slotType != "logical" || plugin != "pgoutput" || database != curDB {
 		return slotStanding{}, fmt.Errorf("pgcapture: replication slot %q exists but is not a pgoutput logical slot on database %q (slot_type=%q, plugin=%q, database=%q) — it cannot anchor this source; use a different --slot name or remove the conflicting slot", slotName, curDB, slotType, plugin, database)
@@ -81,17 +133,6 @@ func querySlotStanding(ctx context.Context, conn *pgx.Conn, slotName string) (sl
 	return st, nil
 }
 
-// slotNotReadyError is the refusal of a snapshot whose slot had no position
-// within wait. Nothing was read: it is returned before the snapshot
-// transaction opens.
-func slotNotReadyError(slotName string, wait time.Duration, ours bool) error {
-	what := fmt.Sprintf("replication slot %q is still being created after %s", slotName, wait)
-	if ours {
-		what = fmt.Sprintf("replication slot %q could not be created within %s", slotName, wait)
-	}
-	return fmt.Errorf("pgcapture: no table was read: %s. PostgreSQL finishes creating a slot only when every transaction that was open on the source when the creation began has ended, and a snapshot read before that would miss the changes committed until then. Run the snapshot again once the slot has a confirmed_flush_lsn in pg_replication_slots (capture is then attached); pg_stat_activity shows the transactions still open: %w", what, ErrSlotNotReady)
-}
-
 // AnchorOnSlot returns the named pgoutput slot's position once the slot can
 // anchor a snapshot, creating the slot when it is absent. It is the baseline
 // producer's (#593) slot seam: the snapshot transaction must open AFTER the
@@ -104,10 +145,17 @@ func slotNotReadyError(slotName string, wait time.Duration, ours bool) error {
 // what commits before its creation ends is never delivered by it, and it is
 // gone if its creator gives up (capture gives its start 30 seconds). So this
 // waits, up to wait (DefaultSlotWait when zero or negative), for that slot to
-// have its position; if it disappears meanwhile the slot is created here, in
-// what is left of the wait. Past the wait the snapshot is refused with
-// ErrSlotNotReady, before anything was read. A slot that already has its
+// have its position. Past the wait the snapshot is refused with a
+// *SlotNotReadyError, before anything was read. A slot that already has its
 // position costs one catalog read and no wait.
+//
+// An absent slot, or one whose creator gave up during the wait, is created
+// here, and that creation is NOT bounded by wait: only ctx ends it, as it
+// always has. On a source that always holds a write transaction older than
+// capture's 30-second start, this creation is the one way the slot gets made
+// at all; giving it up at a cap would leave such a source with neither a
+// snapshot nor capture. It says at most once a minute how long it has waited
+// and where to see what holds it.
 //
 // replConnect lazily opens a REPLICATION connection (replication=database)
 // and is called only when the slot must be created; nil means none is
@@ -125,9 +173,11 @@ func AnchorOnSlot(ctx context.Context, queryConn *pgx.Conn, slotName string, rep
 		wait = DefaultSlotWait
 	}
 	started := time.Now()
-	deadline := started.Add(wait)
+	// The wait for another session's creation; it starts when one is first
+	// seen, so time spent on a creation of our own is not counted in it.
+	var waitStarted time.Time
 	var anchor SlotAnchor
-	said := false
+	said, warned := false, false
 	for {
 		st, err := querySlotStanding(ctx, queryConn, slotName)
 		if err != nil {
@@ -152,30 +202,38 @@ func AnchorOnSlot(ctx context.Context, queryConn *pgx.Conn, slotName string, rep
 			}
 			// Said before, not after: the creation is where a busy source
 			// makes this call wait.
-			logger.Info("pgcapture: creating the replication slot, which PostgreSQL finishes once the transactions open on the source have ended",
-				"slot", slotName, "up_to", time.Until(deadline).Round(time.Second))
-			created, err := createSlotBy(ctx, deadline, slotName, replConnect)
-			switch {
-			case err == nil && created:
+			logger.Info("pgcapture: creating the replication slot, which PostgreSQL finishes once the write transactions open on the source have ended",
+				"slot", slotName)
+			created, err := createSlot(ctx, slotName, replConnect, logger)
+			if err != nil {
+				return SlotAnchor{}, err
+			}
+			if created {
 				// Read again: the position comes from the catalog, as it
 				// does for a slot that was already there.
 				anchor.Created = true
 				continue
-			case err == nil:
-				// Another session is creating a slot of this name: wait for it.
-			case errors.Is(err, errSlotCreateTimedOut):
-				return SlotAnchor{}, slotNotReadyError(slotName, wait, true)
-			default:
-				return SlotAnchor{}, err
 			}
+			// Another session is creating a slot of this name: wait for it,
+			// from now (the wait before was for a creation that is gone).
+			waitStarted = time.Time{}
+		}
+		if waitStarted.IsZero() {
+			waitStarted = time.Now()
 		}
 		if !said {
 			said = true
-			logger.Info("pgcapture: the replication slot is still being created, which PostgreSQL finishes once the transactions open on the source have ended; the snapshot waits for it",
+			logger.Info("pgcapture: the replication slot is still being created, which PostgreSQL finishes once the write transactions open on the source have ended; the snapshot waits for it",
 				"slot", slotName, "up_to", wait)
 		}
-		if !time.Now().Before(deadline) {
-			return SlotAnchor{}, slotNotReadyError(slotName, wait, false)
+		waited := time.Since(waitStarted)
+		if !warned && waited >= slotWaitWarnAfter {
+			warned = true
+			logger.Warn("pgcapture: the snapshot is waiting for the replication slot to finish being created; nothing is read until it has a position. "+slotBlockersHint,
+				"slot", slotName, "waited", waited.Round(time.Second), "up_to", wait)
+		}
+		if waited >= wait {
+			return SlotAnchor{}, &SlotNotReadyError{Slot: slotName, Wait: wait}
 		}
 		select {
 		case <-ctx.Done():
@@ -185,38 +243,52 @@ func AnchorOnSlot(ctx context.Context, queryConn *pgx.Conn, slotName string, rep
 	}
 }
 
-// errSlotCreateTimedOut: createSlotBy ran out of the wait, with the caller's
-// own context still alive.
-var errSlotCreateTimedOut = errors.New("the slot's creation did not end in time")
-
-// createSlotBy creates the slot, giving up at deadline. created is false with
-// a nil error when a slot of that name appeared meanwhile (SQLSTATE 42710):
-// the caller looks at it. Giving up closes the replication connection; the
-// unfinished slot is then gone from pg_replication_slots within seconds
-// (TestAnchorOnSlot_OwnCreationRefusedAtTheCap_3078 holds that, with the
-// transaction that kept the creation waiting still open).
-func createSlotBy(ctx context.Context, deadline time.Time, slotName string, replConnect func(context.Context) (*pgconn.PgConn, error)) (created bool, err error) {
-	cctx, cancel := context.WithDeadline(ctx, deadline)
-	defer cancel()
-	timedOut := func() bool { return cctx.Err() != nil && ctx.Err() == nil }
-	replConn, err := replConnect(cctx)
+// createSlot creates the slot, for as long as ctx lets it: PostgreSQL ends the
+// creation once the write transactions open when it began have ended, and
+// nothing here gives it up before that. created is false with a nil error
+// when a slot of that name appeared meanwhile (SQLSTATE 42710): the caller
+// looks at it. While it waits it says so, at most every slotNoticeEvery, with
+// how long it has waited. Given up by ctx, the replication connection is
+// closed and the unfinished slot is gone from pg_replication_slots within
+// seconds (TestAnchorOnSlot_OwnCreationCancelledLeavesNoSlot_3078 holds
+// that, with the transaction that kept the creation waiting still open).
+func createSlot(ctx context.Context, slotName string, replConnect func(context.Context) (*pgconn.PgConn, error), logger *slog.Logger) (created bool, err error) {
+	began := time.Now()
+	done := make(chan struct{})
+	noticed := make(chan struct{})
+	go func() {
+		defer close(noticed)
+		tick := time.NewTicker(slotNoticeEvery)
+		defer tick.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-tick.C:
+				logger.Warn("pgcapture: still creating the replication slot: PostgreSQL finishes it once the write transactions that were open on the source when the creation began have ended, and the snapshot is not read before. "+slotBlockersHint,
+					"slot", slotName, "waited", time.Since(began).Round(time.Second))
+			}
+		}
+	}()
+	defer func() {
+		close(done)
+		<-noticed
+	}()
+	replConn, err := replConnect(ctx)
 	if err != nil {
-		if timedOut() {
-			return false, errSlotCreateTimedOut
+		if ctx.Err() != nil {
+			return false, ctx.Err()
 		}
 		return false, fmt.Errorf("pgcapture: connecting to create replication slot %q: %w", slotName, err)
 	}
 	defer replConn.Close(context.Background())
-	_, err = pglogrepl.CreateReplicationSlot(cctx, replConn, slotName, "pgoutput", pglogrepl.CreateReplicationSlotOptions{Mode: pglogrepl.LogicalReplication})
+	_, err = pglogrepl.CreateReplicationSlot(ctx, replConn, slotName, "pgoutput", pglogrepl.CreateReplicationSlotOptions{Mode: pglogrepl.LogicalReplication})
 	if err == nil {
 		return true, nil
 	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.SQLState() == "42710" {
 		return false, nil
-	}
-	if timedOut() {
-		return false, errSlotCreateTimedOut
 	}
 	if ctx.Err() != nil {
 		return false, ctx.Err()
@@ -230,7 +302,8 @@ func createSlotBy(ctx context.Context, deadline time.Time, slotName string, repl
 // slot that is gone, lost, being created again, or behind where it was is not
 // the slot the snapshot started under, and the changes made since the
 // snapshot began may not be delivered: a gap that is known now, so the
-// snapshot is not published.
+// snapshot is not published. A read of the catalog that failed is not a
+// verdict: IsSlotUnreadable tells it apart, for a caller that asks again.
 //
 // It cannot see a slot that was dropped and created again with a position in
 // the meantime; whoever holds the index can (the capture's recorded start).

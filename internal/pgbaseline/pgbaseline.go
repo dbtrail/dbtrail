@@ -24,8 +24,10 @@
 // particular the anchor LSN); any resulting overlap is redelivered and is
 // harmless because reconstruct's merge is last-write-wins idempotent over
 // full-row images. A slot that is still being created has no position and
-// anchors nothing: the run waits for it, up to Config.SlotWait, and is
-// refused past that, before any table is read (#3078). The slot is looked at
+// anchors nothing: the run waits for it, up to Config.SlotWait when another
+// session creates it, and is refused past that, before any table is read
+// (#3078); a slot this run creates itself is waited for as long as its
+// creation takes. The slot is looked at
 // once more when the tables are read, and a snapshot whose slot is gone or is
 // not where it was is not published.
 //
@@ -76,10 +78,11 @@ type Config struct {
 	// a silent skip — a baseline without a slot has no delta stream to anchor.
 	ReplDSN string
 	// SlotWait is how long the run waits for the slot to have its position
-	// when the slot is still being created, by capture or by this run
+	// when another session (capture, another snapshot) is creating it
 	// (pgcapture.AnchorOnSlot); past it the run is refused before any table
 	// is read. Zero or negative is pgcapture.DefaultSlotWait. A slot that
-	// already has its position is never waited for.
+	// already has its position is never waited for, and a creation by this
+	// run itself is not bounded by it: only the run's context ends it.
 	SlotWait time.Duration
 	// SlotName and Publication mirror `bintrail-pg stream`'s. The publication
 	// defines the table set (narrowed by Filters); the slot is the ordering
@@ -462,15 +465,80 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 // (idle_in_transaction_session_timeout) would fail a snapshot that is whole
 // over a question that is not about its rows: pg_replication_slots is not
 // under the snapshot, so any connection shows the slot as it is. Only when no
-// new connection can be had is the anchor connection asked.
+// new connection can be had is the anchor connection asked, and an error then
+// carries both causes.
+//
+// A read that failed (a connection cut for a second, a query error) is asked
+// again, slotEndAttempts times in all, slotEndPause apart, before the run is
+// failed: discarding hours of reading over a blip is the wrong trade. A
+// verdict about the slot (gone, lost, being created again, behind where it
+// stood, not a pgoutput slot) is returned at once: asking again would not
+// change it.
 func checkSlotAtEnd(ctx context.Context, cfg Config, anchor *pgx.Conn, floor pglogrepl.LSN) error {
-	fresh, err := pgcapture.ConnectQueryPinned(ctx, cfg.QueryDSN)
-	if err != nil {
-		return pgcapture.CheckSlotStillAnchors(ctx, anchor, cfg.SlotName, floor)
+	var err error
+	for attempt := 1; ; attempt++ {
+		err = checkSlotOnce(ctx, cfg, anchor, floor)
+		if err == nil || !pgcapture.IsSlotUnreadable(err) || ctx.Err() != nil {
+			return err
+		}
+		if attempt == slotEndAttempts {
+			return fmt.Errorf("the replication slot could not be read after the tables were (%d attempts), so whether the snapshot can be anchored on it is not known: %w", attempt, err)
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(slotEndPause):
+		}
 	}
-	defer fresh.Close(context.Background())
-	return pgcapture.CheckSlotStillAnchors(ctx, fresh, cfg.SlotName, floor)
 }
+
+// slotEndAttempts and slotEndPause: how often, and how far apart,
+// checkSlotAtEnd asks a slot whose read failed. Variables for the tests.
+var (
+	slotEndAttempts = 3
+	slotEndPause    = time.Second
+)
+
+// connectSlotCheck and checkSlotStillAnchors are the two calls of
+// checkSlotOnce; variables so a test makes them fail. connectSlotCheck
+// returns how to close what it opened.
+var (
+	connectSlotCheck = func(ctx context.Context, dsn string) (*pgx.Conn, func(), error) {
+		conn, err := pgcapture.ConnectQueryPinned(ctx, dsn)
+		if err != nil {
+			return nil, nil, err
+		}
+		return conn, func() { conn.Close(context.Background()) }, nil
+	}
+	checkSlotStillAnchors = pgcapture.CheckSlotStillAnchors
+)
+
+// checkSlotOnce is one ask of checkSlotAtEnd. A connection that cannot be
+// opened is a failed read (pgcapture.IsSlotUnreadable) only when the anchor
+// connection could not read the slot either; the error then names both.
+func checkSlotOnce(ctx context.Context, cfg Config, anchor *pgx.Conn, floor pglogrepl.LSN) error {
+	fresh, closeFresh, cerr := connectSlotCheck(ctx, cfg.QueryDSN)
+	if cerr == nil {
+		defer closeFresh()
+		return checkSlotStillAnchors(ctx, fresh, cfg.SlotName, floor)
+	}
+	err := checkSlotStillAnchors(ctx, anchor, cfg.SlotName, floor)
+	if err != nil && pgcapture.IsSlotUnreadable(err) {
+		return slotReadBothFailed{connect: cerr, anchor: err}
+	}
+	return err
+}
+
+// slotReadBothFailed: no new connection could be opened, and the anchor
+// connection could not read the slot. Unwraps to both, so it is still a
+// failed read.
+type slotReadBothFailed struct{ connect, anchor error }
+
+func (e slotReadBothFailed) Error() string {
+	return fmt.Sprintf("a new connection to read the replication slot could not be opened (%v), and the snapshot's own connection could not read it either (%v)", e.connect, e.anchor)
+}
+
+func (e slotReadBothFailed) Unwrap() []error { return []error{e.connect, e.anchor} }
 
 // publishError words a failed publish. A vanished marker is returned as it
 // is (#2180): the folder is NOT complete, so the "snapshot complete" wording
