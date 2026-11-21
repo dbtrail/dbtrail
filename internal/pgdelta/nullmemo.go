@@ -149,4 +149,3 @@ func noNullStore(k noNullKey) {
 	}
 	noNullCurrent[k] = struct{}{}
 }
-
