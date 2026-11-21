@@ -282,7 +282,11 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	if refusal := s.admitResult(); refusal != nil {
 		return nil, nil, nil, "", refusal
 	}
-	res, err := s.bound.Run(ctx, s.copyText(qstr), s.runOptions())
+	var res sqlsandbox.Result
+	text, err := s.copyText(qstr)
+	if err == nil {
+		res, err = s.bound.Run(ctx, text, s.runOptions())
+	}
 	if res.Spool != nil {
 		// Only a bug gets here: this port asks for no result in a file.
 		_ = res.Spool.Close()

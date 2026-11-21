@@ -51,6 +51,26 @@ func TestIntegrationPGAFullBatchHasItsPositionSavedWithinTheWait_2985(t *testing
 	finish()
 }
 
+// The save follows the position on its own, as the MySQL capture's saveSoon
+// (#2645) does, not on a timer of the commit wait: with that wait off
+// (BINTRAIL_COMMIT_WITHIN=off) a filled batch still has its position saved
+// at once, not at the hourly checkpoint.
+func TestIntegrationPGAFullBatchPositionIsSavedWithTheCommitWaitOff_2985(t *testing.T) {
+	prev := commitWithin
+	commitWithin = func() time.Duration { return 0 }
+	t.Cleanup(func() { commitWithin = prev })
+
+	send, finish, db := runPGLoop(t)
+	for n := 1; n <= 1000; n++ {
+		send(pgRow(n))
+	}
+	send(event.Event{EventType: event.EventCommit, EndPos: 8000})
+	send(event.Event{EventType: event.EventGTID})
+	waitSaved(t, db, "binlog_position", 8000,
+		"a filled batch's position must be saved as soon as it moves, whatever the commit wait")
+	finish()
+}
+
 // The same for a quiet source: the walsender's position moves with no
 // commit, and it too is saved within the wait, not at the next checkpoint.
 func TestIntegrationPGASentPositionIsSavedWithinTheWait_2985(t *testing.T) {

@@ -861,7 +861,14 @@ listener, its own workers, its own memory.
   not answer, go to the source too (see
   [Transactions on the source](#transactions-on-the-source-the-forwarding-user)).
   A server without a forwarding user is answered from the copy alone, and a
-  statement the copy cannot answer gets its error. A statement that is not a
+  statement the copy cannot answer gets its error. `round()` and `avg()` are
+  written PostgreSQL's way on every connection (see
+  [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port)):
+  `round(avg(amount), 2)` of a `numeric` is `500.00`, as on the source, not
+  `500`. Without a forwarding user, a `round()` or an `avg()` the copy would
+  write otherwise (`avg()` of a `numeric`, `round()` of a `double precision`,
+  a `round()` beside a `UNION`) is refused with error `0A000`, never answered
+  with other digits. A statement that is not a
   read is refused with an error. Unqualified names
   resolve in `public` until the client sets `search_path` (see
   [Session settings](#session-settings-and-query-cancel-on-the-postgresql-port)). NULL order, integer division and text comparison follow
@@ -896,9 +903,10 @@ listener, its own workers, its own memory.
   64-bit microsecond for a timestamp), in arrays too.
 
   An expression's type is the one the copy computes it with, which is not
-  always PostgreSQL's: `avg()` of whole numbers is a `double precision` here
-  and a `numeric` there (through a forwarding account, inside
-  `round(avg(x), k)` it is PostgreSQL's `numeric`, as below), and an aggregate or a literal of a `numeric` keeps its
+  always PostgreSQL's: a `round()` the copy answers is PostgreSQL's
+  `numeric`, with exactly the decimals PostgreSQL writes, on every
+  connection (`avg()` of a `numeric` or of whole numbers, which PostgreSQL
+  writes with 16 to 20 decimals, is refused on the copy), and an aggregate or a literal of a `numeric` keeps its
   precision and scale here (`numeric(10,2)`) where PostgreSQL reports none. A
   `numeric` declared without precision is a `numeric(38,18)` here and is
   written with its 18 decimals (`12345.678000000000000000` where the source
@@ -1169,6 +1177,13 @@ The source answers:
   power of ten of `avg`)
   and `a`, `b` and `x` are numerics or whole numbers, rounded as PostgreSQL
   rounds a `numeric`: half away from zero, to exactly `k` decimals (`50.00`);
+  `round(x, k)` of any other `numeric` or whole number, with `k` from -38 to
+  15 (`round(12.50, 3)` is `12.500`, `round(5, 2)` is `5.00`,
+  `round(-5.0, -1)` is `-10`), and `round(x)` and `round(a / b)` of a
+  `numeric`; a `CASE` or `COALESCE` around such a `round`, checked value by
+  value (PostgreSQL writes `CASE WHEN c THEN round(x, 2) ELSE 0 END` as `0`
+  where the copy would write `0.00`, so a row that takes the `0` sends the
+  statement to the source);
   `floor(a / b)` of numerics, as PostgreSQL takes it (`95`, not `95.0`);
   `ntile(n)`; `extract(epoch from x)` of a timestamp (a `numeric` with six
   decimals, as on PostgreSQL 14 and later) and `to_timestamp(n)` of a whole
@@ -1187,7 +1202,10 @@ The source answers:
   numbers), a `round` whose quotient lands so close to a half that
   PostgreSQL's own rounding of the division could reach it (the copy refuses
   it, and it goes to the source), `round()` of a
-  `double precision` (it rounds a half to even), a division by a column or by
+  `double precision` (it rounds a half to even) and of a whole number (a
+  `double precision` on PostgreSQL), a `round` beside other values in one
+  column (`UNION`, `VALUES`, `ARRAY`, `greatest`, `least`, `nullif`: PostgreSQL keeps each
+  value's own decimals), a division by a column or by
   zero (the copy answers NULL where PostgreSQL fails), `~` and `SIMILAR TO`
   (the copy matched no row), `->` and `->>` (PostgreSQL answers `json`, and
   writes a nested value with spaces), a number with an exponent (a `numeric`
