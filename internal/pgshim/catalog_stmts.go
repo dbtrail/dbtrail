@@ -8,8 +8,24 @@ import (
 )
 
 // The catalog statements this port recognizes (catalog.go), as the clients
-// send them: psql 16 (to a server that says it is 14), JDBC 42.7,
+// send them: psql 13 to 18 (to a server that says it is 14), JDBC 42.7,
 // SQLAlchemy 1.4 with psycopg2, and Grafana's PostgreSQL data source.
+//
+// psql writes \l, \dt and the statements of \d its own way in each major
+// version (#3059): one more column, one more relation kind, another ORDER BY.
+// Each way is a statement of its own here, with the versions seen sending it
+// (catalogStmt.psql), and the forms of one command share the code that
+// answers them, so every psql is told the same of the copy. The texts are
+// the ones collected from each version's psql in testdata/catalog_3059, never
+// written from memory, and a text no collected version sends is not here: a
+// psql that writes a statement yet another way is refused by name until its
+// text is collected.
+
+// The psql majors whose statements were collected (testdata/catalog_3059).
+const (
+	psqlOldest = 13
+	psqlNewest = 18
+)
 
 var catalogStmts []*catalogStmt
 
@@ -23,7 +39,77 @@ func init() {
 // relCols are the columns of psql's relation list.
 var relListCols = []catCol{{"Schema", oidName}, {"Name", oidName}, {"Type", oidText}, {"Owner", oidName}}
 
-const psqlRelList = `SELECT n.nspname as "Schema", c.relname as "Name", CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' END as "Type", pg_catalog.pg_get_userbyid(c.relowner) as "Owner" FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_catalog.pg_am am ON am.oid = c.relam WHERE $w ORDER BY 1,2`
+// psqlRelations is psql's relation list (\dt, \d, \di ...) as the majors
+// from..to write it: kinds are the relation kinds its CASE names, which
+// changed twice (13 and 14 name 's', a kind PostgreSQL no longer has; 13
+// does not name a TOAST table), and amJoin the join 14 and later add. The
+// copy has tables and their primary keys' indexes, which every version
+// names alike, so the answer is one.
+func psqlRelations(from, to int, kinds, amJoin string) *catalogStmt {
+	return &catalogStmt{name: `psql \dt`, psql: [2]int{from, to}, cols: relListCols,
+		text: `SELECT n.nspname as "Schema", c.relname as "Name", CASE c.relkind ` + kinds + ` END as "Type", pg_catalog.pg_get_userbyid(c.relowner) as "Owner" FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace` + amJoin + ` WHERE $w ORDER BY 1,2`,
+		rows: func(v *catalogView, m []string) ([][]any, *pgErr) {
+			f, perr := relFilterOf(m[0])
+			if perr != nil {
+				return nil, perr
+			}
+			var out [][]any
+			for i := range v.rels {
+				r := &v.rels[i]
+				if f.keep(v, r) {
+					kind := "table"
+					if r.kind == 'i' {
+						kind = "index"
+					}
+					out = append(out, []any{r.schema, r.name, kind, v.s.user})
+				}
+			}
+			return out, nil
+		}}
+}
+
+const psqlAmJoin = ` LEFT JOIN pg_catalog.pg_am am ON am.oid = c.relam`
+
+// psqlDatabases is \l as the majors from..to write it. Each asks for the
+// columns its version prints, and each column is answered by its name: the
+// one database is the connection's, in UTF8 with collation C; it has no ICU
+// locale or rules and no access privileges to list.
+func psqlDatabases(from, to int, text string, cols ...string) *catalogStmt {
+	st := &catalogStmt{name: `psql \l`, psql: [2]int{from, to}, text: text}
+	for _, c := range cols {
+		oid := uint32(oidText)
+		switch c {
+		case "Name", "Owner", "Encoding":
+			oid = oidName
+		}
+		st.cols = append(st.cols, catCol{c, oid})
+	}
+	st.rows = func(v *catalogView, _ []string) ([][]any, *pgErr) {
+		row := make([]any, len(cols))
+		for i, c := range cols {
+			switch c {
+			case "Name":
+				row[i] = v.database
+			case "Owner":
+				row[i] = v.s.user
+			case "Encoding":
+				row[i] = "UTF8"
+			case "Locale Provider":
+				row[i] = "libc"
+			case "Collate", "Ctype":
+				row[i] = "C"
+			}
+		}
+		return [][]any{row}, nil
+	}
+	return st
+}
+
+// sentBy says which psql majors were seen sending a statement.
+func (st *catalogStmt) sentBy(from, to int) *catalogStmt {
+	st.psql = [2]int{from, to}
+	return st
+}
 
 const jdbcTableType = `CASE n.nspname ~ '^pg_' OR n.nspname = 'information_schema' WHEN true THEN CASE WHEN n.nspname = 'pg_catalog' OR n.nspname = 'information_schema' THEN CASE c.relkind WHEN 'r' THEN 'SYSTEM TABLE' WHEN 'v' THEN 'SYSTEM VIEW' WHEN 'i' THEN 'SYSTEM INDEX' ELSE NULL END WHEN n.nspname = 'pg_toast' THEN CASE c.relkind WHEN 'r' THEN 'SYSTEM TOAST TABLE' WHEN 'i' THEN 'SYSTEM TOAST INDEX' ELSE NULL END ELSE CASE c.relkind WHEN 'r' THEN 'TEMPORARY TABLE' WHEN 'p' THEN 'TEMPORARY TABLE' WHEN 'i' THEN 'TEMPORARY INDEX' WHEN 'S' THEN 'TEMPORARY SEQUENCE' WHEN 'v' THEN 'TEMPORARY VIEW' ELSE NULL END END WHEN false THEN CASE c.relkind WHEN 'r' THEN 'TABLE' WHEN 'p' THEN 'PARTITIONED TABLE' WHEN 'i' THEN 'INDEX' WHEN 'P' then 'PARTITIONED INDEX' WHEN 'S' THEN 'SEQUENCE' WHEN 'v' THEN 'VIEW' WHEN 'c' THEN 'TYPE' WHEN 'f' THEN 'FOREIGN TABLE' WHEN 'm' THEN 'MATERIALIZED VIEW' ELSE NULL END ELSE NULL END AS TABLE_TYPE`
 
@@ -32,13 +118,17 @@ const grafanaSearchPath = `quote_ident(table_schema) IN ( SELECT CASE WHEN trim(
 func catalogStmtList() []*catalogStmt {
 	return []*catalogStmt{
 		// ---- psql ----
-		{name: "psql \\l",
-			text: `SELECT d.datname as "Name", pg_catalog.pg_get_userbyid(d.datdba) as "Owner", pg_catalog.pg_encoding_to_char(d.encoding) as "Encoding", 'libc' AS "Locale Provider", d.datcollate as "Collate", d.datctype as "Ctype", NULL as "ICU Locale", NULL as "ICU Rules", pg_catalog.array_to_string(d.datacl, E'\n') AS "Access privileges" FROM pg_catalog.pg_database d ORDER BY 1`,
-			cols: []catCol{{"Name", oidName}, {"Owner", oidName}, {"Encoding", oidName}, {"Locale Provider", oidText}, {"Collate", oidText}, {"Ctype", oidText}, {"ICU Locale", oidText}, {"ICU Rules", oidText}, {"Access privileges", oidText}},
-			rows: func(v *catalogView, _ []string) ([][]any, *pgErr) {
-				return [][]any{{v.database, v.s.user, "UTF8", "libc", "C", "C", nil, nil, nil}}, nil
-			}},
-		{name: "psql \\dn",
+		psqlDatabases(13, 14, `SELECT d.datname as "Name", pg_catalog.pg_get_userbyid(d.datdba) as "Owner", pg_catalog.pg_encoding_to_char(d.encoding) as "Encoding", d.datcollate as "Collate", d.datctype as "Ctype", pg_catalog.array_to_string(d.datacl, E'\n') AS "Access privileges" FROM pg_catalog.pg_database d ORDER BY 1`,
+			"Name", "Owner", "Encoding", "Collate", "Ctype", "Access privileges"),
+		psqlDatabases(15, 15, `SELECT d.datname as "Name", pg_catalog.pg_get_userbyid(d.datdba) as "Owner", pg_catalog.pg_encoding_to_char(d.encoding) as "Encoding", d.datcollate as "Collate", d.datctype as "Ctype", NULL as "ICU Locale", 'libc' AS "Locale Provider", pg_catalog.array_to_string(d.datacl, E'\n') AS "Access privileges" FROM pg_catalog.pg_database d ORDER BY 1`,
+			"Name", "Owner", "Encoding", "Collate", "Ctype", "ICU Locale", "Locale Provider", "Access privileges"),
+		psqlDatabases(16, 16, `SELECT d.datname as "Name", pg_catalog.pg_get_userbyid(d.datdba) as "Owner", pg_catalog.pg_encoding_to_char(d.encoding) as "Encoding", 'libc' AS "Locale Provider", d.datcollate as "Collate", d.datctype as "Ctype", NULL as "ICU Locale", NULL as "ICU Rules", pg_catalog.array_to_string(d.datacl, E'\n') AS "Access privileges" FROM pg_catalog.pg_database d ORDER BY 1`,
+			"Name", "Owner", "Encoding", "Locale Provider", "Collate", "Ctype", "ICU Locale", "ICU Rules", "Access privileges"),
+		// 17 and later print "(none)" for an empty list of privileges; the
+		// database has no list at all, which they print as nothing.
+		psqlDatabases(17, psqlNewest, `SELECT d.datname as "Name", pg_catalog.pg_get_userbyid(d.datdba) as "Owner", pg_catalog.pg_encoding_to_char(d.encoding) as "Encoding", 'libc' AS "Locale Provider", d.datcollate as "Collate", d.datctype as "Ctype", NULL as "Locale", NULL as "ICU Rules", CASE WHEN pg_catalog.array_length(d.datacl, 1) = 0 THEN '(none)' ELSE pg_catalog.array_to_string(d.datacl, E'\n') END AS "Access privileges" FROM pg_catalog.pg_database d ORDER BY 1`,
+			"Name", "Owner", "Encoding", "Locale Provider", "Collate", "Ctype", "Locale", "ICU Rules", "Access privileges"),
+		{name: "psql \\dn", psql: [2]int{psqlOldest, psqlNewest},
 			text: `SELECT n.nspname AS "Name", pg_catalog.pg_get_userbyid(n.nspowner) AS "Owner" FROM pg_catalog.pg_namespace n WHERE $w ORDER BY 1`,
 			cols: []catCol{{"Name", oidName}, {"Owner", oidName}},
 			rows: func(v *catalogView, m []string) ([][]any, *pgErr) {
@@ -54,26 +144,10 @@ func catalogStmtList() []*catalogStmt {
 				}
 				return out, nil
 			}},
-		{name: "psql \\dt", text: psqlRelList, cols: relListCols,
-			rows: func(v *catalogView, m []string) ([][]any, *pgErr) {
-				f, perr := relFilterOf(m[0])
-				if perr != nil {
-					return nil, perr
-				}
-				var out [][]any
-				for i := range v.rels {
-					r := &v.rels[i]
-					if f.keep(v, r) {
-						kind := "table"
-						if r.kind == 'i' {
-							kind = "index"
-						}
-						out = append(out, []any{r.schema, r.name, kind, v.s.user})
-					}
-				}
-				return out, nil
-			}},
-		{name: "psql \\d lookup",
+		psqlRelations(13, 13, `WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 's' THEN 'special' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index'`, ""),
+		psqlRelations(14, 14, `WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 's' THEN 'special' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index'`, psqlAmJoin),
+		psqlRelations(15, psqlNewest, `WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index'`, psqlAmJoin),
+		{name: "psql \\d lookup", psql: [2]int{psqlOldest, psqlNewest},
 			text: `SELECT c.oid, n.nspname, c.relname FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE $w ORDER BY 2, 3`,
 			cols: []catCol{{"oid", oidOID}, {"nspname", oidName}, {"relname", oidName}},
 			rows: func(v *catalogView, m []string) ([][]any, *pgErr) {
@@ -102,43 +176,75 @@ func catalogStmtList() []*catalogStmt {
 			}},
 		psqlTableInfo(`''`, "?column?"),
 		psqlTableInfo(`pg_catalog.array_to_string(c.reloptions || array(select 'toast.' || x from pg_catalog.unnest(tc.reloptions) x), ', ')`, "array_to_string"),
-		{name: "psql \\d columns",
+		{name: "psql \\d columns", psql: [2]int{psqlOldest, psqlNewest},
 			text: `SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true) FROM pg_catalog.pg_attrdef d WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef), a.attnotnull, (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation, a.attidentity, a.attgenerated FROM pg_catalog.pg_attribute a WHERE a.attrelid = $n AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`,
 			cols: []catCol{{"attname", oidName}, {"format_type", oidText}, {"pg_get_expr", oidText}, {"attnotnull", oidBool}, {"attcollation", oidName}, {"attidentity", oidChar}, {"attgenerated", oidChar}},
 			rows: func(v *catalogView, m []string) ([][]any, *pgErr) {
-				return v.psqlColumns(m[0], false), nil
+				return v.psqlColumns(m[0], false, false), nil
 			}},
-		{name: "psql \\d+ columns",
+		// 13 does not ask for a column's compression, which came with 14.
+		{name: "psql \\d+ columns", psql: [2]int{13, 13},
+			text: `SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true) FROM pg_catalog.pg_attrdef d WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef), a.attnotnull, (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation, a.attidentity, a.attgenerated, a.attstorage, CASE WHEN a.attstattarget=-1 THEN NULL ELSE a.attstattarget END AS attstattarget, pg_catalog.col_description(a.attrelid, a.attnum) FROM pg_catalog.pg_attribute a WHERE a.attrelid = $n AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`,
+			cols: []catCol{{"attname", oidName}, {"format_type", oidText}, {"pg_get_expr", oidText}, {"attnotnull", oidBool}, {"attcollation", oidName}, {"attidentity", oidChar}, {"attgenerated", oidChar},
+				{"attstorage", oidChar}, {"attstattarget", oidInt2}, {"col_description", oidText}},
+			rows: func(v *catalogView, m []string) ([][]any, *pgErr) {
+				return v.psqlColumns(m[0], true, false), nil
+			}},
+		{name: "psql \\d+ columns", psql: [2]int{14, psqlNewest},
 			text: `SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true) FROM pg_catalog.pg_attrdef d WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef), a.attnotnull, (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation, a.attidentity, a.attgenerated, a.attstorage, a.attcompression AS attcompression, CASE WHEN a.attstattarget=-1 THEN NULL ELSE a.attstattarget END AS attstattarget, pg_catalog.col_description(a.attrelid, a.attnum) FROM pg_catalog.pg_attribute a WHERE a.attrelid = $n AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`,
 			cols: []catCol{{"attname", oidName}, {"format_type", oidText}, {"pg_get_expr", oidText}, {"attnotnull", oidBool}, {"attcollation", oidName}, {"attidentity", oidChar}, {"attgenerated", oidChar},
 				{"attstorage", oidChar}, {"attcompression", oidChar}, {"attstattarget", oidInt2}, {"col_description", oidText}},
 			rows: func(v *catalogView, m []string) ([][]any, *pgErr) {
-				return v.psqlColumns(m[0], true), nil
+				return v.psqlColumns(m[0], true, true), nil
 			}},
-		{name: "psql \\d indexes",
+		{name: "psql \\d indexes", psql: [2]int{13, 17},
 			text: `SELECT c2.relname, i.indisprimary, i.indisunique, i.indisclustered, i.indisvalid, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true), pg_catalog.pg_get_constraintdef(con.oid, true), contype, condeferrable, condeferred, i.indisreplident, c2.reltablespace FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x')) WHERE c.oid = $n AND c.oid = i.indrelid AND i.indexrelid = c2.oid ORDER BY i.indisprimary DESC, c2.relname`,
 			cols: []catCol{{"relname", oidName}, {"indisprimary", oidBool}, {"indisunique", oidBool}, {"indisclustered", oidBool}, {"indisvalid", oidBool}, {"pg_get_indexdef", oidText},
 				{"pg_get_constraintdef", oidText}, {"contype", oidChar}, {"condeferrable", oidBool}, {"condeferred", oidBool}, {"indisreplident", oidBool}, {"reltablespace", oidOID}},
 			rows: func(v *catalogView, m []string) ([][]any, *pgErr) {
-				r := v.relByOID(m[0])
-				if r == nil || r.kind != 'r' || len(r.table.PrimaryKey) == 0 {
-					return nil, nil
-				}
-				t := r.table
-				cols := columnsList(t.PrimaryKey)
-				def := "CREATE UNIQUE INDEX " + quoteName(pkeyName(t)) + " ON " + quoteName(t.Schema) + "." + quoteName(t.Name) + " USING btree (" + cols + ")"
-				return [][]any{{pkeyName(t), true, true, false, true, def, "PRIMARY KEY (" + cols + ")", byte('p'), false, false, false, uint32(0)}}, nil
+				return v.psqlIndexes(m[0]), nil
 			}},
+		// 18 asks whether the key is a temporal one (WITHOUT OVERLAPS, which
+		// a 14 does not have: psql writes the answer into the statement).
+		{name: "psql \\d indexes", psql: [2]int{18, psqlNewest},
+			text: `SELECT c2.relname, i.indisprimary, i.indisunique, i.indisclustered, i.indisvalid, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true), pg_catalog.pg_get_constraintdef(con.oid, true), contype, condeferrable, condeferred, i.indisreplident, c2.reltablespace, false AS conperiod FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x')) WHERE c.oid = $n AND c.oid = i.indrelid AND i.indexrelid = c2.oid ORDER BY i.indisprimary DESC, c2.relname`,
+			cols: []catCol{{"relname", oidName}, {"indisprimary", oidBool}, {"indisunique", oidBool}, {"indisclustered", oidBool}, {"indisvalid", oidBool}, {"pg_get_indexdef", oidText},
+				{"pg_get_constraintdef", oidText}, {"contype", oidChar}, {"condeferrable", oidBool}, {"condeferred", oidBool}, {"indisreplident", oidBool}, {"reltablespace", oidOID}, {"conperiod", oidBool}},
+			rows: func(v *catalogView, m []string) ([][]any, *pgErr) {
+				rows := v.psqlIndexes(m[0])
+				for i := range rows {
+					rows[i] = append(rows[i], false)
+				}
+				return rows, nil
+			}},
+		// 18 asks for a table's foreign keys, the ones it has and the ones
+		// that point at it, whether or not it has any, and \d+ for its
+		// named NOT NULL constraints, which a 14 does not keep.
+		none("psql \\d foreign keys", `SELECT true as sametable, conname, pg_catalog.pg_get_constraintdef(r.oid, true) as condef, conrelid::pg_catalog.regclass AS ontable FROM pg_catalog.pg_constraint r WHERE r.conrelid = $n AND r.contype = 'f' AND conparentid = 0 ORDER BY conname`,
+			catCol{"sametable", oidBool}, catCol{"conname", oidName}, catCol{"condef", oidText}, catCol{"ontable", oidRegclass}).sentBy(18, psqlNewest),
+		none("psql \\d referenced by", `SELECT conname, conrelid::pg_catalog.regclass AS ontable, pg_catalog.pg_get_constraintdef(oid, true) AS condef FROM pg_catalog.pg_constraint c WHERE confrelid IN (SELECT pg_catalog.pg_partition_ancestors($n) UNION ALL VALUES ($n::pg_catalog.regclass)) AND contype = 'f' AND conparentid = 0 ORDER BY conname`,
+			catCol{"conname", oidName}, catCol{"ontable", oidRegclass}, catCol{"condef", oidText}).sentBy(18, psqlNewest),
+		none("psql \\d+ not-null constraints", `SELECT c.conname, a.attname, c.connoinherit, c.conislocal, c.coninhcount <> 0, c.convalidated FROM pg_catalog.pg_constraint c JOIN pg_catalog.pg_attribute a ON (a.attrelid = c.conrelid AND a.attnum = c.conkey[1]) WHERE c.contype = 'n' AND c.conrelid = $n::pg_catalog.regclass ORDER BY a.attnum`,
+			catCol{"conname", oidName}, catCol{"attname", oidName}, catCol{"connoinherit", oidBool}, catCol{"conislocal", oidBool}, catCol{"?column?", oidBool}, catCol{"convalidated", oidBool}).sentBy(18, psqlNewest),
 		none("psql \\d policies", `SELECT pol.polname, pol.polpermissive, CASE WHEN pol.polroles = '{0}' THEN NULL ELSE pg_catalog.array_to_string(array(select rolname from pg_catalog.pg_roles where oid = any (pol.polroles) order by 1),',') END, pg_catalog.pg_get_expr(pol.polqual, pol.polrelid), pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid), CASE pol.polcmd WHEN 'r' THEN 'SELECT' WHEN 'a' THEN 'INSERT' WHEN 'w' THEN 'UPDATE' WHEN 'd' THEN 'DELETE' END AS cmd FROM pg_catalog.pg_policy pol WHERE pol.polrelid = $n ORDER BY 1`,
-			catCol{"polname", oidName}, catCol{"polpermissive", oidBool}, catCol{"array_to_string", oidText}, catCol{"pg_get_expr", oidText}, catCol{"pg_get_expr", oidText}, catCol{"cmd", oidText}),
+			catCol{"polname", oidName}, catCol{"polpermissive", oidBool}, catCol{"array_to_string", oidText}, catCol{"pg_get_expr", oidText}, catCol{"pg_get_expr", oidText}, catCol{"cmd", oidText}).sentBy(psqlOldest, psqlNewest),
+		// 13 builds the list of a statistics object's columns itself.
+		none("psql \\d statistics", `SELECT oid, stxrelid::pg_catalog.regclass, stxnamespace::pg_catalog.regnamespace AS nsp, stxname, (SELECT pg_catalog.string_agg(pg_catalog.quote_ident(attname),', ') FROM pg_catalog.unnest(stxkeys) s(attnum) JOIN pg_catalog.pg_attribute a ON (stxrelid = a.attrelid AND a.attnum = s.attnum AND NOT attisdropped)) AS columns, 'd' = any(stxkind) AS ndist_enabled, 'f' = any(stxkind) AS deps_enabled, 'm' = any(stxkind) AS mcv_enabled, stxstattarget FROM pg_catalog.pg_statistic_ext stat WHERE stxrelid = $n ORDER BY 1`,
+			catCol{"oid", oidOID}, catCol{"stxrelid", oidRegclass}, catCol{"nsp", oidText}, catCol{"stxname", oidName}, catCol{"columns", oidText}, catCol{"ndist_enabled", oidBool}, catCol{"deps_enabled", oidBool}, catCol{"mcv_enabled", oidBool}, catCol{"stxstattarget", oidInt4}).sentBy(13, 13),
 		none("psql \\d statistics", `SELECT oid, stxrelid::pg_catalog.regclass, stxnamespace::pg_catalog.regnamespace::pg_catalog.text AS nsp, stxname, pg_catalog.pg_get_statisticsobjdef_columns(oid) AS columns, 'd' = any(stxkind) AS ndist_enabled, 'f' = any(stxkind) AS deps_enabled, 'm' = any(stxkind) AS mcv_enabled, stxstattarget FROM pg_catalog.pg_statistic_ext WHERE stxrelid = $n ORDER BY nsp, stxname`,
-			catCol{"oid", oidOID}, catCol{"stxrelid", oidRegclass}, catCol{"nsp", oidText}, catCol{"stxname", oidName}, catCol{"columns", oidText}, catCol{"ndist_enabled", oidBool}, catCol{"deps_enabled", oidBool}, catCol{"mcv_enabled", oidBool}, catCol{"stxstattarget", oidInt4}),
+			catCol{"oid", oidOID}, catCol{"stxrelid", oidRegclass}, catCol{"nsp", oidText}, catCol{"stxname", oidName}, catCol{"columns", oidText}, catCol{"ndist_enabled", oidBool}, catCol{"deps_enabled", oidBool}, catCol{"mcv_enabled", oidBool}, catCol{"stxstattarget", oidInt4}).sentBy(14, psqlNewest),
+		// 13 and 14 ask for the publications' names alone.
+		none("psql \\d publications", `SELECT pubname FROM pg_catalog.pg_publication p JOIN pg_catalog.pg_publication_rel pr ON p.oid = pr.prpubid WHERE pr.prrelid = $n UNION ALL SELECT pubname FROM pg_catalog.pg_publication p WHERE p.puballtables AND pg_catalog.pg_relation_is_publishable($n) ORDER BY 1`,
+			catCol{"pubname", oidName}).sentBy(13, 14),
 		none("psql \\d publications", `SELECT pubname , NULL , NULL FROM pg_catalog.pg_publication p JOIN pg_catalog.pg_publication_rel pr ON p.oid = pr.prpubid WHERE pr.prrelid = $n UNION ALL SELECT pubname , NULL , NULL FROM pg_catalog.pg_publication p WHERE p.puballtables AND pg_catalog.pg_relation_is_publishable($n) ORDER BY 1`,
-			catCol{"pubname", oidName}, catCol{"?column?", oidText}, catCol{"?column?", oidText}),
+			catCol{"pubname", oidName}, catCol{"?column?", oidText}, catCol{"?column?", oidText}).sentBy(15, psqlNewest),
 		none("psql \\d parents", `SELECT c.oid::pg_catalog.regclass FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i WHERE c.oid = i.inhparent AND i.inhrelid = $n AND c.relkind != 'p' AND c.relkind != 'I' ORDER BY inhseqno`,
-			catCol{"oid", oidRegclass}),
+			catCol{"oid", oidRegclass}).sentBy(psqlOldest, psqlNewest),
+		// 13 does not ask whether a partition is being detached.
+		none("psql \\d partitions", `SELECT c.oid::pg_catalog.regclass, c.relkind, pg_catalog.pg_get_expr(c.relpartbound, c.oid) FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i WHERE c.oid = i.inhrelid AND i.inhparent = $n ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text`,
+			catCol{"oid", oidRegclass}, catCol{"relkind", oidChar}, catCol{"pg_get_expr", oidText}).sentBy(13, 13),
 		none("psql \\d partitions", `SELECT c.oid::pg_catalog.regclass, c.relkind, inhdetachpending, pg_catalog.pg_get_expr(c.relpartbound, c.oid) FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i WHERE c.oid = i.inhrelid AND i.inhparent = $n ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.oid::pg_catalog.regclass::pg_catalog.text`,
-			catCol{"oid", oidRegclass}, catCol{"relkind", oidChar}, catCol{"inhdetachpending", oidBool}, catCol{"pg_get_expr", oidText}),
+			catCol{"oid", oidRegclass}, catCol{"relkind", oidChar}, catCol{"inhdetachpending", oidBool}, catCol{"pg_get_expr", oidText}).sentBy(14, psqlNewest),
 
 		// ---- JDBC (DatabaseMetaData) ----
 		{name: "JDBC getSchemas",
@@ -443,7 +549,7 @@ pg_catalog.pg_type_is_visible(t.oid) as "visible", n.nspname as "schema", e.enum
 // psqlTableInfo is psql's question about one table before it describes it,
 // with the column \d asks (detail) and \d+ another.
 func psqlTableInfo(detail, detailName string) *catalogStmt {
-	return &catalogStmt{name: "psql \\d table " + detailName,
+	return &catalogStmt{name: "psql \\d table " + detailName, psql: [2]int{psqlOldest, psqlNewest},
 		text: `SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, false AS relhasoids, c.relispartition, ` + detail + `, c.reltablespace, CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, c.relpersistence, c.relreplident, am.amname FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid) LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid) WHERE c.oid = $n`,
 		cols: []catCol{{"relchecks", oidInt2}, {"relkind", oidChar}, {"relhasindex", oidBool}, {"relhasrules", oidBool}, {"relhastriggers", oidBool}, {"relrowsecurity", oidBool}, {"relforcerowsecurity", oidBool}, {"relhasoids", oidBool}, {"relispartition", oidBool},
 			{detailName, oidText}, {"reltablespace", oidOID}, {"reloftype", oidText}, {"relpersistence", oidChar}, {"relreplident", oidChar}, {"amname", oidName}},
@@ -457,8 +563,9 @@ func psqlTableInfo(detail, detailName string) *catalogStmt {
 		}}
 }
 
-// psqlColumns are \d's (and \d+'s) rows for the table an OID names.
-func (v *catalogView) psqlColumns(oid string, verbose bool) [][]any {
+// psqlColumns are \d's rows for the table an OID names, with what \d+ adds
+// (verbose) and, there, the column's compression where psql asks for it.
+func (v *catalogView) psqlColumns(oid string, verbose, compression bool) [][]any {
 	r := v.relByOID(oid)
 	if r == nil || r.kind != 'r' {
 		return nil
@@ -468,11 +575,28 @@ func (v *catalogView) psqlColumns(oid string, verbose bool) [][]any {
 		t, info, _ := typeOf(c)
 		row := []any{c.Name, formatType(t, info), nullIfEmpty(c.Default), c.NotNull, nil, c.Identity, ""}
 		if verbose {
-			row = append(row, info.storage, "", nil, nil)
+			row = append(row, info.storage)
+			if compression {
+				row = append(row, "")
+			}
+			row = append(row, nil, nil)
 		}
 		out = append(out, row)
 	}
 	return out
+}
+
+// psqlIndexes are \d's rows for the indexes of the table an OID names: its
+// primary key's, the one index the catalog has.
+func (v *catalogView) psqlIndexes(oid string) [][]any {
+	r := v.relByOID(oid)
+	if r == nil || r.kind != 'r' || len(r.table.PrimaryKey) == 0 {
+		return nil
+	}
+	t := r.table
+	cols := columnsList(t.PrimaryKey)
+	def := "CREATE UNIQUE INDEX " + quoteName(pkeyName(t)) + " ON " + quoteName(t.Schema) + "." + quoteName(t.Name) + " USING btree (" + cols + ")"
+	return [][]any{{pkeyName(t), true, true, false, true, def, "PRIMARY KEY (" + cols + ")", byte('p'), false, false, false, uint32(0)}}
 }
 
 // none is a recognized statement whose answer is no rows: what it asks

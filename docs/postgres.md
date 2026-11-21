@@ -1972,9 +1972,16 @@ a pattern), `\d`, `\d <table>` and `\d+ <table>`; JDBC's `getSchemas`,
 Metabase call); SQLAlchemy's inspector (`get_schema_names`, `get_table_names`,
 `get_view_names`, `get_columns`, `get_pk_constraint`, `has_table`,
 `get_foreign_keys`, `get_indexes`, which Superset calls); and Grafana's table
-and column lists. They were checked against PostgreSQL 16 with psql 16, JDBC
-42.7, SQLAlchemy 1.4 with psycopg2 and Grafana's queries: for the copy's tables
-each prints what it prints for the source's, but for what follows.
+and column lists. They were checked against PostgreSQL 16 and 18 with psql 13 to 18,
+JDBC 42.7, SQLAlchemy 1.4 with psycopg2 and Grafana's queries: for the copy's
+tables each prints what it prints for the source's, but for what follows.
+
+Each major version of psql writes these commands as statements of its own, and
+the port answers each one's: the commands above were run with psql 13.23,
+14.25 (the one Ubuntu 22.04 installs), 15.20, 16.16, 17.12 and 18.7, and every
+one of them lists the same schemas, tables and columns. Up to DBTrail
+0.137.0 only psql 16 was answered in full: 13 and 14 were refused `\dt`, `\d
+<table>` and `\l`, 18 `\d <table>` and `\l`, 15 and 17 `\l`.
 
 - **What the copy can be read for, and only that**: the tables and columns a
   statement on the copy reads. A table or a column the server hides is not
@@ -1991,8 +1998,9 @@ each prints what it prints for the source's, but for what follows.
   lists the table without them (a warning in the log names it); the next
   snapshot records them.
 - **What the copy does not have is not listed**: no other index, no foreign
-  key, view, sequence, policy, publication, comment, enum or domain, and no
-  access method. The owner of everything is the user the client connected
+  key, view, sequence, policy, publication, comment, enum or domain, no
+  access method, and no named `NOT NULL` constraint (the list psql 18's `\d+`
+  prints for a PostgreSQL 18; a column's `not null` is listed). The owner of everything is the user the client connected
   as, and the one database is the one it connected to, with collation `C`
   (text compares byte by byte here).
 - **Any other statement on the system catalog is refused** (`0A000`) by name:
@@ -2001,7 +2009,8 @@ each prints what it prints for the source's, but for what follows.
   its internal schemas and types. `SHOW TABLES` and `DESCRIBE <table>` list
   the copy's tables and columns in its engine's terms. A client version that
   writes these statements otherwise than the versions above is refused the
-  same way.
+  same way: a psql older than 13 or newer than 18 may be, for the commands it
+  writes differently, until its statements are added.
 - `\d` of an index is refused: the copy has no index; `\d <table>` shows the
   primary key. A connection reads the catalog once for a burst of statements:
   a table hidden while it is connected leaves its listing within 10 seconds,

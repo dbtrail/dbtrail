@@ -22,7 +22,8 @@ import (
 // pg_catalog of its own that names its internal schemas and its own types,
 // and lacks most of the functions these statements call. Each recognized
 // statement is one a client was seen sending (the captures are in
-// testdata/catalog_2769), read in a canonical form (catalogCanon), with the
+// testdata/catalog_2769.sql and, for each psql major from 13 to 18, in
+// testdata/catalog_3059), read in a canonical form (catalogCanon), with the
 // parts that vary (a name, a pattern, an OID, the conditions psql adds for a
 // pattern) read out of it. A statement that reads the catalog and is not one
 // of these is refused by name (catalogRefusal), never answered with an
@@ -334,6 +335,9 @@ type catCol struct {
 // not yet bound), $w for the conditions psql or JDBC add, and its answer.
 type catalogStmt struct {
 	name string
+	// psql are the psql majors seen sending this text, the first and the
+	// last (testdata/catalog_3059), zero for another client's statement.
+	psql [2]int
 	text string
 	re   *regexp.Regexp
 	cols []catCol
