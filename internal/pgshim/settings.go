@@ -1115,6 +1115,12 @@ func (s *session) zoneOnCopy(z zoneSetting, atStatement bool) *pgErr {
 // session's statement_timeout (errStatementTimeout). done ends it, and must
 // be called when the statement is over.
 func (s *session) statementContext() (context.Context, func()) {
+	if s.stmtCtx != nil {
+		// Inside a message's own (beginMessage): its deadline and its cancel
+		// request are the statement's, one for all it does (#2985).
+		ctx, cancel := context.WithCancel(s.stmtCtx)
+		return ctx, cancel
+	}
 	base := s.ctx
 	if base == nil {
 		base = context.Background()
@@ -1130,6 +1136,20 @@ func (s *session) statementContext() (context.Context, func()) {
 		release()
 		stop()
 		cancel(nil)
+	}
+}
+
+// beginMessage opens the context of one message of the client's (a simple
+// query, a Bind, Describe or Execute): its statement_timeout and a cancel
+// request bound everything the port does for it, the wait for a connection
+// to the source, its plan, the copy's wait and run, the relay of the
+// source's answer, under ONE deadline, not one each (#2985). end closes it.
+func (s *session) beginMessage() (end func()) {
+	ctx, done := s.statementContext()
+	s.stmtCtx = ctx
+	return func() {
+		s.stmtCtx = nil
+		done()
 	}
 }
 

@@ -105,12 +105,48 @@ type Binding struct {
 	// reached the copy or the source, and why (route.go), for the port's
 	// status.
 	Routed func(RouteNote)
+	// RunAge, when set, says how far the data of Run's last successful run
+	// on this connection reaches, asked right after it returned. With it a
+	// connection the source answered is not given an older answer of the
+	// copy (copyOlderThanSource); nil: the copy's answers are given as they
+	// are.
+	RunAge func() CopyAge
+	// CopyWait, when set, waits within ctx until the copy holds every commit
+	// of the source before lsn, a WAL position, and says whether it does, or
+	// why not (waitForCopy). nil: nothing waits, and RunAge alone decides.
+	CopyWait func(ctx context.Context, lsn uint64) (CopyWaitOutcome, string)
 	// Status, when set, answers SHOW dbtrail.router_status on this
 	// connection (portstatus.go): name and value pairs, in the order to
 	// show them. last is the connection's last answer, whose rows
 	// (LastAnswer.Rows) the host places among its own. Nil: the statement
 	// answers the last answer's rows alone.
 	Status func(ctx context.Context, last LastAnswer) [][2]string
+}
+
+// CopyWaitOutcome is what Binding.CopyWait found.
+type CopyWaitOutcome int
+
+const (
+	// CopyNoWait: there is nothing to wait on (no recent changes are kept
+	// for the server yet: the copy's run starts them); the copy runs, and
+	// RunAge decides after.
+	CopyNoWait CopyWaitOutcome = iota
+	// CopyReached: the copy holds every commit before the position.
+	CopyReached
+	// CopyNotReached: it does not within the time given, or cannot; the
+	// source answers.
+	CopyNotReached
+)
+
+// CopyAge is how far the data of a statement the copy ran reaches.
+type CopyAge struct {
+	// Read: it read a table of the copy (a statement that reads none, SELECT
+	// 1 or SHOW TABLES, has no age).
+	Read bool
+	// Through: every change capture recorded up to this instant (a commit
+	// time on the source) was in what it read; zero when that is not known,
+	// as for a table read from its snapshot alone.
+	Through time.Time
 }
 
 // RunOptions are what a connection set for itself that a statement on the
@@ -283,8 +319,19 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		return nil, nil, nil, "", refusal
 	}
 	var res sqlsandbox.Result
+	waited, apart, named := false, false, 0
 	text, err := s.copyText(qstr)
 	if err == nil {
+		// On a connection the source answered, the copy first waits to
+		// reach what the source showed it (#2985), or the source answers
+		// instead, before the copy does any work. Unless it reads no table
+		// the source answered this connection about: then it neither waits
+		// nor is held back.
+		apart, named = s.apartFromSource(text)
+		var stop *pgErr
+		if waited, stop = s.waitForCopy(ctx, qstr, apart); stop != nil {
+			return nil, nil, nil, "", stop
+		}
 		res, err = s.bound.Run(ctx, text, s.runOptions())
 	}
 	if res.Spool != nil {
@@ -300,6 +347,14 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 			s.fallTo(s.copyFallback(err, perr))
 		}
 		return nil, nil, nil, "", perr
+	}
+	// A statement read as apart that names no table, when the copy says it
+	// read one, was read wrong: it is held back as any other.
+	if why := s.copyOlderThanSource(waited, apart && named > 0); why != "" {
+		// Nothing of it was sent: the source answers instead (#2985).
+		s.logger.Debug("pgshim: the copy's answer is older than the source's last one on this connection; the source answers", "why", why)
+		s.fallTo(ReasonCopyTooOld)
+		return nil, nil, nil, "", &pgErr{"55000", why}
 	}
 	if res.Truncated {
 		// Refused, not returned short: a client would take the first rows

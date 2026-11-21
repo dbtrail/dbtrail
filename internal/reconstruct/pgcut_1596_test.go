@@ -12,6 +12,9 @@ import (
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
+// withFirstEventPast answers the search for the first event past the point
+// with cut, as event 7: written before the newest event these tests give the
+// index (event 100).
 func withFirstEventPast(t *testing.T, cut *query.BinlogPos) {
 	t.Helper()
 	old := pgFirstEventPast
@@ -30,7 +33,7 @@ func TestResolvePGFoldBounds(t *testing.T) {
 	baselineAt := at.Add(-6 * time.Hour)
 	const floor = 0x1000
 	newest := func(m sqlmock.Sqlmock, end uint64, ts time.Time) {
-		m.ExpectQuery("ORDER BY event_id DESC LIMIT 1").WillReturnRows(sqlmock.NewRows([]string{"end_pos", "event_timestamp"}).AddRow(end, ts))
+		m.ExpectQuery("ORDER BY event_id DESC LIMIT 1").WillReturnRows(sqlmock.NewRows([]string{"end_pos", "event_timestamp", "event_id"}).AddRow(end, ts, uint64(100)))
 	}
 	checkpoint := func(m sqlmock.Sqlmock, lsn any) {
 		r := sqlmock.NewRows([]string{"binlog_position"})
@@ -49,7 +52,7 @@ func TestResolvePGFoldBounds(t *testing.T) {
 		wantErr   string
 	}{
 		{name: "empty index", setup: func(m sqlmock.Sqlmock) {
-			m.ExpectQuery("ORDER BY event_id DESC LIMIT 1").WillReturnRows(sqlmock.NewRows([]string{"end_pos", "event_timestamp"}))
+			m.ExpectQuery("ORDER BY event_id DESC LIMIT 1").WillReturnRows(sqlmock.NewRows([]string{"end_pos", "event_timestamp", "event_id"}))
 		}, wantNext: floor, wantEmpty: true},
 		{name: "an event after the point: stop just before its LSN",
 			setup: func(m sqlmock.Sqlmock) { newest(m, 0x9000, at.Add(time.Hour)) },

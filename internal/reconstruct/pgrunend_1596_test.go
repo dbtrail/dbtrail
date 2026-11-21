@@ -23,7 +23,7 @@ func TestPGRunEnd_oneUntilPerRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	mock.ExpectQuery("ORDER BY event_id DESC LIMIT 1").WillReturnRows(sqlmock.NewRows([]string{"end_pos", "event_timestamp"}).AddRow(uint64(0x8000), at.Add(-time.Hour)))
+	mock.ExpectQuery("ORDER BY event_id DESC LIMIT 1").WillReturnRows(sqlmock.NewRows([]string{"end_pos", "event_timestamp", "event_id"}).AddRow(uint64(0x8000), at.Add(-time.Hour), uint64(100)))
 	mock.ExpectQuery("FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"binlog_position"}).AddRow(int64(0x8000)))
 	withFirstEventPast(t, nil)
 	run, err := resolvePGRunEnd(context.Background(), db, at)

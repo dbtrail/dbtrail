@@ -1,10 +1,13 @@
 package pgshim
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
@@ -24,6 +27,9 @@ import (
 // source before anything is said to the client, so a different answer never
 // reaches it in silence.
 //
+// Of what the screen lets through, only a statement whose plan on the source
+// is expensive goes to the copy (route_cost.go): the copy has no index.
+//
 // Without a forwarding account nothing here applies: every statement is
 // answered as before, by the copy or with its error.
 
@@ -36,10 +42,11 @@ const (
 	RouteRefused = "refused"
 
 	// The copy answered.
-	ReasonAnswersTheSame   = "answers_the_same"   // everything in it answers on the copy as on PostgreSQL
-	ReasonNoForwardAccount = "no_forward_account" // the server has no forwarding account: the copy answers alone
-	ReasonHiddenRules      = "hidden_rules"       // the server hides tables or columns: nothing is sent to its source
-	ReasonCopyCommand      = "copy_command"       // a command of the copy's own (SHOW TABLES, DESCRIBE)
+	ReasonAnswersTheSame    = "answers_the_same"   // everything in it answers on the copy as on PostgreSQL
+	ReasonNoForwardAccount  = "no_forward_account" // the server has no forwarding account: the copy answers alone
+	ReasonHiddenRules       = "hidden_rules"       // the server hides tables or columns: nothing is sent to its source
+	ReasonCopyCommand       = "copy_command"       // a command of the copy's own (SHOW TABLES, DESCRIBE)
+	ReasonSourceUnreachable = "source_unreachable" // its plan could not be asked: the source cannot be reached (route_cost.go)
 
 	// The source answered.
 	ReasonInTransaction     = "in_transaction"      // the client's transaction block lives there
@@ -54,6 +61,9 @@ const (
 	ReasonCopyWaitTimeout   = "copy_wait_timeout"   // it waited for a slot of the copy as long as it may
 	ReasonCopyColumnsDiffer = "copy_columns_differ" // the copy answered with a column it writes otherwise
 	ReasonCatalogNotOnCopy  = "catalog_not_on_copy" // a catalog statement the copy does not answer
+	ReasonCheapPlan         = "cheap_plan"          // the source's plan is below both thresholds (route_cost.go)
+	ReasonExplainFailed     = "explain_failed"      // the source's plan could not be had: EXPLAIN did not run, or was not asked
+	ReasonCopyTooOld        = "copy_too_old"        // the copy's answer was older than one the source already gave this connection
 
 	// Nobody ran it.
 	ReasonReadOnly = "read_only" // not a read, and the port is read-only toward the source
@@ -237,12 +247,213 @@ func (s *session) copyFallback(err error, perr *pgErr) string {
 	return ReasonCopyRefused
 }
 
+// copyOlderThanSource says why the copy's answer that was just read is not
+// given to a connection the source answered before (#2985), "" when it may
+// be. A connection must not read a value go back: once the source sent it
+// rows (sourceRead), an answer of the copy that read the copy's tables is
+// given only when the copy waited for the source's position first and every
+// table it read had its recent changes over it (waited). Nothing else proves
+// it: no clock of the source is compared with this machine's. A table read
+// from its snapshot alone says nothing of how far it reaches, and goes to
+// the source. Nothing is decided where the statement cannot go to the
+// source, nor when the host does not say what the answer read
+// (Binding.RunAge nil). Nor for a statement that reads no table the source
+// answered this connection about (apart, apartFromSource): what the copy
+// holds of other tables is not older than anything this connection was
+// shown.
+//
+// It is the MySQL port's rule for the copy against itself (#2913: the copy
+// never answers a connection with less of the index than an earlier answer
+// of the copy held, and the statement goes to MySQL as copy_too_old), with
+// the source's answer as the earlier one.
+func (s *session) copyOlderThanSource(waited, apart bool) string {
+	if apart || !s.src.any() || s.bound == nil || s.bound.RunAge == nil || !s.canFallBack() {
+		return ""
+	}
+	a := s.bound.RunAge()
+	switch {
+	case !a.Read:
+		return ""
+	case waited && !a.Through.IsZero():
+		return ""
+	case a.Through.IsZero():
+		return "the copy read a table from its snapshot alone, which can be older than what the source answered this connection before"
+	}
+	return "the copy did not wait for what the source answered this connection before"
+}
+
+// positionWarnEvery is how often a connection that cannot learn the source's
+// position says so at warn level.
+const positionWarnEvery = time.Minute
+
+var positionWarned struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+// warnNoPosition says, at most every positionWarnEvery for the process, that
+// a statement for the copy went to the source because no position of the
+// source was known after its last answer.
+func (s *session) warnNoPosition(why string) {
+	positionWarned.mu.Lock()
+	due := time.Since(positionWarned.at) >= positionWarnEvery
+	if due {
+		positionWarned.at = time.Now()
+	}
+	positionWarned.mu.Unlock()
+	if due {
+		s.logger.Warn("pgshim: the source's WAL position after its last answer on a connection is not known, so a statement for the copy there is answered by the source (said once a minute)", "why", why)
+	}
+}
+
+// DefaultCopyWaitLimit is how long a statement for the copy waits for the
+// copy to reach the source's position on a connection the source answered
+// (waitForCopy), never past the statement's own time: the read of that
+// position, when one is needed, and the wait after it, together.
+const DefaultCopyWaitLimit = 6 * time.Second
+
+// copyWaitLimit is DefaultCopyWaitLimit, a variable so a test can shorten
+// it.
+var copyWaitLimit = DefaultCopyWaitLimit
+
+// waitForCopy is the wait of a statement about to run on the copy, on a
+// connection the source answered (#2985): the copy answers only once its
+// recent changes hold every commit the source had made when the statement
+// arrived, a position read from the source now, which is at or past the
+// one its last answer showed. It is the MySQL port's fresh-mode wait for the
+// source (#2645) on a PostgreSQL position: Binding.CopyWait waits on
+// capture's saved position, then on an update of the tails after it.
+//
+// waited true: the copy reached it. stop not nil: the statement does not run
+// on the copy (it could not reach it in time, or capture is too far behind
+// for the time left; the source answers it), or the statement itself was
+// stopped while it waited. Both false and nil: nothing was waited for (no
+// answer of the source on this connection, a host without the wait, a
+// position that could not be read), and copyOlderThanSource decides after
+// the run, as without the wait.
+//
+// apart: the statement reads no table the source answered this connection
+// about (apartFromSource), and waits for nothing.
+//
+// While it waits a statement holds its client connection and nothing else:
+// no worker of the copy (the copy has not been asked yet), no connection to
+// the source (the one its position was read on is given back first), and
+// nothing of the port's result budget.
+func (s *session) waitForCopy(ctx context.Context, qstr string, apart bool) (waited bool, stop *pgErr) {
+	if apart || !s.src.any() || s.bound == nil || s.bound.CopyWait == nil || !s.canFallBack() {
+		return false, nil
+	}
+	if !isSelectLike(qstr) || readsCatalog(qstr) {
+		// A command of the copy's own (SHOW TABLES), which the source would
+		// not take, or a read of the copy's catalog, which the source would
+		// answer with its own: neither reads a table's rows. Should it read
+		// one too, copyOlderThanSource sends it to the source after.
+		return false, nil
+	}
+	// The position after the source's last answer: kept when it was read
+	// then (knownLSN), else read on the connection the statement's plan was
+	// asked on, else read now. A position read before that answer would
+	// let an older answer through, so none of those is used, and with none
+	// the source answers: never the copy unproven.
+	// The limit counts from here: a read of the position that took all of
+	// it leaves the wait none, and the source answers.
+	limit := time.Now().Add(copyWaitLimit)
+	want, why := uint64(0), ""
+	switch {
+	case s.knownValid:
+		want = s.knownLSN
+	case !s.copyWantAt.IsZero() && s.copyWantAt.After(s.sourceAnsweredAt):
+		want = s.copyWant
+	default:
+		want, why = s.sourceWALPosition()
+	}
+	s.copyWant, s.copyWantAt = 0, time.Time{}
+	if perr := stoppedError(ctx); perr != nil {
+		return false, perr
+	}
+	if why != "" {
+		s.warnNoPosition(why)
+		s.fallTo(ReasonCopyTooOld)
+		return false, &pgErr{"55000", "the source's position after its last answer on this connection is not known (" + why + "), so the copy does not answer it"}
+	}
+	wctx, cancel := context.WithDeadline(ctx, limit)
+	outcome, why := s.bound.CopyWait(wctx, want)
+	cancel()
+	if perr := stoppedError(ctx); perr != nil {
+		return false, perr
+	}
+	switch outcome {
+	case CopyNoWait:
+		// No recent changes are kept for the server yet: the copy runs (that
+		// starts them) and copyOlderThanSource, which has no wait to rely
+		// on, sends a table's read to the source.
+		s.logger.Debug("pgshim: nothing to wait on for the copy; it runs, and the source answers what it cannot prove", "why", why)
+		return false, nil
+	case CopyReached:
+		return true, nil
+	}
+	s.logger.Debug("pgshim: the copy did not reach the source's position in time; the source answers", "why", why)
+	s.fallTo(ReasonCopyTooOld)
+	return false, &pgErr{"55000", "the copy did not reach what the source already answered this connection: " + why}
+}
+
+// sourceWALPosition reads where the source's WAL stands now, on this
+// connection's connection there, given back after unless something of the
+// client's lives on it; why says why it could not be read.
+func (s *session) sourceWALPosition() (lsn uint64, why string) {
+	if s.up != nil && s.up.inCycle {
+		return 0, "an extended batch is open on the source"
+	}
+	// A connection there is waited for no longer than the copy waits.
+	s.slotWaitCap = copyWaitLimit
+	up, perr := s.prepareSource()
+	s.slotWaitCap = 0
+	if perr != nil {
+		return 0, perr.code + ": " + perr.msg
+	}
+	cell, perr, lost := s.cellOnSource(up, sourceWALPositionSQL)
+	if lost != nil {
+		s.loseSource(lost.why)
+		return 0, lost.why
+	}
+	s.releaseIdleSource()
+	if perr != nil {
+		return 0, perr.code + ": " + perr.msg
+	}
+	lsn, ok := parseLSN(string(cell))
+	if !ok {
+		return 0, fmt.Sprintf("%q is not a WAL position", cell)
+	}
+	return lsn, ""
+}
+
+// sourceWALPositionSQL reads where the source's WAL stands: on a standby,
+// how far it has replayed.
+const sourceWALPositionSQL = "SELECT CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() ELSE pg_current_wal_lsn() END"
+
+// parseLSN reads a WAL position as PostgreSQL writes it (16/B374D848).
+func parseLSN(s string) (uint64, bool) {
+	hi, lo, ok := strings.Cut(s, "/")
+	if !ok || hi == "" || lo == "" || len(hi) > 8 || len(lo) > 8 {
+		return 0, false
+	}
+	h, err := strconv.ParseUint(hi, 16, 32)
+	if err != nil {
+		return 0, false
+	}
+	l, err := strconv.ParseUint(lo, 16, 32)
+	if err != nil {
+		return 0, false
+	}
+	return h<<32 | l, true
+}
+
 // transientFallback reports whether a reason a statement went to the
 // source is the moment's (a busy or lagging copy), which must not keep a
 // prepared statement on the source for good.
 func transientFallback(reason string) bool {
 	switch reason {
-	case ReasonCopyBehindSource, ReasonCopyAgeUnknown, ReasonCopyQueueFull, ReasonCopyWaitTimeout:
+	case ReasonCopyBehindSource, ReasonCopyAgeUnknown, ReasonCopyQueueFull, ReasonCopyWaitTimeout, ReasonCopyTooOld:
 		return true
 	}
 	return false

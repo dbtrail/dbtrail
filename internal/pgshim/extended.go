@@ -72,6 +72,9 @@ type preparedStatement struct {
 	// fallback is why the statement goes to the source since the copy
 	// could not answer it (route.go), "" while it has not been sent there.
 	fallback string
+	// byCost is the side the source's plan gave the statement
+	// (route_cost.go), kept once decided; zero while it was not.
+	byCost routeDecision
 }
 
 // portal is a statement with its arguments, ready to run.
@@ -83,6 +86,9 @@ type portal struct {
 	// onSource is set for a portal bound on the source (forward_ext.go):
 	// its Describe, Execute and Close are sent there.
 	onSource bool
+	// sourcePath is the search_path the source had when the portal was
+	// bound there, under which it resolved the statement's names.
+	sourcePath string
 	// ran is set once the statement ran; what it answered is below.
 	ran   bool
 	empty bool

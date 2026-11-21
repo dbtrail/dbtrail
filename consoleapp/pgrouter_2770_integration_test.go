@@ -86,13 +86,15 @@ func TestIntegrationPGRouterRouting(t *testing.T) {
 
 	t.Run("each statement goes to the side that answers it as PostgreSQL does", func(t *testing.T) {
 		c := pgClient(t, ctx, env.portDSN(), nil)
+		// What the copy answers first: once the source answered this
+		// connection, the copy's older answers are not given to it (#2985).
 		for _, tc := range []struct{ stmt, want string }{
 			{count, "3"},
-			{count + " WHERE now() IS NOT NULL", "4"},
-			{"SELECT count(*) FROM " + pgRouteSource, "1"},
 			// at is a reserved word on the copy, which the port quotes there
 			// (#2973): the copy answers it, from its rows.
 			{"SELECT min(at) FROM " + pgRouteTable, "1"},
+			{count + " WHERE now() IS NOT NULL", "4"},
+			{"SELECT count(*) FROM " + pgRouteSource, "1"},
 			// An array written as a string: PostgreSQL reads it as the
 			// column's type, the copy cannot and fails, and the source
 			// answers it with its fourth row (the copy would say 2).
@@ -119,8 +121,15 @@ func TestIntegrationPGRouterRouting(t *testing.T) {
 			t.Errorf("under another time zone: %q, want the source's 4", got)
 		}
 		one(ctx, c, "RESET TimeZone")
-		if got := one(ctx, c, count); got != "3" {
-			t.Errorf("back in UTC: %q", got)
+		// Back in UTC the screen gives it to the copy again, whose 3 is older
+		// than the 4 the source showed this connection: the source answers
+		// (#2985).
+		tooOld := env.routes.doc("").Servers[env.serverID].Reasons[pgshim.ReasonCopyTooOld]
+		if got := one(ctx, c, count); got != "4" {
+			t.Errorf("back in UTC: %q, want the source's 4", got)
+		}
+		if n := env.routes.doc("").Servers[env.serverID].Reasons[pgshim.ReasonCopyTooOld]; n != tooOld+1 {
+			t.Errorf("back in UTC: copy_too_old %d, want %d: the copy was not chosen first", n, tooOld+1)
 		}
 		one(ctx, c, "BEGIN")
 		if got := one(ctx, c, count); got != "4" {
@@ -139,10 +148,11 @@ func TestIntegrationPGRouterRouting(t *testing.T) {
 				stmt string
 				want string
 			}{
+				// The copy's first (#2985).
 				{"SELECT count(*) AS n FROM " + pgRouteTable + " WHERE id > $1", `[n] ["3"]`},
+				{"SELECT min(at) AS m FROM " + pgRouteTable + " WHERE id > $1", `[m] ["1"]`},
 				{"SELECT count(*) AS n FROM " + pgRouteTable + " WHERE now() IS NOT NULL AND id > $1", `[n] ["4"]`},
 				{"SELECT count(*) AS n FROM " + pgRouteSource + " WHERE id > $1", `[n] ["1"]`},
-				{"SELECT min(at) AS m FROM " + pgRouteTable + " WHERE id > $1", `[m] ["1"]`},
 				{"SELECT free FROM " + pgRouteTable + " WHERE id = $1", `[free] ["1.5"]`},
 			} {
 				arg := 0
@@ -164,10 +174,10 @@ func TestIntegrationPGRouterRouting(t *testing.T) {
 		const want = "copy=3 source=4 missing=1 at=1 free=1.5"
 		if psql, err := exec.LookPath("psql"); err == nil {
 			out, err := exec.CommandContext(ctx, psql, "-X", "-At", "-v", "ON_ERROR_STOP=1",
-				"-c", count, "-c", count+" WHERE now() IS NOT NULL", "-c", "SELECT count(*) FROM "+pgRouteSource,
-				"-c", "SELECT min(at) FROM "+pgRouteTable, "-c", "SELECT free FROM "+pgRouteTable+" WHERE id = 1",
+				"-c", count, "-c", "SELECT min(at) FROM "+pgRouteTable, "-c", count+" WHERE now() IS NOT NULL",
+				"-c", "SELECT count(*) FROM "+pgRouteSource, "-c", "SELECT free FROM "+pgRouteTable+" WHERE id = 1",
 				env.portDSN()).CombinedOutput()
-			if got := strings.Join(strings.Fields(string(out)), " "); err != nil || got != "3 4 1 1 1.5" {
+			if got := strings.Join(strings.Fields(string(out)), " "); err != nil || got != "3 1 4 1 1.5" {
 				t.Errorf("psql: %v %q", err, out)
 			}
 		} else {
@@ -345,10 +355,12 @@ with psycopg.connect(sys.argv[1], autocommit=True) as conn:
     def one(q, *a):
         return conn.execute(q, a).fetchone()[0]
     t = "` + pgRouteTable + `"
+    # The copy's first: once the source answered, the copy's older answers
+    # are not given to this connection.
     copy = one("SELECT count(*) FROM " + t + " WHERE id > %s", 0)
+    at = one("SELECT min(at) FROM " + t + " WHERE id > %s", 0)
     source = one("SELECT count(*) FROM " + t + " WHERE now() IS NOT NULL AND id > %s", 0)
     missing = one("SELECT count(*) FROM ` + pgRouteSource + ` WHERE id > %s", 0)
-    at = one("SELECT min(at) FROM " + t + " WHERE id > %s", 0)
     free = one("SELECT free FROM " + t + " WHERE id = %s", 1)
     print(f"copy={copy} source={source} missing={missing} at={at} free={free}")
 `
@@ -366,11 +378,16 @@ public class Route {
         String t = "` + pgRouteTable + `";
         try (Connection c = DriverManager.getConnection(args[0])) {
             String copy = "", source = "", missing = "", at = "", free = "";
-            for (int i = 0; i < 6; i++) { // past prepareThreshold: named statements too
+            // Past prepareThreshold: named statements too. The copy's first:
+            // once the source answered, the copy's older answers are not
+            // given to this connection.
+            for (int i = 0; i < 6; i++) {
                 copy = one(c, "SELECT count(*) FROM " + t + " WHERE id > ?", 0);
+                at = one(c, "SELECT min(at) FROM " + t + " WHERE id > ?", 0);
+            }
+            for (int i = 0; i < 6; i++) {
                 source = one(c, "SELECT count(*) FROM " + t + " WHERE now() IS NOT NULL AND id > ?", 0);
                 missing = one(c, "SELECT count(*) FROM ` + pgRouteSource + ` WHERE id > ?", 0);
-                at = one(c, "SELECT min(at) FROM " + t + " WHERE id > ?", 0);
                 free = one(c, "SELECT free FROM " + t + " WHERE id = ?", 1);
             }
             System.out.println("copy=" + copy + " source=" + source + " missing=" + missing + " at=" + at + " free=" + free);

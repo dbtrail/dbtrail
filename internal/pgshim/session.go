@@ -75,6 +75,35 @@ type session struct {
 	// fallback is why the statement the copy just failed goes to the
 	// source instead (route.go), "" when it does not; set by runFree.
 	fallback string
+	// costVerdicts are the source's plans' verdicts this connection
+	// remembers, by statement shape (route_cost.go).
+	costVerdicts map[string]costVerdict
+	// sourceAnsweredAt is when the source last answered a statement of this
+	// connection: the copy may not answer it with data older than that
+	// (copyOlderThanSource). Zero when the source never answered one.
+	sourceAnsweredAt time.Time
+	// copyWant is the source's WAL position read on the connection that
+	// asked for a statement's plan, at copyWantAt, kept for the wait of the
+	// statement the copy then runs (waitForCopy).
+	copyWant   uint64
+	copyWantAt time.Time
+	// slotWaitCap, when set, bounds the wait for a connection to the source
+	// (source), below the statement's own.
+	slotWaitCap time.Duration
+	// stmtCtx is the context of the message being handled (beginMessage),
+	// nil between messages.
+	stmtCtx context.Context
+	// src is which tables the source sent this connection rows or a
+	// statement's end about (markSourceRead, source_tables.go): the copy
+	// must not answer it with less of those. proving is the statement the
+	// source is answering now when its tables may be confirmed, nil when
+	// they cannot: what it sends then marks every table.
+	// knownLSN is the source's WAL position read after the last such answer
+	// on this connection, valid while knownValid.
+	src        sourceReads
+	proving    *sourceProof
+	knownLSN   uint64
+	knownValid bool
 	// last is which side answered the connection's last statement, and why
 	// (portstatus.go): what SHOW dbtrail.router_status says.
 	last LastAnswer
@@ -157,6 +186,16 @@ func (s *session) handleSimpleQuery(qstr string) error {
 	var d routeDecision
 	if s.abortedRefusal(qstr) == nil {
 		d = s.route(s.classify(qstr), qstr)
+	}
+	if byCostApplies(d) {
+		// The screen lets the copy answer it: the source's plan says
+		// whether the copy is worth it (route_cost.go).
+		var stop *pgErr
+		if d, stop = s.routeByCostRemembered(qstr); stop != nil {
+			s.fail(stop)
+			s.routeNote(qstr, d, time.Since(started), true)
+			return s.readyFlush()
+		}
 	}
 	if d.side == RouteSource || d.side == RouteRefused {
 		ok := s.forwardSimple(qstr)

@@ -54,7 +54,10 @@ func (l *statusLogin) login(_ context.Context, _, _ string, password *Password, 
 		l.notes = append(l.notes, n)
 	}}
 	if l.forward {
-		b.Forward = &Forward{DSN: "postgres://fwd:pw@127.0.0.1:1/db?sslmode=disable&connect_timeout=2"}
+		// Routing by plan off (#2985): the source here cannot be reached,
+		// and what this tests is what the status says of the screen's
+		// decisions.
+		b.Forward = &Forward{DSN: "postgres://fwd:pw@127.0.0.1:1/db?sslmode=disable&connect_timeout=2", Cost: &CostPolicy{}}
 	}
 	return b, nil
 }

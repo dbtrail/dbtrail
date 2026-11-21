@@ -355,7 +355,9 @@ func (l *fallbackLogin) login(_ context.Context, _, _ string, password *Password
 		l.notes = append(l.notes, n)
 	}}
 	if l.forward || l.barred {
-		b.Forward = &Forward{DSN: "postgres://fwd:pw@127.0.0.1:1/db?sslmode=disable&connect_timeout=2"}
+		// Routing by plan off: these are the screen's decisions, and the
+		// source cannot be reached to be asked (route_cost_test.go).
+		b.Forward = &Forward{DSN: "postgres://fwd:pw@127.0.0.1:1/db?sslmode=disable&connect_timeout=2", Cost: &CostPolicy{}}
 	}
 	if l.barred {
 		b.Forward.Barred = func() string { return "it hides tables" }

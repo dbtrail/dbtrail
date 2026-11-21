@@ -75,14 +75,15 @@ func BuildPGReport(ctx context.Context, cfg PGDoctorConfig) *doctor.Report {
 	// never silently suppress it.
 	walRes, skipDependents := walLevelResult(pgcapture.CheckWALLevel(ctx, conn))
 	r.Add(walRes)
+	filters := cliutil.BuildIndexFilters(cfg.Schemas, cfg.Tables)
 	if skipDependents {
 		for _, name := range dependentCheckNames {
 			r.Add(doctor.CheckResult{Name: name, Status: doctor.StatusSkip, Detail: "requires wal_level=logical"})
 		}
+		// Not a dependent: what the role may read does not hang on wal_level.
+		addReadAccessCheck(ctx, r, conn, cfg.Publication, filters)
 		return r
 	}
-
-	filters := cliutil.BuildIndexFilters(cfg.Schemas, cfg.Tables)
 
 	if err := pgcapture.CheckPublication(ctx, conn, cfg.Publication, filters); err != nil {
 		r.Add(doctor.CheckResult{
@@ -106,6 +107,7 @@ func BuildPGReport(ctx context.Context, cfg PGDoctorConfig) *doctor.Report {
 		r.Add(doctor.CheckResult{Name: "REPLICA IDENTITY FULL", Status: doctor.StatusPass})
 	}
 
+	addReadAccessCheck(ctx, r, conn, cfg.Publication, filters)
 	addGeneratedColumnsCheck(ctx, r, conn, cfg.Publication)
 	addDeferrableKeysCheck(ctx, r, conn, cfg.Publication)
 	addUnloggedCheck(ctx, r, conn, cfg.Publication, filters)

@@ -193,10 +193,16 @@ password copied from this page.
 - The role does **not** need to be a superuser.
 - **Capturing changes needs no `SELECT`**: logical replication delivers the
   row data over the WAL. **The first copy does.** It reads every table of the
-  publication with `COPY (SELECT ...)`, as this role, so without `SELECT` the
-  checks of `server add` pass and the first snapshot then fails with
-  `permission denied for table ...` (`42501`). The same goes for a table added
-  to the publication later, which is read in full once.
+  publication with `COPY (SELECT ...)`, as this role, so without `SELECT` it
+  would stop with `permission denied for table ...` (`42501`). `server add`
+  checks it (**Read access to the published tables**) and warns about a role
+  that cannot read one of them, showing the `GRANT` to run; DBTrail grants
+  nothing by itself. It is a warning: the server is added and its changes are
+  recorded, since that needs no `SELECT`. The copy is what is refused. A
+  snapshot asks before it starts, and stops with the same statement before
+  the slot or any file is created, until the permission is there. That also
+  covers a table added to the publication later, which is read in full once,
+  and a permission taken away since the server was added.
 - **Disk for the first copy.** It is written into the server's Local folder as
   compressed Parquet. Before it starts, DBTrail compares the tables' size
   with the free space there: it refuses below 1 GiB free and warns below 1.3×
@@ -353,6 +359,15 @@ bintrail-pg doctor --query-dsn "$PG" --slot bintrail_shop --publication bintrail
   retaining. The status progresses `reserved` (PASS) → `extended` / `unreserved`
   (**WARN** — retaining WAL and approaching the limit; doctor still exits 0) →
   `lost` (a loud **FAIL** with the re-baseline recovery path).
+- **Read access to the published tables** → WARN if the role cannot read a
+  table the first copy reads: no `USAGE` on its schema, or `SELECT` neither on
+  the table nor on every column the copy reads. Doctor still exits 0, and
+  capture starts: recording changes does not need it. A snapshot is refused
+  until it is granted. Ownership, a superuser, a role
+  inherited from another and `pg_read_all_data` count, as PostgreSQL itself
+  counts them. The check prints one `GRANT` per table, each name quoted; past
+  ten tables it prints `GRANT SELECT ON ALL TABLES IN SCHEMA` once per schema,
+  which also covers the tables of that schema that are not published.
 - **No UNLOGGED tables** → WARN if any captured table is `UNLOGGED` (under a
   `FOR ALL TABLES` publication, and under a `FOR TABLES IN SCHEMA` — PostgreSQL
   15+ — publication for its member schemas). UNLOGGED tables write no WAL, so
@@ -849,8 +864,8 @@ listener, its own workers, its own memory.
     10-million-row table took 0.4 to 0.6 seconds in fresh mode (0.13 to 0.35
     in fast), and 0.12 to 0.17 on the 2-million-row one (0.03 to 0.09).
   - **A statement that reads one row by its key reads the whole table too**:
-    the copy has no index. With a forwarding user such a statement can be
-    answered by the source (see
+    the copy has no index. With a forwarding user such a statement is
+    answered by the source, whose plan for it is cheap (see
     [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port)).
   - **How many statements it answers** is set by `--workers`, which is 4
     out of the box, with 256 clients connected at most
@@ -880,8 +895,8 @@ listener, its own workers, its own memory.
     arrive before it reads.
 - **The copy answers what it answers as PostgreSQL does.** With the server's
   forwarding user, each statement is decided on its own: the copy answers it
-  when everything in it is known to give PostgreSQL's answer there, and the
-  source otherwise, read-only (see
+  when everything in it is known to give PostgreSQL's answer there and its
+  plan on the source is expensive, and the source otherwise, read-only (see
   [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port)).
   A transaction block the client opens, and a catalog statement the copy does
   not answer, go to the source too (see
@@ -1047,7 +1062,7 @@ mode): on a 16GB machine, set `--workers 2`.
 | `--threads` | `BINTRAIL_PG_ROUTER_THREADS` | 2 | Threads each statement may use (1 to 16) |
 | `--sql-memory` | `BINTRAIL_CONSOLE_SQL_MEMORY` | 2GB, or the value saved in the web interface | Memory each statement may use |
 | `--max-connections` | `BINTRAIL_PG_ROUTER_MAX_CONNECTIONS` | 256 | Clients connected at once (1 to 1024). One more is refused with an error |
-| `--max-source-connections` | `BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS` | 16 | Connections to the servers' own PostgreSQL held at once, every server together (1 to 1024). A client holds one while its transaction block (or a catalog statement the copy does not answer) runs there; past the limit the statement that needed one is refused (`53300`) |
+| `--max-source-connections` | `BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS` | 16 | Connections to the servers' own PostgreSQL held at once, every server together (1 to 1024). A client holds one while a statement the source answers, its plan, or its transaction block runs there; past the limit the statement that needed one waits for one to be given back, up to 30 seconds, and is then refused (`53300`) |
 | `--max-wait` | `BINTRAIL_PG_ROUTER_MAX_WAIT` | none | How long a statement waits for its turn before it is refused |
 | `--sql-port-max-rows` | `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS` | the port's row cap | Most rows one statement returns |
 | `--token` | `BINTRAIL_CONSOLE_TOKEN` | none | The access token, one more password. It does not open the port |
@@ -1172,9 +1187,14 @@ server, closes the connections that use it; clients reconnect.
   is refused. A connection that is lost, or whose read-only guard was turned
   off, is not replaced behind the client's back: a statement that needs the
   source answers `08006 ... reconnect` (a block open at that moment fails, and
-  only its `ROLLBACK` is answered), while reads on the copy go on.
+  only its `ROLLBACK` is answered), while reads on the copy go on, except one
+  the copy would answer with data older than what the source already
+  answered that connection (see below), which gets the same `08006`.
 - **Every wait for the source is bounded** by the port's five-minute cap on a
-  statement, besides the client's `statement_timeout` and cancel.
+  statement, besides the client's `statement_timeout` and cancel. The wait
+  for a connection there, when the port holds as many as it opens, is
+  bounded by 30 seconds, the `statement_timeout` and a cancel request; one
+  deadline covers every wait of a statement.
 - **When the source cannot be reached**: `08001 cannot connect to the source`;
   when it refuses the forwarding user, `08004` with PostgreSQL's reason (not
   `28P01`, which would read as the client's own password being wrong). The
@@ -1267,6 +1287,171 @@ The source answers:
 - **What is not a query**: `EXPLAIN`, cursors and savepoints outside a block,
   `VALUES`, `TABLE`. A statement that writes is refused (`25006`). `SHOW
   TABLES` and `DESCRIBE`, the copy's own, stay on the copy.
+
+**Of what the copy can answer, only what is expensive on the source goes to
+the copy.** The copy has no index: a read by a primary key takes a
+millisecond on PostgreSQL, and on the copy it reads the whole table, behind
+every other statement waiting for a worker (measured: 15 seconds for one row
+of a table of 2 million). So before a statement the copy can answer goes
+there, the port asks the source for its plan, with `EXPLAIN (FORMAT JSON)` on
+the forwarding user's connection (the statement itself does not run), and
+sends it to the copy only when:
+
+- the **Total Cost** at the top of the plan is **50,000 or more**
+  (`--cost-threshold`, `BINTRAIL_PG_ROUTER_COST_THRESHOLD`), or
+- the plan has a **sequential scan** (a `Seq Scan` node, at any depth: in a
+  join, a subquery, a `WITH`) estimated at **1,000,000 rows or more**
+  (`--scan-rows`, `BINTRAIL_PG_ROUTER_SCAN_ROWS`), whatever its cost. A
+  scan run by parallel workers counts the rows of all of them.
+
+Anything else is answered by the source (`cheap_plan` in `/status`). 0 turns
+one rule off; both cannot be 0. In the compose `.env` they are
+`PG_ROUTER_COST_THRESHOLD` and `PG_ROUTER_SCAN_ROWS`. The defaults come from a
+TPC-C source of 97 million rows on PostgreSQL 16: reads by a primary key cost
+1 to 12, an order's lines by an index 12, the stock level join 712, a
+`count(*)` of one warehouse's orders by an index 15,059, and `max(ts)` of a
+heartbeat table 4,202 with a sequential scan of 201,680 rows; of 14
+analytics reports, two cost 177 and 699 on PostgreSQL (a table of 2,000 rows,
+an index range) and stay there, and the other twelve cost 98,367 to
+13,351,258, several with sequential scans of 2.4 to 61 million rows.
+
+What this costs and where it can go wrong:
+
+- **One round trip to the source** for each statement the copy could answer,
+  and a connection there for that moment (`--max-source-connections`), given
+  back as soon as the copy is chosen. A client connection holds one there
+  only while something of its own lives on it, so most statements open it,
+  a login of the forwarding user, as a statement the source answers did
+  already. With every one of them taken, the statement waits for one to be
+  given back, as a statement waits in line for the copy: up to 30 seconds,
+  or its `statement_timeout` when that is shorter, and it gets `53300` only
+  then. A slot is given back as soon as a statement outside a block has its
+  answer, so with 50 clients over the default 16 the wait is a few
+  milliseconds; only blocks held open longer make it run out. A cancel
+  request ends the wait, and its `statement_timeout` counts everything the
+  statement did, the wait included. When the plan cannot be asked because
+  the source cannot be reached (down, refusing the forwarding user, its
+  connection lost, or no connection free in that wait), the copy answers
+  the statement, as before routing by plan, with a NOTICE that routing by
+  plan is off for the moment (`source_unreachable` in `/status`).
+- **A statement shape the source answers is asked about once a minute, not
+  every time**, when its answer cannot depend on its values: a connection
+  remembers the verdict on `SELECT ... WHERE id = 5` for a minute, by its shape (values blanked)
+  and the session's `search_path`, and sends `WHERE id = 6` the same way
+  without asking. Only where every value is compared with `=` (a `>`, a
+  `BETWEEN`, an `IN` list or a `LIMIT` can change the plan with the value,
+  and are asked every time), and only for a plan ten times below both
+  thresholds (a plan near a threshold can cross it for another value). A
+  verdict for the copy is never kept: a table dropped and made again on
+  the source would still be read from the copy's old rows. A plan the
+  source refused, for the moment or for good, is asked about again. The
+  MySQL port asks every time.
+- **A connection does not read a value go back after the source answered
+  it; the copy waits for it.** The copy is a second or two behind the source
+  in fresh mode: a counter the source just showed a connection as 37413
+  could read 37405 on the copy the next moment. So once the source answered
+  a connection about a table, a statement for the copy that reads that
+  table on it first reads where the source's WAL stands, then waits, up to
+  6 seconds and never past its own `statement_timeout`, until capture's
+  saved position has reached it (the
+  commit of its last whole transaction, or on a quiet source the position
+  the source's walsender last reported) and the copy's recent changes have
+  been brought up to date after that; then the copy answers. When capture
+  is not moving fast enough to get there in the time left (judged from how
+  far its saved position moved in the last seconds), or the wait runs out,
+  the source answers at once and the copy runs nothing (`copy_too_old` in
+  `/status`). Measured on PostgreSQL 16 in fresh mode, the counter written
+  every 20 ms and read 100 times from the source then for the copy on one
+  connection: the copy answered all 100, none went back, and on a quiet
+  source 10 of 10. The source's position is asked in the same write as
+  every statement the source answers, right behind it, so it costs no round
+  trip and no connection when the copy waits later; after an extended
+  batch it is asked once the batch is over. Any row or statement's end the
+  source sends counts, also when an error follows it. When no position of
+  the source after its last answer is known (that read was refused, or the
+  connection to the source was lost), the source answers the statement and
+  the log says so once a minute: no clock of the source is compared with
+  the router's. A table read from its snapshot alone (fast mode, a table
+  with no recent changes) says nothing of how far it reaches, so on such a
+  connection the source answers it. Until a statement has read the
+  server's copy in fresh mode there is nothing to wait on: the copy runs to
+  start its recent changes, and the source answers. This holds for
+  every connection with a forwarding user, routing by plan or not: one that
+  ran a transaction block on the source waits for the copy after its
+  `COMMIT` too. A connection the source never answered, or answered only
+  with an error, reads the copy without waiting. While a statement waits it
+  holds its own connection to the port and nothing else: no worker of the
+  copy, which has not been asked yet, and no connection to the source.
+- **That holds table by table, not for the whole connection.** The port
+  keeps, per connection, which tables the source answered it about, and a
+  statement for the copy waits, or goes to the source, only when it reads
+  one of them. A statement that reads other tables is answered by the copy
+  at once, however far behind the copy is. What this means for a reader:
+  two answers on one connection about *different* tables can be of
+  different moments. An example: `SELECT balance FROM accounts WHERE id = 7`
+  is cheap, so the source answers it, as of now; the next statement,
+  `SELECT sum(amount) FROM payments`, is expensive, reads no table the
+  source answered this connection about, and is answered by the copy, a
+  second or two behind (in fast mode, as old as the last snapshot). A
+  payment committed together with a change of that balance can be in the
+  first answer and not in the second. A value of one table still never
+  goes back: after the source showed `accounts`, a report that reads
+  `accounts` waits for the copy as before. To have two tables read at one
+  moment, read them in one statement, or in a transaction block, which the
+  source answers whole.
+- **Which tables a statement read is told only when it can be proven; when
+  it cannot, the statement counts as having read every table**, and the
+  rule is the connection's again, as before. It is proven in two steps.
+  First its text: one `SELECT` (a `WITH` at its start, subqueries, joins and
+  set operations included) whose tables are all named in `FROM`, calling
+  only functions of PostgreSQL's own that read no table (`count`, `sum`,
+  `coalesce`, `now`, `date_trunc` and the like). Then the source itself, in
+  the same write as the statement and right behind it, with one query of
+  its catalog: each name must resolve, under the session's `search_path`,
+  to a plain permanent table that has no child table, is no partition or
+  child itself, and has no row-level security, and the database must hold none of the things that run a
+  user's code where the text shows none. The tables kept are the ones the
+  source names in that answer. So each of these, answered by the source,
+  marks every table: a view, a temporary or foreign table, a partitioned
+  table or an inheritance parent (reading it reads its children), a
+  partition or an inheritance child (the copy can hold its rows under its
+  parent's name), a table with row-level security, a function in `FROM`, a function the port does
+  not know to read no table (a function of yours, `nextval`,
+  `query_to_xml`), a function written with its schema, `TABLE x`,
+  `LATERAL`, `ONLY`, `TABLESAMPLE`, `FOR UPDATE`, a `WITH` that is not at
+  the start of the statement, a cursor (`DECLARE`, `FETCH`), `SHOW`,
+  `VALUES` alone, `EXPLAIN`, several statements in one text, text the port
+  does not read whole (a dollar-quoted string, `E'...'`), a table name
+  written outside ASCII without quotes, more than 32 tables in one
+  statement, a `search_path` that names `pg_catalog` or `pg_temp`, and
+  any statement at all while the database holds an operator or a cast
+  written in SQL or PL/pgSQL, a domain with a constraint, or a function or
+  aggregate of yours whose name the statement calls or writes after a dot
+  (PostgreSQL calls `f(t)` for `t.f` when `t` has no column `f`). Past 64 tables a connection stops
+  keeping names and every table is marked. In an extended-protocol batch
+  the tables are confirmed once the batch is over (its `Sync`): a statement
+  for the copy inside the same batch, before that, is held back. Names are
+  compared without regard to case, and a name the statement for the copy
+  writes without a schema counts for every schema that has a table of that
+  name: the copy matches names that way, so more is held back, never less.
+  Operators and casts an extension wrote in C are taken to read no table
+  of yours.
+- **An `EXPLAIN` the source refuses** (a table it does not have, a syntax it
+  does not take) sends the statement to the source, which answers it with
+  its own error (`explain_failed` in `/status`). So does a text of more than
+  one statement, which is not asked about at all: `EXPLAIN` of the first
+  would run the others.
+- **The plan's numbers are estimates**, as fresh as the source's statistics
+  (`ANALYZE`), and a sequential scan's rows are the rows it is estimated to
+  return after its filter, not the rows it reads.
+- **A prepared statement is asked about once**, at its first Describe or
+  Bind, before any argument exists, and keeps that side. One with
+  parameters is asked with `EXPLAIN (GENERIC_PLAN, FORMAT JSON)`, which
+  PostgreSQL 16 and later take. **On PostgreSQL 15 a prepared statement with
+  parameters goes to the source**, however expensive: that `EXPLAIN` is
+  refused there. A statement first described in the middle of a batch that
+  already went to the source is sent there for that batch, and asked again
+  the next time.
 
 **A server that hides tables or columns sends nothing to its source**, not a
 statement the copy refuses, not a transaction block, not a catalog statement:
@@ -1404,6 +1589,8 @@ The reasons, with the MySQL port's names where they mean the same:
 | copy | `copy_command` | a command of the copy's own (`SHOW TABLES`, `DESCRIBE`) |
 | copy | `no_forward_account` | the server has no forwarding user: the copy answers alone |
 | copy | `hidden_rules` | the server hides tables or columns: nothing is sent to its source |
+| source | `cheap_plan` | its plan on the source is under both thresholds: the source answers it, by its indexes |
+| source | `explain_failed` | its plan could not be had (the source refused the `EXPLAIN`, a text of more than one statement): the source answers it, its error included |
 | source | `in_transaction` | the client's transaction block |
 | source | `veto` | a construct the copy answers differently, or is not known to answer the same |
 | source | `session_differs` | a session setting the copy is not known to reproduce (`TimeZone`) |
@@ -1416,11 +1603,8 @@ The reasons, with the MySQL port's names where they mean the same:
 | source | `copy_queue_full`, `copy_wait_timeout` | the copy was busy |
 | refused | `read_only` | not a read |
 
-What the copy would answer and the source did not make faster is not decided
-here yet: every statement the copy can answer goes to the copy, however cheap
-it would be on the source. Deciding by the source's plan, as the MySQL port
-does, would cost a login to the source for each statement, since a connection
-holds one there only while something of its own lives on it.
+Here `answers_the_same` counts the statements the copy answered: the ones it
+answers as PostgreSQL does and whose plan on the source is expensive.
 
 ### Listing schemas, tables and columns on the PostgreSQL port
 
