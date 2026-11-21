@@ -93,7 +93,7 @@ func TestCopyScreen_zoneInALiteral(t *testing.T) {
 		`SELECT id FROM ` + o + ` WHERE placed_at < TIMESTAMP '2026-02-01 00:00:00.5'`,
 		`SELECT name FROM ` + c + ` WHERE signup >= DATE '2026-01-01'`,
 		`SELECT name FROM ` + c + ` WHERE signup >= '2026-01-01'::date`,
-		`SELECT name FROM ` + c + ` WHERE signup >= CAST('2026-01-01' AS date)`,
+		`SELECT name FROM ` + c + ` WHERE signup = CAST('2026-01-01' AS date)`,
 		`SELECT id FROM ` + o + ` WHERE placed_at = '2026-03-02 10:00:00'`,
 	}
 	for _, q := range copyOK {
