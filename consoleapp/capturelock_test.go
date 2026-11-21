@@ -149,6 +149,30 @@ func TestCaptureLockHeartbeatLateYesIsStillALoss(t *testing.T) {
 	}
 }
 
+// The heartbeat can read a "yes" after the limit has passed with its timer
+// not yet served (a process that was not scheduled for a while): the clock
+// decides, so the answer does not extend a limit that already ran out. The
+// loop cannot be made to read both at once on demand, so the rule is pinned
+// where it is written.
+func TestCaptureLockAnswerAfterTheLimitIsTooLate(t *testing.T) {
+	setCaptureLockTimings(t, time.Second, time.Second, 10*time.Second)
+	confirmed := time.Now()
+	for _, c := range []struct {
+		after time.Duration
+		late  bool
+	}{
+		{0, false},
+		{9 * time.Second, false},
+		{10 * time.Second, false},
+		{10*time.Second + time.Millisecond, true},
+		{time.Minute, true},
+	} {
+		if got := captureLockAnswerTooLate(confirmed, confirmed.Add(c.after)); got != c.late {
+			t.Errorf("an answer read %s after the last confirmation: too late = %v, want %v", c.after, got, c.late)
+		}
+	}
+}
+
 // A question that fails means the connection is gone (or the server refused):
 // lost at once, never after waiting out the limit.
 func TestCaptureLockHeartbeatErrorIsALossAtOnce(t *testing.T) {

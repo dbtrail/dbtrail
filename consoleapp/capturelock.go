@@ -250,7 +250,7 @@ func (l *captureLock) heartbeat() {
 			// The timer and this answer can both be ready, and a process
 			// that was not scheduled for a while reads them late: the clock
 			// decides, not which one select picked.
-			if time.Since(confirmed) > captureLockUnconfirmedLimit {
+			if captureLockAnswerTooLate(confirmed, time.Now()) {
 				lose(silent())
 				return
 			}
@@ -262,6 +262,12 @@ func (l *captureLock) heartbeat() {
 			return
 		}
 	}
+}
+
+// captureLockAnswerTooLate reports whether an answer read at now came after
+// the limit that started at confirmed.
+func captureLockAnswerTooLate(confirmed, now time.Time) bool {
+	return now.Sub(confirmed) > captureLockUnconfirmedLimit
 }
 
 // check asks whether this session still owns the lock. ctx carries no
