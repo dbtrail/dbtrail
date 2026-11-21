@@ -73,8 +73,9 @@ func TestCopyScreen_zoneInALiteral(t *testing.T) {
 		`SELECT name FROM ` + c + ` WHERE signup = '2026-01-15 23:30:00-05'::date`:                             zonedTypedVeto,
 		`SELECT id FROM ` + o + ` WHERE placed_at BETWEEN TIMESTAMP '2026-03-02 10:00:00' AND TIMESTAMP '2026-03-03 10:00:00+02'`: zonedTypedVeto,
 		`SELECT id FROM ` + o + ` WHERE placed_at NOT BETWEEN TIMESTAMP '2026-03-02 10:00:00+02' AND TIMESTAMP '2026-03-03 10:00:00'`: zonedTypedVeto,
-		// The casts to a timestamp were the source's already.
-		`SELECT id FROM ` + o + ` WHERE placed_at = '2026-03-02 10:00:00+02'::timestamp`:       "cast",
+		// A cast to a timestamp was the source's already, zone or none.
+		`SELECT id FROM ` + o + ` WHERE placed_at = '2026-03-02 10:00:00+02'::timestamp`:       zonedTypedVeto,
+		`SELECT id FROM ` + o + ` WHERE placed_at = '2026-03-02 10:00:00'::timestamp`:          "cast",
 		`SELECT id FROM ` + o + ` WHERE placed_at = CAST('2026-03-02 10:00:00+02' AS timestamp)`: "CAST",
 		`SELECT id FROM ` + o + ` WHERE placed_at = '2026-03-02 10:00:00+02'`:                  zonedCompareVeto,
 		`SELECT id FROM ` + o + ` WHERE '2026-03-02 10:00:00+02' = placed_at`:                  zonedCompareVeto,
