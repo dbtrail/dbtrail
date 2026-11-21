@@ -959,11 +959,29 @@ How many clients may be connected to the PostgreSQL port at once, 1 to 1024. One
 
 ### `pg-router-max-source-connections`
 
-How many connections to your own PostgreSQL servers the PostgreSQL router holds at once, across all servers, 1 to 1024. A client uses one while a statement the source answers (or its transaction) runs there; past the limit that statement is refused with error 53300. This keeps the port from using up the source's own connection slots.
+How many connections to your own PostgreSQL servers the PostgreSQL router holds at once, across all servers, 1 to 1024. A client uses one while a statement the source answers (or its transaction) runs there; past the limit that statement waits for one to be given back, up to 30 seconds, and is then refused with error 53300. This keeps the port from using up the source's own connection slots.
 
 - Default: 16.
 - Example: `pg-router-max-source-connections = 32`
 - Environment variable: `BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS`
+- Read by: pg-router.
+
+### `pg-router-cost-threshold`
+
+For a server with a forwarding user: a statement the copy answers as PostgreSQL does goes to the copy only when it is expensive on your PostgreSQL. This is the plan cost that counts as expensive: the Total Cost at the top of the plan EXPLAIN gives on the source, asked before the statement runs. Below it, and with no sequential scan over BINTRAIL_PG_ROUTER_SCAN_ROWS rows, the source answers, by its indexes (a read by a primary key costs about 1 to 12). 0 turns this rule off.
+
+- Default: 50000.
+- Example: `pg-router-cost-threshold = 100000`
+- Environment variable: `BINTRAIL_PG_ROUTER_COST_THRESHOLD`
+- Read by: pg-router.
+
+### `pg-router-scan-rows`
+
+For a server with a forwarding user: a statement the copy answers as PostgreSQL does goes to the copy when the plan EXPLAIN gives on the source has a sequential scan (any Seq Scan, at any depth) estimated at this many rows or more, whatever its cost. 0 turns this rule off; it cannot be 0 together with BINTRAIL_PG_ROUTER_COST_THRESHOLD.
+
+- Default: 1000000.
+- Example: `pg-router-scan-rows = 500000`
+- Environment variable: `BINTRAIL_PG_ROUTER_SCAN_ROWS`
 - Read by: pg-router.
 
 ### `pg-router-max-wait`

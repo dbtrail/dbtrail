@@ -1,6 +1,8 @@
 package pgshim
 
 import (
+	"fmt"
+
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
@@ -37,7 +39,25 @@ func (s *session) stmtRoute(st *preparedStatement) routeDecision {
 	}
 	// Classified with a stand-in for each argument, as Parse classifies it;
 	// screened as the client wrote it, each $n a value of its own type.
-	return s.route(s.classify(st.probeText()), st.query)
+	d := s.route(s.classify(st.probeText()), st.query)
+	if !byCostApplies(d) {
+		return d
+	}
+	// The source's plan, asked once for the statement, before any argument
+	// exists (route_cost.go): its Describe and every execution are answered
+	// by the same side.
+	if st.byCost.side != "" {
+		return st.byCost
+	}
+	d, keep, stop := s.routeByCost(st.query, len(st.paramOIDs) > 0)
+	if keep || stop != nil && stop.code != "57014" {
+		// A source that could not be reached is kept too: this is asked again
+		// by every message of the statement (its Bind, its note), and each
+		// would wait for the source to answer once more. It goes there, whose
+		// error the client gets.
+		st.byCost = d
+	}
+	return d
 }
 
 // cloneBind copies a Bind message, whose buffers the next message reuses.
@@ -102,6 +122,7 @@ func (s *session) portalToSource(p *portal) (ok bool) {
 		return false
 	}
 	p.onSource = true
+	p.sourcePath = up.sent["search_path"]
 	p.cols, p.types, p.rows, p.tag = nil, nil, nil, ""
 	return true
 }
@@ -299,7 +320,7 @@ func (s *session) bindOnSource(st *preparedStatement, m *pgproto3.Bind) {
 	}
 	s.dropPortal(m.DestinationPortal)
 	s.ext.portals[m.DestinationPortal] = &portal{
-		name: m.DestinationPortal, stmt: st, onSource: true,
+		name: m.DestinationPortal, stmt: st, onSource: true, sourcePath: up.sent["search_path"],
 		resultFormats: append([]int16(nil), m.ResultFormatCodes...),
 		route:         s.stmtRoute(st),
 	}
@@ -414,6 +435,14 @@ func (s *session) executeOnSource(p *portal, maxRows uint32) {
 	defer done()
 	up.ctx = ctx
 	defer func() { up.ctx = nil }()
+	// Which tables it reads is confirmed once the batch is over
+	// (syncOnSource): until then what the source sends marks every table.
+	if proof := s.proveReads(p.stmt.query); proof != nil && proof.path == p.sourcePath {
+		// Only for a portal bound under the search_path of now: the source
+		// resolved its names when it was bound.
+		s.proving = proof
+	}
+	defer func() { s.proving = nil }()
 	if err := up.send(&pgproto3.Execute{Portal: p.name, MaxRows: maxRows}, &pgproto3.Flush{}); err != nil {
 		s.sourceLostExt(&errSourceLost{"it could not be written to: " + err.Error()})
 		return
@@ -490,5 +519,38 @@ func (s *session) syncOnSource() {
 		return
 	}
 	s.followSourceStatus(up, tx)
+	if !up.unsafe {
+		if lost := s.confirmPending(up); lost != nil {
+			s.loseSource(lost.why)
+			s.afterSource(up)
+			return
+		}
+	} else if len(s.src.pending) > 0 {
+		s.src.markAll()
+	}
+	if s.src.any() && !s.knownValid && s.bound.CopyWait != nil && !up.unsafe {
+		// The batch sent the client the source's rows: where the source
+		// stands now, once the batch is over (#2985, knownLSN).
+		if _, perr, lost := s.positionAfter(up); lost != nil {
+			s.loseSource(lost.why)
+		} else if perr != nil {
+			s.logger.Debug("pgshim: the source did not say its WAL position after a batch", "code", perr.code, "err", perr.msg)
+		}
+	}
 	s.afterSource(up)
+}
+
+// positionAfter reads the source's WAL position on up, outside any batch,
+// and keeps it as the connection's known one.
+func (s *session) positionAfter(up *upstream) (uint64, *pgErr, *errSourceLost) {
+	cell, perr, lost := s.cellOnSource(up, sourceWALPositionSQL)
+	if lost != nil || perr != nil {
+		return 0, perr, lost
+	}
+	lsn, ok := parseLSN(string(cell))
+	if !ok {
+		return 0, &pgErr{"XX000", fmt.Sprintf("%q is not a WAL position", cell)}, nil
+	}
+	s.knownLSN, s.knownValid = lsn, true
+	return lsn, nil, nil
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/hiderules"
 	"github.com/dbtrail/dbtrail/internal/pgbaseline"
+	"github.com/dbtrail/dbtrail/internal/pgshim"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
@@ -88,6 +89,14 @@ type pgPortFixture struct {
 	// port's bound on connections to the sources.
 	entry   func(*console.ServerEntry)
 	sources int
+	// sourceWait, when set, is how long a statement waits for a connection
+	// to the source when sources are all taken (#2985).
+	sourceWait time.Duration
+	// cost is when a statement the copy can answer goes there rather than
+	// to the source. nil turns routing by plan off: these fixtures hold a
+	// few rows, which every plan finds cheap, and what they test is the
+	// screen.
+	cost *pgshim.CostPolicy
 }
 
 func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx pgPortFixture) pgExtEnv {
@@ -167,6 +176,13 @@ func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx
 	router := &pgRouterPort{srv: srv, addr: freeAddr(t), maxConns: 32, poll: 20 * time.Millisecond, out: io.Discard, tls: tlsConfig, routes: routes}
 	if fx.sources > 0 {
 		router.sources = newPGSourceSlots(fx.sources)
+		if fx.sourceWait > 0 {
+			router.sources.wait = fx.sourceWait
+		}
+	}
+	router.cost = fx.cost
+	if router.cost == nil {
+		router.cost = &pgshim.CostPolicy{}
 	}
 	portCtx, stopPort := context.WithCancel(context.Background())
 	served := make(chan struct{})

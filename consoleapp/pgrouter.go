@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -138,9 +139,11 @@ func addPGRouterFlags(cmd *cobra.Command) {
 	f.Int("workers", defaultPGRouterWorkers, fmt.Sprintf("How many statements run on the copy at once, 1 to %d. The rest wait their turn. Env BINTRAIL_PG_ROUTER_WORKERS.", maxPGRouterWorkers))
 	f.Int("threads", defaultPGRouterThreads, fmt.Sprintf("How many threads each statement may use, 1 to %d. Env BINTRAIL_PG_ROUTER_THREADS.", maxPGRouterThreads))
 	f.Int("max-connections", defaultPGRouterMaxConns, fmt.Sprintf("How many clients may be connected at once, 1 to %d; one more is refused with an error. Env BINTRAIL_PG_ROUTER_MAX_CONNECTIONS.", maxPGRouterMaxConns))
-	f.Int("max-source-connections", defaultPGRouterMaxSourceConns, fmt.Sprintf("How many connections to the servers' own PostgreSQL this process holds at once, across every server, 1 to %d. A client holds one while a statement the source answers, or its transaction block, runs there; past the limit, the statement that needed one is refused with an error (53300). Env BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS.", maxPGRouterMaxSourceConns))
+	f.Int("max-source-connections", defaultPGRouterMaxSourceConns, fmt.Sprintf("How many connections to the servers' own PostgreSQL this process holds at once, across every server, 1 to %d. A client holds one while a statement the source answers, or its transaction block, runs there; past the limit, the statement that needed one waits for one to be given back, up to 30 seconds, and is then refused with an error (53300). Env BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS.", maxPGRouterMaxSourceConns))
 	f.String("status-addr", "", "Address to serve the port's status on (host:port, e.g. 127.0.0.1:9092): /status, as JSON, says per server which side answered each statement and why, and /metrics this process's Prometheus metrics. Empty: none. It asks for no password. Env BINTRAIL_PG_ROUTER_STATUS_ADDR.")
 	f.Bool("status-statements", false, "Keep a row per statement shape and side in /status (values blanked, table and column names kept): whoever reaches --status-addr then reads the names of the tables and columns your clients query. Env BINTRAIL_PG_ROUTER_STATUS_STATEMENTS.")
+	f.Float64("cost-threshold", pgshim.DefaultCostThreshold, "With a server's forwarding user, a statement the copy answers as PostgreSQL does goes to the copy only when it is expensive on the source: when the Total Cost at the top of its plan (EXPLAIN on the source, before it runs) is at least this, or a sequential scan in the plan is estimated at --scan-rows rows or more; otherwise the source answers it, by its indexes (a read by a primary key costs about 1 to 12). 0 turns this rule off. Env BINTRAIL_PG_ROUTER_COST_THRESHOLD.")
+	f.Int64("scan-rows", pgshim.DefaultScanRows, "With a server's forwarding user, a statement the copy answers as PostgreSQL does goes to the copy when a sequential scan in its plan on the source (any Seq Scan node, at any depth) is estimated at this many rows or more, whatever its cost. 0 turns this rule off. Env BINTRAIL_PG_ROUTER_SCAN_ROWS.")
 	f.String("max-wait", "", "How long a statement waits for its turn when every worker is busy, e.g. 30s or 2m; past it the client gets an error. Empty or 0: no limit of its own, and the five minutes one statement may take, its wait included, is what ends it. Env BINTRAIL_PG_ROUTER_MAX_WAIT.")
 	f.Int("sql-port-max-rows", console.DefaultSQLPortMaxRows, "Most rows one statement returns; a result with more is refused, not cut. Env BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS.")
 }
@@ -164,6 +167,10 @@ type pgRouterSettings struct {
 	// StatusStatements keeps its per-statement table.
 	StatusAddr       string
 	StatusStatements bool
+	// Cost is when a statement the copy answers as PostgreSQL does goes
+	// there rather than to the source (--cost-threshold,
+	// --scan-rows).
+	Cost pgshim.CostPolicy
 	// TLS is the operator's certificate (--tls-cert, --tls-key), nil when
 	// none is set: the port then serves one made up at start.
 	TLS *shim.PortTLS
@@ -250,6 +257,9 @@ func pgRouterSettingsFrom(cmd *cobra.Command) (pgRouterSettings, error) {
 			return st, err
 		}
 	}
+	if st.Cost, err = pgRouterCostFrom(cmd); err != nil {
+		return st, err
+	}
 	st.StatusStatements, _ = f.GetBool("status-statements")
 	if !f.Changed("status-statements") {
 		if v := os.Getenv("BINTRAIL_PG_ROUTER_STATUS_STATEMENTS"); v != "" {
@@ -325,6 +335,83 @@ func pgRouterAddressLine(listen string, container bool) string {
 	return "PostgreSQL router: that address is reached from other machines. Whoever reaches it can try the port's password, and reads the copy of every PostgreSQL server with it; keep it behind a firewall.\n"
 }
 
+// pgRouterCostFrom reads --cost-threshold and --scan-rows, or
+// their variables, and refuses what no plan can be compared with.
+func pgRouterCostFrom(cmd *cobra.Command) (pgshim.CostPolicy, error) {
+	f := cmd.Flags()
+	var pol pgshim.CostPolicy
+	costName, rowsName := "--cost-threshold", "--scan-rows"
+	pol.CostThreshold, _ = f.GetFloat64("cost-threshold")
+	if !f.Changed("cost-threshold") {
+		if v := os.Getenv("BINTRAIL_PG_ROUTER_COST_THRESHOLD"); v != "" {
+			costName = "BINTRAIL_PG_ROUTER_COST_THRESHOLD"
+			var err error
+			if pol.CostThreshold, err = strconv.ParseFloat(strings.TrimSpace(v), 64); err != nil {
+				return pol, fmt.Errorf("%s=%q is not a number: it is the plan cost from which a statement goes to the copy", costName, v)
+			}
+		}
+	}
+	pol.ScanRows, _ = f.GetInt64("scan-rows")
+	if !f.Changed("scan-rows") {
+		if v := os.Getenv("BINTRAIL_PG_ROUTER_SCAN_ROWS"); v != "" {
+			rowsName = "BINTRAIL_PG_ROUTER_SCAN_ROWS"
+			var err error
+			if pol.ScanRows, err = strconv.ParseInt(strings.TrimSpace(v), 10, 64); err != nil {
+				return pol, fmt.Errorf("%s=%q is not a whole number: it is the rows of a sequential scan from which a statement goes to the copy", rowsName, v)
+			}
+		}
+	}
+	switch {
+	case math.IsNaN(pol.CostThreshold) || math.IsInf(pol.CostThreshold, 0):
+		return pol, fmt.Errorf("%s must be a number a plan's cost can be compared with, and %v is not one", costName, pol.CostThreshold)
+	case pol.CostThreshold < 0:
+		return pol, fmt.Errorf("%s must be 0 or more: it is %v", costName, pol.CostThreshold)
+	case pol.ScanRows < 0:
+		return pol, fmt.Errorf("%s must be 0 or more: it is %d", rowsName, pol.ScanRows)
+	case pol.CostThreshold == 0 && pol.ScanRows == 0:
+		return pol, fmt.Errorf("%s and %s are both 0, so no statement could ever go to the copy through a forwarding user; set one of them", costName, rowsName)
+	}
+	return pol, nil
+}
+
+// pgCostRuleWords says when a statement goes to the copy by its plan, for
+// the startup lines.
+func pgCostRuleWords(pol pgshim.CostPolicy) string {
+	costWords := fmt.Sprintf("%g", pol.CostThreshold)
+	if pol.CostThreshold < 1e15 {
+		costWords = groupThousands(int64(math.Ceil(pol.CostThreshold)))
+	}
+	cost := fmt.Sprintf("its plan there (EXPLAIN) costs %s or more (--cost-threshold)", costWords)
+	scan := fmt.Sprintf("its plan there (EXPLAIN) has a sequential scan of %s rows or more (--scan-rows)", groupThousands(pol.ScanRows))
+	switch {
+	case pol.CostThreshold > 0 && pol.ScanRows > 0:
+		return cost + ", or has a sequential scan of " + groupThousands(pol.ScanRows) + " rows or more (--scan-rows)"
+	case pol.CostThreshold > 0:
+		return cost + "; the rule on sequential scans is off (--scan-rows 0)"
+	case pol.ScanRows > 0:
+		return scan + "; the rule on cost is off (--cost-threshold 0)"
+	}
+	return "no rule is set, and every statement the copy can answer goes to the copy"
+}
+
+// groupThousands writes n with a comma between each three digits.
+func groupThousands(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	neg := strings.HasPrefix(s, "-")
+	s = strings.TrimPrefix(s, "-")
+	var b strings.Builder
+	for i, c := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(c)
+	}
+	if neg {
+		return "-" + b.String()
+	}
+	return b.String()
+}
+
 // pgRouterStartupLines says, at start-up, where the port will be, how a
 // client reaches a server on it, and what this process may use.
 func pgRouterStartupLines(st pgRouterSettings, memory, memoryFrom string, memoryErr error, servers int, serversExist bool) string {
@@ -335,7 +422,7 @@ func pgRouterStartupLines(st pgRouterSettings, memory, memoryFrom string, memory
 	}
 	b.WriteString(".\n")
 	b.WriteString("PostgreSQL router: it serves PostgreSQL servers only. The copy answers reads, in each server's mode (fresh or fast, said below).\n")
-	fmt.Fprintf(&b, "PostgreSQL router: with a server's forwarding user (bintrail-console server forward-user), each statement is answered by the copy only when the copy is known to answer it as PostgreSQL does, and by the server's own PostgreSQL otherwise, as well as a transaction block a client opens; read-only, at most %d connections there at once (--max-source-connections). A server without a forwarding user is answered from the copy alone.\n", st.MaxSourceConns)
+	fmt.Fprintf(&b, "PostgreSQL router: with a server's forwarding user (bintrail-console server forward-user), each statement is answered by the copy only when the copy is known to answer it as PostgreSQL does, and by the server's own PostgreSQL otherwise, as well as a transaction block a client opens; read-only, at most %d connections there at once (--max-source-connections). Of what the copy can answer, only a statement that is expensive on the source goes to the copy, which has no index: %s. A server without a forwarding user is answered from the copy alone.\n", st.MaxSourceConns, pgCostRuleWords(st.Cost))
 	switch {
 	case st.StatusAddr != "" && st.StatusStatements:
 		fmt.Fprintf(&b, "PostgreSQL router: http://%s/status says which side answered each statement and why, with a row per statement shape, which names tables and columns (values are blanked); that address asks for no password.\n", st.StatusAddr)
@@ -466,7 +553,7 @@ func runPGRouter(cmd *cobra.Command, _ []string) error {
 		defer stopStatus()
 	}
 	port := &pgRouterPort{srv: srv, addr: st.Listen, maxConns: st.MaxConns, poll: console.DefaultFollowInterval, out: os.Stderr, tls: served.Config,
-		sources: newPGSourceSlots(st.MaxSourceConns), routes: routes}
+		sources: newPGSourceSlots(st.MaxSourceConns), routes: routes, cost: &st.Cost}
 	return port.serve(ctx)
 }
 
@@ -515,6 +602,9 @@ type pgRouterPort struct {
 	// routes counts which side answered each statement (#2770); nil
 	// counts nothing.
 	routes *pgRouteStats
+	// cost is when a statement the copy can answer goes there rather than
+	// to the source; nil for pgshim's default.
+	cost *pgshim.CostPolicy
 
 	mu    sync.Mutex
 	bound string
@@ -617,7 +707,7 @@ func (p *pgRouterPort) serve(ctx context.Context) error {
 		p.bound, p.stop, p.passwords = ln.Addr().String(), cancel, passwords
 		p.mu.Unlock()
 		slog.Info("PostgreSQL router: the port is open", "listen", ln.Addr().String())
-		err = servePGPortRouted(child, p.srv, ln, p.maxConns, budget, p.tls, sources, p.routes)
+		err = servePGPortRouted(child, p.srv, ln, p.maxConns, budget, p.tls, sources, p.routes, p.cost)
 		cancel()
 		p.mu.Lock()
 		p.bound, p.stop, p.passwords = "", nil, nil
@@ -682,35 +772,63 @@ func servePGPortWithin(ctx context.Context, srv *console.Server, ln net.Listener
 // sources, all of them together (--max-source-connections).
 type pgSourceSlots struct {
 	ch chan struct{}
+	// wait is how long a statement waits for one when every one is taken,
+	// the time a statement waits in line for the copy (#2985).
+	wait time.Duration
 }
 
+// pgSourceSlotWait is how long a statement waits for a connection to the
+// source when the port holds as many as it opens: the copy's line
+// (sqlsandbox.DefaultMaxWait). A slot is given back as soon as a statement
+// outside a transaction block has its answer, so the wait is usually a few
+// milliseconds; only blocks held open for longer make it run out. The line
+// has no length of its own: each client waits for one slot at most, and the
+// port's client limit (--max-connections) bounds the clients.
+const pgSourceSlotWait = sqlsandbox.DefaultMaxWait
+
 func newPGSourceSlots(n int) *pgSourceSlots {
-	return &pgSourceSlots{ch: make(chan struct{}, n)}
+	return &pgSourceSlots{ch: make(chan struct{}, n), wait: pgSourceSlotWait}
 }
 
 // limit is how many there may be.
 func (p *pgSourceSlots) limit() int { return cap(p.ch) }
 
-// acquire takes one, without waiting; release gives it back, once.
-func (p *pgSourceSlots) acquire() (release func(), ok bool) {
+// acquire takes one, waiting for it up to p.wait while ctx lasts; release
+// gives it back, once.
+func (p *pgSourceSlots) acquire(ctx context.Context) (release func(), ok bool) {
+	give := func() func() {
+		var once sync.Once
+		return func() { once.Do(func() { <-p.ch }) }
+	}
 	select {
 	case p.ch <- struct{}{}:
-		var once sync.Once
-		return func() { once.Do(func() { <-p.ch }) }, true
+		return give(), true
 	default:
+	}
+	if p.wait <= 0 {
 		return nil, false
 	}
+	t := time.NewTimer(p.wait)
+	defer t.Stop()
+	select {
+	case p.ch <- struct{}{}:
+		return give(), true
+	case <-ctx.Done():
+	case <-t.C:
+	}
+	return nil, false
 }
 
 // servePGPortWith is servePGPortWithin with the bound on connections to the
 // sources (#2771).
 func servePGPortWith(ctx context.Context, srv *console.Server, ln net.Listener, maxConns int, budget *pgshim.ResultBudget, tlsConfig *tls.Config, sources *pgSourceSlots) error {
-	return servePGPortRouted(ctx, srv, ln, maxConns, budget, tlsConfig, sources, nil)
+	return servePGPortRouted(ctx, srv, ln, maxConns, budget, tlsConfig, sources, nil, nil)
 }
 
 // servePGPortRouted is servePGPortWith with the tally of which side answered
-// each statement (#2770); nil counts nothing.
-func servePGPortRouted(ctx context.Context, srv *console.Server, ln net.Listener, maxConns int, budget *pgshim.ResultBudget, tlsConfig *tls.Config, sources *pgSourceSlots, routes *pgRouteStats) error {
+// each statement (#2770), nil counting nothing, and when a statement the copy
+// can answer goes there rather than to the source, nil for pgshim's default.
+func servePGPortRouted(ctx context.Context, srv *console.Server, ln net.Listener, maxConns int, budget *pgshim.ResultBudget, tlsConfig *tls.Config, sources *pgSourceSlots, routes *pgRouteStats, cost *pgshim.CostPolicy) error {
 	logger := slog.Default()
 	// Accept returns when the listener is closed; the connections end with
 	// ctx (pgshim closes each one's socket), and Serve waits for them.
@@ -722,7 +840,7 @@ func servePGPortRouted(ctx context.Context, srv *console.Server, ln net.Listener
 	// travel is refused on this wire, so nothing waits on it; the engine
 	// asks for it all the same.
 	gate := shim.NewGate(defaultFlashbackMaxFullTable)
-	return pgshim.Serve(ctx, ln, pgshim.Config{Login: pgPortLogin(srv, pgRouterQueryTimeout, gate, logger, sources, routes), Logger: logger, MaxConns: maxConns, ResultBudget: budget, TLS: tlsConfig})
+	return pgshim.Serve(ctx, ln, pgshim.Config{Login: pgPortLogin(srv, pgRouterQueryTimeout, gate, logger, sources, routes, cost), Logger: logger, MaxConns: maxConns, ResultBudget: budget, TLS: tlsConfig})
 }
 
 // pgPortLogin is the port's login: the port's passwords, then the server.
@@ -736,7 +854,7 @@ func servePGPortRouted(ctx context.Context, srv *console.Server, ln net.Listener
 // sources bounds the connections to the servers' sources that the logins'
 // connections share (#2771), and routes counts which side answered each of
 // their statements (#2770; nil counts nothing).
-func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, logger *slog.Logger, sources *pgSourceSlots, routes *pgRouteStats) pgshim.LoginFunc {
+func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, logger *slog.Logger, sources *pgSourceSlots, routes *pgRouteStats, cost *pgshim.CostPolicy) pgshim.LoginFunc {
 	return func(ctx context.Context, user, database string, password *pgshim.Password, drop func()) (*pgshim.Binding, *pgshim.Error) {
 		// Before the passwords are read: a connection opened with an
 		// application login is served only if no login changed since
@@ -853,7 +971,7 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			}
 			closers = append(closers, untrack)
 			bound.Forward = &pgshim.Forward{DSN: fwdDSN, Acquire: sources.acquire, Limit: sources.limit(), Timeout: timeout,
-				Barred: pgForwardBarred(tgt.ID, tgt.TimeTravelRefusal, routes, logger)}
+				Barred: pgForwardBarred(tgt.ID, tgt.TimeTravelRefusal, routes, logger), Cost: cost}
 		case fwdRefused != "":
 			bound.Forward = &pgshim.Forward{Refused: fwdRefused}
 		}
@@ -872,6 +990,30 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		// names resolved where PostgreSQL resolves them, and a column the
 		// statement did not name headed as PostgreSQL heads it (#2803).
 		bound.Answered = copySQL.NoteAnswered
+		// How far the copy's last answer on this connection reaches, so one
+		// older than what the source already answered it is not given
+		// (#2985): the instant of its tails when every table it read had
+		// them, none when it read a snapshot alone.
+		bound.RunAge = func() pgshim.CopyAge {
+			a := copySQL.LastRunAge()
+			age := pgshim.CopyAge{Read: a.Read()}
+			if a.Tailed {
+				age.Through = a.Through
+			}
+			return age
+		}
+		// The copy waits for the source's position on a connection the
+		// source answered, then answers (#2985).
+		bound.CopyWait = func(ctx context.Context, lsn uint64) (pgshim.CopyWaitOutcome, string) {
+			outcome, why := copySQL.WaitPGTailsPast(ctx, lsn)
+			switch outcome {
+			case console.PGCopyReached:
+				return pgshim.CopyReached, why
+			case console.PGCopyNotReached:
+				return pgshim.CopyNotReached, why
+			}
+			return pgshim.CopyNoWait, why
+		}
 		bound.Run = func(ctx context.Context, statement string, opts pgshim.RunOptions) (sqlsandbox.Result, error) {
 			if timeout > 0 {
 				var cancel context.CancelFunc
