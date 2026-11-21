@@ -293,12 +293,16 @@ const freshTailsWait = 3 * time.Second
 func (s *Server) statementTailsFresh(ctx context.Context, k *tailKeeper, tables, read []views.BaselineTable, wait time.Duration) (out []views.BaselineTable, through time.Time, throughID uint64, ok bool, missing string) {
 	deadline := time.Now().Add(wait)
 	woke := false
-	// publishedSince says whether an update published after ch was taken.
-	// The reads below (the tails, then what was published, then each
-	// table's state) are three holds of the lock, not one: an update
-	// published between them makes them disagree, and a verdict drawn from
-	// two updates is no one's (#3088). The statement then looks again.
+	// publishedSince says whether an update published after ch was taken,
+	// within the statement's time. The reads below (the tails, then what
+	// was published, then each table's state) are three holds of the lock,
+	// not one: an update published between them makes them disagree, and a
+	// verdict drawn from two updates is no one's (#3088). The statement
+	// then looks again.
 	publishedSince := func(ch <-chan struct{}) bool {
+		if ctx.Err() != nil || time.Until(deadline) <= 0 {
+			return false
+		}
 		select {
 		case <-ch:
 			return true
