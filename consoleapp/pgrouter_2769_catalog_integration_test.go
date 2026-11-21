@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -67,13 +68,14 @@ var ownersOut = regexp.MustCompile(`\|(postgres|pg_database_owner|anyone)(\||$)`
 
 // psqlLines is what psql printed, with the owner left out and the lines of
 // what the copy has no equivalent of (the source's publications, its access
-// method) dropped.
+// method, and the NOT NULL constraints a PostgreSQL 18 names and psql 18's
+// \d+ lists: the port says it is a 14, which has none) dropped.
 func psqlLines(out string) string {
 	var keep []string
 	skip := false
 	for _, l := range strings.Split(out, "\n") {
 		switch {
-		case strings.HasPrefix(l, "Publications:"):
+		case strings.HasPrefix(l, "Publications:"), strings.HasPrefix(l, "Not-null constraints:"):
 			skip = true
 			continue
 		case skip && strings.HasPrefix(l, "    "):
@@ -95,36 +97,84 @@ func TestIntegrationPGRouterCatalog(t *testing.T) {
 	portURL := fmt.Sprintf("postgres://anyone:tok@%s:%s/pgsrv?sslmode=disable", env.host, env.port)
 	dir := t.TempDir()
 
+	// Every psql there is to run (psqlClients): each major writes \dt, \d
+	// and \l as catalog statements of its own (#3059).
+	clients := psqlClients(t, ctx)
+
 	t.Run("psql", func(t *testing.T) {
-		psql, err := exec.LookPath("psql")
-		if err != nil {
+		if len(clients) == 0 {
 			t.Skip("psql is not installed here")
 		}
-		skipPsqlBefore16(t, ctx, psql)
-		for _, c := range []string{`\dt c2769*`, `\dn c2769*`, `\dt ` + catSchema + `.*`, `\d ` + catTable, `\d ` + catItems, `\d+ ` + catTable, `\d+ ` + catItems} {
-			run := func(u string) string {
-				out, err := exec.CommandContext(ctx, psql, u, "-X", "-A", "-c", c).CombinedOutput()
-				if err != nil {
-					// Each psql version writes these statements its own way:
-					// which one this is, and what it sent (-E echoes it).
-					version, _ := exec.CommandContext(ctx, psql, "--version").CombinedOutput()
-					sent, _ := exec.CommandContext(ctx, psql, u, "-X", "-A", "-E", "-c", c).CombinedOutput()
-					t.Fatalf("psql %s against %s: %v\n%s\n%s\nwhat it sent:\n%s", c, u, err, out, version, sent)
+		// What each psql printed on the port for the commands every version
+		// prints the same way, to compare the versions with each other.
+		same := map[string]map[string]string{}
+		for _, cl := range clients {
+			t.Run(cl.version, func(t *testing.T) {
+				for _, c := range []string{`\dt c2769*`, `\dn c2769*`, `\dt ` + catSchema + `.*`, `\d ` + catTable, `\d ` + catItems, `\d+ ` + catTable, `\d+ ` + catItems} {
+					run := func(u string) (string, bool) {
+						out, err := cl.command(ctx, u, "-X", "-A", "-c", c).CombinedOutput()
+						if err != nil {
+							// Each psql version writes these statements its
+							// own way: what this one sent (-E echoes it).
+							sent, _ := cl.command(ctx, u, "-X", "-A", "-E", "-c", c).CombinedOutput()
+							t.Errorf("psql %s: %s against %s: %v\n%s\nwhat it sent:\n%s", cl.version, c, u, err, out, sent)
+							return "", false
+						}
+						return psqlLines(string(out)), true
+					}
+					s, ok := run(env.sourceDSN)
+					p, ok2 := run(portURL)
+					if !ok || !ok2 {
+						continue
+					}
+					if s != p || !strings.Contains(s, "c2769") {
+						t.Errorf("psql %s: %s\n  the port:\n%s\nthe source:\n%s", cl.version, c, p, s)
+					}
+					if !strings.HasPrefix(c, `\d+`) {
+						if same[c] == nil {
+							same[c] = map[string]string{}
+						}
+						// psql 18 titles \dt's list "List of tables".
+						same[c][cl.version] = strings.Replace(p, "List of tables\n", "List of relations\n", 1)
+					}
+					// In the log, what a person sees: \dt and \d <table>
+					// as this psql prints them on the port.
+					if c == `\dt c2769*` || c == `\d `+catTable {
+						if out, err := cl.command(ctx, portURL, "-X", "-c", c).CombinedOutput(); err == nil {
+							t.Logf("psql %s on the port, %s:\n%s", cl.version, c, out)
+						}
+					}
 				}
-				return psqlLines(string(out))
-			}
-			if s, p := run(env.sourceDSN), run(portURL); s != p || !strings.Contains(s, "c2769") {
-				t.Errorf("psql %s\n  the port:\n%s\nthe source:\n%s", c, p, s)
-			}
+				// \l and \dn list the one database the connection opened and
+				// the copy's schemas, nothing of the server's or the copy's
+				// own. \l has the columns this psql asks for: the locale
+				// provider from 15 on, the ICU rules from 16 on.
+				out, err := cl.command(ctx, portURL, "-X", "-A", "-t", "-c", `\l`, "-c", `\dn`).CombinedOutput()
+				if err != nil {
+					t.Fatalf("psql %s: \\l and \\dn: %v\n%s", cl.version, err, out)
+				}
+				database := "pgsrv|anyone|UTF8|libc|C|C|||"
+				switch {
+				case cl.major < 15:
+					database = "pgsrv|anyone|UTF8|C|C|"
+				case cl.major == 15:
+					database = "pgsrv|anyone|UTF8|C|C||libc|"
+				}
+				if got := strings.TrimSpace(string(out)); got != database+"\nc2769s|anyone\npublic|anyone" {
+					t.Errorf("psql %s: \\l and \\dn on the port:\n%s", cl.version, got)
+				}
+			})
 		}
-		// \l and \dn list the one database the connection opened and the
-		// copy's schemas, nothing of the server's or the copy's own.
-		out, err := exec.CommandContext(ctx, psql, portURL, "-X", "-A", "-t", "-c", `\l`, "-c", `\dn`).CombinedOutput()
-		if err != nil {
-			t.Fatalf("%v\n%s", err, out)
-		}
-		if got := strings.TrimSpace(string(out)); got != "pgsrv|anyone|UTF8|libc|C|C|||\nc2769s|anyone\npublic|anyone" {
-			t.Errorf("\\l and \\dn on the port:\n%s", got)
+		// One copy, one listing: whatever the psql, the port shows the same
+		// tables, schemas and columns. (\d+ is left out: each version prints
+		// columns of its own there, compression from 14 on.)
+		for c, byVersion := range same {
+			first := clients[0].version
+			for _, cl := range clients[1:] {
+				if a, b := byVersion[first], byVersion[cl.version]; a != b {
+					t.Errorf("%s on the port, psql %s:\n%s\npsql %s:\n%s", c, first, a, cl.version, b)
+				}
+			}
 		}
 	})
 
@@ -233,27 +283,115 @@ func TestIntegrationPGRouterCatalog(t *testing.T) {
 			t.Fatal(err)
 		}
 		env.srv.RefreshFollowedFiles()
-		psql, err := exec.LookPath("psql")
-		if err != nil {
+		if len(clients) == 0 {
 			t.Skip("psql is not installed here")
 		}
-		skipPsqlBefore16(t, ctx, psql)
-		out, err := exec.CommandContext(ctx, psql, portURL, "-X", "-c", `\dt *.*`, "-c", `\d `+catText).CombinedOutput()
-		if err != nil {
-			t.Fatalf("%v\n%s", err, out)
-		}
-		got := string(out)
-		for _, gone := range []string{"c2769_items", "doc", "Indexes", "_pkey"} {
-			if strings.Contains(got, gone) {
-				t.Errorf("%q is listed after it was hidden:\n%s", gone, got)
-			}
-		}
-		for _, there := range []string{catTable, " vc ", " iv "} {
-			if !strings.Contains(got, there) {
-				t.Errorf("%q is missing:\n%s", there, got)
-			}
+		for _, cl := range clients {
+			t.Run(cl.version, func(t *testing.T) {
+				// ON_ERROR_STOP: psql's exit status is its last command's, and
+				// a command refused in the middle would leave the checks
+				// below with less to look at than they think.
+				out, err := cl.command(ctx, portURL, "-X", "-v", "ON_ERROR_STOP=1", "-c", `\dt *.*`, "-c", `\d `+catText, "-c", `\d+ `+catText, "-c", `\dn`, "-c", `\d`).CombinedOutput()
+				if err != nil {
+					t.Fatalf("psql %s: %v\n%s", cl.version, err, out)
+				}
+				got := string(out)
+				if strings.Contains(got, "ERROR") {
+					t.Fatalf("psql %s: a command was refused:\n%s", cl.version, got)
+				}
+				for _, gone := range []string{"c2769_items", "doc", "Indexes", "_pkey"} {
+					if strings.Contains(got, gone) {
+						t.Errorf("psql %s: %q is listed after it was hidden:\n%s", cl.version, gone, got)
+					}
+				}
+				for _, there := range []string{catTable, " vc ", " iv "} {
+					if !strings.Contains(got, there) {
+						t.Errorf("psql %s: %q is missing:\n%s", cl.version, there, got)
+					}
+				}
+			})
 		}
 	})
+}
+
+// psqlClient is one psql the catalog test runs against the port.
+type psqlClient struct {
+	// argv runs it: the binary, or `docker run ... <image> psql`.
+	argv []string
+	// version is what it says it is ("14.25"), major the number in front.
+	version string
+	major   int
+}
+
+func (c psqlClient) command(ctx context.Context, args ...string) *exec.Cmd {
+	return exec.CommandContext(ctx, c.argv[0], append(append([]string{}, c.argv[1:]...), args...)...)
+}
+
+// psqlClients are the psql versions to run, oldest first: the one installed,
+// the binaries BINTRAIL_TEST_PSQL_BINS names (a path list:
+// /usr/lib/postgresql/14/bin/psql:/usr/lib/postgresql/17/bin/psql) and the
+// one inside each docker image BINTRAIL_TEST_PSQL_IMAGES names (blanks
+// between them: "postgres:13 postgres:14"), run on the host's network.
+//
+// None is left out quietly: one the environment names that does not run
+// fails the test, and so does a major BINTRAIL_REQUIRE_PSQL_MAJORS names
+// ("13 14 15 16 17 18", what CI sets) that none of them is. No version is
+// skipped for being old: the port answers each one's statements, and a psql
+// it does not know yet fails here by its version.
+func psqlClients(t *testing.T, ctx context.Context) []psqlClient {
+	t.Helper()
+	var candidates [][]string
+	if p, err := exec.LookPath("psql"); err == nil {
+		candidates = append(candidates, []string{p})
+	}
+	for _, p := range filepath.SplitList(os.Getenv("BINTRAIL_TEST_PSQL_BINS")) {
+		if p != "" {
+			candidates = append(candidates, []string{p})
+		}
+	}
+	for _, image := range strings.Fields(os.Getenv("BINTRAIL_TEST_PSQL_IMAGES")) {
+		candidates = append(candidates, []string{"docker", "run", "--rm", "--network", "host", image, "psql"})
+	}
+	var clients []psqlClient
+	seen := map[string]bool{}
+	for _, argv := range candidates {
+		cl := psqlClient{argv: argv}
+		out, err := cl.command(ctx, "--version").CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s --version: %v\n%s", strings.Join(argv, " "), err, out)
+		}
+		// "psql (PostgreSQL) 14.25 (Ubuntu ...)", "psql (PostgreSQL) 19beta1"
+		fields := strings.Fields(string(out))
+		if len(fields) < 3 {
+			t.Fatalf("%s --version answered %q", strings.Join(argv, " "), out)
+		}
+		cl.version = fields[2]
+		digits := 0
+		for digits < len(cl.version) && cl.version[digits] >= '0' && cl.version[digits] <= '9' {
+			digits++
+		}
+		if cl.major, err = strconv.Atoi(cl.version[:digits]); err != nil {
+			t.Fatalf("%s --version answered %q", strings.Join(argv, " "), out)
+		}
+		if !seen[cl.version] {
+			seen[cl.version] = true
+			clients = append(clients, cl)
+		}
+	}
+	sort.SliceStable(clients, func(i, j int) bool { return clients[i].major < clients[j].major })
+	for _, want := range strings.Fields(os.Getenv("BINTRAIL_REQUIRE_PSQL_MAJORS")) {
+		found := false
+		for _, cl := range clients {
+			found = found || strconv.Itoa(cl.major) == want
+		}
+		if !found {
+			t.Fatalf("BINTRAIL_REQUIRE_PSQL_MAJORS names psql %s and none of the %d psql found here is one: give the test one with BINTRAIL_TEST_PSQL_BINS or BINTRAIL_TEST_PSQL_IMAGES", want, len(clients))
+		}
+	}
+	if len(clients) == 0 && os.Getenv("BINTRAIL_REQUIRE_PSQL") != "" {
+		t.Fatal("psql is not installed, and BINTRAIL_REQUIRE_PSQL says it must be")
+	}
+	return clients
 }
 
 // jdbcCatalogProgram prints what DatabaseMetaData says of the fixture's
@@ -382,31 +520,3 @@ const grafanaColumnsQuery = `SELECT quote_ident(column_name) AS "column", data_t
             string_to_array(current_setting('search_path'),',') s
           )
       END`
-
-// skipPsqlBefore16 skips a test of psql's backslash commands when the psql
-// installed is older than 16. Each major version of psql writes \dt and \d
-// as catalog statements of its own, and the port recognizes the ones psql 16
-// and later send (internal/pgshim/catalog_stmts.go). psql 14.25, the one on
-// the CI's ubuntu-22.04 image, sends a \dt with one more relation kind
-// ('s', special), which the port refuses as a catalog statement it does not
-// know: a gap of the port's, older than this test running in CI, to be
-// closed on its own.
-func skipPsqlBefore16(t *testing.T, ctx context.Context, psql string) {
-	t.Helper()
-	out, err := exec.CommandContext(ctx, psql, "--version").Output()
-	if err != nil {
-		t.Fatalf("psql --version: %v", err)
-	}
-	// "psql (PostgreSQL) 14.25 (Ubuntu ...)"
-	fields := strings.Fields(string(out))
-	if len(fields) < 3 {
-		t.Fatalf("psql --version answered %q", out)
-	}
-	major, err := strconv.Atoi(strings.SplitN(fields[2], ".", 2)[0])
-	if err != nil {
-		t.Fatalf("psql --version answered %q", out)
-	}
-	if major < 16 {
-		t.Skipf("psql %s is installed here: the port answers the catalog statements of psql 16 and later, not this version's", fields[2])
-	}
-}

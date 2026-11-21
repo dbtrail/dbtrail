@@ -164,14 +164,18 @@ func TestRelFilterOf(t *testing.T) {
 
 // testCatalogView is a catalog of two tables in two schemas, the session's
 // schema public.
-func testCatalogView() *catalogView {
+func testCatalogView() *catalogView { return testCatalogViewOf(testCatalog()) }
+
+// testCatalogViewOf is the catalog of these tables for the user app, whose
+// schema is public, in the database orders.
+func testCatalogViewOf(tables []CatalogTable) *catalogView {
 	s := &session{user: "app"}
 	s.initSettings("public", "app")
 	s.reported = map[string]string{}
-	s.catalogTables = testCatalog()
+	s.catalogTables = tables
 	s.catalogAt = time.Now()
 	s.database = "orders"
-	s.bound = &Binding{Catalog: func(context.Context) ([]CatalogTable, error) { return testCatalog(), nil }}
+	s.bound = &Binding{Catalog: func(context.Context) ([]CatalogTable, error) { return tables, nil }}
 	v, _ := s.catalog()
 	return v
 }
@@ -192,6 +196,8 @@ type catalogLogin struct {
 	mu   sync.Mutex
 	ran  []string
 	read int
+	// tables are the catalog's, testCatalog's when nil.
+	tables []CatalogTable
 }
 
 func (l *catalogLogin) login(_ context.Context, _, _ string, password *Password, _ func()) (*Binding, *Error) {
@@ -209,6 +215,9 @@ func (l *catalogLogin) login(_ context.Context, _, _ string, password *Password,
 			l.mu.Lock()
 			l.read++
 			l.mu.Unlock()
+			if l.tables != nil {
+				return l.tables, nil
+			}
 			return testCatalog(), nil
 		}}, nil
 }
