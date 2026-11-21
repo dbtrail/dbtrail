@@ -511,8 +511,8 @@ leave out is asked for.
 | `--name` | What to call the server (default: made from its address). It is the user name on the MySQL port |
 | `--schemas` | Comma-separated schemas to record (default: every user schema) |
 | `--flavor` | `mysql` or `mariadb` (default: asked of the server) |
-| `--forward-user` | The forwarding user: what the MySQL port, or the PostgreSQL port, runs statements as on this database when the copy cannot answer (default: asked on a terminal, or `[dbtrail-forward]` in `--defaults-file`) |
-| `--no-forward` | Do not ask for a forwarding user |
+| `--forward-user` | The forwarding user: what the MySQL port, or the PostgreSQL port, runs statements as on this database when the copy cannot answer (default: asked for on a terminal for a MySQL, never for a PostgreSQL, which is asked about the capture account instead; or `[dbtrail-forward]` in `--defaults-file`) |
+| `--no-forward` | Forward nothing: no forwarding user is asked for, and a PostgreSQL is not asked about the capture account |
 | `--capture-account` | PostgreSQL: yes, the port may forward read-only with the user DBTrail connects with, only a `SELECT` whose every table is a table of the copy (default: asked on a terminal, no without one) |
 | `--no-capture-account` | PostgreSQL: no, the port does not forward with the user DBTrail connects with |
 | `-v`, `--verbose` | Also print how to turn on each optional improvement |

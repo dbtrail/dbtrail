@@ -252,3 +252,26 @@ func TestOptions_brokenGroupNamesTheLineOnly(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// capture-account (#3054): DBTrail's own key, read like any other; alone on
+// its line it is on, written with = and nothing after it says nothing.
+func TestParseCaptureAccount(t *testing.T) {
+	for in, want := range map[string]string{
+		"[dbtrail-forward]\ncapture-account=yes\n":          "yes",
+		"[dbtrail-forward]\ncapture_account = NO # later\n": "NO",
+		"[dbtrail-forward]\ncapture-account\n":              "1",
+		"[dbtrail-forward]\nloose-capture-account\n":        "1",
+		"[dbtrail-forward]\ncapture-account=\n":             "",
+		"[dbtrail-forward]\ncapture-account = \"\"\n":        "",
+		"[dbtrail-forward]\nuser=a\n":                       "",
+		"[client]\ncapture-account=yes\n":                   "",
+	} {
+		c, err := Parse([]byte(in), "dbtrail-forward")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.CaptureAccount != want {
+			t.Errorf("%q: %q, want %q", in, c.CaptureAccount, want)
+		}
+	}
+}

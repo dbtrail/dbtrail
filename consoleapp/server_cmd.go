@@ -244,8 +244,8 @@ func init() {
 	f.StringVarP(&srvAdd.Database, "database", "d", "", "PostgreSQL: the database to record")
 	f.StringVar(&srvAdd.Publication, "publication", "", "PostgreSQL: the publication that names the tables to record. You create it; DBTrail checks it")
 	f.StringVar(&srvAdd.Slot, "slot", "", "PostgreSQL: the replication slot, which DBTrail creates (default: bintrail_<database>)")
-	f.StringVar(&srvAdd.ForwardUser, "forward-user", "", "The user the MySQL port, or the PostgreSQL port, runs statements as on this database when the copy cannot answer (default: asked, or [dbtrail-forward] in --defaults-file)")
-	f.BoolVar(&srvAdd.NoForward, "no-forward", false, "Do not ask for a forwarding user")
+	f.StringVar(&srvAdd.ForwardUser, "forward-user", "", "The user the MySQL port, or the PostgreSQL port, runs statements as on this database when the copy cannot answer (default: asked for on a terminal for a MySQL, never for a PostgreSQL, which is asked about the capture account instead; or [dbtrail-forward] in --defaults-file)")
+	f.BoolVar(&srvAdd.NoForward, "no-forward", false, "Forward nothing: no forwarding user is asked for, and a PostgreSQL is not asked about the capture account")
 	f.BoolVar(&srvAdd.CaptureAccount, "capture-account", false, "PostgreSQL: yes, the port may forward read-only with the user DBTrail connects with, only a SELECT whose every table is a table of the copy (default: asked on a terminal, no without one)")
 	f.BoolVar(&srvAdd.NoCaptureAccount, "no-capture-account", false, "PostgreSQL: no, the port does not forward with the user DBTrail connects with")
 	f.BoolVarP(&srvVerbose, "verbose", "v", false, "Also print how to turn on each optional improvement")
@@ -538,12 +538,18 @@ type addInput struct {
 	FwdAsk               bool
 	ask                  asker
 	// Capture is what is done about the capture account once a PostgreSQL
-	// is added (#3054, resolveCapture).
-	Capture captureAnswer
+	// is added (#3054, resolveCapture); captureWhy says why it was not
+	// asked, for captureNotAsked.
+	Capture    captureAnswer
+	captureWhy string
 	// IncludesSkipped counts the option file's !include lines, which were
 	// not followed: worth saying when what they hold is what is missing.
 	IncludesSkipped int
 }
+
+// captureNotMySQL refuses the capture account's flags and key on a MySQL or
+// MariaDB add (#3054).
+const captureNotMySQL = "--capture-account, --no-capture-account and capture-account in the option file are a PostgreSQL's: the MySQL port forwards only as a forwarding user of its own"
 
 // resolveAddInput settles what to add from, in order of who wins: the
 // command line, the option file, the person at the terminal.
@@ -564,6 +570,14 @@ func resolveAddInput(f addFlags, ask asker, stdin io.Reader) (addInput, error) {
 	in.Database, in.Slot, in.Publication = strings.TrimSpace(f.Database), strings.TrimSpace(f.Slot), strings.TrimSpace(f.Publication)
 	if !pg && (in.Database != "" || in.Slot != "" || in.Publication != "") {
 		return addInput{}, errors.New("--database, --slot and --publication are a PostgreSQL's: add --flavor postgres")
+	}
+	// The flags alone, before anything is asked (the option file's key is
+	// read later, with the file).
+	if !pg && (f.CaptureAccount || f.NoCaptureAccount) {
+		return addInput{}, errors.New(captureNotMySQL)
+	}
+	if f.CaptureAccount && f.NoCaptureAccount {
+		return addInput{}, errors.New("--capture-account and --no-capture-account say opposite things: use one")
 	}
 	defaultPort := "3306"
 	if pg {
@@ -704,8 +718,8 @@ func resolveAddInput(f addFlags, ask asker, stdin io.Reader) (addInput, error) {
 		}
 		return in, nil
 	}
-	if f.CaptureAccount || f.NoCaptureAccount || fwdFile.CaptureAccount != "" {
-		return addInput{}, errors.New("--capture-account, --no-capture-account and capture-account in the option file are a PostgreSQL's: the MySQL port forwards only as a forwarding user of its own")
+	if fwdFile.CaptureAccount != "" {
+		return addInput{}, errors.New(captureNotMySQL)
 	}
 	if err := resolveForward(&in, f, fwdFile, ask, ask.Interactive() && !f.PasswordStdin && !fileOnStdin); err != nil {
 		return addInput{}, err
@@ -1006,11 +1020,12 @@ func runServerAdd(ctx context.Context, c *ctlClient, in addInput, verbose bool, 
 	case res.OK:
 		fmt.Fprintf(out, "\nAdded %q. DBTrail is recording its changes.\n", res.Name)
 		// The port's password exists in this answer only: printed before the
-		// forwarding user is asked for or set, so neither a Ctrl-C at the
-		// question nor a refused account loses it.
+		// forwarding user (MySQL) or the capture account (PostgreSQL) is
+		// asked about or set, so neither a Ctrl-C at the question nor a
+		// refused account loses it.
 		if pg {
-			// Not said when the question comes next: it says it itself,
-			// whether it is answered or skipped.
+			// Not said when the capture account is dealt with next: that
+			// says it itself, whatever the answer.
 			printNewServerPortPG(out, res.Port, res.Name, in.FwdUser == "" && in.Capture == captureNone)
 			err := addForwardUserPG(ctx, c, in, res, out)
 			if err == nil {

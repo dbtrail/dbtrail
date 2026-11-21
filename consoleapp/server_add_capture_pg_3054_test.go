@@ -30,6 +30,7 @@ func TestServerAddPostgresCaptureAnswerOutputInEveryCase(t *testing.T) {
 		capture captureAnswer
 		typed   []string // at the question, in turn; "" is Enter
 		fwdUser string
+		why     string
 	}
 	heads := map[string]string{"port turned on": pgAddedHead, "port already on": pgAlreadyOnHead}
 	for _, port := range []string{"port turned on", "port already on"} {
@@ -49,7 +50,9 @@ func TestServerAddPostgresCaptureAnswerOutputInEveryCase(t *testing.T) {
 				head + "\n" + pgCaptureQuestion + "Answer yes or no (Enter is yes).\n" + pgCaptureNoAtQuestion + pgNextLine, false},
 			{"--capture-account", answer{capture: captureYes}, head + "\n" + pgCaptureYes + pgNextLine, true},
 			{"--no-capture-account", answer{capture: captureNo}, head + "\n" + pgCaptureNoFlag + pgNextLine, false},
-			{"no terminal and nothing said", answer{capture: captureNotAsked}, head + "\n" + pgCaptureNotAsked + pgNextLine, false},
+			{"no terminal and nothing said", answer{capture: captureNotAsked, why: "nobody is at a terminal to answer"}, head + "\n" + pgCaptureNotAsked + pgNextLine, false},
+			{"the option file on stdin, on a terminal", answer{capture: captureNotAsked, why: "standard input carried the option file or the password, so nothing could be asked"},
+				head + "\n" + strings.Replace(pgCaptureNotAsked, "nobody is at a terminal to answer", "standard input carried the option file or the password, so nothing could be asked", 1) + pgNextLine, false},
 			{"--forward-user: set as before, nothing asked", answer{fwdUser: "app_ro"}, head + "\n" + pgForwardsWant("app_ro") + pgNextLine, false},
 			{"--no-forward: nothing forwarded", answer{}, head + map[bool]string{true: "", false: "\n"}[port == "port turned on"] + pgNoForwardYet + "\n" + pgNextLine, false},
 		} {
@@ -59,7 +62,7 @@ func TestServerAddPostgresCaptureAnswerOutputInEveryCase(t *testing.T) {
 					d.port = pgPortAlreadyOn()
 				}
 				in := pgAddInput()
-				in.Capture = tc.a.capture
+				in.Capture, in.captureWhy = tc.a.capture, tc.a.why
 				var ask *seqAsker
 				if tc.a.capture == captureAsk {
 					ask = &seqAsker{t: t, tty: true}
@@ -203,7 +206,10 @@ func TestResolveAddInputPostgresCapture(t *testing.T) {
 		{name: "both flags", cnf: plain, flags: addFlags{CaptureAccount: true, NoCaptureAccount: true},
 			wantErr: "--capture-account and --no-capture-account say opposite things: use one"},
 		{name: "a value that is neither yes nor no", cnf: plain + "[dbtrail-forward]\ncapture-account=maybe\n",
-			wantErr: "capture-account under [dbtrail-forward] in the option file is yes or no"},
+			wantErr: `capture-account under [dbtrail-forward] in the option file is yes or no, not "maybe"`},
+		{name: "capture-account= with nothing after it says nothing", cnf: plain + "[dbtrail-forward]\ncapture-account=\n", want: captureNotAsked},
+		{name: "capture-account = \"\" says nothing", cnf: plain + "[dbtrail-forward]\ncapture-account = \"\"\n", want: captureNotAsked},
+		{name: "a comment after the value", cnf: plain + "[dbtrail-forward]\ncapture-account = no # not yet\n", want: captureNo},
 		{name: "--no-forward with --capture-account", cnf: plain, flags: addFlags{NoForward: true, CaptureAccount: true},
 			wantErr: "--no-forward and --capture-account say opposite things: use one"},
 		{name: "--no-forward with the file's yes", cnf: plain + "[dbtrail-forward]\ncapture-account=yes\n", flags: addFlags{NoForward: true},
@@ -239,6 +245,15 @@ func TestResolveAddInputPostgresCapture(t *testing.T) {
 			}
 			if len(ask.asked) != 0 {
 				t.Fatalf("asked before the add: %q", ask.asked)
+			}
+			if in.Capture == captureNotAsked {
+				want := "nobody is at a terminal to answer"
+				if tc.tty {
+					want = "standard input carried the option file or the password, so nothing could be asked"
+				}
+				if in.captureWhy != want {
+					t.Fatalf("why not asked: %q, want %q", in.captureWhy, want)
+				}
 			}
 		})
 	}
