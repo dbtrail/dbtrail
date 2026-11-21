@@ -179,3 +179,21 @@ func TestMySQLRouteDSNUnchanged(t *testing.T) {
 		t.Error("a flavor that is neither MySQL nor PostgreSQL took a forwarding account")
 	}
 }
+
+// TestPGRouteAccountStateRefusesAReplicationURL: a stored forwarding URL is
+// held to what setting one is held to. A value edited by hand that asks for a
+// replication connection is not used, in any of the spellings PostgreSQL
+// reads for it.
+func TestPGRouteAccountStateRefusesAReplicationURL(t *testing.T) {
+	const src = "postgres://repl:cap@db.example.com:5432/shop?sslmode=require"
+	const plain = "postgres://app_ro:pw@db.example.com:5432/shop?sslmode=require"
+	if state, cfg := pgRouteAccountState(plain, src); state != routeSeparate || cfg == nil {
+		t.Fatalf("an ordinary forwarding URL: state %v, want routeSeparate", state)
+	}
+	for _, v := range []string{"database", "true", "on", "1", "yes", "false", ""} {
+		stored := plain + "&replication=" + v
+		if state, cfg := pgRouteAccountState(stored, src); state != routeUnreadable || cfg != nil {
+			t.Errorf("replication=%s: state %v (cfg %v), want routeUnreadable and no URL to connect with", v, state, cfg)
+		}
+	}
+}

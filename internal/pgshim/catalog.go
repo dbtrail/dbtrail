@@ -277,79 +277,41 @@ func readsCatalog(q string) bool {
 	return catalogWords.MatchString(plain) || catalogFuncs.MatchString(plain)
 }
 
-// plainText is a statement lowercased with its comments, string literals
+// plainText is a statement lowercased with its comments and string literals
 // (E” escapes and dollar quotes included) blanked and its double quotes
-// taken out, so a quoted name reads as the name.
+// taken out, so a quoted name reads as the name. The text is cut as
+// PostgreSQL's scanner cuts it (scanSQL); what follows something that could
+// not be read is kept as written, lowercased, so a name in it is still seen.
 func plainText(q string) string {
+	toks, why := scanSQL(q)
 	var b strings.Builder
-	for i := 0; i < len(q); {
-		c := q[i]
-		switch {
-		case c == '-' && i+1 < len(q) && q[i+1] == '-':
-			for i < len(q) && q[i] != '\n' {
-				i++
-			}
+	end := 0
+	for i, t := range toks {
+		// A quoted name stands apart from a word written against it
+		// (FROM"pg_class"), and stays joined to the dot of a qualified one.
+		quoted := t.kind == scQuoted || i > 0 && toks[i-1].kind == scQuoted
+		if t.start > end || quoted && !t.isOp(".") && !(i > 0 && toks[i-1].isOp(".")) {
 			b.WriteByte(' ')
-		case c == '/' && i+1 < len(q) && q[i+1] == '*':
-			for depth := 0; i < len(q); {
-				if i+1 < len(q) && q[i] == '/' && q[i+1] == '*' {
-					depth++
-					i += 2
-				} else if i+1 < len(q) && q[i] == '*' && q[i+1] == '/' {
-					depth--
-					i += 2
-					if depth == 0 {
-						break
-					}
-				} else {
-					i++
-				}
-			}
-			b.WriteByte(' ')
-		case c == '\'':
-			escapes := i > 0 && (q[i-1] == 'e' || q[i-1] == 'E')
-			j := i + 1
-			for j < len(q) {
-				if escapes && q[j] == '\\' {
-					j += 2
-					continue
-				}
-				if q[j] == '\'' {
-					if j+1 < len(q) && q[j+1] == '\'' {
-						j += 2
-						continue
-					}
-					break
-				}
-				j++
-			}
-			b.WriteString(" '' ")
-			i = j + 1
-		case c == '$':
-			// A dollar quote: $$...$$ or $tag$...$tag$.
-			j := i + 1
-			for j < len(q) && (q[j] == '_' || q[j] >= 'a' && q[j] <= 'z' || q[j] >= 'A' && q[j] <= 'Z' || q[j] >= '0' && q[j] <= '9' && j > i+1) {
-				j++
-			}
-			if j < len(q) && q[j] == '$' {
-				tag := q[i : j+1]
-				if end := strings.Index(q[j+1:], tag); end >= 0 {
-					b.WriteString(" '' ")
-					i = j + 1 + end + len(tag)
-					continue
-				}
-			}
-			b.WriteByte(c)
-			i++
-		case c == '"':
-			i++
-		default:
-			if c >= 'A' && c <= 'Z' {
-				c += 'a' - 'A'
-			}
-			b.WriteByte(c)
-			i++
 		}
+		switch {
+		case t.kind == scUnicode && strings.HasSuffix(t.text, `"`):
+			// A name with Unicode escapes: kept as written, quotes out.
+			b.WriteString(" " + strings.ToLower(strings.ReplaceAll(t.text, `"`, "")) + " ")
+		case t.kind == scString, t.kind == scEscape, t.kind == scPrefix, t.kind == scDollar, t.kind == scUnicode:
+			b.WriteString(" '' ")
+		default:
+			b.WriteString(strings.ToLower(t.text))
+		}
+		end = t.end
+	}
+	if why != "" {
+		// The scanner stopped at a blank, a comment or the token it could
+		// not read: the rest starts there.
+		for end < len(q) && strings.IndexByte(" \t\n\r\f", q[end]) >= 0 {
+			end++
+		}
+		b.WriteByte(' ')
+		b.WriteString(strings.ToLower(q[end:]))
 	}
 	return b.String()
 }

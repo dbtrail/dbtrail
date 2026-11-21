@@ -78,6 +78,31 @@ func (c *sessionCmd) tag() string {
 	return "SELECT 1"
 }
 
+// sourceText is the statement the port sends the source for a BEGIN, a SET
+// TRANSACTION, a COMMIT or a ROLLBACK: written here from the modes that were
+// read, so it holds nothing else. A block is opened READ ONLY in so many
+// words, whatever the connection's default is.
+func (c *sessionCmd) sourceText() (string, *pgErr) {
+	if perr := checkModes(c.modes); perr != nil {
+		return "", perr
+	}
+	modes := "READ ONLY"
+	if c.modes.iso != "" {
+		modes = "ISOLATION LEVEL " + strings.ToUpper(c.modes.iso) + ", " + modes
+	}
+	switch c.kind {
+	case cmdBegin:
+		return "BEGIN " + modes, nil
+	case cmdSetTx:
+		return "SET TRANSACTION " + modes, nil
+	case cmdCommit:
+		return "COMMIT", nil
+	case cmdRollback:
+		return "ROLLBACK", nil
+	}
+	return "", &pgErr{"XX000", "not a transaction statement"}
+}
+
 // returnsRows says whether the statement answers with rows (SHOW and the
 // functions), which the port then describes and answers itself.
 func (c *sessionCmd) returnsRows() bool { return c.kind == cmdShow || c.kind == cmdFunc }
@@ -134,102 +159,54 @@ type token struct {
 	text string
 }
 
-// lexSession splits a statement into tokens, skipping blanks and comments.
-// ok is false for anything this does not read: a $1, a U& string, a dollar
-// quote, an unterminated quote or comment.
+// lexSession splits a statement into tokens, skipping blanks and comments,
+// cut where PostgreSQL's scanner cuts them (scanSQL). ok is false for
+// anything this does not read: a $1, a U& string, a dollar quote, a string
+// with a letter in front or in more than one piece, a number with letters
+// run into it, an unterminated quote or comment.
 func lexSession(q string) (toks []token, ok bool) {
-	i := 0
-	for i < len(q) {
-		c := q[i]
-		switch {
-		case c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v':
-			i++
-		case c == '-' && i+1 < len(q) && q[i+1] == '-':
-			for i < len(q) && q[i] != '\n' {
+	st, why := scanSQL(q)
+	if why != "" {
+		return nil, false
+	}
+	for i := 0; i < len(st); i++ {
+		t := st[i]
+		switch t.kind {
+		case scWord:
+			toks = append(toks, token{tokIdent, strings.ToLower(t.text)})
+		case scQuoted:
+			toks = append(toks, token{tokQIdent, t.text})
+		case scString, scEscape:
+			lit := q[t.start:t.end]
+			if t.kind == scEscape {
+				lit = lit[1:]
+			}
+			s, n, ok := readQuoted(lit, '\'', t.kind == scEscape)
+			if !ok || n != len(lit) || t.continued {
+				return nil, false
+			}
+			toks = append(toks, token{tokString, s})
+		case scNumber:
+			if t.junk {
+				return nil, false
+			}
+			toks = append(toks, token{tokNumber, t.text})
+		case scOp:
+			if (t.text == "-" || t.text == "+") && i+1 < len(st) && st[i+1].kind == scNumber && !st[i+1].junk && st[i+1].start == t.end {
+				// A sign written against its number.
+				text := st[i+1].text
+				if t.text == "-" {
+					text = "-" + text
+				}
+				toks = append(toks, token{tokNumber, text})
 				i++
+				continue
 			}
-		case c == '/' && i+1 < len(q) && q[i+1] == '*':
-			// Comments nest, as on PostgreSQL.
-			for depth := 0; ; {
-				if i+1 >= len(q) {
-					return nil, false
-				}
-				switch {
-				case q[i] == '/' && q[i+1] == '*':
-					depth++
-					i += 2
-				case q[i] == '*' && q[i+1] == '/':
-					depth--
-					i += 2
-				default:
-					i++
-				}
-				if depth == 0 {
-					break
-				}
+			if strings.Contains("=,();.", t.text) {
+				toks = append(toks, token{tokPunct, t.text})
+				continue
 			}
-		case c == '\'':
-			s, n, ok := readQuoted(q[i:], '\'', false)
-			if !ok {
-				return nil, false
-			}
-			toks = append(toks, token{tokString, s})
-			i += n
-		case (c == 'e' || c == 'E') && i+1 < len(q) && q[i+1] == '\'':
-			s, n, ok := readQuoted(q[i+1:], '\'', true)
-			if !ok {
-				return nil, false
-			}
-			toks = append(toks, token{tokString, s})
-			i += 1 + n
-		case c == '"':
-			s, n, ok := readQuoted(q[i:], '"', false)
-			if !ok || s == "" {
-				return nil, false
-			}
-			toks = append(toks, token{tokQIdent, s})
-			i += n
-		case c >= '0' && c <= '9', c == '.' && i+1 < len(q) && q[i+1] >= '0' && q[i+1] <= '9',
-			(c == '-' || c == '+') && i+1 < len(q) && (q[i+1] >= '0' && q[i+1] <= '9' || q[i+1] == '.'):
-			j := i
-			if c == '-' || c == '+' {
-				j++
-			}
-			for j < len(q) && (q[j] >= '0' && q[j] <= '9' || q[j] == '.') {
-				j++
-			}
-			if j < len(q) && (q[j] == 'e' || q[j] == 'E') {
-				k := j + 1
-				if k < len(q) && (q[k] == '+' || q[k] == '-') {
-					k++
-				}
-				if k < len(q) && q[k] >= '0' && q[k] <= '9' {
-					for k < len(q) && q[k] >= '0' && q[k] <= '9' {
-						k++
-					}
-					j = k
-				}
-			}
-			text := q[i:j]
-			if c == '+' {
-				text = text[1:]
-			}
-			toks = append(toks, token{tokNumber, text})
-			i = j
-		case sessIdentStart(c):
-			j := i
-			for j < len(q) && sessIdentPart(q[j]) {
-				j++
-			}
-			if j < len(q) && q[j] == '\'' {
-				// U&'...', B'...', X'...', N'...': strings this does not read.
-				return nil, false
-			}
-			toks = append(toks, token{tokIdent, strings.ToLower(q[i:j])})
-			i = j
-		case strings.IndexByte("=,();.", c) >= 0:
-			toks = append(toks, token{tokPunct, string(c)})
-			i++
+			return nil, false
 		default:
 			return nil, false
 		}

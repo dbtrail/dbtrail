@@ -155,6 +155,7 @@ last_answer_error=yes
 		}(), `server=7f4d577430b48821
 forwarding=off
 forwarding_off_reason=the server has no forwarding account
+forwarding_account=none
 sql_mode=fresh
 copy_snapshot=2026-11-20T13:30:00Z
 copy_age_seconds=5400

@@ -2,6 +2,7 @@ package consoleapp
 
 import (
 	"context"
+	"net/url"
 	"slices"
 	"strconv"
 	"time"
@@ -30,6 +31,9 @@ type pgPortStatusInput struct {
 	// ForwardingOff is why nothing of this connection is sent to the
 	// source, "" when statements may go there.
 	ForwardingOff string
+	// ForwardingAccount names the account statements are sent with
+	// (#3054), "" for none.
+	ForwardingAccount string
 	// Mode is "fresh" or "fast", "" when not known.
 	Mode string
 	// CopyUnavailable is why SQL on the copy is not available for the
@@ -66,6 +70,15 @@ func pgPortStatusRows(in pgPortStatusInput) [][2]string {
 		out = append(out, [2]string{"forwarding", "on"})
 	} else {
 		out = append(out, [2]string{"forwarding", "off"}, [2]string{"forwarding_off_reason", in.ForwardingOff})
+	}
+	// The MySQL port's row of that name: which account, or none.
+	// Named only while statements may go there: with forwarding off the
+	// account in force is none, whatever is saved.
+	switch {
+	case in.ForwardingOff != "":
+		out = append(out, [2]string{"forwarding_account", "none"})
+	case in.ForwardingAccount != "":
+		out = append(out, [2]string{"forwarding_account", in.ForwardingAccount})
 	}
 	if in.Mode != "" {
 		out = append(out, [2]string{"sql_mode", in.Mode})
@@ -185,6 +198,7 @@ func pgPortStatusFor(srv *console.Server, tgt console.FlashbackTarget, bound *pg
 	return func(ctx context.Context, last pgshim.LastAnswer) [][2]string {
 		in := pgPortStatusInput{Server: tgt.ID, Now: time.Now(), Last: last}
 		in.ForwardingOff = pgForwardingOff(bound.Forward, tgt.TimeTravelRefusal)
+		in.ForwardingAccount = pgForwardingAccount(bound.Forward)
 		in.Mode, _ = srv.SQLModeOf(tgt.ID)
 		if tgt.SQL == nil {
 			in.CopyUnavailable = tgt.SQLUnavailable
@@ -198,4 +212,21 @@ func pgPortStatusFor(srv *console.Server, tgt console.FlashbackTarget, bound *pg
 		routes.counted(tgt.ID, &in)
 		return pgPortStatusRows(in)
 	}
+}
+
+// pgForwardingAccount names the account f sends statements with, "" when it
+// has none: the capture account (console.PGForwardsWithCapture) or the
+// server's forwarding user by name.
+func pgForwardingAccount(f *pgshim.Forward) string {
+	switch {
+	case f == nil || f.DSN == "":
+		return ""
+	case f.CaptureAccount:
+		return console.PGForwardsWithCapture
+	}
+	u, err := url.Parse(f.DSN)
+	if err != nil || u.User == nil {
+		return "forwarding user"
+	}
+	return "forwarding user " + u.User.Username()
 }

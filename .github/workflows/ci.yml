@@ -177,6 +177,10 @@ jobs:
               # What runs in which shard, and how one package is split by
               # test name: a change to it must run the shards.
               - 'scripts/mysql-integration-shard.sh'
+              # Which of the console's tests need a PostgreSQL, and the
+              # check that each ran: a change to it must run both jobs that
+              # call it.
+              - 'scripts/pg-console-tests.sh'
               - '!internal/console/assets_*_test.go'
             console:
               - 'internal/console/**'
@@ -210,6 +214,10 @@ jobs:
               - 'scripts/pull-test-images.sh'
               - '.github/actions/**'
               - 'scripts/mysql-integration-shard.sh'
+              # Which of the console's tests need a PostgreSQL, and the
+              # check that each ran: a change to it must run both jobs that
+              # call it.
+              - 'scripts/pg-console-tests.sh'
               - '!internal/console/**'
               - '!consoleapp/**'
               - '!cmd/bintrail-console/**'
@@ -625,6 +633,14 @@ jobs:
         if: env.RUN == 'true'
         run: bash scripts/mysql-integration-shard.sh check-split /tmp/mysql-it.out
 
+      # consoleapp's tests that need a PostgreSQL skip in these shards and run
+      # in the `integration-postgres-source` job, which picks them by name. A
+      # test that skipped here for want of a PostgreSQL under a name that job
+      # does not pick would run nowhere (scripts/pg-console-tests.sh).
+      - name: The console tests without a PostgreSQL here run in the PostgreSQL job
+        if: env.RUN == 'true'
+        run: bash scripts/pg-console-tests.sh check-mysql-log /tmp/mysql-it.out
+
       # The false-green tripwires: these tests must have PASSED in some shard,
       # not merely not failed. They live in different shards, so they are
       # checked here over every shard's log.
@@ -1000,7 +1016,7 @@ jobs:
         run: |
           set -o pipefail
           go test -tags=integration -race -p 1 -count=1 -v \
-            ./internal/pgcapture/ ./internal/pgstreamrun/ ./internal/pgbaseline/ ./internal/pgshim/ ./internal/pgverifysource/ ./internal/pgcompare/ 2>&1 | tee /tmp/pg-it.out
+            ./internal/pgcapture/ ./internal/pgstreamrun/ ./internal/pgbaseline/ ./internal/pgshim/ ./internal/pgverifysource/ ./internal/pgcompare/ ./internal/pgdrill/ 2>&1 | tee /tmp/pg-it.out
           grep -q -- '--- PASS: TestOne_EndToEnd_PostgresToIndexToRecovery' /tmp/pg-it.out \
             || { echo "FATAL: PG end-to-end integration test did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationPGVerifyLiveSourceUnderWrites2198' /tmp/pg-it.out \
@@ -1012,40 +1028,58 @@ jobs:
           grep -q -- '--- PASS: TestIntegrationPGCompare' /tmp/pg-it.out \
             || { echo "FATAL: the PostgreSQL source-against-copy comparison did not run — false-green tripwire" >&2; exit 1; }
 
-      # The console's tests that need a MySQL index and a PostgreSQL source at
-      # once (#2813). In the MySQL shards they skip for want of a PostgreSQL,
-      # so this is where they run; selected by name, since the rest of
-      # consoleapp's integration tests have their own shards. On two
-      # PostgreSQL versions, 16 and the newest: what they exercise is the
-      # console and the wire, and the snapshot under them is tested on every
-      # version above, but 18 changed how generated columns travel. The
-      # tripwire is the point: a renamed test, or a pattern that stops
-      # matching, would otherwise leave this step green with nothing run.
-      - name: Console tests that need MySQL and PostgreSQL together
+      # The forwarding test over TLS needs a PostgreSQL that serves TLS, as its
+      # superuser, and one that is not the source above: it makes the
+      # forwarding account again there, which the source's grants would refuse.
+      # The image carries a self-signed certificate (Debian's "snakeoil"),
+      # enough for a test that asks whether the connection is encrypted and
+      # that verify-full refuses a certificate nobody signed. Only on the
+      # cells the console's tests run on. Not named "Start PostgreSQL source":
+      # scripts/check-postgres-source-lockstep.sh reads those steps.
+      - name: Start a PostgreSQL that serves TLS (bintrail-test-postgres-tls, ${{ matrix.postgres }})
         if: env.RUN == 'true' && (matrix.postgres == '16' || matrix.postgres == '18')
         run: |
-          set -o pipefail
-          # psql is the client the port is for: the test runs it, and with
-          # BINTRAIL_REQUIRE_PSQL its absence is a failure, not a skip.
+          docker run -d --name bintrail-test-postgres-tls \
+            -e POSTGRES_PASSWORD=testpg \
+            -e POSTGRES_DB=pgtest \
+            -p 15433:5432 \
+            "${TEST_IMAGES}/library/postgres:${{ matrix.postgres }}" \
+            -c ssl=on -c ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem -c ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
+          # Ready is a connection over TCP that TLS encrypted, not a server
+          # that answers: see the source's probe above for why TCP.
+          for i in $(seq 1 60); do
+            if [ "$(docker exec bintrail-test-postgres-tls psql 'host=127.0.0.1 user=postgres password=testpg dbname=pgtest sslmode=require' -XAtc 'SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()' 2>/dev/null)" = t ]; then
+              echo "The PostgreSQL that serves TLS is ready."; exit 0
+            fi
+            sleep 2
+          done
+          echo "The PostgreSQL that serves TLS did not become ready in time" >&2
+          docker logs bintrail-test-postgres-tls >&2 || true
+          exit 1
+
+      # The console's tests that need a MySQL index and a PostgreSQL source at
+      # once (#2813). In the MySQL shards they skip for want of a PostgreSQL,
+      # so this is where they run. Which tests, and what proves none was left
+      # out or skipped: scripts/pg-console-tests.sh. Nothing here names a
+      # test, so a new one runs without a change to this file. On two
+      # PostgreSQL versions, 16 and the newest: what they exercise is the
+      # console and the wire, and the snapshot under them is tested on every
+      # version above, but 18 changed how generated columns travel.
+      - name: Console tests that need MySQL and PostgreSQL together
+        if: env.RUN == 'true' && (matrix.postgres == '16' || matrix.postgres == '18')
+        env:
+          # psql is the client the port is for: the tests run it, and with
+          # this its absence is a failure, not a skip.
+          BINTRAIL_REQUIRE_PSQL: "1"
+          BINTRAIL_TEST_PG_TLS_DSN: "postgres://postgres:testpg@127.0.0.1:15433/pgtest"
+          BINTRAIL_REQUIRE_PG_TLS: "1"
+        run: |
           command -v psql >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends postgresql-client; }
-          BINTRAIL_REQUIRE_PSQL=1 go test -tags=integration -race -p 1 -count=1 -v \
-            -run '^(TestIntegrationPGRouter|TestIntegrationPGSnapshotUpdate|TestIntegrationPGCaptureStatus|TestIntegrationPGNewTableIsIncluded_2759|TestIntegrationPGSnapshotUpdateGeneratedColumn|TestIntegrationServerAddPostgresWarnsAboutARoleWithoutSelect_3022|TestIntegrationServerStartPostgresWithARoleWithoutSelect_3022)$' ./consoleapp/ 2>&1 | tee /tmp/pg-console-it.out
+          bash scripts/pg-console-tests.sh run /tmp/pg-console-it.out
+          # A subtest, which the script's check does not read: psql itself
+          # talked to the port.
           grep -q -- '--- PASS: TestIntegrationPGRouter/psql ' /tmp/pg-console-it.out \
             || { echo "FATAL: psql did not run against the PostgreSQL router — false-green tripwire" >&2; exit 1; }
-          grep -q -- '^--- PASS: TestIntegrationPGRouter ' /tmp/pg-console-it.out \
-            || { echo "FATAL: the PostgreSQL router end-to-end test did not run — false-green tripwire" >&2; exit 1; }
-          grep -q -- '^--- PASS: TestIntegrationPGSnapshotUpdate ' /tmp/pg-console-it.out \
-            || { echo "FATAL: the PostgreSQL scheduled snapshot update test did not run — false-green tripwire" >&2; exit 1; }
-          grep -q -- '^--- PASS: TestIntegrationPGCaptureStatus ' /tmp/pg-console-it.out \
-            || { echo "FATAL: the PostgreSQL capture status test did not run — false-green tripwire" >&2; exit 1; }
-          grep -q -- '^--- PASS: TestIntegrationPGNewTableIsIncluded_2759 ' /tmp/pg-console-it.out \
-            || { echo "FATAL: the PostgreSQL new-table test did not run — false-green tripwire" >&2; exit 1; }
-          grep -q -- '^--- PASS: TestIntegrationPGSnapshotUpdateGeneratedColumn ' /tmp/pg-console-it.out \
-            || { echo "FATAL: the PostgreSQL generated-column test did not run — false-green tripwire" >&2; exit 1; }
-          grep -q -- '^--- PASS: TestIntegrationServerAddPostgresWarnsAboutARoleWithoutSelect_3022 ' /tmp/pg-console-it.out \
-            || { echo "FATAL: the PostgreSQL server add read-access test did not run — false-green tripwire" >&2; exit 1; }
-          grep -q -- '^--- PASS: TestIntegrationServerStartPostgresWithARoleWithoutSelect_3022 ' /tmp/pg-console-it.out \
-            || { echo "FATAL: the PostgreSQL start read-access test did not run — false-green tripwire" >&2; exit 1; }
 
   integration-postgres-extensions:
     # Extension-type round-trip coverage (#1210): PostGIS geometry/geography
@@ -1441,5 +1475,7 @@ jobs:
         run: bash scripts/check-mysql-shard-lockstep.sh
       - name: PostgreSQL source settings lockstep (ci.yml, release.yaml)
         run: bash scripts/check-postgres-source-lockstep.sh
+      - name: The check that no PostgreSQL console test is left out or skipped
+        run: bash scripts/pg-console-tests.sh --self-test
       - name: Test images come from the mirror, not Docker Hub (ci.yml, release.yaml, managed-pg-smoke.yml)
         run: bash scripts/check-test-image-registry.sh

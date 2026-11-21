@@ -100,6 +100,7 @@ var reasonMeans = map[string]string{
 	ReasonCopyColumnsDiffer: "the copy answered with a column it writes otherwise than PostgreSQL",
 	ReasonCatalogNotOnCopy:  "a catalog statement the copy does not answer",
 	ReasonReadOnly:          "not a read, and the port sends nothing that writes to the source",
+	ReasonCaptureGate:       "the server forwards with the capture account, and the statement is not a SELECT whose every table is a table of the copy, so the copy answered it",
 	ReasonCheapPlan:         "the statement is cheap on the source, by its plan there, and the copy has no index",
 	ReasonExplainFailed:     "the source's plan for the statement could not be had, so the source answers it",
 	ReasonCopyTooOld:        "the copy could not show it had caught up with what the source already answered this connection about a table the statement reads",
