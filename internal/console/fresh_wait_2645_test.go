@@ -159,7 +159,7 @@ func (r *waitRig) publish(t *testing.T) {
 	ctx := context.Background()
 	r.s.statementTails(ctx, r.k, r.read, r.read)
 	r.k.settle()
-	// The build's install woke the follower (#3088); the test is the
+	// The build's install woke the follower (runBuild); the test is the
 	// follower, and this update is the one that wake asked for. Left
 	// pending, a case's "<-r.k.pub.wake" took it in place of its
 	// statement's own wake, ran its update before the statement looked, and
