@@ -398,7 +398,6 @@ func TestServerAddPostgresWithNoForwardingUserSaysHowToSetOne(t *testing.T) {
 	}
 }
 
-
 // The capture user given where resolveForward did not see it (a caller that
 // built the input itself): setForwardUser refuses it before anything is sent,
 // and names the source as a PostgreSQL.
@@ -536,7 +535,6 @@ func TestPGShellUser(t *testing.T) {
 		}
 	}
 }
-
 
 // --password-stdin spends stdin on the capture password, on a terminal too:
 // the forwarding user's password cannot be asked for, and nothing is sent.

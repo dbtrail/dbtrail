@@ -42,7 +42,9 @@ func TestServerAddPostgresCaptureAnswerOutputInEveryCase(t *testing.T) {
 		}{
 			{"asked, Enter is yes", answer{capture: captureAsk, typed: []string{""}}, head + "\n" + pgCaptureQuestion + pgCaptureYes + pgNextLine, true},
 			{"asked, yes typed", answer{capture: captureAsk, typed: []string{" YES "}}, head + "\n" + pgCaptureQuestion + pgCaptureYes + pgNextLine, true},
-			{"asked, no", answer{capture: captureAsk, typed: []string{"n"}}, head + "\n" + pgCaptureQuestion + pgCaptureNoAtQuestion + pgNextLine, false},
+			{"asked, y", answer{capture: captureAsk, typed: []string{"y"}}, head + "\n" + pgCaptureQuestion + pgCaptureYes + pgNextLine, true},
+			{"asked, n", answer{capture: captureAsk, typed: []string{"n"}}, head + "\n" + pgCaptureQuestion + pgCaptureNoAtQuestion + pgNextLine, false},
+			{"asked, No", answer{capture: captureAsk, typed: []string{"No"}}, head + "\n" + pgCaptureQuestion + pgCaptureNoAtQuestion + pgNextLine, false},
 			{"asked, something else, then no", answer{capture: captureAsk, typed: []string{"maybe", "no"}},
 				head + "\n" + pgCaptureQuestion + "Answer yes or no (Enter is yes).\n" + pgCaptureNoAtQuestion + pgNextLine, false},
 			{"--capture-account", answer{capture: captureYes}, head + "\n" + pgCaptureYes + pgNextLine, true},

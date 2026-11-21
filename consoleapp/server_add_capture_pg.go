@@ -41,9 +41,9 @@ const (
 // parseCaptureValue reads a capture-account line's value.
 func parseCaptureValue(v string) (on bool, ok bool) {
 	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "1", "yes", "true", "on":
+	case "1", "y", "yes", "true", "on":
 		return true, true
-	case "0", "no", "false", "off":
+	case "0", "n", "no", "false", "off":
 		return false, true
 	}
 	return false, false
