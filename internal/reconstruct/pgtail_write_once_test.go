@@ -34,17 +34,17 @@ func writeOnceKeys(n int) []string {
 }
 
 // The row that cannot be written is the first, a middle one or the last of
-// the file, for each way a row is turned down: a refusal that ends the tail
-// (a row filed under another row's key; a large value PostgreSQL did not
-// send and nothing gives) and an error that does not (a row the tail holds
-// that does not read). Whole files and deltas.
+// the file, for each way a row is turned down: a row filed under another
+// row's key, a large value PostgreSQL did not send and nothing gives, and a
+// row the tail holds that does not read. Each is a refusal, which ends the
+// table's tail: none would be written at the next try, and each try would
+// cost the file. Whole files and deltas.
 func TestPGTail_ARowThatCannotBeWrittenLeavesNothing(t *testing.T) {
 	const n = 9
 	keys := writeOnceKeys(n)
 	type damage struct {
 		name    string
-		refusal string // what a *TailRefusal says; "" for an error that is not one
-		errText string
+		refusal string // what the *TailRefusal says
 		// marker: the row is one that arrives not to be written; do is nil.
 		marker bool
 		do     func(t *testing.T, tail *PGTail, key string) (undo func())
@@ -68,7 +68,7 @@ func TestPGTail_ARowThatCannotBeWrittenLeavesNothing(t *testing.T) {
 		// The key's only change in the tail is one whose large value was not
 		// sent, so no earlier change gives it: put in the page, below.
 		{name: "a large value that was not sent", refusal: "PostgreSQL did not send it", marker: true},
-		{name: "a row the tail holds that does not read", errText: "does not read",
+		{name: "a row the tail holds that does not read", refusal: "does not read",
 			do: func(t *testing.T, tail *PGTail, key string) func() {
 				was, held := tail.packed[key]
 				if !held {
@@ -150,10 +150,8 @@ func TestPGTail_ARowThatCannotBeWrittenLeavesNothing(t *testing.T) {
 					switch {
 					case err == nil:
 						t.Fatalf("the write went through with %d rows", rows)
-					case d.refusal != "" && (!asTailRefusal(err, &refusal) || !strings.Contains(refusal.Reason, d.refusal)):
+					case !asTailRefusal(err, &refusal) || !strings.Contains(refusal.Reason, d.refusal):
 						t.Fatalf("want a refusal that says %q, got %v", d.refusal, err)
-					case d.refusal == "" && (asTailRefusal(err, &refusal) || !strings.Contains(err.Error(), d.errText)):
-						t.Fatalf("want an error that says %q and is no refusal, got %v", d.errText, err)
 					}
 					if rows != 0 {
 						t.Fatalf("a write that failed says it wrote %d rows", rows)

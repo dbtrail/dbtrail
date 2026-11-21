@@ -571,7 +571,10 @@ func (t *PGTail) tailRow(key string, ev *query.ResultRow) (map[string]any, error
 		if row, ok := t.held(key, ev); ok {
 			var uerr error
 			if after, uerr = t.unpackImage(key, row); uerr != nil {
-				return nil, uerr
+				// A refusal, as everything else here: the row reads no better
+				// at the next write, and tried again it would cost the whole
+				// file each time.
+				return nil, &TailRefusal{uerr.Error()}
 			}
 		}
 		if after == nil {
