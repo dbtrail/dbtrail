@@ -48,47 +48,48 @@ func hideHostPaths(msg string, roots []string) string {
 			add(resolved)
 		}
 	}
-	slices.SortFunc(clean, func(a, b string) int { return len(b) - len(a) })
-	for _, r := range clean {
-		msg = replaceWholePath(msg, r)
+	if len(clean) == 0 {
+		return msg
 	}
-	return msg
+	slices.SortFunc(clean, func(a, b string) int { return len(b) - len(a) })
+	// One pass over the message as it came, every boundary read from it and
+	// never from what was written out: a marker already in the text (a
+	// client can type one, and the engine repeats what it was given) says
+	// nothing about the path after it. A folder inside one just hidden
+	// (/tmp/tmp, /data/copy/tmp) follows a letter of the hidden one, so it
+	// is not a folder of its own.
+	var b strings.Builder
+	for i := 0; i < len(msg); {
+		if i == 0 || !pathByte(msg[i-1]) {
+			if n := wholePathAt(msg, i, clean); n > 0 {
+				b.WriteString(hiddenPathWord)
+				i += n
+				continue
+			}
+		}
+		b.WriteByte(msg[i])
+		i++
+	}
+	return b.String()
 }
 
-func replaceWholePath(msg, root string) string {
-	var b strings.Builder
-	rest := msg
-	for {
-		i := strings.Index(rest, root)
-		if i < 0 {
-			b.WriteString(rest)
-			return b.String()
+// wholePathAt returns the length of the first of roots (longest first) that
+// msg holds at i as a whole path, or 0. It ends the message, a path
+// component, or is followed by a character that cannot be part of a path. A
+// URL keeps its path: after "scheme://host" a folder follows a letter of the
+// host or a slash, both of which can be part of a path, so the caller never
+// asks here.
+func wholePathAt(msg string, i int, roots []string) int {
+	for _, r := range roots {
+		if !strings.HasPrefix(msg[i:], r) {
+			continue
 		}
-		end := i + len(root)
-		before := byte(0)
-		if i > 0 {
-			before = rest[i-1]
-		} else if b.Len() > 0 {
-			before = b.String()[b.Len()-1]
+		end := i + len(r)
+		if end == len(msg) || msg[end] == '/' || !pathByte(msg[end]) {
+			return len(r)
 		}
-		// Right after a folder already hidden, the match is a folder inside
-		// it (/tmp/tmp, /data/copy/tmp), not a folder of its own.
-		afterHidden := strings.HasSuffix(b.String()+rest[:i], hiddenPathWord)
-		after := byte(0)
-		if end < len(rest) {
-			after = rest[end]
-		}
-		// A URL keeps its path: after "scheme://host" the folder follows a
-		// letter of the host or a slash, both of which can be part of a
-		// path, so it is not taken for a folder of the host.
-		if !pathByte(before) && !afterHidden && (after == 0 || after == '/' || !pathByte(after)) {
-			b.WriteString(rest[:i])
-			b.WriteString(hiddenPathWord)
-		} else {
-			b.WriteString(rest[:end])
-		}
-		rest = rest[end:]
 	}
+	return 0
 }
 
 // pathByte reports whether c can be part of a path name next to a folder.

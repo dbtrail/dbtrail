@@ -281,6 +281,15 @@ func TestHideHostPaths(t *testing.T) {
 		// A folder named like the known one, inside it: replaced once.
 		{"at /tmp/tmp/x", "at " + h + "/tmp/x"},
 		{"at /data/copy/data/copy", "at " + h + "/data/copy"},
+		{"at /data/copy/tmp/x", "at " + h + "/tmp/x"},
+		// The marker typed by a client and repeated by the engine protects
+		// nothing after it.
+		{"typed " + h + "/data/copy/x", "typed " + h + h + "/x"},
+		{"typed '" + h + "/tmp'", "typed '" + h + h + "'"},
+		{h + "/home/svc/.duckdb/stored_secrets", h + h + "/stored_secrets"},
+		// Two folders back to back.
+		{"/data/copy:/tmp/x", h + ":" + h + "/x"},
+		{"[/data/copy, /tmp]", "[" + h + ", " + h + "]"},
 		// Not a known folder: a longer name, a folder inside another one, a
 		// URL, a date, a division.
 		{"/tmpfiles/x", "/tmpfiles/x"},
@@ -325,6 +334,7 @@ func TestHideHostPaths_resolvedFormsAndColons(t *testing.T) {
 			{`pattern "` + form + `/x"`, `pattern "` + h + `/x"`},
 			{`pattern '` + form + `'`, `pattern '` + h + `'`},
 			{"looked in " + form, "looked in " + h},
+			{"typed " + h + form + "/a", "typed " + h + h + "/a"},
 		}
 		for _, c := range cases {
 			if got := hideHostPaths(c.in, roots); got != c.want {
