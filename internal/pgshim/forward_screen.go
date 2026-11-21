@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // The screen a statement passes before it is sent, as the client wrote it,
@@ -145,30 +146,141 @@ func isRollbackTo(qstr string) bool {
 }
 
 // savepointStmt reads a statement that is one SAVEPOINT name, RELEASE
-// [SAVEPOINT] name or ROLLBACK TO [SAVEPOINT] name: kind is "savepoint",
-// "release" or "rollback", "" for any other statement. The name is as
-// plainText leaves it (lowercased, its quotes gone).
+// [SAVEPOINT] name or ROLLBACK [WORK | TRANSACTION] TO [SAVEPOINT] name: kind
+// is "savepoint", "release" or "rollback", "" for any other statement. name
+// is the savepoint's name as PostgreSQL keeps it (nameWords): two spellings
+// of one savepoint give one name, and "A" and a give two.
 func savepointStmt(qstr string) (kind, name string) {
-	plain := strings.TrimRight(strings.TrimSpace(plainText(qstr)), "; \t\r\n")
-	if strings.Contains(plain, ";") {
+	w, ok := nameWords(qstr)
+	if !ok || len(w) < 2 {
 		return "", ""
 	}
-	w := strings.Fields(plain)
-	last := func() string {
-		if len(w) == 0 {
-			return ""
+	// word says whether w[i] is the keyword k: written without quotes.
+	word := func(i int, k string) bool { return i < len(w) && !w[i].quoted && w[i].text == k }
+	// named reads [SAVEPOINT] name from w[i] to the end.
+	named := func(i int) (string, bool) {
+		if len(w) == i+2 && word(i, "savepoint") {
+			i++
 		}
-		return w[len(w)-1]
+		if len(w) != i+1 {
+			return "", false
+		}
+		return w[i].text, true
 	}
 	switch {
-	case len(w) == 2 && w[0] == "savepoint":
-		return "savepoint", w[1]
-	case len(w) >= 2 && len(w) <= 3 && w[0] == "release" && (len(w) == 2 || w[1] == "savepoint"):
-		return "release", last()
-	case rollbackTo(w):
-		return "rollback", last()
+	case word(0, "savepoint"):
+		if len(w) == 2 {
+			return "savepoint", w[1].text
+		}
+	case word(0, "release"):
+		if name, ok := named(1); ok {
+			return "release", name
+		}
+	case word(0, "rollback"):
+		i := 1
+		if word(i, "work") || word(i, "transaction") {
+			i++
+		}
+		if !word(i, "to") {
+			return "", ""
+		}
+		if name, ok := named(i + 1); ok {
+			return "rollback", name
+		}
 	}
 	return "", ""
+}
+
+// nameWord is a keyword or a name of a statement made of nothing else.
+type nameWord struct {
+	// text is the word as PostgreSQL 16 keeps an identifier: one written
+	// without quotes with its ASCII letters in lower case (É stays É: only A
+	// to Z are folded in a UTF-8 database), one written in quotes as it is
+	// written, "" inside it one quote; either cut to 63 bytes, never inside
+	// a character.
+	text   string
+	quoted bool
+}
+
+// maxIdentifierBytes is PostgreSQL's NAMEDATALEN - 1: what it keeps of an
+// identifier, and so what tells two names apart.
+const maxIdentifierBytes = 63
+
+// nameWords splits a statement made only of keywords and names (SAVEPOINT
+// a, ROLLBACK TO "A") into them, comments dropped and the semicolons that
+// end it allowed. ok is false for a statement that holds anything else: a
+// string, a number, an operator, a name written with Unicode escapes
+// (U&"..."), an empty or unterminated quoted name, or a second statement.
+func nameWords(q string) (words []nameWord, ok bool) {
+	isStart := func(c byte) bool { return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= 0x80 }
+	isPart := func(c byte) bool { return isStart(c) || c >= '0' && c <= '9' || c == '$' }
+	clip := func(s string) string {
+		if len(s) <= maxIdentifierBytes {
+			return s
+		}
+		n := maxIdentifierBytes
+		for n > 0 && !utf8.RuneStart(s[n]) {
+			n--
+		}
+		return s[:n]
+	}
+	ended := false
+	for i := 0; i < len(q); {
+		c := q[i]
+		switch {
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v':
+			i++
+		case c == '-' && i+1 < len(q) && q[i+1] == '-':
+			for i < len(q) && q[i] != '\n' && q[i] != '\r' {
+				i++
+			}
+		case c == '/' && i+1 < len(q) && q[i+1] == '*':
+			i = commentEnd(q, i+2)
+		case c == ';':
+			ended = true
+			i++
+		case ended:
+			// Something after the semicolon: another statement.
+			return nil, false
+		case c == '"':
+			var b strings.Builder
+			j, closed := i+1, false
+			for j < len(q) {
+				if q[j] == '"' {
+					if j+1 < len(q) && q[j+1] == '"' {
+						b.WriteByte('"')
+						j += 2
+						continue
+					}
+					closed = true
+					break
+				}
+				b.WriteByte(q[j])
+				j++
+			}
+			if !closed || b.Len() == 0 {
+				return nil, false
+			}
+			words = append(words, nameWord{text: clip(b.String()), quoted: true})
+			i = j + 1
+		case isStart(c):
+			j := i
+			for j < len(q) && isPart(q[j]) {
+				j++
+			}
+			b := []byte(q[i:j])
+			for k, x := range b {
+				if x >= 'A' && x <= 'Z' {
+					b[k] = x + 'a' - 'A'
+				}
+			}
+			words = append(words, nameWord{text: clip(string(b))})
+			i = j
+		default:
+			return nil, false
+		}
+	}
+	return words, true
 }
 
 // verbRefusal is the refusal of a statement that begins with verb.

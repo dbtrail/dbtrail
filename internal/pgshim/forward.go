@@ -929,6 +929,11 @@ func (s *session) tookSavepointStmt(qstr string) {
 		if at >= 0 {
 			s.set, s.sessionLevel = s.savepoints[at].set, s.savepoints[at].sessionLevel
 			s.savepoints = s.savepoints[:at+1]
+		} else {
+			// The source went back to a savepoint this session did not see
+			// made (one made inside a longer text): what the settings were
+			// there is not known, and the ones of now are given again.
+			s.logger.Warn("pgshim: the source rolled back to a savepoint this connection did not follow; the session's settings stay as they are now", "savepoint", name)
 		}
 		// The source went back to its own settings at the savepoint: they
 		// are given again before the next statement.
