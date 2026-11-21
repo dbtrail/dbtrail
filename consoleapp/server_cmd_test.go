@@ -1250,6 +1250,15 @@ func TestServerAddSaysWhereThePortStands(t *testing.T) {
 			port(map[string]any{"enabled": on, "turned_on": true, "routing_on": true, "port": "3309"}),
 			[]string{"The MySQL port is on now", "No password came with the answer. Make one:", "port new-password"},
 			[]string{"shown only now"}},
+		{"turned on, the password made before the server is kept",
+			port(map[string]any{"enabled": on, "turned_on": true, "routing_on": true, "port": "3309", "has_password": true}),
+			[]string{"The MySQL port is on now, with Engine Routing on.", "mysql -h 127.0.0.1 -P 3309 -u shop -p",
+				"Its password is the one made before this server was added, which is not shown again. If it was not kept, make a new one:  bintrail-console port new-password"},
+			[]string{"shown only now", "No password came"}},
+		{"turned on, Engine Routing was turned off before",
+			port(map[string]any{"enabled": on, "turned_on": true, "routing_on": false, "port": "3309", "password": "bfp_abc123", "has_password": true}),
+			[]string{"The MySQL port is on now, with Engine Routing off, as it was saved. The user is the server's name:", "Password (shown only now, keep it): bfp_abc123"},
+			[]string{"Engine Routing on", "made before"}},
 		{"already on, routing on",
 			port(map[string]any{"enabled": on, "turned_on": false, "routing_on": true, "host": "10.0.0.5", "port": "3310", "has_password": true}),
 			[]string{"The MySQL port is on, with Engine Routing on, and takes the password it already has:", "mysql -h 10.0.0.5 -P 3310 -u shop -p"},
@@ -1330,5 +1339,51 @@ func TestMysqlLineUser(t *testing.T) {
 		if got := mysqlLineUser(name); got != want {
 			t.Errorf("mysqlLineUser(%q) = %q, want %q", name, got, want)
 		}
+	}
+}
+
+// What `server add` prints about the MySQL port for each answer the first
+// server can get after something was saved about the port before it. The
+// answers are the ones internal/console's
+// TestCheckRoute_theFirstServerAfterASaveThatChoosesNeitherTurnsThePortOn
+// logs from the real routes. Run with -v to read every text whole.
+func TestServerAddPortTexts_afterSomethingWasSavedBeforeTheFirstServer(t *testing.T) {
+	on, off := true, false
+	for _, tc := range []struct {
+		name string
+		port ctlNewServerPort
+		want string
+	}{
+		{"the monitor login was saved first",
+			ctlNewServerPort{ctlPort: ctlPort{Enabled: &on, Host: "127.0.0.1", Port: "3309", HasPassword: true, RoutingOn: true, Password: "bfp_abc123"}, TurnedOn: true},
+			"\nThe MySQL port is on now, with Engine Routing on. The user is the server's name:\n\n  mysql -h 127.0.0.1 -P 3309 -u shop -p\n\nPassword (shown only now, keep it): bfp_abc123\nStatements for \"shop\" are answered once its first copy is ready.\n\n"},
+		{"a password was made first",
+			ctlNewServerPort{ctlPort: ctlPort{Enabled: &on, Host: "127.0.0.1", Port: "3309", HasPassword: true, RoutingOn: true}, TurnedOn: true},
+			"\nThe MySQL port is on now, with Engine Routing on. The user is the server's name:\n\n  mysql -h 127.0.0.1 -P 3309 -u shop -p\n\nIts password is the one made before this server was added, which is not shown again. If it was not kept, make a new one:  bintrail-console port new-password\nStatements for \"shop\" are answered once its first copy is ready.\n\n"},
+		{"Engine Routing was turned off first",
+			ctlNewServerPort{ctlPort: ctlPort{Enabled: &on, Host: "127.0.0.1", Port: "3309", HasPassword: true, Password: "bfp_abc123"}, TurnedOn: true},
+			"\nThe MySQL port is on now, with Engine Routing off, as it was saved. The user is the server's name:\n\n  mysql -h 127.0.0.1 -P 3309 -u shop -p\n\nPassword (shown only now, keep it): bfp_abc123\nStatements for \"shop\" are answered once its first copy is ready.\n\n"},
+		{"the port was turned off first",
+			ctlNewServerPort{ctlPort: ctlPort{Enabled: &off}},
+			"\nThe MySQL port is off, as it was saved. Turn it on:  bintrail-console port on\n\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			printNewServerPort(&out, &tc.port, "shop", false)
+			t.Logf("MySQL:%s", out.String())
+			if out.String() != tc.want {
+				t.Errorf("got:\n%q\nwant:\n%q", out.String(), tc.want)
+			}
+			var pg bytes.Buffer
+			printNewServerPortPG(&pg, &tc.port, "shop", false)
+			t.Logf("PostgreSQL:%s", pg.String())
+			kept := strings.Contains(pg.String(), "made before this server was added")
+			if wantKept := tc.port.TurnedOn && tc.port.Password == ""; kept != wantKept {
+				t.Errorf("PostgreSQL text says the password was kept: %v, want %v\n%s", kept, wantKept, pg.String())
+			}
+			if strings.Contains(pg.String(), "No password came") {
+				t.Errorf("PostgreSQL text says no password came:\n%s", pg.String())
+			}
+		})
 	}
 }

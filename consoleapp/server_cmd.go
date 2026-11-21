@@ -1020,6 +1020,11 @@ func runServerAdd(ctx context.Context, c *ctlClient, in addInput, verbose bool, 
 // Routing on, and this is the one place its password is shown. Nothing is
 // printed for a DBTrail that says nothing about the port (an older one): the
 // lines after it are then the ones it always printed.
+// portPasswordKeptLine is what adding the first server says about the port's
+// password when one was made before the server was added: it is kept, so the
+// answer shows none.
+const portPasswordKeptLine = "Its password is the one made before this server was added, which is not shown again. If it was not kept, make a new one:  bintrail-console port new-password"
+
 func printNewServerPort(out io.Writer, p *ctlNewServerPort, name string, noForwardYet bool) {
 	if p == nil || p.Enabled == nil {
 		return
@@ -1027,9 +1032,19 @@ func printNewServerPort(out io.Writer, p *ctlNewServerPort, name string, noForwa
 	user := mysqlLineUser(name)
 	switch {
 	case p.TurnedOn:
-		fmt.Fprintf(out, "\nThe MySQL port is on now, with Engine Routing on. The user is the server's name:\n\n  mysql -h %s -u %s -p\n\n", p.where(), user)
+		// Engine Routing is on unless it was turned off before the port was
+		// ever on, which is kept.
+		routing := "on"
+		if !p.RoutingOn {
+			routing = "off, as it was saved"
+		}
+		fmt.Fprintf(out, "\nThe MySQL port is on now, with Engine Routing %s. The user is the server's name:\n\n  mysql -h %s -u %s -p\n\n", routing, p.where(), user)
 		if p.Password != "" {
 			fmt.Fprintf(out, "Password (shown only now, keep it): %s\n", p.Password)
+		} else if p.HasPassword {
+			// A password was made before the server was added, and it was
+			// kept: there is none to show, and none is missing.
+			fmt.Fprintln(out, portPasswordKeptLine)
 		} else {
 			// Turned on by this request and no password in the answer: the
 			// person must not be left thinking one was shown.
@@ -1083,6 +1098,8 @@ func printNewServerPortPG(out io.Writer, p *ctlNewServerPort, name string, noFor
 		fmt.Fprintf(out, "\nThe port for SQL clients is on now. %s\n\n%s\n\n", where, line)
 		if p.Password != "" {
 			fmt.Fprintf(out, "Password (shown only now, keep it): %s\n", p.Password)
+		} else if p.HasPassword {
+			fmt.Fprintln(out, portPasswordKeptLine)
 		} else {
 			fmt.Fprintln(out, "No password came with the answer. Make one:  bintrail-console port new-password")
 		}
