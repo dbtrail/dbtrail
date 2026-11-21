@@ -394,6 +394,12 @@ func TestPGBaseline_MidRunTableFailure_Integration(t *testing.T) {
 	mustExec(t, setup, fmt.Sprintf("GRANT SELECT ON %s TO %s", tblOK, role)) // tblDenied: NO grant
 	mustExec(t, setup, fmt.Sprintf("GRANT pg_read_all_stats TO %s", role))   // pg_replication_slots visibility
 
+	// A role that cannot read a table is refused before anything is written
+	// (#3022), so that check is taken out here: this test is about a table
+	// that fails once the copy is under way, as it still can when the
+	// permission is taken away between the check and the COPY.
+	defer pgbaseline.SetCheckReadAccess(func(context.Context, *pgx.Conn, string, event.Filters) error { return nil })()
+
 	outDir := t.TempDir()
 	_, err = pgbaseline.Run(ctx, pgbaseline.Config{
 		QueryDSN:    limitedDSN(t, baseDSN, role, "testpgb"),
