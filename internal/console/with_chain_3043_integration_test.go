@@ -415,7 +415,7 @@ func TestIntegrationFreshNamesTheEngineResolves_3043(t *testing.T) {
 		"caf\u00e9", "CAF\u00c9", "Caf\u00c9",
 		// 2. The same in quotes, in backticks, and with the accent as a
 		// code point of its own.
-		`"caf\u00e9"`, `"CAF\u00c9"`, "`caf\u00e9`", "`CAF\u00c9`", "cafe\u0301", `"cafe\u0301"`, "CAFE\u0301",
+		"\"caf\u00e9\"", "\"CAF\u00c9\"", "`caf\u00e9`", "`CAF\u00c9`", "cafe\u0301", "\"cafe\u0301\"", "CAFE\u0301",
 		// 3. ASCII, every quoting, mixed case.
 		"orders", "ORDERS", "oRdErS", `"Orders"`, `"ORDERS"`, `"orders"`, "`Orders`", "`orders`", "[orders]", "[Orders]",
 		// 4. A space or a quote inside the quotes.
