@@ -224,8 +224,8 @@ const (
 // text the way the routing screen does (lexSQLSpans), so a mention inside a
 // string, a quoted name or a comment is not one.
 //
-// A message that screen cannot read to its end (a dollar quote, an E''
-// string) is searched as far as it was read: the status statement before
+// A message that screen cannot read to its end (a dollar quote, a string
+// with escapes) is searched as far as it was read: the status statement before
 // the unreadable part is found, one after it is not, and then goes where
 // the message goes. The source refuses it there as a setting it does not
 // have; nothing is answered in the port's name.
