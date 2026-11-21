@@ -6,8 +6,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/pgshim"
 )
 
 // #3054: `server forward-user <server> --capture-account` and
@@ -128,5 +130,32 @@ func TestServerForwardUserCaptureAccountRefusals(t *testing.T) {
 	_, _, c2 := newCaptureDaemon(t, console.ServerEntry{Name: "shop", DSN: "idxuser:idxsecret@tcp(127.0.0.1:1)/idx_shop"})
 	if _, err := runFwd(t, c2, fwdFlags{CaptureAccount: true}); err == nil || !strings.Contains(err.Error(), "the server has no source database, so there is nothing to forward to; set its source first") {
 		t.Errorf("no source: %v", err)
+	}
+}
+
+// SHOW dbtrail.router_status names the account, from a real binding's
+// Forward, whole rows compared.
+func TestPGPortStatusNamesTheForwardingAccount(t *testing.T) {
+	now := time.Date(2026, 11, 21, 15, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name string
+		f    *pgshim.Forward
+		want string
+	}{
+		{"the capture account", &pgshim.Forward{DSN: pgAddSourceURL, CaptureAccount: true},
+			"server=7f4d577430b48821\nforwarding=on\nforwarding_account=capture account, read-only, tables of the copy only\ncopy_snapshot=unknown\ncopy_age_seconds=unknown\nlast_answer=none\n"},
+		{"a forwarding user", &pgshim.Forward{DSN: "postgres://app_ro:pw@pg1:5432/shopdb"},
+			"server=7f4d577430b48821\nforwarding=on\nforwarding_account=forwarding user app_ro\ncopy_snapshot=unknown\ncopy_age_seconds=unknown\nlast_answer=none\n"},
+		{"none", &pgshim.Forward{Refused: console.PGRouteRefusedNoAccount},
+			"server=7f4d577430b48821\nforwarding=off\nforwarding_off_reason=" + console.PGRouteRefusedNoAccount + "\nforwarding_account=none\ncopy_snapshot=unknown\ncopy_age_seconds=unknown\nlast_answer=none\n"},
+	} {
+		in := pgPortStatusInput{Server: "7f4d577430b48821", Now: now}
+		in.ForwardingOff = pgForwardingOff(c.f, nil)
+		in.ForwardingAccount = pgForwardingAccount(c.f)
+		got := statusText(pgPortStatusRows(in))
+		if got != c.want {
+			t.Errorf("%s:\n got:\n%s\nwant:\n%s", c.name, got, c.want)
+		}
+		t.Logf("%s:\n%s", c.name, got)
 	}
 }
