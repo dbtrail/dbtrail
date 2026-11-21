@@ -554,6 +554,29 @@ or column list to any table — bintrail-pg refuses a partial publication at
 startup and in `doctor`, because pgoutput would silently drop the excluded
 changes.
 
+It should also publish **truncate** (also the default). A publication created
+`WITH (publish = 'insert, update, delete')` sends nothing for a `TRUNCATE`, so
+DBTrail never learns that the table was emptied: the removed rows stay in the
+copy and come back in every rebuild, and nothing in the recorded history says
+they are gone. Every insert, update and delete is still captured, so this is a
+**warning**, not a refusal: at the start of capture (once), in `doctor` and the
+server checks (**Publication publishes TRUNCATE**), and on the PostgreSQL
+health card of the web interface. A snapshot taken after the `TRUNCATE` starts
+from what the table holds then; a rebuild of a moment before it still shows
+the removed rows. bintrail-pg does not change the publication; run, as its
+owner or a superuser:
+
+```sql
+ALTER PUBLICATION bintrail_pub SET (publish = 'insert, update, delete, truncate');
+```
+
+`SET (publish = ...)` changes only which operations are published: the
+publication keeps its tables and its other options (`publish_via_partition_root`,
+`publish_generated_columns`). The check runs when capture starts, when the
+doctor runs, and with each health reading (every 30 seconds) while capture
+runs, so a publication changed later is shown on the health card and logged
+when it is first seen.
+
 ```sql
 -- Specific tables (recommended — you control exactly what is captured):
 CREATE PUBLICATION bintrail_pub FOR TABLE public.orders, public.customers;
@@ -606,6 +629,12 @@ bintrail-pg doctor --query-dsn "$PG" --slot bintrail_shop --publication bintrail
   [step 3](#3-replica-identity-full-optional-needed-only-for-undo).
 - **Replica identity holds the primary key** → FAIL for a table whose replica
   identity leaves a primary-key column out: capture skips it.
+- **Publication publishes TRUNCATE** → WARN if the publication leaves
+  `truncate` out of `publish`: a `TRUNCATE` on the source is not recorded, and
+  the rows it removed stay in the copy and in every rebuild. Doctor still exits
+  0, and capture starts. The check prints the `ALTER PUBLICATION ... SET
+  (publish = 'insert, update, delete, truncate')` to run (see
+  [step 4](#4-create-a-publication)).
 - **Read access to the published tables** → WARN if the role cannot read a
   table the first copy reads: no `USAGE` on its schema, or `SELECT` neither on
   the table nor on every column the copy reads. Doctor still exits 0, and
@@ -2501,7 +2530,10 @@ user.
   reversible event: `recover` has no per-row before-images to put back, and a
   `reconstruct` whose window crosses the truncate refuses instead of bringing the
   removed rows back. A multi-table `TRUNCATE a, b` records one marker per
-  published table; a truncate of an out-of-scope table records nothing.
+  published table; a truncate of an out-of-scope table records nothing. All of
+  this needs a publication that publishes `truncate`: without it PostgreSQL
+  sends nothing and no marker is recorded (see
+  [step 4](#4-create-a-publication)).
 - **Other schema changes are inferred, not read.** See
   [Schema changes on PostgreSQL](#schema-changes-on-postgresql).
 - **Sequence cursors are not captured.** The materialized id values in your rows

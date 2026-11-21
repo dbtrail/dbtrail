@@ -33,8 +33,8 @@ func validatePublication(ctx context.Context, conn *pgx.Conn, pubname string, fi
 	// can be created WITH (publish = 'insert'), which silently drops updates and deletes.
 	// Check before the allTables short-circuit.
 	if ops := missingPublishedOps(pubIns, pubUpd, pubDel); len(ops) > 0 {
-		return fmt.Errorf("pgcapture: publication %q does not publish %s — those changes would be silently lost; recreate it WITH (publish = 'insert, update, delete') or leave publish unset for all operations",
-			pubname, strings.Join(ops, ", "))
+		return fmt.Errorf("pgcapture: publication %q does not publish %s — those changes would be silently lost; run %s (it keeps the publication's tables and other options), or leave publish unset for all operations",
+			pubname, strings.Join(ops, ", "), TruncateFixStatement(pubname))
 	}
 	// FOR ALL TABLES covers everything and cannot carry per-table row filters or column
 	// lists (PostgreSQL rejects WHERE/column-lists on FOR ALL TABLES), so it is unambiguously safe.
@@ -167,8 +167,10 @@ func restrictedPublicationError(pubname string, restricted []restrictedTable) er
 
 // missingPublishedOps returns the row-changing operations (insert/update/delete) a
 // publication does NOT publish. pgoutput emits nothing for an unpublished operation,
-// so bintrail would silently miss those changes. TRUNCATE is excluded deliberately —
-// bintrail does not rely on TRUNCATE row events. Pure, so the decision is unit-testable.
+// so bintrail would silently miss those changes. TRUNCATE is not in this fatal set:
+// without it every row change is still captured and only the record of a TRUNCATE
+// (the decoder's marker, #827) is lost, so it is a warning of its own
+// (pubtruncate.go, #3108). Pure, so the decision is unit-testable.
 func missingPublishedOps(ins, upd, del bool) []string {
 	var missing []string
 	if !ins {

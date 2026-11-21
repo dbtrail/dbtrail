@@ -399,7 +399,15 @@ type sourceHealthJSON struct {
 	// with why (pgcapture.HealthSnapshot.NotCaptured). The page shows them in
 	// red, and shows "all FULL" only when both lists are empty.
 	NotCaptured []string `json:"not_captured"`
-	CheckedAt   string   `json:"checked_at"`
+	// TruncateFix is the statement that makes the publication publish
+	// TRUNCATE, present only when it does not (#3108): the zero value means
+	// no warning, so a snapshot written before this field, or one recording
+	// a failed probe, shows none.
+	TruncateFix string `json:"truncate_fix,omitempty"`
+	// TruncateCheckError is why that could not be read, so the page says it
+	// could not check instead of showing nothing, which reads as fine.
+	TruncateCheckError string `json:"truncate_check_error,omitempty"`
+	CheckedAt          string `json:"checked_at"`
 	// ProbeError, when set, means this snapshot records a FAILED probe rather than a
 	// reading — the slot fields are absent/zero. Persisted so the console shows an
 	// explicit "probe failing" state instead of a blank panel (see buildProbeErrorJSON).
@@ -512,11 +520,15 @@ func buildSourceHealthJSON(snap pgcapture.HealthSnapshot, checkedAt time.Time) (
 		ConfirmedFlushLSN:      snap.Slot.ConfirmedFlushLSN.String(),
 		ReplicaIdentityNotFull: snap.ReplicaIdentityNotFull,
 		NotCaptured:            snap.NotCaptured,
+		TruncateFix:            snap.TruncateFix,
 		CheckedAt:              checkedAt.UTC().Format(time.RFC3339),
 	}
 	if snap.Slot.SafeWalSize.Valid {
 		v := snap.Slot.SafeWalSize.Int64
 		h.SafeWalSize = &v
+	}
+	if snap.TruncateErr != nil {
+		h.TruncateCheckError = snap.TruncateErr.Error()
 	}
 	if h.ReplicaIdentityNotFull == nil {
 		h.ReplicaIdentityNotFull = []string{} // marshal as [] not null — a cleaner contract for the frontend
@@ -641,6 +653,11 @@ func streamLoopPG(
 		watch = loadPublicationWatch(indexDB)
 	}
 	publishedUnread := false
+	// truncateWarned starts false: capture's own start line may not have
+	// said it (its read failed, or the publication changed before the first
+	// poll), so the first reading that finds it says it, at worst a second
+	// time.
+	truncateUnread, truncateWarned := false, false
 	pollHealth := func() {
 		pctx, cancel := context.WithTimeout(ctx, healthPollTimeout)
 		defer cancel()
@@ -696,6 +713,24 @@ func streamLoopPG(
 				logger.Warn("pgstreamrun: could not list the publication's tables; until it can be read, a table taken out of the publication is not noticed",
 					"error", snap.PublishedErr)
 			}
+		}
+		// #3108: a publication that stops (or starts again) publishing
+		// TRUNCATE while capture runs. Said when it changes, not every 30
+		// seconds; the web interface shows it on every reading.
+		if failing := snap.TruncateErr != nil; failing != truncateUnread && ctx.Err() == nil && pctx.Err() == nil {
+			truncateUnread = failing
+			if failing {
+				logger.Warn("pgstreamrun: could not read whether the publication publishes TRUNCATE; the web interface says it could not check", "error", snap.TruncateErr)
+			} else {
+				logger.Info("pgstreamrun: whether the publication publishes TRUNCATE is read again")
+			}
+		}
+		if snap.TruncateErr == nil {
+			if snap.TruncateFix != "" && !truncateWarned {
+				logger.Warn("pgstreamrun: the publication does not publish TRUNCATE, so "+pgcapture.TruncateNotRecorded+". Inserts, updates and deletes are captured normally. To record TRUNCATE, run the statement in fix on the source as the publication's owner",
+					"fix", snap.TruncateFix)
+			}
+			truncateWarned = snap.TruncateFix != ""
 		}
 		if snap.PublishedErr == nil {
 			highLSN := max(snap.FlushedLSN, pendingSent, state.lsn)
