@@ -1252,6 +1252,87 @@ described: a driver that prepared it once (pgx, JDBC) is not told other
 columns later. One that the copy refused at its first execution runs on the
 source from then on.
 
+#### Which side answered a statement: `SHOW dbtrail.router_status`
+
+On any connection to the port, this statement says which side answered that
+connection's last statement and why:
+
+```sql
+SELECT count(*) FROM orders WHERE now() IS NOT NULL;
+SHOW dbtrail.router_status;
+```
+
+```text
+           name           |                                     value
+--------------------------+--------------------------------------------------------------------------------
+ server                   | a9d50e10e73cb3b4
+ forwarding               | on
+ sql_mode                 | fast
+ copy_snapshot            | 2026-11-21T00:42:49Z
+ copy_age_seconds         | 1
+ last_answer              | source
+ last_answer_reason       | veto
+ last_answer_reason_means | something in the statement is not known to answer on the copy as on PostgreSQL
+ last_answer_error        | no
+ counting_since           | 2026-11-21T00:42:50Z
+ statements_copy          | 1
+ statements_source        | 12
+ statements_refused       | 1
+ reason_answers_the_same  | 1
+ reason_veto              | 9
+```
+
+It is the PostgreSQL port's counterpart of the MySQL port's `SHOW ROUTER
+STATUS`, with the same row names where they mean the same. The rows:
+
+- `server`: the id of the server this connection reads.
+- `forwarding`: `on` when statements of this connection may go to the source,
+  `off` when the copy answers alone; `forwarding_off_reason` then says why (no
+  forwarding user, or a server that hides tables or columns).
+- `sql_mode`: `fresh` or `fast`.
+- `copy_snapshot` and `copy_age_seconds`: when the server's newest snapshot was
+  taken and how long ago that is, `unknown` before the first snapshot. In fresh
+  mode an answer also reads the changes captured since, so the age of what a
+  statement read is the last answer's own, below. A server whose copy cannot be
+  read says why in `copy_unavailable_reason`.
+- `last_answer`: `copy`, `source`, `refused`, or `none` before the first
+  statement. `last_answer_reason` is one of the reasons in the table below,
+  `last_answer_reason_means` the same in a sentence, and `last_answer_error`
+  says whether the client got an error for it (`yes` after `copy` means the
+  copy could not run it and nobody else could answer).
+- When the copy answered: `last_answer_indexed_through` (every change capture
+  had recorded up to this instant was in what the statement read) and
+  `last_answer_age_seconds` (how long before the answer that was, rounded up).
+  Both read `unknown`, and `last_answer_age_unknown_reason` says why, for an
+  answer that read a table without its newest changes (fast mode, among
+  others: it is as old as the snapshot it read) or that read no table.
+- `counting_since`, `statements_copy`, `statements_source`,
+  `statements_refused` and one `reason_<name>` per reason: the server's counts
+  since the router started, the same numbers `/status` serves.
+
+What to know about it:
+
+- The port answers it itself, always: with or without a forwarding user,
+  before the server has a snapshot, over the simple and the extended protocol
+  (psql, psycopg, pgx, JDBC, prepared or not), inside a transaction block, and
+  in a failed block too, where PostgreSQL answers nothing but `ROLLBACK`: it is
+  how to read which side failed the block, and the block stays failed.
+- It is never sent to the source and never run on the copy, and it is not an
+  answer: asking twice says the same, and it is in no count. Statements the
+  port answers itself (`SET`, `SHOW` of a setting, `BEGIN`, the catalog's
+  listings, time travel) do not change the last answer either.
+- Send it alone. A message that holds it with other statements (`SELECT 1;
+  SHOW dbtrail.router_status` in one `psql -c`) is refused whole (`0A000`) and
+  nothing in it runs.
+- The name is not a setting: `SET`, `RESET` and `current_setting` of it are
+  refused (`42704`). The dot in the name is on purpose: PostgreSQL keeps dotted
+  names for extensions, so no setting of its own can have this one.
+- `SHOW ROUTER STATUS`, the MySQL port's spelling, is refused here with the
+  statement to send: `SHOW ROUTER STATUS is the MySQL port's statement; on
+  this port it is SHOW dbtrail.router_status`.
+- The time-travel port of `bintrail-pg flashback` routes nothing and does not
+  answer it.
+
 #### The port's status
 
 ```bash

@@ -305,6 +305,10 @@ type pgConnAges struct {
 	id      string
 	mu      sync.Mutex
 	pending console.CopyRunAge
+	// last is the age of the connection's last answer when the copy gave
+	// it, zero otherwise: what SHOW dbtrail.router_status says of it
+	// (pgrouter_port_status.go).
+	last console.CopyRunAge
 }
 
 // agesFor is a connection's pgConnAges for server id; nil when r is.
@@ -336,8 +340,13 @@ func (c *pgConnAges) routed() func(pgshim.RouteNote) {
 		c.mu.Lock()
 		a := c.pending
 		c.pending = console.CopyRunAge{}
+		answered := n.Side == pgshim.RouteCopy && !n.Failed
+		c.last = console.CopyRunAge{}
+		if answered {
+			c.last = a
+		}
 		c.mu.Unlock()
-		if n.Side == pgshim.RouteCopy && !n.Failed {
+		if answered {
 			c.r.age(c.id, a)
 		}
 	}
