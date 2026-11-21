@@ -513,6 +513,8 @@ leave out is asked for.
 | `--flavor` | `mysql` or `mariadb` (default: asked of the server) |
 | `--forward-user` | The forwarding user: what the MySQL port, or the PostgreSQL port, runs statements as on this database when the copy cannot answer (default: asked on a terminal, or `[dbtrail-forward]` in `--defaults-file`) |
 | `--no-forward` | Do not ask for a forwarding user |
+| `--capture-account` | PostgreSQL: yes, the port may forward read-only with the user DBTrail connects with, only a `SELECT` whose every table is a table of the copy (default: asked on a terminal, no without one) |
+| `--no-capture-account` | PostgreSQL: no, the port does not forward with the user DBTrail connects with |
 | `-v`, `--verbose` | Also print how to turn on each optional improvement |
 
 `--defaults-file` reads the format of `~/.my.cnf`. It reads `[client]`, then
@@ -648,9 +650,15 @@ password, or a user that cannot log in or lacks grants, shows with the first
 statement the port forwards. In the web interface, Test connection on the
 server's form tries the login of a MySQL or MariaDB server's forwarding user.
 
-A PostgreSQL added with `--flavor postgres` takes its forwarding user the same
-way: the same question, the same two options and the same group in the option
-file, and the same refusals when it is saved. What its port does with it is in
+A PostgreSQL added with `--flavor postgres` is asked another question: may the
+PostgreSQL port forward, read-only and only to the copy's tables, as the user
+DBTrail connects with? Enter is yes. Without a terminal it is no unless
+`--capture-account`, or `capture-account = yes` under `[dbtrail-forward]`,
+says yes, and the command says that nothing was asked
+([docs/postgres.md](postgres.md#forwarding-with-the-capture-account)). A
+forwarding user of its own is taken with the same two options and the same
+group in the option file, and refused the same way when it is saved; the
+question is then not asked. What its port does with it is in
 [docs/postgres.md](postgres.md#transactions-on-the-source-the-forwarding-user).
 
 To set or change it later:

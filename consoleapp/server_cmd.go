@@ -78,6 +78,11 @@ type addFlags struct {
 	// NoForward: do not ask for one.
 	ForwardUser string
 	NoForward   bool
+	// CaptureAccount and NoCaptureAccount answer, for a PostgreSQL, whether
+	// the port may forward with the user DBTrail connects with (#3054),
+	// without the question.
+	CaptureAccount   bool
+	NoCaptureAccount bool
 }
 
 var serverAddCmd = &cobra.Command{
@@ -120,14 +125,18 @@ and the publication that names its tables, which you create first:
   bintrail-console server add --flavor postgres -h pg1 -u dbtrail -p -d shop --publication bintrail_pub
 
 DBTrail creates the replication slot (--slot, bintrail_<database> unless
-named). The forwarding user is taken as for a MySQL: asked for once the
-server is added, or named with --forward-user or [dbtrail-forward]. On a
-PostgreSQL it is a role of its own that can log in, with SELECT on what the
-port should read. The PostgreSQL port sends to your PostgreSQL, as that role
-and read-only, what the copy is not known to answer as PostgreSQL does, and
-a client's transaction blocks. Without one the copy answers alone, and a
-statement it cannot answer gets an error. To set or change it later:
+named). Once a PostgreSQL is added, one question is asked on a terminal:
+may the PostgreSQL port send to your PostgreSQL, read-only, a SELECT whose
+every table is a table of the copy, as the user DBTrail connects with, when
+the copy does not answer it? Enter is yes. Without a terminal it is no unless
+--capture-account, or capture-account=yes under [dbtrail-forward], says yes;
+--no-capture-account says no. Without it the copy answers alone, and a
+statement it cannot answer gets an error. To let the port read more, name a
+forwarding user of its own instead, a role that can log in with SELECT on
+what the port should read: --forward-user or [dbtrail-forward] user= (the
+question is then not asked). Later:
 
+  bintrail-console server forward-user <server> --capture-account
   bintrail-console server forward-user <server> -u <user> -p
 
 DBTrail's user on a PostgreSQL needs REPLICATION, and SELECT on the tables
@@ -237,6 +246,8 @@ func init() {
 	f.StringVar(&srvAdd.Slot, "slot", "", "PostgreSQL: the replication slot, which DBTrail creates (default: bintrail_<database>)")
 	f.StringVar(&srvAdd.ForwardUser, "forward-user", "", "The user the MySQL port, or the PostgreSQL port, runs statements as on this database when the copy cannot answer (default: asked, or [dbtrail-forward] in --defaults-file)")
 	f.BoolVar(&srvAdd.NoForward, "no-forward", false, "Do not ask for a forwarding user")
+	f.BoolVar(&srvAdd.CaptureAccount, "capture-account", false, "PostgreSQL: yes, the port may forward read-only with the user DBTrail connects with, only a SELECT whose every table is a table of the copy (default: asked on a terminal, no without one)")
+	f.BoolVar(&srvAdd.NoCaptureAccount, "no-capture-account", false, "PostgreSQL: no, the port does not forward with the user DBTrail connects with")
 	f.BoolVarP(&srvVerbose, "verbose", "v", false, "Also print how to turn on each optional improvement")
 	serverAddCmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		// `-pSECRET` and `--password=SECRET` are what a mysql user types, and
@@ -526,6 +537,9 @@ type addInput struct {
 	FwdUser, FwdPassword string
 	FwdAsk               bool
 	ask                  asker
+	// Capture is what is done about the capture account once a PostgreSQL
+	// is added (#3054, resolveCapture).
+	Capture captureAnswer
 	// IncludesSkipped counts the option file's !include lines, which were
 	// not followed: worth saying when what they hold is what is missing.
 	IncludesSkipped int
@@ -678,11 +692,20 @@ func resolveAddInput(f addFlags, ask asker, stdin io.Reader) (addInput, error) {
 		if err := resolvePostgres(&in, ask, interactive); err != nil {
 			return addInput{}, err
 		}
-		// The forwarding user, settled as a MySQL's is (#3020).
+		// The forwarding user, settled as a MySQL's is (#3020), and never
+		// asked for: on the default path the question is whether the port
+		// may forward with the capture account (#3054).
 		if err := resolveForward(&in, f, fwdFile, ask, interactive); err != nil {
 			return addInput{}, err
 		}
+		in.FwdAsk = false
+		if err := resolveCapture(&in, f, fwdFile, ask, interactive); err != nil {
+			return addInput{}, err
+		}
 		return in, nil
+	}
+	if f.CaptureAccount || f.NoCaptureAccount || fwdFile.CaptureAccount != "" {
+		return addInput{}, errors.New("--capture-account, --no-capture-account and capture-account in the option file are a PostgreSQL's: the MySQL port forwards only as a forwarding user of its own")
 	}
 	if err := resolveForward(&in, f, fwdFile, ask, ask.Interactive() && !f.PasswordStdin && !fileOnStdin); err != nil {
 		return addInput{}, err
@@ -988,8 +1011,11 @@ func runServerAdd(ctx context.Context, c *ctlClient, in addInput, verbose bool, 
 		if pg {
 			// Not said when the question comes next: it says it itself,
 			// whether it is answered or skipped.
-			printNewServerPortPG(out, res.Port, res.Name, in.FwdUser == "" && !in.FwdAsk)
+			printNewServerPortPG(out, res.Port, res.Name, in.FwdUser == "" && in.Capture == captureNone)
 			err := addForwardUserPG(ctx, c, in, res, out)
+			if err == nil {
+				err = addCaptureAnswerPG(ctx, c, in, res, out)
+			}
 			fmt.Fprintf(out, "Next, the first copy of its tables:  bintrail-console snapshot run %s\n", res.Name)
 			return err
 		}

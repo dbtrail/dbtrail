@@ -28,6 +28,11 @@ type Client struct {
 	// Includes are the !include and !includedir lines of the file, as
 	// written. They were not followed.
 	Includes []string
+	// CaptureAccount is the value of a capture-account line (DBTrail's own
+	// option, under [dbtrail-forward]: whether the port may forward with the
+	// user DBTrail connects with), as written; "" when there is none, "1"
+	// for the option alone on its line.
+	CaptureAccount string
 }
 
 // Load reads the file at path. See Parse for groups.
@@ -117,7 +122,7 @@ func Parse(data []byte, groups ...string) (Client, error) {
 		rank  int
 		set   bool
 	}
-	opts := map[string]*setting{"host": {}, "port": {}, "user": {}, "password": {}, "socket": {}}
+	opts := map[string]*setting{"host": {}, "port": {}, "user": {}, "password": {}, "socket": {}, "capture-account": {}}
 
 	var out Client
 	current := -1
@@ -160,6 +165,11 @@ func Parse(data []byte, groups ...string) (Client, error) {
 	}
 	out.Host, out.Port, out.User = opts["host"].value, opts["port"].value, opts["user"].value
 	out.Password, out.Socket = opts["password"].value, opts["socket"].value
+	out.CaptureAccount = opts["capture-account"].value
+	if opts["capture-account"].set && out.CaptureAccount == "" {
+		// An option alone on its line is on, as in MySQL.
+		out.CaptureAccount = "1"
+	}
 	return out, nil
 }
 

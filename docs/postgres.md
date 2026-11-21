@@ -85,23 +85,42 @@ DBTrail asks an address to learn what answers there is in MySQL's protocol.
 What it prints at the end is the `psql` line for the PostgreSQL port, with the
 port's password when this was the first server.
 
-Once the server is added, on a terminal, the command asks for its
-[forwarding user](#transactions-on-the-source-the-forwarding-user), as it does
-for a MySQL: the role the PostgreSQL port runs statements as on your
-PostgreSQL, read-only, when the copy is not known to answer them as PostgreSQL
-does. Enter skips it. `--forward-user <role>` names it on the command line
-(its password is asked for), `[dbtrail-forward]` in `--defaults-file` names it
-with its password for a script, and `--no-forward` does not ask.
+Once the server is added, on a terminal, the command asks one question: may
+the PostgreSQL port send to your PostgreSQL, read-only, a `SELECT` whose every
+table is a table of the copy, as the role DBTrail already connects with, when
+the copy does not answer it
+([forwarding with the capture account](#forwarding-with-the-capture-account))?
+Enter is yes. Without a terminal (a script, or the Docker `dbtrail` command,
+which sends the option file on standard input) nothing is asked and the answer
+is no, and the command says so, unless `--capture-account` or this line in the
+option file says yes:
 
-What is refused when it is saved: the role DBTrail captures with, an empty
-password, and a source the account cannot be laid over (one reached through a
-socket directory, or whose URL names its user or host as a parameter). The
-server then stays added and recording, the command says why and exits 1, and
-`dbtrail server forward-user` sets it once that is fixed. No login is tried
-with the role when it is saved, by `server add` or by `server forward-user`: a
-wrong password, or a role that cannot log in, shows with the first statement
-the port sends to your PostgreSQL. To check it, run `BEGIN; SELECT 1; COMMIT;`
-through the PostgreSQL port, once the first copy is ready.
+```ini
+[dbtrail-forward]
+capture-account = yes
+```
+
+`--no-capture-account` (or `capture-account = no`) says no. With no the copy
+answers alone, and a statement it cannot answer gets an error;
+`bintrail-console server forward-user <server> --capture-account` turns it on
+later.
+
+To let the port read more than that, give the server a
+[forwarding user](#transactions-on-the-source-the-forwarding-user) of its own:
+`--forward-user <role>` on the command line (its password is asked for), or
+`user` and `password` under `[dbtrail-forward]` for a script. The question is
+then not asked. `--no-forward` forwards nothing and asks nothing.
+
+What is refused when a forwarding user is saved: the role DBTrail captures
+with, an empty password, and a source the account cannot be laid over (one
+reached through a socket directory, or whose URL names its user or host as a
+parameter). The server then stays added and recording, the command says why
+and exits 1, and `dbtrail server forward-user` sets it once that is fixed. No
+login is tried with the role when it is saved, by `server add` or by
+`server forward-user`: a wrong password, or a role that cannot log in, shows
+with the first statement the port sends to your PostgreSQL. To check it, run
+`BEGIN; SELECT 1; COMMIT;` through the PostgreSQL port, once the first copy is
+ready.
 
 The **index stays MySQL**; only the *source* is PostgreSQL. The source type is
 fixed once saved — to change a server's capture engine, delete and re-create it.
@@ -1291,6 +1310,16 @@ the copy answers what does not pass (`capture_gate` in the reasons below).
 `SHOW dbtrail.router_status` says `forwarding_account | capture account,
 read-only, tables of the copy only`, and the router's `/status` has the same
 in `forwarding_account` for the server.
+
+The port's connections then log in as the same role as capture. Each one is a
+session of that role, so it counts toward the role's `CONNECTION LIMIT` and
+toward your PostgreSQL's `max_connections`. The PostgreSQL router holds at
+most `--max-source-connections` of them at once (16 unless set), across every
+server. A role with a `CONNECTION LIMIT` lower than that plus what capture
+itself holds can leave capture unable to log in again after a restart or a
+dropped connection. Leave the role without a limit (the default), or give it
+one with room for the router's maximum and capture's own connections. A
+forwarding user of its own keeps the two apart.
 
 ### Which side answers a statement on the PostgreSQL port
 
