@@ -133,6 +133,8 @@ func TestCopyScreen_bothBoundsOfBetween(t *testing.T) {
 		`SELECT id FROM ` + o + ` WHERE $1 BETWEEN $2 AND $3`:          text,
 		`SELECT id FROM ` + o + ` WHERE $1 BETWEEN 1 AND $2`:           text,
 		`SELECT id FROM ` + o + ` WHERE $1 BETWEEN 1 AND 'x'`:          text,
+		// The AND of a BETWEEN is not one inside a parenthesis of its lower bound.
+		`SELECT id FROM ` + o + ` WHERE qty BETWEEN (CASE WHEN id > 1 AND id < 5 THEN 1 ELSE 2 END) AND note`: text,
 		`SELECT id FROM ` + o + ` WHERE qty BETWEEN SYMMETRIC 9 AND 2`: "SYMMETRIC",
 		`SELECT id FROM ` + o + ` WHERE qty BETWEEN 1`:                 "AND was not found",
 		`SELECT id FROM ` + o + ` WHERE (qty BETWEEN 1) AND 2 = 2`:     "AND was not found",
@@ -159,6 +161,7 @@ func TestCopyScreen_bothBoundsOfBetween(t *testing.T) {
 		`SELECT id FROM ` + o + ` WHERE qty BETWEEN 1 AND 5 AND id BETWEEN 2 AND 3`,
 		`SELECT id FROM ` + o + ` WHERE (qty BETWEEN 1 AND 5) AND amount BETWEEN 1 AND 2`,
 		`SELECT id FROM ` + o + ` WHERE qty BETWEEN (1) AND (qty + 1)`,
+		`SELECT id FROM ` + o + ` WHERE qty BETWEEN (CASE WHEN id > 1 AND id < 5 THEN 1 ELSE 2 END) AND 9`,
 		`SELECT id FROM ` + o + ` o WHERE o.qty BETWEEN o.id AND o.customer_id`,
 		`SELECT customer_id FROM ` + o + ` GROUP BY customer_id HAVING count(*) BETWEEN 1 AND 5`,
 	}
