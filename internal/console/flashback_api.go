@@ -299,11 +299,11 @@ func (s *Server) handleFlashbackPut(w http.ResponseWriter, r *http.Request) {
 	}
 	next := saved
 	if req.Routing != nil {
-		next.Routing = *req.Routing
-	} else if req.Enabled != nil && *req.Enabled && !flashbackFileExists(path) {
-		// The port is turned on for the first time and nothing was ever
-		// saved about it: Engine Routing starts on (#2686). A setting that
-		// exists keeps what it says, off included.
+		next.Routing, next.RoutingNotChosen = *req.Routing, false
+	} else if req.Enabled != nil && *req.Enabled && !saved.routingChosen() {
+		// The port is turned on for the first time and nobody chose
+		// whether Engine Routing is on: it starts on (#2686). A choice that
+		// was made keeps what it says, off included.
 		next.Routing = true
 	}
 	if req.Enabled == nil {
@@ -320,6 +320,10 @@ func (s *Server) handleFlashbackPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	next.Enabled = *req.Enabled
+	// On or off, somebody chose now, and Engine Routing is from here on what
+	// this file says: turning the port off and on again does not turn Engine
+	// Routing on.
+	next.PortNotChosen, next.RoutingNotChosen = false, false
 
 	if !next.Enabled {
 		if err := saveFlashbackFile(path, &next); err != nil {
@@ -395,14 +399,6 @@ func (s *Server) handleFlashbackPut(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, flashbackChangeDTO{flashbackStatusDTO: s.flashbackStatus(), Password: created})
 }
 
-// flashbackFileExists reports whether a port setting was ever saved at path.
-// An error other than "no such file" counts as existing: a setting that
-// cannot be looked at is not replaced by a default.
-func flashbackFileExists(path string) bool {
-	_, err := os.Stat(path)
-	return !errors.Is(err, fs.ErrNotExist)
-}
-
 // newServerPortDTO is what adding a server says about the MySQL port
 // (#2686): its state, whether this request turned it on, and, only then,
 // the password that was made for it. NotTurnedOn is why a port with nothing
@@ -416,15 +412,23 @@ type newServerPortDTO struct {
 
 // portOnForNewServer turns the MySQL port on, with Engine Routing on, when the
 // FIRST server was just added (first: DBTrail had no server before it, in the
-// registry or given on the command line) and NOTHING was ever saved about the
-// port (#2686): the step that used to be `port on` and `port routing on`.
+// registry or given on the command line) and NOBODY chose whether the port is
+// on or off (#2686): the step that used to be `port on` and `port routing on`.
 //
-// Everything else is left as it is. A setting that exists is the operator's,
+// "Nobody chose" is not "no settings file". The file is also written by saves
+// that say nothing about on or off: the monitor login, a password made ahead,
+// Engine Routing alone. After one of those the first server still turns the
+// port on, and what was saved is kept: the monitor login, the password (none
+// is made, and none is in the answer: HasPassword says it has one), Engine
+// Routing if it was chosen. FlashbackFile.portChosen is the test.
+//
+// Everything else is left as it is. A choice that was made is the operator's,
 // off included, so a port turned off stays off however many servers are
-// added. An installation that already had servers and never turned the port
-// on keeps it off when it adds another one after an upgrade: the port opens
-// only where nobody could have been relying on it being closed. The password
-// is made here and returned in this one answer.
+// added; so does one in a file from before the choice was written down, which
+// cannot say whether it was made. An installation that already had servers
+// and never turned the port on keeps it off when it adds another one after an
+// upgrade: the port opens only where nobody could have been relying on it
+// being closed. A password made here is returned in this one answer.
 //
 // It never fails the request that added the server: what stopped it is in
 // NotTurnedOn, and the server stays added.
@@ -455,7 +459,7 @@ func (s *Server) portOnForNewServer(r *http.Request, first bool) *newServerPortD
 	if refusal != "" {
 		return answer(refusal)
 	}
-	if flashbackFileExists(path) {
+	if saved.portChosen() {
 		return answer("")
 	}
 	if !first {
@@ -473,7 +477,11 @@ func (s *Server) portOnForNewServer(r *http.Request, first bool) *newServerPortD
 		return answer("this session has a data access policy, and the port reads every server without it. An operator without data restrictions turns it on")
 	}
 	next := saved
-	next.Enabled, next.Routing = true, true
+	next.Enabled = true
+	if !saved.routingChosen() {
+		next.Routing = true
+	}
+	next.PortNotChosen, next.RoutingNotChosen = false, false
 	if next.Listen == "" {
 		next.Listen = defaultFlashbackListen(s.listen)
 	}
@@ -493,8 +501,8 @@ func (s *Server) portOnForNewServer(r *http.Request, first bool) *newServerPortD
 	fb.mu.Lock()
 	fb.saved, fb.listen, fb.lastErr = next, control.Listening(), ""
 	fb.mu.Unlock()
-	slog.Info("console: the MySQL port was turned on, with Engine Routing on, as the first server was added",
-		"listen", next.Listen, "password_created", created != "")
+	slog.Info("console: the MySQL port was turned on as the first server was added",
+		"listen", next.Listen, "routing", next.Routing, "password_created", created != "")
 	return &newServerPortDTO{flashbackStatusDTO: s.flashbackStatus(), TurnedOn: true, Password: created}
 }
 
@@ -509,6 +517,13 @@ func (s *Server) portOnForNewServer(r *http.Request, first bool) *newServerPortD
 // turned off in the web interface must not come back on at the next start
 // because the old startup setting is still there. on reports what the
 // saved setting says after the call.
+//
+// "Exists" is the file here, on purpose, where portOnForNewServer asks
+// whether on or off was chosen. While the startup setting is given this runs
+// at every start, before any route can save, and the versions that opened
+// the port from it refused every save to this file. So a file that some
+// other save made is from a time the setting was not given: an installation
+// whose port was not always on, which is not the one this is for.
 func (s *Server) EnsureFlashbackOn() (changed, on bool, err error) {
 	fb := &s.flashback
 	fb.mutate.Lock()
@@ -524,6 +539,7 @@ func (s *Server) EnsureFlashbackOn() (changed, on bool, err error) {
 	}
 	next := saved
 	next.Enabled = true
+	next.PortNotChosen, next.RoutingNotChosen = false, false
 	if next.Listen == "" {
 		next.Listen = defaultFlashbackListen(s.listen)
 	}
