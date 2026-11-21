@@ -204,6 +204,16 @@ func pgFigureName(n any) (name string, strength int, sure bool) {
 		if op, _ := v["is_operator"].(bool); op {
 			return "", 0, true
 		}
+		switch name, _ := v["function_name"].(string); name {
+		case "_bintrail_pg_pack", "_bintrail_pg_packn", "_bintrail_pg_unpack":
+			// The port's wrapping of a CASE or a COALESCE and of each of
+			// its values (pgRoundMacros): named as what it wraps.
+			kids, _ := v["children"].([]any)
+			if len(kids) != 1 {
+				return "", 0, false
+			}
+			return pgFigureName(kids[0])
+		}
 		return pgFunctionName(v)
 	case "WINDOW":
 		return pgFunctionName(v)
@@ -295,11 +305,14 @@ func pgFunctionName(v map[string]any) (string, int, bool) {
 	} else if name == "count_star" {
 		name = "count"
 	} else if strings.HasPrefix(name, "_bintrail_pg_round_") {
-		// round(a / b, k) and round(avg(x), k), as the port writes them
-		// for the copy (pgRoundMacros).
+		// round(a / b, k), round(avg(x), k), round(x, k), round(x, -k)
+		// and round(x), as the port writes them for the copy
+		// (pgRoundMacros).
 		name = "round"
 	} else if strings.HasPrefix(name, "_bintrail_pg_floor_") {
 		name = "floor"
+	} else if name == "_bintrail_pg_avg" {
+		name = "avg"
 	} else if name == "_bintrail_pg_epoch" {
 		name = "extract"
 	} else if name == "_bintrail_pg_to_timestamp" {

@@ -500,9 +500,12 @@ var copyFuncs = map[string]bool{
 	"coalesce": true, "nullif": true, "greatest": true, "least": true,
 	"length": true, "substring": true, "trim": true, "position": true, "concat": true,
 	"abs": true, "bool_and": true, "string_agg": true,
-	// round(a / b, k) and round(avg(x), k), as RewriteForCopy writes them:
-	// rounded as PostgreSQL rounds a numeric (sqlsandbox pgRoundMacros).
-	pgRoundDiv: true, pgRoundAvg: true,
+	// round(a / b, k), round(avg(x), k), round(x, k), round(x, -k) and
+	// round(x), as RewriteForCopy writes them: rounded as PostgreSQL rounds a
+	// numeric (sqlsandbox pgRoundMacros), or refused. A CASE or a COALESCE
+	// around one, checked value by value (packMixedScale).
+	pgRoundDiv: true, pgRoundAvg: true, pgRoundK: true, pgRoundNeg: true, pgRoundWhole: true,
+	pgPack: true, pgPackN: true, pgUnpack: true,
 	// floor(a / b), as RewriteForCopy writes it, and ntile(n), whose
 	// buckets pgcompare measured the same.
 	pgFloorDiv: true, "ntile": true,
@@ -622,6 +625,9 @@ func typeIsFloat(t string) bool { return t == "DOUBLE" || t == "FLOAT" || t == "
 // name may be a text column.
 func screenForCopy(in []rtToken, types map[string][]string) string {
 	if why := aliasUse(in); why != "" {
+		return why
+	}
+	if why := scaleMixRisk(in); why != "" {
 		return why
 	}
 	types = withAliasTypes(in, types)
@@ -1009,6 +1015,12 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 				}
 				a := args(i + 1)
 				switch t.text {
+				case pgRoundK, pgRoundNeg, pgRoundWhole:
+					// The macro refuses a float; a column known to be one goes
+					// to the source without asking the copy first.
+					if len(a) > 0 && len(a[0]) == 1 && a[0][0].kind == rtWord && all(a[0][0].text, typeIsFloat) {
+						return "round() of a double precision (PostgreSQL rounds it half to even, and to no number of decimals)"
+					}
 				case "extract":
 					if len(a) != 1 || len(a[0]) < 1 || a[0][0].kind != rtWord || !dateFields[a[0][0].text] {
 						return "extract() of a field other than year, month or day"

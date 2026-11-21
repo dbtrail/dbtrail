@@ -59,9 +59,10 @@ func TestCopyScreen_ownWordsAsNames(t *testing.T) {
 			t.Errorf("%s: sent to the source for %s", q, veto)
 		}
 	}
-	// Without forwarding, only the words are quoted.
+	// Without forwarding the words are quoted too, and the round rewritten
+	// as on every connection.
 	q := "SELECT round(a / b, 2), at FROM t"
-	if got := routeSession(false).copyText(q); got != `SELECT round(a / b, 2), "at" FROM t` {
-		t.Errorf("without a forwarding account: %q", got)
+	if got, err := routeSession(false).copyText(q); err != nil || got != `SELECT _bintrail_pg_round_div(a, b, 2, 0.01), "at" FROM t` {
+		t.Errorf("without a forwarding account: %q, %v", got, err)
 	}
 }

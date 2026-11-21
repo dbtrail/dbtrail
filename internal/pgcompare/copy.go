@@ -24,6 +24,11 @@ type SnapshotCopy struct {
 	// it to the copy (pgshim.RewriteForCopy), so what is measured is what
 	// the port runs.
 	Rewrite func(string) string
+	// Refuse, when set, is the error the port answers a statement with
+	// before the copy is asked (pgshim.RewriteForCopyAlone, on a connection
+	// whose statements the copy answers alone); nil lets the copy answer.
+	// A refused statement is NOT_ON_COPY with that error.
+	Refuse func(string) error
 }
 
 // OpenSnapshotCopy prepares the copy held in snapshotDir (one complete
@@ -46,6 +51,11 @@ func OpenSnapshotCopy(ctx context.Context, runner *sqlsandbox.Runner, snapshotDi
 
 // Query runs one statement on the copy.
 func (c *SnapshotCopy) Query(ctx context.Context, stmt string, max int) (sqlcompare.Rows, bool, error) {
+	if c.Refuse != nil {
+		if err := c.Refuse(stmt); err != nil {
+			return sqlcompare.Rows{}, false, err
+		}
+	}
 	if c.Rewrite != nil {
 		stmt = c.Rewrite(stmt)
 	}
