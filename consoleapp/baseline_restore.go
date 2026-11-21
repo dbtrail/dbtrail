@@ -319,6 +319,11 @@ func wireBaselineExtras(cfg *console.Config, sup *baselineSupervisor, serversPat
 	if sup == nil {
 		return
 	}
+	// What a daemon killed in the middle of a fold left in the temporary
+	// directory, removed at the restart and not at the next fold (#2513).
+	// Only here, so only a daemon with a snapshot supervisor sweeps as it
+	// starts; any other process does at its first fold.
+	reconstruct.SweepDeadWorkDirs()
 	history, err := console.OpenBaselineHistory(console.DefaultBaselineHistoryPath(serversPath))
 	if err != nil {
 		slog.Error("baseline history unavailable; run durations will NOT be recorded (file timestamps still approximate them); fix or move the file and restart", "error", err)

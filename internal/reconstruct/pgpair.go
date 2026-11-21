@@ -609,11 +609,14 @@ func materializePGBaseWithPair(ctx context.Context, basePath string, prev *pgPre
 			return "", nil, err
 		}
 	}
-	tmpDir, err := os.MkdirTemp(dir, "bintrail-compact-*")
+	// Locked for as long as it is used, so what a killed process leaves in
+	// the system's temporary directory is told from this one (#2513).
+	work, err := newWorkDir(dir, workDirCompact)
 	if err != nil {
 		return "", nil, fmt.Errorf("mkdir temp: %w", err)
 	}
-	cleanup := func() { os.RemoveAll(tmpDir) }
+	tmpDir := work.path
+	cleanup := func() { _ = work.remove() }
 	tmpPath := filepath.Join(tmpDir, "baseline.parquet")
 	duck, err := sql.Open("duckdb", "")
 	if err != nil {
