@@ -182,7 +182,7 @@ func TestDumpAttempt_aWorkingFolderThatFilledIsSaidAsOne_1938(t *testing.T) {
 				"No new snapshot was made",
 				"earlier snapshots are unchanged",
 				"The partial dump was deleted",
-				`"Working folder" setting`, "BINTRAIL_CONSOLE_BASELINE_STAGING",
+				"set BINTRAIL_CONSOLE_BASELINE_STAGING, or console-baseline-staging in dbtrail.cnf, and restart DBTrail.",
 			} {
 				if !strings.Contains(first, want) {
 					t.Errorf("the first line lacks %q:\n%s", want, first)
@@ -271,7 +271,7 @@ func TestFullRead_aDiskThatFillsDuringTheDumpReachesThePage_1938(t *testing.T) {
 	// The card shows one line, whole: the cause, then the fix by the name of
 	// the setting. Nothing of mydumper's, and no cut.
 	want := "The working folder " + stage + " filled up during the full read (0 B free when the dump stopped). " +
-		`Free space there, or move it to a bigger disk with the "Working folder" setting and restart DBTrail.`
+		"Free space there, or move it to a bigger disk: set BINTRAIL_CONSOLE_BASELINE_STAGING, or console-baseline-staging in dbtrail.cnf, and restart DBTrail."
 	if st.Failure == nil || st.Failure.Summary != want {
 		t.Fatalf("failure card = %+v\nwant summary %q", st.Failure, want)
 	}
@@ -293,7 +293,7 @@ func TestSnapshotFailure_aFilledWorkingFolderIsNeverCutFromTheCard_1938(t *testi
 		if f == nil || f.Kind != "" {
 			t.Fatalf("%s: failure = %+v", name, f)
 		}
-		if !strings.HasPrefix(f.Summary, "The working folder "+folder+" filled up") || !strings.HasSuffix(f.Summary, `the "Working folder" setting and restart DBTrail.`) || !strings.Contains(f.Summary, "4.0 KiB free") {
+		if !strings.HasPrefix(f.Summary, "The working folder "+folder+" filled up") || !strings.HasSuffix(f.Summary, "set BINTRAIL_CONSOLE_BASELINE_STAGING, or console-baseline-staging in dbtrail.cnf, and restart DBTrail.") || !strings.Contains(f.Summary, "4.0 KiB free") {
 			t.Errorf("%s: summary = %q", name, f.Summary)
 		}
 	}

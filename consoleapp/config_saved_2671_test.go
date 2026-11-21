@@ -76,6 +76,32 @@ func TestConfigCheck_aValueSavedInTheWebComesFirst(t *testing.T) {
 		}
 	}
 
+	// A working folder and a lock mode saved by 0.85 to 0.88 still come
+	// first, and the web interface has had no control for them since 0.89.0:
+	// the line names the request that removes the saved value.
+	folder, mode := "/old/stage", "lock-all"
+	if err := reg.SetBackupSetting(console.BackupSettingStagingDir, &folder); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.SetBackupSetting(console.BackupSettingLockMode, &mode); err != nil {
+		t.Fatal(err)
+	}
+	c = savedOverrides(applied, servers)
+	if len(c.Problems) != 4 ||
+		c.Problems[2] != `line 4: console-baseline-staging is not used by the capture and web service (watch), because a value saved in the web interface comes first. The web interface no longer shows this setting: remove the saved value with PUT /api/backup-settings/daemon/staging_dir and {"use_startup":true}, then restart DBTrail, or remove this line.` ||
+		c.Problems[3] != `line 7: console-baseline-lock-mode is not used by the capture and web service (watch), because a value saved in the web interface comes first. The web interface no longer shows this setting: remove the saved value with PUT /api/backup-settings/daemon/lock_mode and {"use_startup":true}, or remove this line.` {
+		t.Fatalf("got %q", c.Problems)
+	}
+	if strings.Contains(strings.Join(c.Problems, "\n"), "/old/stage") {
+		t.Errorf("a saved value is printed: %q", c.Problems)
+	}
+	if err := reg.SetBackupSetting(console.BackupSettingStagingDir, &empty); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.SetBackupSetting(console.BackupSettingLockMode, &bad); err != nil {
+		t.Fatal(err)
+	}
+
 	// The same value saved in both places: a note.
 	same := "4"
 	if err := reg.SetBackupSetting(console.BackupSettingBaselineRetain, &same); err != nil {

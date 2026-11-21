@@ -41,7 +41,7 @@ func TestDumpDiskVerdict_refusesOnDataAlone_1938(t *testing.T) {
 			"take up about 10.0 GiB on the database server, not counting indexes",
 			"the working folder " + stage + " has 4.0 GiB free",
 			"Nothing was read from your database, and earlier snapshots are unchanged",
-			`"Working folder" setting`, "BINTRAIL_CONSOLE_BASELINE_STAGING",
+			"set BINTRAIL_CONSOLE_BASELINE_STAGING, or console-baseline-staging in dbtrail.cnf, and restart DBTrail.",
 		} {
 			if !strings.Contains(msg, want) {
 				t.Errorf("refusal lacks %q:\n%s", want, msg)

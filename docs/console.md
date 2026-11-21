@@ -323,7 +323,7 @@ and searching events:
    bintrail needed on the restore side; the build is a full plaintext copy
    of every row, staged on the daemon's disk in the working folder, which
    is beside DBTrail's own data unless `BINTRAIL_CONSOLE_BASELINE_STAGING`
-   or the backup settings say otherwise; [capacity.md](./capacity.md) has
+   or a folder saved in the web interface by 0.85 to 0.88 says otherwise; [capacity.md](./capacity.md) has
    the cases where it stays under the system temp folder). Its
    **Checks** section (`watch` only) runs
    `bintrail verify` and shows past runs, and **Where and how often** holds
@@ -2156,15 +2156,22 @@ server's statements instead of serving without it.
   location it can list. It is turned on where the daemon is started, with this
   variable, and not in the web interface; see
   [settings that need a restart](https://www.dbtrail.com/docs/settings/backups#set-at-startup).
-- `BINTRAIL_CONSOLE_BASELINE_STAGING` (`watch` only) — the working folder
-  (the **Working folder** row in the web interface's backup settings): where
-  full reads (the mydumper dump) and `.sql` builds write their temporary
+- `BINTRAIL_CONSOLE_BASELINE_STAGING` (`watch` only) — the working folder:
+  where full reads (the mydumper dump) and `.sql` builds write their temporary
   files. Snapshots are not built there: every snapshot is written into its
   server's local folder.
+  It is set with this variable or with `console-baseline-staging` in the
+  [option file](option-file.md), and read once at startup: restart DBTrail
+  after a change. The web interface has had no row for it since 0.89.0. A
+  folder saved there by 0.85 to 0.88 is still in the servers file and wins
+  over both: `dbtrail config check` names a `console-baseline-staging` line
+  that loses to it, and `PUT /api/backup-settings/daemon/staging_dir` with
+  `{"use_startup":true}` removes the saved folder (restart DBTrail after
+  that).
   With nothing set it is `baseline-staging` in the folder that holds the
   servers file, beside DBTrail's own data; it stays under the system temp
   folder when that data is on network storage or in memory, or the folder
-  cannot be written, and the backup settings then say so, with a warning when that
+  cannot be written, and the startup log then says so, with a warning when that
   folder is memory. Sizing, and the full rule,
   are in [capacity.md](./capacity.md).
 - `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` (`watch` only) — empty (default:
