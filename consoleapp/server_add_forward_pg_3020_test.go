@@ -301,7 +301,7 @@ Password (shown only now, keep it): bfp_portpw
 Statements for "shop" are answered once its first copy is ready.
 `
 
-const pgNoForwardYet = `Until it has a forwarding user, the copy answers them alone, and a statement it cannot answer gets an error:
+const pgNoForwardYet = `Until "shop" has a forwarding user, the copy answers its statements alone, and a statement it cannot answer gets an error:
   bintrail-console server forward-user shop -u <user> -p
 `
 

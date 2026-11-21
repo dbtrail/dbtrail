@@ -188,12 +188,14 @@ func TestPrintNewServerPortPG(t *testing.T) {
 		wantNot      []string
 	}{
 		{"an older DBTrail says nothing", nil, true, nil, []string{"port", "forward"}},
-		{"already on, on another address", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on, Host: "10.0.0.5", Port: "3309"}}, true,
+		{"already on, on another address", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on, Host: "10.0.0.5", Port: "3309"}}, false,
 			[]string{"is on, and takes the password it already has", `psql "host=10.0.0.5 port=5433 dbname=shop `}, []string{"shown only now", "3309", "forward"}},
+		{"already on, and no forwarding user named", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on, Host: "10.0.0.5", Port: "3309"}}, true,
+			[]string{"sslmode=require\"\n\nUntil \"shop\" has a forwarding user, the copy answers its statements alone, and a statement it cannot answer gets an error:\n  bintrail-console server forward-user shop -u <user> -p\n\n"}, []string{"shown only now", "3309"}},
 		{"turned on and no password in the answer", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on}, TurnedOn: true}, false,
 			[]string{"is on now", "port new-password"}, []string{"shown only now", "forward"}},
 		{"turned on, and no forwarding user named", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on}, TurnedOn: true}, true,
-			[]string{"is on now", "ready.\nUntil it has a forwarding user, the copy answers them alone, and a statement it cannot answer gets an error:\n  bintrail-console server forward-user shop -u <user> -p\n\n"}, nil},
+			[]string{"is on now", "ready.\nUntil \"shop\" has a forwarding user, the copy answers its statements alone, and a statement it cannot answer gets an error:\n  bintrail-console server forward-user shop -u <user> -p\n\n"}, nil},
 		{"not turned on", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &off}, NotTurnedOn: "DBTrail already had servers."}, true,
 			[]string{"was not turned on: DBTrail already had servers.\n"}, []string{"psql", "forward"}},
 		{"off, as saved", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &off}}, true, []string{"is off, as it was saved", "port on"}, []string{"psql", "forward"}},

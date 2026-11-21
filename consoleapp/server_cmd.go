@@ -1058,6 +1058,11 @@ func printNewServerPortPG(out io.Writer, p *ctlNewServerPort, name string, noFor
 		}
 	case *p.Enabled:
 		fmt.Fprintf(out, "\nThe port for SQL clients is on, and takes the password it already has. %s\n\n%s\n", where, line)
+		// A second PostgreSQL server: the port was on already, and this
+		// server still starts with the copy answering alone.
+		if noForwardYet {
+			fmt.Fprintf(out, "\n%s\n", pgNoForwardYetLine(name))
+		}
 	case p.NotTurnedOn != "":
 		fmt.Fprintf(out, "\nThe port for SQL clients was not turned on: %s.\n", strings.TrimRight(p.NotTurnedOn, "."))
 	default:

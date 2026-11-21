@@ -25,7 +25,7 @@ func pgForwardsAsLine(name, user string) string {
 // pgNoForwardYetLine says where a PostgreSQL server stands without a
 // forwarding user, and the command that sets one.
 func pgNoForwardYetLine(name string) string {
-	return fmt.Sprintf("Until it has a forwarding user, the copy answers them alone, and a statement it cannot answer gets an error:\n  bintrail-console server forward-user %s -u <user> -p", mysqlLineUser(name))
+	return fmt.Sprintf("Until %q has a forwarding user, the copy answers its statements alone, and a statement it cannot answer gets an error:\n  bintrail-console server forward-user %s -u <user> -p", name, mysqlLineUser(name))
 }
 
 // addForwardUserPG is addForwardUser for a PostgreSQL: it sets the
