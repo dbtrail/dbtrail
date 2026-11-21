@@ -1523,6 +1523,8 @@ asynchronous replica. Its age is a number to watch, not a rule:
 
 - `SHOW ROUTER STATUS` shows `copy_snapshot` and `copy_age_seconds` for the
   server of that connection.
+  On the PostgreSQL port the statement is `SHOW dbtrail.router_status`
+  ([PostgreSQL](postgres.md#which-side-answered-a-statement-show-dbtrailrouter_status)).
 - `bintrail_read_routing_copy_snapshot_timestamp_seconds` is the same number
   for Prometheus. Alert on `time()` minus it, the way replica lag is alerted
   on ([Observability](observability.md#engine-routing-bintrail_read_routing_decisions_total)).
