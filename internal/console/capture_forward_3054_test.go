@@ -327,7 +327,10 @@ func TestRouteCaptureAccountAPI(t *testing.T) {
 			t.Errorf("%s: %d %s", c.body, code, b)
 			continue
 		}
-		if c.msg != "" && !strings.Contains(b, c.msg) {
+		var e struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(b), &e); err != nil || c.msg != "" && e.Error != c.msg {
 			t.Errorf("%s: %s", c.body, b)
 		}
 	}
