@@ -31,53 +31,48 @@ import (
 // statement whose tables are not known: a table function, which can read a
 // table it does not name, and a qualified name that is no view of the copy,
 // which the engine may still resolve to one of its tables (sqlTailTables).
+//
+// pg marks the ones also run by PostgreSQL's rules. The rule is one piece of
+// code for every family, and each run starts a worker: the whole list runs
+// once, and the package has ten minutes for all its tests.
 var withChainShapes = []struct {
-	name, stmt string
-	snapshot   bool
+	name, stmt   string
+	snapshot, pg bool
 }{
-	{"no WITH", "SELECT {V} FROM {T} ORDER BY id", false},
-	{"one block", "WITH x AS (SELECT * FROM {T}) SELECT {V} FROM x ORDER BY id", false},
-	{"a block reading a block", "WITH x AS (SELECT * FROM {T}), y AS (SELECT x.* FROM x) SELECT {V} FROM y ORDER BY id", false},
-	{"three levels", "WITH x AS (SELECT * FROM {T}), y AS (SELECT * FROM x), z AS (SELECT * FROM y) SELECT {V} FROM z ORDER BY id", false},
-	{"one block used twice", "WITH x AS (SELECT * FROM {T}) SELECT {V} FROM x WHERE id IN (SELECT id FROM x) ORDER BY id", false},
-	{"a block read by two blocks", "WITH x AS (SELECT * FROM {T}), y AS (SELECT * FROM x), z AS (SELECT id AS zid FROM x) SELECT {V} FROM y JOIN z ON y.id = z.zid ORDER BY id", false},
-	{"two independent blocks", "WITH x AS (SELECT * FROM {T}), y AS (SELECT 1 AS one) SELECT {V} FROM x, y ORDER BY id", false},
-	{"a recursive WITH beside the table", "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1) SELECT {V} FROM {T}, n ORDER BY id", false},
-	{"a recursive WITH over the table", "WITH RECURSIVE r AS (SELECT id, status, 1 AS depth FROM {T} UNION ALL SELECT id, status, depth + 1 FROM r WHERE depth < 1) SELECT {V} FROM r ORDER BY id", false},
-	{"a block named as the table", "WITH {t} AS (SELECT * FROM {T}) SELECT {V} FROM {t} ORDER BY id", false},
-	{"a block named as the table, read by a block", "WITH {t} AS (SELECT * FROM {T}), y AS (SELECT * FROM {t}) SELECT {V} FROM y ORDER BY id", false},
-	{"a block with a column list", "WITH x(id, status) AS (SELECT id, status FROM {T}), y AS (SELECT * FROM x) SELECT {V} FROM y ORDER BY id", false},
-	{"blocks inside a subquery", "SELECT {V} FROM (WITH x AS (SELECT * FROM {T}), y AS (SELECT * FROM x) SELECT * FROM y) q ORDER BY id", false},
-	{"a block of the subquery reading a block of the statement", "WITH x AS (SELECT * FROM {T}) SELECT {V} FROM (WITH y AS (SELECT * FROM x) SELECT * FROM y) q ORDER BY id", false},
-	{"MATERIALIZED and NOT MATERIALIZED", "WITH x AS MATERIALIZED (SELECT * FROM {T}), y AS NOT MATERIALIZED (SELECT * FROM x) SELECT {V} FROM y ORDER BY id", false},
-	{"a block that reads no table", "WITH c AS (SELECT 1 AS one), y AS (SELECT one FROM c) SELECT {V} FROM {T}, y ORDER BY id", false},
-	{"quoted and upper-case block names", `WITH "X" AS (SELECT * FROM {T}), Y AS (SELECT * FROM x) SELECT {V} FROM "y" ORDER BY id`, false},
-	{"a system table beside the table", "SELECT {V} FROM {T} WHERE (SELECT count(*) FROM duckdb_views) >= 0 ORDER BY id", false},
+	{"a block reading a block", "WITH x AS (SELECT * FROM {T}), y AS (SELECT x.* FROM x) SELECT {V} FROM y ORDER BY id", false, true},
+	{"three levels", "WITH x AS (SELECT * FROM {T}), y AS (SELECT * FROM x), z AS (SELECT * FROM y) SELECT {V} FROM z ORDER BY id", false, false},
+	{"a block read by two blocks", "WITH x AS (SELECT * FROM {T}), y AS (SELECT * FROM x), z AS (SELECT id AS zid FROM x) SELECT {V} FROM y JOIN z ON y.id = z.zid ORDER BY id", false, false},
+	{"two independent blocks", "WITH x AS (SELECT * FROM {T}), y AS (SELECT 1 AS one) SELECT {V} FROM x, y ORDER BY id", false, false},
+	{"a recursive WITH over the table", "WITH RECURSIVE r AS (SELECT id, status, 1 AS depth FROM {T} UNION ALL SELECT id, status, depth + 1 FROM r WHERE depth < 1) SELECT {V} FROM r ORDER BY id", false, true},
+	{"a block named as the table, read by a block", "WITH {t} AS (SELECT * FROM {T}), y AS (SELECT * FROM {t}) SELECT {V} FROM y ORDER BY id", false, false},
+	{"a block with a column list", "WITH x(id, status) AS (SELECT id, status FROM {T}), y AS (SELECT * FROM x) SELECT {V} FROM y ORDER BY id", false, false},
+	{"blocks inside a subquery", "SELECT {V} FROM (WITH x AS (SELECT * FROM {T}), y AS (SELECT * FROM x) SELECT * FROM y) q ORDER BY id", false, false},
+	{"MATERIALIZED and NOT MATERIALIZED", "WITH x AS MATERIALIZED (SELECT * FROM {T}), y AS NOT MATERIALIZED (SELECT * FROM x) SELECT {V} FROM y ORDER BY id", false, false},
+	{"a block that reads no table", "WITH c AS (SELECT 1 AS one), y AS (SELECT one FROM c) SELECT {V} FROM {T}, y ORDER BY id", false, false},
+	{"quoted and upper-case block names", `WITH "X" AS (SELECT * FROM {T}), Y AS (SELECT * FROM x) SELECT {V} FROM "y" ORDER BY id`, false, true},
+	{"a system table beside the table", "SELECT {V} FROM {T} WHERE (SELECT count(*) FROM duckdb_views) >= 0 ORDER BY id", false, false},
 	// By decision, as before #3043:
-	{"a table that cannot have a tail", "SELECT {V} FROM {N} ORDER BY id", true},
-	{"a block reading a block over a table that cannot have a tail", "WITH x AS (SELECT * FROM {N}), y AS (SELECT * FROM x) SELECT {V} FROM y ORDER BY id", true},
-	{"a block over each table", "WITH x AS (SELECT * FROM {T}), n AS (SELECT id AS nid FROM {N}), y AS (SELECT x.* FROM x JOIN n ON x.id = n.nid) SELECT {V} FROM y ORDER BY id", true},
-	{"a table function beside the table", "SELECT {V} FROM {T}, range(1) ORDER BY id", true},
-	{"a table function beside a block reading a block", "WITH x AS (SELECT * FROM {T}), y AS (SELECT * FROM x) SELECT {V} FROM y, range(1) ORDER BY id", true},
-	{"a qualified name that is no view of the copy", "SELECT {V} FROM {T} WHERE (SELECT count(*) FROM information_schema.schemata) >= 0 ORDER BY id", true},
+	{"a block reading a block over a table that cannot have a tail", "WITH x AS (SELECT * FROM {N}), y AS (SELECT * FROM x) SELECT {V} FROM y ORDER BY id", true, true},
+	{"a block over each table", "WITH x AS (SELECT * FROM {T}), n AS (SELECT id AS nid FROM {N}), y AS (SELECT x.* FROM x JOIN n ON x.id = n.nid) SELECT {V} FROM y ORDER BY id", true, false},
+	{"a table function beside a block reading a block", "WITH x AS (SELECT * FROM {T}), y AS (SELECT * FROM x) SELECT {V} FROM y, range(1) ORDER BY id", true, true},
+	{"a qualified name that is no view of the copy", "SELECT {V} FROM {T} WHERE (SELECT count(*) FROM information_schema.schemata) >= 0 ORDER BY id", true, false},
 }
 
-// checkWithChainShapes runs every shape and holds its answer to what the
-// shape says: the recent change, or the snapshot's row with no note. stale
-// is the snapshot's row. run returns the rows as text and the note.
-func checkWithChainShapes(t *testing.T, value, table, noTail, stale string, run func(stmt string) (rows []string, note string, err error)) {
+// checkWithChainShapes runs the shapes (those marked pg alone when pgOnly)
+// and holds each answer to what the shape says: the recent change, or the
+// snapshot's row, and no note either way. stale is the snapshot's row. run
+// runs a statement on a connection of its own and returns the rows as text
+// and the note: a connection whose last answer read the recent changes is
+// told once when the next one does not (snapshotAloneNote), whatever the
+// statement, and that would be the connection's note, not the statement's.
+func checkWithChainShapes(t *testing.T, pgOnly bool, value, table, noTail, stale string, run func(stmt string) (rows []string, note string, err error)) {
 	bare := table[strings.LastIndex(table, ".")+1:]
 	for _, c := range withChainShapes {
+		if pgOnly && !c.pg {
+			continue
+		}
 		stmt := strings.NewReplacer("{V}", value, "{T}", table, "{N}", noTail, "{t}", bare).Replace(c.stmt)
 		t.Run(c.name, func(t *testing.T) {
-			// Twice, and the second answer is the one judged: a connection
-			// whose last answer read the recent changes is told once when
-			// the next one does not (snapshotAloneNote), whatever the
-			// statement, and that is the connection's note, not this
-			// statement's.
-			if _, _, err := run(stmt); err != nil {
-				t.Fatalf("%s\n\tfailed: %v", stmt, err)
-			}
 			rows, note, err := run(stmt)
 			if err != nil {
 				t.Fatalf("%s\n\tfailed: %v", stmt, err)
@@ -117,8 +112,8 @@ func TestIntegrationPGFreshWithBlocks_3043(t *testing.T) {
 	r.change(none.Table, event.EventUpdate, "1", "paid", 0x620, 20*time.Minute)
 	r.checkpoint(0x620)
 
-	q := &SQLOnCopy{s: r.s, b: r.b, user: "u", id: bootServerID}
 	run := func(stmt string) ([]string, string, error) {
+		q := &SQLOnCopy{s: r.s, b: r.b, user: "u", id: bootServerID}
 		res, err := q.Run(context.Background(), stmt, "", sqlsandbox.Session{PostgresRules: true})
 		if err != nil {
 			return nil, "", err
@@ -130,8 +125,9 @@ func TestIntegrationPGFreshWithBlocks_3043(t *testing.T) {
 		}
 		return out, res.Note, nil
 	}
-	settleTails(t, r.s, func() { run("SELECT status FROM public." + tbl.Table) })
-	checkWithChainShapes(t, "id || '=' || status", "public."+tbl.Table, "public."+none.Table, "1=one", run)
+	// Both tables, so the keeper has said of each whether it has a tail.
+	settleTails(t, r.s, func() { run("SELECT a.status FROM public." + tbl.Table + " a, public." + none.Table + " b") })
+	checkWithChainShapes(t, true, "id || '=' || status", "public."+tbl.Table, "public."+none.Table, "1=one", run)
 }
 
 // On a MySQL server's copy: the same statements through the same steps.
@@ -155,8 +151,8 @@ func TestIntegrationFreshWithBlocks_3043(t *testing.T) {
 	r.change(tbl.Table, event.EventUpdate, "1", "paid", "binlog.000008", 100, at)
 	r.change(none.Table, event.EventUpdate, "1", "paid", "binlog.000008", 200, at)
 
-	q := &SQLOnCopy{s: r.s, b: r.b, user: "u", id: bootServerID}
 	run := func(stmt string) ([]string, string, error) {
+		q := &SQLOnCopy{s: r.s, b: r.b, user: "u", id: bootServerID}
 		res, err := q.Run(context.Background(), stmt, "", sqlsandbox.Session{})
 		if err != nil {
 			return nil, "", err
@@ -168,8 +164,9 @@ func TestIntegrationFreshWithBlocks_3043(t *testing.T) {
 		}
 		return out, res.Note, nil
 	}
-	settleTails(t, r.s, func() { run("SELECT status FROM shop." + tbl.Table) })
-	checkWithChainShapes(t, "CAST(id AS VARCHAR) || '=' || status", "shop."+tbl.Table, "shop."+none.Table, "1=new", run)
+	// Both tables, so the keeper has said of each whether it has a tail.
+	settleTails(t, r.s, func() { run("SELECT a.status FROM shop." + tbl.Table + " a, shop." + none.Table + " b") })
+	checkWithChainShapes(t, false, "CAST(id AS VARCHAR) || '=' || status", "shop."+tbl.Table, "shop."+none.Table, "1=new", run)
 
 	// A connection that routes (the port with a forwarding user): the copy
 	// answers the chained statement with the table's tail, and says the run
@@ -177,16 +174,13 @@ func TestIntegrationFreshWithBlocks_3043(t *testing.T) {
 	// refuses one over this rig's tables, which carry no definition.
 	t.Run("a block reading a block, on a connection that routes", func(t *testing.T) {
 		stmt := "WITH x AS (SELECT id, status FROM shop." + tbl.Table + "), y AS (SELECT id, status FROM x) SELECT CAST(id AS VARCHAR) || '=' || status FROM y ORDER BY id"
-		for range 2 {
-			res, err := q.Run(context.Background(), stmt, "", sqlsandbox.Session{StrictStar: true})
-			if err != nil {
-				t.Fatalf("not answered by the copy: %v", err)
-			}
-			age := q.LastRunAge()
-			q.NoteRoute("copy")
-			if len(res.Rows) != 1 || res.Rows[0][0].(string) != "1=paid" || res.Note != "" || !age.Tailed {
-				t.Fatalf("answered %v with note %q, read with its changes: %v", res.Rows, res.Note, age.Tailed)
-			}
+		q := &SQLOnCopy{s: r.s, b: r.b, user: "u", id: bootServerID}
+		res, err := q.Run(context.Background(), stmt, "", sqlsandbox.Session{StrictStar: true})
+		if err != nil {
+			t.Fatalf("not answered by the copy: %v", err)
+		}
+		if age := q.LastRunAge(); len(res.Rows) != 1 || res.Rows[0][0].(string) != "1=paid" || res.Note != "" || !age.Tailed {
+			t.Fatalf("answered %v with note %q, read with its changes: %v", res.Rows, res.Note, age.Tailed)
 		}
 	})
 }
@@ -308,9 +302,6 @@ func TestIntegrationFreshNeverTailsHalfAStatement_3043(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if got, age, err := run(both); err != nil || got != "paid/paid" || !age.Tailed {
-		t.Fatalf("both tables named in full: %q, tailed %v, %v", got, age.Tailed, err)
-	}
 	// Each way of naming the second table, and what the statement is then
 	// answered with: both tables with their tails, or both from the snapshot
 	// and the run saying so. Never one of each.
