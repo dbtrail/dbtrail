@@ -102,6 +102,12 @@ func (f *FlashbackFile) portChosen() bool {
 
 // routingChosen is portChosen for Engine Routing: off with RoutingNotChosen,
 // on a port that was never turned on, is nobody's choice.
+//
+// What neither can tell: a binary from before the marks that turned off a
+// port, or Engine Routing, that was never on, over a file that already had
+// the marks. It changes no field and carries the marks along, so the file
+// reads as nobody's choice. It takes a downgrade and an upgrade around that
+// one command, before the port was ever on.
 func (f *FlashbackFile) routingChosen() bool {
 	return !f.RoutingNotChosen || f.Routing || f.Enabled || f.Listen != ""
 }
