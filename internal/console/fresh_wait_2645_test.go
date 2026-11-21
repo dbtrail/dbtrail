@@ -159,11 +159,24 @@ func (r *waitRig) publish(t *testing.T) {
 	ctx := context.Background()
 	r.s.statementTails(ctx, r.k, r.read, r.read)
 	r.k.settle()
+	// The build's install woke the follower (#3088); the test is the
+	// follower, and this update is the one that wake asked for. Left
+	// pending, a case's "<-r.k.pub.wake" took it in place of its
+	// statement's own wake, ran its update before the statement looked, and
+	// the statement's wake was found pending at the end (#3180).
+	select {
+	case <-r.k.pub.wake:
+	default:
+		t.Fatal("the build's install did not wake the follower")
+	}
 	r.k.followOnce(ctx, time.Minute)
 	r.k.settle()
 	r.k.followOnce(ctx, time.Minute)
 	if v, _ := r.k.published(r.read); len(v) != 1 {
 		t.Fatalf("the rig's tail is not published: %v", v)
+	}
+	if n := len(r.k.pub.wake); n != 0 {
+		t.Fatalf("the rig left %d wakes pending: a case would take one for its statement's", n)
 	}
 	// Time goes on after the update: a position first seen from here on is
 	// after the update began, as on a real clock.
