@@ -68,6 +68,9 @@ func resolveCapture(in *addInput, f addFlags, file mycnf.Client, ask asker, canA
 			return fmt.Errorf("capture-account under [dbtrail-forward] in the option file is yes or no, not %q", file.CaptureAccount)
 		}
 		said, saidYes, from = true, on, "capture-account=yes under [dbtrail-forward] in the option file"
+		if !on {
+			from = "capture-account=no under [dbtrail-forward] in the option file"
+		}
 	}
 	switch {
 	case f.NoForward:
@@ -85,7 +88,7 @@ func resolveCapture(in *addInput, f addFlags, file mycnf.Client, ask asker, canA
 	case said && saidYes:
 		in.Capture = captureYes
 	case said:
-		in.Capture = captureNo
+		in.Capture, in.captureWhy = captureNo, from
 	case canAsk:
 		in.Capture, in.ask = captureAsk, ask
 	default:
@@ -119,7 +122,7 @@ func addCaptureAnswerPG(ctx context.Context, c *ctlClient, in addInput, res ctlC
 	case captureNone:
 		return nil
 	case captureNo:
-		fmt.Fprintf(out, "The port does not forward for %q (--no-capture-account): the copy answers alone, and a statement it cannot answer gets an error. Turn it on later:  %s\n\n", res.Name, turnOn)
+		fmt.Fprintf(out, "The port does not forward for %q (%s): the copy answers alone, and a statement it cannot answer gets an error. Turn it on later:  %s\n\n", res.Name, in.captureWhy, turnOn)
 		return nil
 	case captureNotAsked:
 		fmt.Fprintf(out, "Not asked whether the port may forward with %s: %s, and nothing said yes, so the port does not forward for %q and the copy answers alone. Turn it on:  %s\n(or, when adding, --capture-account, or capture-account=yes under [dbtrail-forward] in the option file)\n\n", in.User, in.captureWhy, res.Name, turnOn)
@@ -127,7 +130,16 @@ func addCaptureAnswerPG(ctx context.Context, c *ctlClient, in addInput, res ctlC
 	case captureYes:
 		on = true
 	case captureAsk:
-		fmt.Fprint(out, captureQuestion(in.User, res.Name))
+		// Said where the question goes, beside it; and what was typed
+		// during the add is not the answer: Enter means yes here.
+		say := func(text string) { fmt.Fprint(out, text) }
+		if s, ok := in.ask.(interface{ Say(string) }); ok {
+			say = s.Say
+		}
+		say(captureQuestion(in.User, res.Name))
+		if d, ok := in.ask.(interface{ DiscardTypeAhead() }); ok {
+			d.DiscardTypeAhead()
+		}
 		for tries := 0; ; tries++ {
 			answer, err := in.ask.Line(fmt.Sprintf("Let the port forward as %s? (yes/no)", in.User), "yes")
 			if err != nil {
@@ -140,7 +152,7 @@ func addCaptureAnswerPG(ctx context.Context, c *ctlClient, in addInput, res ctlC
 			if tries == 2 {
 				return fmt.Errorf("%w: the answer was neither yes nor no. Turn it on later:  %s", errAddedNoCapture, turnOn)
 			}
-			fmt.Fprintln(out, "Answer yes or no (Enter is yes).")
+			say("Answer yes or no (Enter is yes).\n")
 		}
 		if !on {
 			fmt.Fprintf(out, "No: the copy answers alone, and a statement it cannot answer gets an error. Turn it on later:  %s\n\n", turnOn)

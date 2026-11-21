@@ -49,7 +49,9 @@ func TestServerAddPostgresCaptureAnswerOutputInEveryCase(t *testing.T) {
 			{"asked, something else, then no", answer{capture: captureAsk, typed: []string{"maybe", "no"}},
 				head + "\n" + pgCaptureQuestion + "Answer yes or no (Enter is yes).\n" + pgCaptureNoAtQuestion + pgNextLine, false},
 			{"--capture-account", answer{capture: captureYes}, head + "\n" + pgCaptureYes + pgNextLine, true},
-			{"--no-capture-account", answer{capture: captureNo}, head + "\n" + pgCaptureNoFlag + pgNextLine, false},
+			{"--no-capture-account", answer{capture: captureNo, why: "--no-capture-account"}, head + "\n" + pgCaptureNoFlag + pgNextLine, false},
+			{"capture-account=no in the file", answer{capture: captureNo, why: "capture-account=no under [dbtrail-forward] in the option file"},
+				head + "\n" + strings.Replace(pgCaptureNoFlag, "(--no-capture-account)", "(capture-account=no under [dbtrail-forward] in the option file)", 1) + pgNextLine, false},
 			{"no terminal and nothing said", answer{capture: captureNotAsked, why: "nobody is at a terminal to answer"}, head + "\n" + pgCaptureNotAsked + pgNextLine, false},
 			{"the option file on stdin, on a terminal", answer{capture: captureNotAsked, why: "standard input carried the option file or the password, so nothing could be asked"},
 				head + "\n" + strings.Replace(pgCaptureNotAsked, "nobody is at a terminal to answer", "standard input carried the option file or the password, so nothing could be asked", 1) + pgNextLine, false},
@@ -300,5 +302,62 @@ func TestServerAddMySQLUnchangedBy3054(t *testing.T) {
 		if strings.HasSuffix(call, "/route") {
 			t.Fatalf("calls %v", d.calls)
 		}
+	}
+}
+
+// A terminal: the explanation goes where the question goes, and what was
+// typed during the add is thrown away before the question, so an Enter
+// pressed while the checks ran is not a yes.
+type ttyAsker struct {
+	*turnAsker
+	said      []string
+	discarded int
+	order     []string
+}
+
+func (a *ttyAsker) Say(text string) { a.said = append(a.said, text); a.order = append(a.order, "say") }
+func (a *ttyAsker) DiscardTypeAhead() {
+	a.discarded++
+	a.order = append(a.order, "discard")
+}
+func (a *ttyAsker) Line(q, def string) (string, error) {
+	a.order = append(a.order, "line")
+	return a.turnAsker.Line(q, def)
+}
+
+func TestServerAddPostgresCaptureQuestionOnATerminal(t *testing.T) {
+	d, c := newPGAddDaemon(t, pgAddSourceURL)
+	ask := &ttyAsker{turnAsker: &turnAsker{seqAsker: &seqAsker{t: t, tty: true}, answers: []string{"maybe", "no"}}}
+	in := pgAddInput()
+	in.Capture, in.ask = captureAsk, ask
+	var out bytes.Buffer
+	if err := runServerAdd(context.Background(), c, in, false, &out); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(ask.order, ","), "say,discard,line,say,line"; got != want {
+		t.Fatalf("order %s, want %s", got, want)
+	}
+	if len(ask.said) != 2 || ask.said[0] != pgCaptureQuestion || ask.said[1] != "Answer yes or no (Enter is yes).\n" {
+		t.Fatalf("said %q", ask.said)
+	}
+	if strings.Contains(out.String(), "With your yes") {
+		t.Fatalf("the explanation went to stdout too:\n%s", out.String())
+	}
+	if e, _ := d.reg.Get(d.id); e.ForwardWithCaptureAccount {
+		t.Fatal("saved")
+	}
+}
+
+// An add that ends on the list, stopped, with --capture-account: the yes was
+// not saved either, and the error says how to give it.
+func TestServerAddPostgresStoppedSaysTheYesWasNotSaved(t *testing.T) {
+	d, c := newFakeDaemon(t)
+	d.on("POST /api/servers/check", 200, map[string]any{"ok": false, "name": "shop", "kept": true, "error": "the slot could not be created", "doctor": passReport()})
+	in := pgAddInput()
+	in.Capture = captureYes
+	err := runServerAdd(context.Background(), c, in, false, &bytes.Buffer{})
+	const want = "the database is on the list, stopped: the checks passed, and recording did not start: the slot could not be created\nForwarding with the user DBTrail connects with was not saved either:  bintrail-console server forward-user shop --capture-account\nSee `bintrail-console server list`"
+	if !errors.Is(err, errAddedStopped) || err.Error() != want {
+		t.Fatalf("err = %v\nwant  %s", err, want)
 	}
 }

@@ -100,7 +100,9 @@ option file says yes:
 capture-account = yes
 ```
 
-`--no-capture-account` (or `capture-account = no`) says no. With no the copy
+`--no-capture-account` (or `capture-account = no`) says no. `capture-account`
+alone on its line is yes, as an option alone is in MySQL, even with a comment
+after it; `capture-account =` with nothing after it says nothing. With no the copy
 answers alone, and a statement it cannot answer gets an error;
 `bintrail-console server forward-user <server> --capture-account` turns it on
 later.

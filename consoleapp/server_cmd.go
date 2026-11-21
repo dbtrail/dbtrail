@@ -539,7 +539,7 @@ type addInput struct {
 	ask                  asker
 	// Capture is what is done about the capture account once a PostgreSQL
 	// is added (#3054, resolveCapture); captureWhy says why it was not
-	// asked, for captureNotAsked.
+	// asked (captureNotAsked), or what said no (captureNo).
 	Capture    captureAnswer
 	captureWhy string
 	// IncludesSkipped counts the option file's !include lines, which were
@@ -615,6 +615,10 @@ func resolveAddInput(f addFlags, ask asker, stdin io.Reader) (addInput, error) {
 		// never forwards as.
 		if fwdFile, err = file.Client("dbtrail-forward"); err != nil {
 			return addInput{}, err
+		}
+		// Refused before a password is asked for, as the flags are.
+		if !pg && fwdFile.CaptureAccount != "" {
+			return addInput{}, errors.New(captureNotMySQL)
 		}
 		if in.Host == "" {
 			in.Host = cnf.Host
@@ -717,9 +721,6 @@ func resolveAddInput(f addFlags, ask asker, stdin io.Reader) (addInput, error) {
 			return addInput{}, err
 		}
 		return in, nil
-	}
-	if fwdFile.CaptureAccount != "" {
-		return addInput{}, errors.New(captureNotMySQL)
 	}
 	if err := resolveForward(&in, f, fwdFile, ask, ask.Interactive() && !f.PasswordStdin && !fileOnStdin); err != nil {
 		return addInput{}, err
@@ -1048,6 +1049,10 @@ func runServerAdd(ctx context.Context, c *ctlClient, in addInput, verbose bool, 
 		}
 		return fmt.Errorf("%w: %s failed. Fix %s and run the command again", errNotAdded, plural(failed, "check"), it)
 	case res.Error != "" && res.Kept:
+		if pg && in.Capture == captureYes {
+			// The yes asked for was not saved either: said, with how.
+			return fmt.Errorf("%w: the checks passed, and recording did not start: %s\nForwarding with the user DBTrail connects with was not saved either:  bintrail-console server forward-user %s --capture-account\nSee `bintrail-console server list`", errAddedStopped, res.Error, mysqlLineUser(res.Name))
+		}
 		return fmt.Errorf("%w: the checks passed, and recording did not start: %s\nSee `bintrail-console server list`", errAddedStopped, res.Error)
 	case res.Error != "":
 		return fmt.Errorf("%w: the checks passed, and recording did not start: %s", errNotAdded, res.Error)
