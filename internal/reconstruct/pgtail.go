@@ -500,16 +500,6 @@ func (t *PGTail) write(path string, keys []string) (rows int64, retErr error) {
 	if err != nil {
 		return 0, &TailRefusal{fmt.Sprintf("%s.%s: %v", t.schema, t.table, err)}
 	}
-	// Every row before the file: a refusal leaves nothing behind. Each is
-	// made again when it is written, not kept: held all at once they are
-	// the maps the tail no longer holds, for every key, while a whole file
-	// is written.
-	sort.Strings(keys)
-	for _, k := range keys {
-		if _, err = t.tailRow(k, t.fold.Changes[k]); err != nil {
-			return 0, err
-		}
-	}
 	tmp := path + ".tmp"
 	w, err := newParquetTableWriter(tmp, upsCols, map[string]string{
 		baseline.MetaKeyLastEventID: fmt.Sprint(t.fold.LastEventID),
@@ -523,6 +513,13 @@ func (t *PGTail) write(path string, keys []string) (rows int64, retErr error) {
 			_ = os.Remove(tmp)
 		}
 	}()
+	// Each row is made once, as it is written, and not kept: held all at once
+	// they are the maps the tail no longer holds, for every key, while a whole
+	// file is written. A row that is refused, the first or the last, leaves
+	// nothing behind by the cleanup above: the rows before it went to the
+	// .tmp, a name no statement is ever handed, which is removed, and the keys
+	// stay changed because only a file in place clears them.
+	sort.Strings(keys)
 	for _, k := range keys {
 		row, rerr := t.tailRow(k, t.fold.Changes[k])
 		if rerr != nil {
