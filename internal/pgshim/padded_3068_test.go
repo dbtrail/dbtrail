@@ -212,7 +212,6 @@ func TestPadded_toTheSource(t *testing.T) {
 		`SELECT id FROM codes WHERE #2 = 'ab'`,
 		`SELECT id FROM codes WHERE COLUMNS('c') = 'ab'`,
 		`SELECT name FROM plain WHERE name IN (FROM codes)`,
-		`FROM codes SELECT id WHERE k = 1`,
 		`SELECT DISTINCT ON (id) * EXCLUDE (id) FROM codes`,
 		// The table's whole row as a value.
 		`SELECT count(DISTINCT codes) FROM codes`,
@@ -381,6 +380,7 @@ func TestPadded_use(t *testing.T) {
 		`SELECT id, CAST(k AS decimal(10,2)) FROM codes c WHERE c.k IN (1, 2)`: false,
 		`SELECT k, count(*) FILTER (WHERE k > 1), row_number() OVER (PARTITION BY k) FROM codes AS c GROUP BY k`: false,
 		`SELECT id FROM codes c JOIN plain p USING (id) WHERE NOT (c.k = 1) AND p.qty BETWEEN (1) AND (2)`: false,
+		`FROM codes SELECT id WHERE k = 1`: true,
 		`SELECT 1`:                   false,
 		`SELECT code + 1 FROM codes`: true,
 		`SELECT code, code FROM codes WHERE code = 'a'`:          true,
