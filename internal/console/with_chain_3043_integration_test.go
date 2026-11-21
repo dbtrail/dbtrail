@@ -50,44 +50,30 @@ var withChainShapes = []struct {
 	{"a block over each table", "WITH x AS (SELECT * FROM {T}), n AS (SELECT id AS nid FROM {N}), y AS (SELECT x.* FROM x JOIN n ON x.id = n.nid) SELECT {V} FROM y ORDER BY id", true},
 }
 
-// checkWithChainShapes runs every shape in both kinds of session and holds
-// each answer to the rule: the recent change is in it, or the answer carries
-// a note (a session that does not route), or the statement is refused for
-// the source to answer (a session that routes). run returns the rows as
-// text, the note, and the refusal.
-func checkWithChainShapes(t *testing.T, value, table, noTail string, run func(stmt string, routing bool) (rows []string, note string, refused error)) {
+// checkWithChainShapes runs every shape and holds each answer to the rule:
+// the recent change is in it, or the answer carries a note. run returns the
+// rows as text and the note.
+func checkWithChainShapes(t *testing.T, value, table, noTail string, run func(stmt string) (rows []string, note string, err error)) {
+	bare := table[strings.LastIndex(table, ".")+1:]
 	for _, c := range withChainShapes {
-		bare := table[strings.LastIndex(table, ".")+1:]
 		stmt := strings.NewReplacer("{V}", value, "{T}", table, "{N}", noTail, "{t}", bare).Replace(c.stmt)
-		for _, routing := range []bool{false, true} {
-			name := c.name
-			if routing {
-				name += ", routing"
+		t.Run(c.name, func(t *testing.T) {
+			rows, note, err := run(stmt)
+			if err != nil {
+				t.Fatalf("%s\n\tfailed: %v", stmt, err)
 			}
-			t.Run(name, func(t *testing.T) {
-				rows, note, refused := run(stmt, routing)
-				if refused != nil {
-					if !routing {
-						t.Fatalf("%s\n\tfailed: %v", stmt, refused)
-					}
-					if !strings.Contains(refused.Error(), "fresh mode") {
-						t.Fatalf("%s\n\trefused, and not for fresh mode: %v", stmt, refused)
-					}
-					return // the source answers
-				}
-				if len(rows) != 1 {
-					t.Fatalf("%s\n\tanswered %v, want the table's one row", stmt, rows)
-				}
-				switch {
-				case rows[0] == "1=paid" && !c.noTail:
-				case rows[0] == "1=paid":
-					t.Errorf("%s\n\tread a recent change of a table capture does not record", stmt)
-				case note != "":
-				default:
-					t.Errorf("%s\n\tanswered %v from the snapshot alone, with no note", stmt, rows)
-				}
-			})
-		}
+			if len(rows) != 1 {
+				t.Fatalf("%s\n\tanswered %v, want the table's one row", stmt, rows)
+			}
+			switch {
+			case rows[0] == "1=paid" && !c.noTail:
+			case rows[0] == "1=paid":
+				t.Errorf("%s\n\tread a recent change of a table capture does not record", stmt)
+			case note != "":
+			default:
+				t.Errorf("%s\n\tanswered %v from the snapshot alone, with no note", stmt, rows)
+			}
+		})
 	}
 }
 
@@ -116,8 +102,8 @@ func TestIntegrationPGFreshWithBlocks_3043(t *testing.T) {
 	r.checkpoint(0x620)
 
 	q := &SQLOnCopy{s: r.s, b: r.b, user: "u", id: bootServerID}
-	run := func(stmt string, routing bool) ([]string, string, error) {
-		res, err := q.Run(context.Background(), stmt, "", sqlsandbox.Session{PostgresRules: true, StrictStar: routing})
+	run := func(stmt string) ([]string, string, error) {
+		res, err := q.Run(context.Background(), stmt, "", sqlsandbox.Session{PostgresRules: true})
 		if err != nil {
 			return nil, "", err
 		}
@@ -128,7 +114,7 @@ func TestIntegrationPGFreshWithBlocks_3043(t *testing.T) {
 		}
 		return out, res.Note, nil
 	}
-	settleTails(t, r.s, func() { run("SELECT id FROM public."+tbl.Table, false) })
+	settleTails(t, r.s, func() { run("SELECT status FROM public." + tbl.Table) })
 	checkWithChainShapes(t, "id || '=' || status", "public."+tbl.Table, "public."+none.Table, run)
 }
 
@@ -154,8 +140,8 @@ func TestIntegrationFreshWithBlocks_3043(t *testing.T) {
 	r.change(none.Table, event.EventUpdate, "1", "paid", "binlog.000008", 200, at)
 
 	q := &SQLOnCopy{s: r.s, b: r.b, user: "u", id: bootServerID}
-	run := func(stmt string, routing bool) ([]string, string, error) {
-		res, err := q.Run(context.Background(), stmt, "", sqlsandbox.Session{StrictStar: routing})
+	run := func(stmt string) ([]string, string, error) {
+		res, err := q.Run(context.Background(), stmt, "", sqlsandbox.Session{})
 		if err != nil {
 			return nil, "", err
 		}
@@ -166,12 +152,12 @@ func TestIntegrationFreshWithBlocks_3043(t *testing.T) {
 		}
 		return out, res.Note, nil
 	}
-	settleTails(t, r.s, func() { run("SELECT id FROM shop."+tbl.Table, false) })
+	settleTails(t, r.s, func() { run("SELECT status FROM shop." + tbl.Table) })
 	checkWithChainShapes(t, "CAST(id AS VARCHAR) || '=' || status", "shop."+tbl.Table, "shop."+none.Table, run)
 }
 
 // settleTails has the boot server's keeper build and publish the tail of the
-// tables read reads: a read starts the build, the follower publishes it.
+// tables that read reads: a read starts the build, the follower publishes it.
 func settleTails(t *testing.T, s *Server, read func()) {
 	t.Helper()
 	read()
