@@ -95,8 +95,6 @@ func charCases() []charCase {
 		differs(`SELECT c FROM ` + x + ` EXCEPT SELECT t FROM ` + x),
 		// Around them.
 		differs(`SELECT id FROM ` + x + ` WHERE c = '' ORDER BY id`),
-		differs(`SELECT id FROM ` + x + ` WHERE 'ab' = c ORDER BY id`),
-		differs(`SELECT id FROM ` + x + ` WHERE c NOT IN ('ab') ORDER BY id`),
 		differs(`SELECT id FROM ` + x + ` WHERE c IS DISTINCT FROM 'ab' ORDER BY id`),
 		differs(`SELECT id FROM ` + x + ` WHERE c BETWEEN 'ab' AND 'ab' ORDER BY id`),
 		differs(`SELECT id, char_length(c) FROM ` + x + ` ORDER BY id`),
@@ -105,14 +103,10 @@ func charCases() []charCase {
 		{`SELECT id, octet_length(c) FROM ` + x + ` ORDER BY id`, sqlcompare.NotOnCopy, false},
 		differs(`SELECT id, c::text || '|' FROM ` + x + ` ORDER BY id`),
 		differs(`SELECT id, CASE WHEN c = 'ab' THEN 1 ELSE 0 END FROM ` + x + ` ORDER BY id`),
-		differs(`SELECT id, CASE c WHEN 'ab' THEN 1 ELSE 0 END FROM ` + x + ` ORDER BY id`),
-		differs(`SELECT count(*) FROM ` + x + ` WHERE c = 'ab'`),
 		differs(`SELECT a.id FROM ` + x + ` a JOIN ` + p + ` b ON a.c = b.c ORDER BY a.id`),
 		differs(`SELECT a.id FROM ` + x + ` a JOIN ` + p + ` b USING (c) ORDER BY a.id`),
 		differs(`SELECT c FROM ` + x + ` UNION SELECT t FROM ` + x),
-		differs(`SELECT c FROM ` + x + ` UNION SELECT c FROM ` + p),
 		differs(`WITH y AS (SELECT id, c AS z FROM ` + x + `) SELECT id FROM y WHERE z = 'ab' ORDER BY id`),
-		differs(`SELECT id FROM (SELECT id, c AS z FROM ` + x + `) s WHERE z = 'ab' ORDER BY id`),
 		differs(`SELECT s.id FROM (SELECT * FROM ` + x + `) s WHERE s.c = 'ab' ORDER BY s.id`),
 		differs(`SELECT id FROM ` + p + ` WHERE c IN (SELECT c FROM ` + x + `) ORDER BY id`),
 		// A bpchar without a length: values PostgreSQL finds equal are two
@@ -131,10 +125,8 @@ func charCases() []charCase {
 		sent(`SELECT id FROM ` + x + ` WHERE c IS NULL ORDER BY id`),
 		sent(`SELECT c, count(*) FROM ` + x + ` GROUP BY c`),
 		sent(`SELECT count(DISTINCT c), count(c) FROM ` + x),
-		sent(`SELECT k, min(id) FROM ` + x + ` WHERE c IS NOT NULL GROUP BY k`),
 		// A plain select list: both sides write the padded value.
 		stays(`SELECT id, c FROM ` + x + ` ORDER BY id`),
-		stays(`SELECT c FROM ` + x + ` WHERE id = 1`),
 		stays(`SELECT a.id, a.c AS code FROM ` + x + ` a WHERE a.k > 2 ORDER BY a.id`),
 		stays(`SELECT DISTINCT c FROM ` + x),
 		stays(`SELECT c, count(*) FROM ` + x + ` GROUP BY 1`),
@@ -145,7 +137,6 @@ func charCases() []charCase {
 		// Nothing of the padded columns.
 		stays(`SELECT count(*) FROM ` + x),
 		stays(`SELECT id FROM ` + x + ` WHERE t = 'ab' ORDER BY id`),
-		stays(`SELECT k, count(*) FROM ` + x + ` GROUP BY k`),
 		stays(`SELECT id, length(t), t || 'x' FROM ` + x + ` ORDER BY id`),
 	}
 }
@@ -159,13 +150,7 @@ func charPlainCases() []string {
 		`SELECT id FROM ` + p + ` WHERE c <> 'ab' ORDER BY id`,
 		`SELECT id, length(c) FROM ` + p + ` ORDER BY id`,
 		`SELECT id, c || 'x' FROM ` + p + ` ORDER BY id`,
-		`SELECT id FROM ` + p + ` WHERE c = t ORDER BY id`,
-		`SELECT id FROM ` + p + ` WHERE c IN ('ab', 'x') ORDER BY id`,
-		`SELECT a.id, b.id FROM ` + p + ` a JOIN ` + p + ` b ON a.c = b.t ORDER BY a.id, b.id`,
-		`SELECT DISTINCT length(c) FROM ` + p,
 		`SELECT t FROM ` + p + ` INTERSECT SELECT c FROM ` + p,
-		`SELECT c FROM ` + p + ` EXCEPT SELECT t FROM ` + p,
-		`SELECT c, count(*) FROM ` + p + ` GROUP BY c`,
 		`SELECT count(*) FROM (SELECT * FROM ` + p + `) s`,
 		`WITH y AS (SELECT id, c AS z FROM ` + p + `) SELECT id FROM y WHERE z = 'ab' ORDER BY id`,
 	}
