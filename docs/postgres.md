@@ -1,8 +1,8 @@
 # PostgreSQL as a source
 
 bintrail can capture from a **PostgreSQL** server while the index database stays
-MySQL. PostgreSQL capture lives in its own binary, **`bintrail-pg`**. This is a
-**beta** capability: capture is type-faithful,
+MySQL. PostgreSQL capture lives in its own binary, **`bintrail-pg`**.
+Capture is type-faithful,
 `REPLICA IDENTITY FULL`-enforced, replication-slot/WAL-retention-monitored, and
 DDL-drift-safe, all verified end-to-end against real PostgreSQL (15–18 in CI)
 and smoke-validated on managed PostgreSQL (RDS / Aurora). It still has
