@@ -567,9 +567,9 @@ server and takes it off the list, after asking (`--yes` does not ask). What
 was already recorded and copied is kept.
 
 **The first copy and the MySQL port.** `server add` leaves the MySQL port on:
-adding a server when nothing was ever saved about the port turns it on, with
-Engine Routing on, and prints the `mysql` line and the port's password, which
-is shown only then. After it, one more command reaches a query answered on
+adding the first server when nobody chose whether the port is on or off turns
+it on, with Engine Routing on, and prints the `mysql` line and the port's
+password, which is shown only then. After it, one more command reaches a query answered on
 port 3309, with no web interface:
 
 ```
@@ -578,10 +578,22 @@ dbtrail snapshot schedule shop --every 1h   # keep the copy current
 mysql -h 127.0.0.1 -P 3309 -u shop -p
 ```
 
-Only the first server does it, and only when nothing was ever saved about
-the port. A port that was turned off stays off when another server is added,
+Only the first server does it, and only when nobody turned the port on or
+off before. A port that was turned off stays off when a server is added,
 and an installation that already had servers keeps a port it never turned on
-off when it adds one more after an upgrade. A session that may not
+off when it adds one more after an upgrade.
+
+What was saved about the port before the first server, without turning it on
+or off, is kept, and the port still turns on: a
+[monitor login](time-travel-sql.md#monitor-login), a password made with
+`dbtrail port new-password` (the command then says the port takes that
+password, and shows none), and Engine Routing turned off with
+`dbtrail port routing off`, which stays off. Until someone turns the port on
+or off, its settings file says so (`port_not_chosen: true`). A settings file
+(`console-mysql-port.yaml`) written by 0.137.0 or older does not say whether
+the port was turned off or only never turned on, so it is read as turned off:
+after an upgrade, turn the port on with `dbtrail port on`.
+ A session that may not
 change settings, or that has a data access policy, adds its server and the
 port is left as it was; the command says so. The web interface's Connect
 screen does the same and shows the same password. Its step 2 has an optional

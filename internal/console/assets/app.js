@@ -19500,7 +19500,9 @@ function readConnectStash() {
 // newServerPortBlock (#2686): what adding a server did to the MySQL port.
 // Adding the first one turns the port on, with Engine Routing on, and this
 // answer is the only place its password is ever shown, so it is drawn
-// whenever the port was turned on by this add. Nothing is drawn for a port that was
+// whenever the port was turned on by this add. A password made before the
+// server was added is kept, and Engine Routing turned off before it stays
+// off: both are said instead. Nothing is drawn for a port that was
 // already on or was saved as off: nothing about it changed, and nothing for an
 // answer that does not say whether the port is on (an older DBTrail, or a
 // reply that is not one). Pure, so every state can be rendered with node.
@@ -19510,7 +19512,7 @@ function newServerPortBlock(res) {
   const box = el("div", { class: "cn-newport" });
   if (p.turned_on) {
     const line = "mysql -h " + (p.host || "127.0.0.1") + " -P " + (p.port || "3309") + " -u " + mysqlLineUser(res.name) + " -p";
-    box.append(el("p", { class: "cn-sql-row", text: "The MySQL port is on now, with Engine Routing on. Connect with the mysql client; the user is the server's name:" }));
+    box.append(el("p", { class: "cn-sql-row", text: "The MySQL port is on now, with Engine Routing " + (p.routing_on ? "on" : "off, as it was saved") + ". Connect with the mysql client; the user is the server's name:" }));
     box.append(el("div", { class: "cn-term" },
       el("div", { class: "cn-urlrow" },
         el("code", { class: "stg-code cn-url cn-term-line", text: line }),
@@ -19521,6 +19523,9 @@ function newServerPortBlock(res) {
         el("div", { class: "cn-urlrow" },
           el("code", { class: "stg-code cn-url cn-term-line", text: p.password }),
           el("button", { class: "btn btn-sm cn-term-copy", type: "button", text: "Copy", onclick: () => copyText(p.password, "Port password") }))));
+    } else if (p.has_password) {
+      // Made before the server was added, and kept: none to show, none missing.
+      box.append(el("p", { class: "cn-sql-row", text: "Its password is the one made before this server was added, which is not shown again. If it was not kept, make a new one on the MySQL clients page." }));
     } else {
       box.append(el("p", { class: "cn-sql-row", text: "No password came with the answer. Make one on the MySQL clients page." }));
     }

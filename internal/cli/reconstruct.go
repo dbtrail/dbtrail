@@ -295,7 +295,7 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	// anchor for PG). ReadParquetMetadataAny reads S3 too — the same reader the
 	// full-table path uses (fulltable.go) — so an S3 baseline populates bmeta,
 	// which the old local-only read silently skipped: without it, gap detection
-	// and the PG beta warn below were disabled for every S3 baseline (#916). A
+	// and the PG rendering-GUC warn below were disabled for every S3 baseline (#916). A
 	// read failure is non-fatal — warn and proceed with a zero bmeta (gap
 	// detection then reports "unavailable", the pre-#916 S3 behavior).
 	var bmeta baseline.DumpMetadata
@@ -374,28 +374,22 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	// bytea, interval) are proven end-to-end through the baseline↔delta fold
 	// under rendering GUCs pinned identically on the baseline COPY and
 	// walsender sessions (#593 slice D, pgcapture/gucpin.go,
-	// TestOne_PGTypeMatrixThroughReconstructFold); the residual beta surface
-	// is container types only. Warn — never refuse (the path is honest-best-
-	// effort and a refusal would break the surface that DOES work). Detect PG
-	// by the recorded flavor OR the baseline's LSN anchor (read from S3 too
-	// since #916). Both clauses are load-bearing: the LSN clause catches any
-	// PG baseline carrying an anchor (post-#593, local or S3); the flavor
-	// clause catches a pre-#593 PG baseline with LSN==0 (no anchor) and
-	// backstops a baseline whose metadata read failed. --baseline-only returns
-	// above, before the DB is ever opened, so it never reaches these warns.
-	if pgReconstructBeta(query.SourceFlavor(db), bmeta.LSN) {
-		slog.Warn("single-row reconstruct for a PostgreSQL source: scalar types (including timestamptz/timestamp/date/time, float, bytea, interval — rendered under session GUCs pinned identically at capture and baseline) are validated end-to-end; container types (arrays beyond integer[]/text[], composite, range/multirange, hstore, geometric) remain beta — verify the round-trip before relying on them (#593)")
-		// A PG baseline whose rendering-GUC stamp is absent (pre-pin, rendered
-		// under the server's session defaults) OR different from the current
-		// pin was rendered under other GUCs; on a server whose defaults differ
-		// from the pin, its GUC-sensitive text will not join post-pin deltas —
-		// the merge is an exact text join. Warn with the remediation.
-		// (Comparing the VALUE, not mere presence, also catches a baseline
-		// produced by a binary with a different pinned set.)
-		if bmeta.LSN != 0 && bmeta.RenderGUCs != baseline.RenderGUCsPinned {
-			slog.Warn("this baseline's rendering-GUC stamp does not match the current pin (#593) — it predates GUC pinning or was produced under a different pin; on a server whose TimeZone/DateStyle/extra_float_digits/bytea_output/IntervalStyle defaults differ from the pinned values, its GUC-sensitive text will not match newer deltas; re-run `bintrail-pg baseline` to refresh it",
-				"baseline_render_gucs", bmeta.RenderGUCs)
-		}
+	// TestOne_PGTypeMatrixThroughReconstructFold); container types beyond the
+	// tested ones are untested through the fold, which docs/postgres.md says.
+	// Nothing is printed for that. --baseline-only returns above, before the DB
+	// is ever opened, so it never reaches the warn below.
+	//
+	// A PG baseline (one carrying an LSN anchor, read from S3 too since #916)
+	// whose rendering-GUC stamp is absent (pre-pin, rendered under the server's
+	// session defaults) OR different from the current pin was rendered under
+	// other GUCs; on a server whose defaults differ from the pin, its
+	// GUC-sensitive text will not join post-pin deltas — the merge is an exact
+	// text join. Warn with the remediation. (Comparing the VALUE, not mere
+	// presence, also catches a baseline produced by a binary with a different
+	// pinned set.)
+	if bmeta.LSN != 0 && bmeta.RenderGUCs != baseline.RenderGUCsPinned {
+		slog.Warn("this baseline's rendering-GUC stamp does not match the current pin (#593) — it predates GUC pinning or was produced under a different pin; on a server whose TimeZone/DateStyle/extra_float_digits/bytea_output/IntervalStyle defaults differ from the pinned values, its GUC-sensitive text will not match newer deltas; re-run `bintrail-pg baseline` to refresh it",
+			"baseline_render_gucs", bmeta.RenderGUCs)
 	}
 
 	// Refuse if a TRUNCATE/DROP/RENAME hit this table in the window: it emits
@@ -582,8 +576,8 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	// binlog file+pos. PG LSN TEXT ("0/1A2B3C4") is NOT lexically ordered, so
 	// the binlog_file column must never be compared for a PG source — see
 	// reconstruct.GapDetected and resolveGapCheck. NOTE: single-row reconstruct
-	// (and the shim's _snapshot) DO run for a PG source today — a beta warn
-	// fired above; full-table reconstruct runs for PG to Parquet only (#1596). The
+	// (and the shim's _snapshot) DO run for a PG source today;
+	// full-table reconstruct runs for PG to Parquet only (#1596). The
 	// remaining slice-D GA hardening is end-to-end type-fidelity validation and
 	// pinning the baseline COPY vs pgoutput rendering GUCs so their text agrees;
 	// it must honor "replay at/after the floor", not "strictly after the
@@ -1134,17 +1128,6 @@ func resolveGapCheck(flavor string, bmeta baseline.DumpMetadata, firstFile strin
 		eventPosMissing = firstStartPos == 0
 	}
 	return flavor, lineageGuard, anchorPresent, eventPosMissing
-}
-
-// pgReconstructBeta reports whether a single-row reconstruct is running against
-// a PostgreSQL source — gate for the beta warning. Either the index records the
-// source flavor as "postgres", or the baseline carries an LSN anchor. Both
-// clauses are load-bearing: the LSN clause catches any PG baseline carrying an
-// anchor (post-#593, local or S3 — metadata is read from S3 too since #916); the
-// flavor clause catches a pre-#593 PG baseline with LSN==0 (no anchor) and
-// backstops a baseline whose metadata read failed.
-func pgReconstructBeta(flavor string, baselineLSN uint64) bool {
-	return flavor == "postgres" || baselineLSN != 0
 }
 
 // ── no snapshot (#1807) ──────────────────────────────────────────────────────
