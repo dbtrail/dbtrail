@@ -925,7 +925,8 @@ does not protect: capture's service lowered as well (leave the other services
 at the default priority), and Kubernetes, where a container's weight competes
 only inside its pod; set a CPU limit on the container there. A compose file
 from before this line keeps running the service at the default priority, as
-it did: take the current file to get it.
+it did: take the current file to get it (the installer never replaces a file
+that is already there).
 
 | `.env` | What it sets | Unset |
 |---|---|---|

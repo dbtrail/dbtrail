@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -86,9 +87,20 @@ func TestPGRouterUnit_runsAtTheRoutersCPUPriority(t *testing.T) {
 		if len(all) != 1 {
 			t.Fatalf("%s has %d CPUWeight= lines, want exactly one", unit, len(all))
 		}
+		// Under [Service]: systemd ignores it anywhere else.
+		at := strings.Index(string(data), "\nCPUWeight=")
+		service, install := strings.Index(string(data), "\n[Service]\n"), strings.Index(string(data), "\n[Install]\n")
+		if service < 0 || install < 0 || at < service || at > install {
+			t.Fatalf("%s: CPUWeight= is not in the [Service] section", unit)
+		}
 		return all[0][1]
 	}
 	router, pg := read("bintrail-router.service"), read("bintrail-pg-router.service")
+	// Well below the default of 100, as cpuPriorityOf counts it for the
+	// MySQL router: half or less.
+	if n, err := strconv.Atoi(pg); err != nil || n < 1 || n > 50 {
+		t.Errorf("bintrail-pg-router.service has CPUWeight=%s, want at most half the default of 100", pg)
+	}
 	if pg != router {
 		t.Errorf("bintrail-pg-router.service has CPUWeight=%s and bintrail-router.service CPUWeight=%s; they must match", pg, router)
 	}

@@ -27,7 +27,7 @@ func TestRouterStartupLines_sayTheCoresNote(t *testing.T) {
 	}
 }
 
-func TestCompose_onlyTheRouterRunsAtALowerCPUPriority(t *testing.T) {
+func TestCompose_onlyTheRoutersRunAtALowerCPUPriority(t *testing.T) {
 	data, err := os.ReadFile(composePath)
 	if err != nil {
 		t.Fatal(err)
