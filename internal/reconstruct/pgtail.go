@@ -103,6 +103,11 @@ type PGTail struct {
 	fromCopy    bool
 	wants       map[string]struct{}
 	copyRefusal string
+	// copyDeferred counts the updates in a row that left this tail's read
+	// of the copy for later, and copyRoom is the room (bytes of text) one
+	// of them had and found too small, 0 for none: see DeferCopy.
+	copyDeferred int
+	copyRoom     int64
 }
 
 // pgPackedRow is the row of one change, put away. of is the change it is

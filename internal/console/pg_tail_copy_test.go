@@ -498,7 +498,6 @@ func (k *tailKeeper) tableEntry(key string) *tailEntry {
 // tables go on. A read only cut short is tried again.
 func TestPGTailCopy_theCopyCannotBeRead(t *testing.T) {
 	ctx := context.Background()
-	huge := strings.Repeat("x", 2<<20)
 	for name, c := range map[string]struct {
 		budget tailBudget
 		rows   [][3]string
@@ -516,9 +515,6 @@ func TestPGTailCopy_theCopyCannotBeRead(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, says: "could not be read from its copy: "},
-		"the values are more than the tails may hold": {budget: tailBudget{Bytes: 1 << 20},
-			rows: [][3]string{{"1", huge, "note one"}, {"2", "two", "note two"}},
-			says: "past their memory budget (1 MiB, BINTRAIL_SQL_TAIL_MAX_BYTES)"},
 		"the copy has no row of the key": {rows: [][3]string{{"2", "two", "note two"}}, says: "the copy has no row under that key"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -611,10 +607,10 @@ func TestPGTailCopy_theCopyCannotBeRead(t *testing.T) {
 		}
 	})
 
-	t.Run("the read running when the time for an update's reads is up ends its table's tail, and one not started waits", func(t *testing.T) {
-		was := pgCopyReadMax
-		pgCopyReadMax = 20 * time.Millisecond
-		t.Cleanup(func() { pgCopyReadMax = was })
+	t.Run("a read that had the whole time for an update's reads and did not end loses its tail, and one not started waits", func(t *testing.T) {
+		was, wasMin := pgCopyReadMax, pgCopyReadMin
+		pgCopyReadMax, pgCopyReadMin = 20*time.Millisecond, 0
+		t.Cleanup(func() { pgCopyReadMax, pgCopyReadMin = was, wasMin })
 		r := newPGCopyRig(t, tailBudget{})
 		// items sorts before orders: its read is the one that takes the time.
 		slow := pgCopyCut(t, filepath.Join(r.root, "snap1"), "items", 0x500, [3]string{"1", "i", "n"})
@@ -643,7 +639,7 @@ func TestPGTailCopy_theCopyCannotBeRead(t *testing.T) {
 			t.Fatalf("the copy was read at %v, want the slow table's alone", r.f.copied())
 		}
 		// With the time a read really has, the next update reads it.
-		pgCopyReadMax = was
+		pgCopyReadMax, pgCopyReadMin = was, wasMin
 		got, err = r.k.refresh(ctx, []views.BaselineTable{r.cut1, slow})
 		if err != nil {
 			t.Fatal(err)
@@ -652,6 +648,246 @@ func TestPGTailCopy_theCopyCannotBeRead(t *testing.T) {
 			t.Fatalf("at the next update the other table is not read: %+v", v)
 		}
 	})
+}
+
+// pgCopyTimes sets the times an update gives its reads, for one test.
+func pgCopyTimes(t *testing.T, max, margin, least time.Duration) {
+	t.Helper()
+	wasMax, wasMargin, wasMin := pgCopyReadMax, pgCopyReadMargin, pgCopyReadMin
+	pgCopyReadMax, pgCopyReadMargin, pgCopyReadMin = max, margin, least
+	t.Cleanup(func() { pgCopyReadMax, pgCopyReadMargin, pgCopyReadMin = wasMax, wasMargin, wasMin })
+}
+
+// The memory the tails may hold: with no room left a read waits for a later
+// update and its table keeps its tail, whoever took the room; only a table
+// that does not fit the whole budget alone is refused.
+func TestPGTailCopy_noRoomWaitsAndOnlyATableTooLargeAloneIsRefused(t *testing.T) {
+	ctx := context.Background()
+	large := strings.Repeat("x", 600<<10)
+
+	t.Run("alone and larger than the whole budget: refused", func(t *testing.T) {
+		r := newPGCopyRig(t, tailBudget{Bytes: 1 << 20}, [3]string{"1", strings.Repeat("x", 2<<20), "note one"}, [3]string{"2", "two", "note two"})
+		// No other table's tail is held: the room is the whole budget less
+		// what this tail holds itself.
+		r.f.update("orders", 0x610, "1", pgCopyUnsent, "n")
+		got, err := r.k.refresh(ctx, []views.BaselineTable{r.cut1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := r.k.tableEntry(r.key)
+		if _, has := got[r.key]; has || e == nil || !strings.Contains(e.refused, "do not fit the tails' memory budget, with no other table's changes held (1 MiB, BINTRAIL_SQL_TAIL_MAX_BYTES)") {
+			t.Fatalf("view %v, refusal %q", has, e.refused)
+		}
+	})
+
+	t.Run("the first read takes the room: the second waits, is not read again for nothing, and is read once there is room", func(t *testing.T) {
+		r := newPGCopyRig(t, tailBudget{Bytes: 1 << 20}, [3]string{"1", large, "note one"}, [3]string{"2", "two", "note two"})
+		items := pgCopyCut(t, filepath.Join(r.root, "snap1"), "items", 0x500, [3]string{"1", large, "n"})
+		r.f.floors[items.Path] = 0x500
+		both := []views.BaselineTable{r.cut1, items}
+		before := settled(t, ctx, r.k, both...)[r.key]
+		r.f.update("items", 0x610, "1", pgCopyUnsent, "n")
+		r.f.update("orders", 0x620, "1", pgCopyUnsent, "n")
+		got, err := r.k.refresh(ctx, both)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ki := tailKey("public", "items")
+		if v, ok := got[ki]; !ok || v.ThroughID != r.f.lastID() {
+			t.Fatalf("the table read first was not written: %+v", got)
+		}
+		e := r.k.tableEntry(r.key)
+		if e == nil || e.refused != "" {
+			t.Fatalf("the table that found no room was refused: %q", e.refused)
+		}
+		if v, ok := got[r.key]; !ok || v.ThroughID != before.ThroughID {
+			t.Fatalf("the table that found no room does not keep its last version: %+v", got[r.key])
+		}
+		if times, room := e.tail.(pgCopyTail).CopyDeferred(); times != 1 || room <= 0 {
+			t.Fatalf("the tail says it was left for later %d times, with room %d", times, room)
+		}
+		if want := []string{items.Path, r.cut1.Path}; !reflect.DeepEqual(r.f.copied(), want) {
+			t.Fatalf("the copy was read at %v, want %v", r.f.copied(), want)
+		}
+		// No more room than a read already found too small: the copy is not
+		// read again at every update to find that out. (One more read is
+		// allowed for: the first one's values, put away, count a little less
+		// than they did as they came in.)
+		for range 3 {
+			if _, err := r.k.refresh(ctx, both); err != nil {
+				t.Fatal(err)
+			}
+		}
+		settledAt := len(r.f.copied())
+		for range 3 {
+			if _, err := r.k.refresh(ctx, both); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if n := len(r.f.copied()); n != settledAt || n > 3 {
+			t.Fatalf("the copy was read %d times, %d of them in the last three updates; with no more room than a read found too small it is not read again", n, n-settledAt)
+		}
+		if e := r.k.tableEntry(r.key); e.refused != "" {
+			t.Fatalf("waiting refused the table: %q", e.refused)
+		}
+		// Room: the read is made, and the table is current again.
+		r.k.mu.Lock()
+		r.k.budget.Bytes = 8 << 20
+		r.k.mu.Unlock()
+		got, err = r.k.refresh(ctx, both)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v, ok := got[r.key]; !ok || v.ThroughID != r.f.lastID() || len(r.f.copied()) != settledAt+1 {
+			t.Fatalf("with room again: view %+v, the copy read %d times", got[r.key], len(r.f.copied()))
+		}
+		if rows := pgCopyState(t, r.cut1, got[r.key]); len(rows) != 2 || rows[0] != "1="+large+"/n" {
+			t.Fatalf("the row does not hold its value from the copy (%d rows)", len(rows))
+		}
+	})
+
+	t.Run("no room at all, as when another tail is over the budget: the read waits", func(t *testing.T) {
+		r := newPGCopyRig(t, tailBudget{Bytes: 1 << 20})
+		// A key waits: its read was cut short.
+		r.f.update("orders", 0x610, "1", pgCopyUnsent, "n")
+		short, cancel := context.WithCancel(ctx)
+		r.f.hook(func(ctx context.Context, _ views.BaselineTable) error {
+			cancel()
+			return ctx.Err()
+		})
+		_, _ = r.k.refresh(short, []views.BaselineTable{r.cut1})
+		cancel()
+		// The tails now hold more than their budget (what a tail that
+		// stopped over it leaves: it is still held).
+		r.k.mu.Lock()
+		r.k.budget.Bytes = 1
+		r.k.mu.Unlock()
+		got, err := r.k.refresh(ctx, []views.BaselineTable{r.cut1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := r.k.tableEntry(r.key)
+		if e.refused != "" {
+			t.Fatalf("with no room in the budget the table was refused: %q", e.refused)
+		}
+		if v, ok := got[r.key]; !ok || v.ThroughID != 1 || len(r.f.copied()) != 1 {
+			t.Fatalf("view %+v, the copy read %d times; want the last version and no read", got[r.key], len(r.f.copied()))
+		}
+		r.k.mu.Lock()
+		r.k.budget.Bytes = 1 << 20
+		r.k.mu.Unlock()
+		got, err = r.k.refresh(ctx, []views.BaselineTable{r.cut1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v := got[r.key]; v.ThroughID != r.f.lastID() || !reflect.DeepEqual(pgCopyState(t, r.cut1, v), []string{"1=one/n", "2=paid/p", "3=three/note three"}) {
+			t.Fatalf("with room again: %+v", v)
+		}
+	})
+}
+
+// An update with little time left starts no read, ends in time, and
+// publishes the tables that wait for nothing.
+func TestPGTailCopy_anUpdateShortOfTimeStillPublishesTheOtherTables(t *testing.T) {
+	ctx := context.Background()
+	r := newPGCopyRig(t, tailBudget{})
+	items := pgCopyCut(t, filepath.Join(r.root, "snap1"), "items", 0x500, [3]string{"1", "i", "n"})
+	r.f.floors[items.Path] = 0x500
+	both := []views.BaselineTable{r.cut1, items}
+	settled(t, ctx, r.k, both...)
+	r.f.update("orders", 0x610, "1", pgCopyUnsent, "n")
+	r.f.update("items", 0x620, "1", "ii", "nn")
+	// As a statement's own update: two seconds in all. The reads may not run
+	// into the last second and a half, and need a second at least.
+	pgCopyTimes(t, 10*time.Second, 1500*time.Millisecond, time.Second)
+	short, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	began := time.Now()
+	got, err := r.k.refresh(short, both)
+	if err != nil {
+		t.Fatalf("the update failed for every table: %v", err)
+	}
+	if short.Err() != nil || time.Since(began) > time.Second {
+		t.Fatalf("the update took %s of its two seconds", time.Since(began))
+	}
+	if n := len(r.f.copied()); n != 0 {
+		t.Fatalf("a read was started with too little time for it (%d)", n)
+	}
+	if v, ok := got[tailKey("public", "items")]; !ok || v.ThroughID != r.f.lastID() {
+		t.Fatalf("the table that waits for nothing was not published: %+v", got)
+	}
+	e := r.k.tableEntry(r.key)
+	if v, ok := got[r.key]; e.refused != "" || !ok || v.ThroughID != 1 {
+		t.Fatalf("the table whose read was not started: refusal %q, view %+v; want its last version", e.refused, got[r.key])
+	}
+	// A read cut short by the nearer deadline is left for later too, not
+	// refused: it never had the whole time to itself.
+	pgCopyTimes(t, 10*time.Second, 1500*time.Millisecond, 0)
+	short2, cancel2 := context.WithTimeout(ctx, 1700*time.Millisecond)
+	defer cancel2()
+	r.f.hook(func(ctx context.Context, _ views.BaselineTable) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	got, err = r.k.refresh(short2, both)
+	if err != nil || short2.Err() != nil {
+		t.Fatalf("the update whose read was cut short: %v (its own deadline: %v)", err, short2.Err())
+	}
+	if e := r.k.tableEntry(r.key); e.refused != "" {
+		t.Fatalf("a read cut short by the update's nearer deadline refused the table: %q", e.refused)
+	}
+	if _, ok := got[tailKey("public", "items")]; !ok {
+		t.Fatalf("the other table was not published: %+v", got)
+	}
+	// With time, it is read.
+	got, err = r.k.refresh(ctx, both)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := got[r.key]; v.ThroughID != r.f.lastID() || !reflect.DeepEqual(pgCopyState(t, r.cut1, v), []string{"1=one/n", "2=paid/p", "3=three/note three"}) {
+		t.Fatalf("with time again: %+v", v)
+	}
+}
+
+// The tails that waited longest are read first: the order of the tables'
+// names does not leave the same one for later at every update.
+func TestPGTailCopy_theTailThatWaitedIsReadFirst(t *testing.T) {
+	ctx := context.Background()
+	r := newPGCopyRig(t, tailBudget{})
+	items := pgCopyCut(t, filepath.Join(r.root, "snap1"), "items", 0x500, [3]string{"1", "i", "n"}, [3]string{"2", "j", "m"})
+	r.f.floors[items.Path] = 0x500
+	both := []views.BaselineTable{r.cut1, items}
+	settled(t, ctx, r.k, both...)
+	r.f.update("items", 0x610, "1", pgCopyUnsent, "n")
+	r.f.update("orders", 0x620, "1", pgCopyUnsent, "n")
+	// Three seconds for the reads, and a read needs one and a half: the
+	// first one takes two.
+	pgCopyTimes(t, 3*time.Second, 0, 1500*time.Millisecond)
+	r.f.hook(func(context.Context, views.BaselineTable) error {
+		time.Sleep(2 * time.Second)
+		return nil
+	})
+	if _, err := r.k.refresh(ctx, both); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{items.Path}; !reflect.DeepEqual(r.f.copied(), want) {
+		t.Fatalf("the copy was read at %v, want items alone (first by name, and the time went on it)", r.f.copied())
+	}
+	if e := r.k.tableEntry(r.key); e.refused != "" {
+		t.Fatalf("the table whose read was not started was refused: %q", e.refused)
+	}
+	// Both wait again: the one left for later goes first.
+	r.f.update("items", 0x630, "2", pgCopyUnsent, "m2")
+	got, err := r.k.refresh(ctx, both)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{items.Path, r.cut1.Path, items.Path}; !reflect.DeepEqual(r.f.copied(), want) {
+		t.Fatalf("the copy was read at %v, want %v", r.f.copied(), want)
+	}
+	if v := got[r.key]; v.ThroughID != r.f.lastID() {
+		t.Fatalf("the table that waited is not current: %+v", v)
+	}
 }
 
 // No source but PostgreSQL's reads the copy, and no tail but PostgreSQL's

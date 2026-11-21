@@ -125,6 +125,8 @@ func (t *PGTail) GiveCopyValues(keys, cols []string, rows map[string]map[string]
 	if t.copyRefusal != "" {
 		return 0, t.copyRefusal
 	}
+	// A read was made: it waits for none any more.
+	t.copyDeferred, t.copyRoom = 0, 0
 	asked := make(map[string]bool, len(cols))
 	for _, c := range cols {
 		asked[c] = true
@@ -176,6 +178,25 @@ func (t *PGTail) GiveCopyValues(keys, cols []string, rows map[string]map[string]
 	}
 	return given, ""
 }
+
+// DeferCopy records that whoever drives the tail left its read of the copy
+// for a later update, and returns how many in a row that makes. room, when
+// above 0, is how much text the read was allowed and found too little: until
+// more than that is free there is no use in reading again (CopyDeferred).
+// The count is what lets a driver that cannot read for every tail in one
+// update take the ones that waited longest first, and say so only now and
+// then.
+func (t *PGTail) DeferCopy(room int64) int {
+	t.copyDeferred++
+	if room > 0 {
+		t.copyRoom = room
+	}
+	return t.copyDeferred
+}
+
+// CopyDeferred is how many updates in a row left the read for later, and
+// the room that was found too small (0: none was).
+func (t *PGTail) CopyDeferred() (times int, room int64) { return t.copyDeferred, t.copyRoom }
 
 // copyPending is what keeps keys from being written: the refusal of a value
 // the copy could not give, or ErrPGTailCopyPending while one of them waits
