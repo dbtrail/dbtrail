@@ -1029,7 +1029,7 @@ jobs:
           # BINTRAIL_REQUIRE_PSQL its absence is a failure, not a skip.
           command -v psql >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends postgresql-client; }
           BINTRAIL_REQUIRE_PSQL=1 go test -tags=integration -race -p 1 -count=1 -v \
-            -run '^(TestIntegrationPGRouter|TestIntegrationPGSnapshotUpdate|TestIntegrationPGCaptureStatus|TestIntegrationPGNewTableIsIncluded_2759|TestIntegrationPGSnapshotUpdateGeneratedColumn)$' ./consoleapp/ 2>&1 | tee /tmp/pg-console-it.out
+            -run '^(TestIntegrationPGRouter|TestIntegrationPGSnapshotUpdate|TestIntegrationPGCaptureStatus|TestIntegrationPGNewTableIsIncluded_2759|TestIntegrationPGSnapshotUpdateGeneratedColumn|TestIntegrationServerAddPostgresRefusesARoleWithoutSelect_3022)$' ./consoleapp/ 2>&1 | tee /tmp/pg-console-it.out
           grep -q -- '--- PASS: TestIntegrationPGRouter/psql ' /tmp/pg-console-it.out \
             || { echo "FATAL: psql did not run against the PostgreSQL router — false-green tripwire" >&2; exit 1; }
           grep -q -- '^--- PASS: TestIntegrationPGRouter ' /tmp/pg-console-it.out \
@@ -1042,6 +1042,8 @@ jobs:
             || { echo "FATAL: the PostgreSQL new-table test did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '^--- PASS: TestIntegrationPGSnapshotUpdateGeneratedColumn ' /tmp/pg-console-it.out \
             || { echo "FATAL: the PostgreSQL generated-column test did not run — false-green tripwire" >&2; exit 1; }
+          grep -q -- '^--- PASS: TestIntegrationServerAddPostgresRefusesARoleWithoutSelect_3022 ' /tmp/pg-console-it.out \
+            || { echo "FATAL: the PostgreSQL server add read-access test did not run — false-green tripwire" >&2; exit 1; }
 
   integration-postgres-extensions:
     # Extension-type round-trip coverage (#1210): PostGIS geometry/geography

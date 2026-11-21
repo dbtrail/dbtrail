@@ -162,6 +162,12 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	}
 	defer conn.Close(context.Background())
 
+	// Before the slot: a role that cannot read a table to copy is refused
+	// with nothing created (#3022).
+	if err := refuseUnreadable(ctx, conn, cfg.Publication, cfg.Filters, logger); err != nil {
+		return Stats{}, err
+	}
+
 	// Ensure the slot exists BEFORE the snapshot transaction opens — the
 	// ordering invariant that makes the baseline anchorable: the slot's
 	// consistent_point ≤ the anchor LSN read below, so no delta between them
