@@ -17,6 +17,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/cli"
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/mydumperlock"
 	"github.com/dbtrail/dbtrail/internal/rotation"
 )
 
@@ -245,15 +246,37 @@ func reportOptionFileCompared(w io.Writer, r cli.OptionReport, skipped bool) err
 // BINTRAIL_ROTATE_INTERVAL is not here: the interval watch starts with also
 // sets how often old snapshots are pruned, saved policy or not, so its line
 // is used either way.
+//
+// fix is what to do about the saved value. The web interface saved the last
+// three from 0.85.0 to 0.88 and has had no control for them since 0.89.0
+// (#1846): a value saved then is still in the server list and still comes
+// first, so the way out named is the request that removes it.
 var savedInTheWeb = []struct {
-	env, key, where string
+	env, key, where, fix string
 }{
-	{"BINTRAIL_ROTATE_RETAIN", "", "a rotation policy saved in the web interface (Settings, Retention, Edit rotation)"},
-	{"BINTRAIL_ROTATE_ADD_FUTURE", "", "a rotation policy saved in the web interface (Settings, Retention, Edit rotation)"},
-	{"BINTRAIL_CONSOLE_BASELINE_RETAIN", console.BackupSettingBaselineRetain, "a value saved in the web interface (Snapshots, settings)"},
-	{"BINTRAIL_CONSOLE_BASELINE_LOCK_MODE", console.BackupSettingLockMode, "a value saved in the web interface"},
-	{"BINTRAIL_CONSOLE_BASELINE_STAGING", console.BackupSettingStagingDir, "a value saved in the web interface"},
-	{"BINTRAIL_CONSOLE_VERIFY_TABLES", console.BackupSettingVerifyTables, "a value saved in the web interface"},
+	{"BINTRAIL_ROTATE_RETAIN", "", "a rotation policy saved in the web interface (Settings, Retention, Edit rotation)", savedFixThere},
+	{"BINTRAIL_ROTATE_ADD_FUTURE", "", "a rotation policy saved in the web interface (Settings, Retention, Edit rotation)", savedFixThere},
+	{"BINTRAIL_CONSOLE_BASELINE_RETAIN", console.BackupSettingBaselineRetain, "a value saved in the web interface (Snapshots, settings)", savedFixThere},
+	{"BINTRAIL_CONSOLE_BASELINE_LOCK_MODE", console.BackupSettingLockMode, "a value saved in the web interface", savedFixRequest(console.BackupSettingLockMode, false)},
+	{"BINTRAIL_CONSOLE_BASELINE_STAGING", console.BackupSettingStagingDir, "a value saved in the web interface", savedFixRequest(console.BackupSettingStagingDir, true)},
+	{"BINTRAIL_CONSOLE_VERIFY_TABLES", console.BackupSettingVerifyTables, "a value saved in the web interface", savedFixRequest(console.BackupSettingVerifyTables, false)},
+}
+
+const savedFixThere = "Change it there, or remove this line."
+
+// savedFixRequest is the way out for a setting the web interface no longer
+// shows: the request that removes the saved value. restart is for the one
+// DBTrail reads only when it starts, the working folder. The route is the
+// one a refused lock mode already names (mydumperlock.SavedLockModeEndpoint),
+// with this setting's key at its end.
+func savedFixRequest(key string, restart bool) string {
+	then := ""
+	if restart {
+		then = ", then restart DBTrail"
+	}
+	route := strings.TrimSuffix(mydumperlock.SavedLockModeEndpoint, console.BackupSettingLockMode) + key
+	return "The web interface no longer shows this setting: remove the saved value with " + route +
+		` and {"use_startup":true}` + then + ", or remove this line."
 }
 
 // savedComparison is what comparing the option file with the values saved in
@@ -338,7 +361,7 @@ func savedOverrides(r cli.OptionReport, serversPath string) savedComparison {
 			case saved && same:
 				c.Notes = append(c.Notes, fmt.Sprintf("line %d: %s is also saved in the web interface, with the same value.", a.Line, a.Option))
 			case saved:
-				c.Problems = append(c.Problems, fmt.Sprintf("line %d: %s is not used by the capture and web service (watch), because %s comes first. Change it there, or remove this line.", a.Line, a.Option, w.where))
+				c.Problems = append(c.Problems, fmt.Sprintf("line %d: %s is not used by the capture and web service (watch), because %s comes first. %s", a.Line, a.Option, w.where, w.fix))
 			}
 		}
 	}

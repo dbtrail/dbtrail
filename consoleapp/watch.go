@@ -1430,7 +1430,7 @@ func bootWorkingFolderDefault(reg *console.Registry) workingFolderDefault {
 		return workingFolderDefault{}
 	}
 	d := defaultWorkingFolderOnce(reg.Path())
-	const fix = "set the Working folder in the web interface's backup settings, or BINTRAIL_CONSOLE_BASELINE_STAGING, to a disk with room, and restart"
+	const fix = "set " + stagingSetWith + ", to a folder on a disk with room, and restart"
 	switch {
 	case d.InMemory:
 		slog.Warn("working folder: no folder is set, and full reads will write their dump into memory: the system temp folder is RAM on this host",
