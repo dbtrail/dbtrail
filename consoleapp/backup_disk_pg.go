@@ -55,7 +55,7 @@ const pgCopyPeakTenths = 13
 var pgCopyEstimateFn = pgbaseline.ReadCopyEstimate
 
 // moveLocalFolderHint is how an operator gives the snapshot folder more room.
-const moveLocalFolderHint = "Free space there, or give this server a Local folder on a bigger disk (Snapshots page, under Where and how often)."
+const moveLocalFolderHint = "Free space there, or give this server a Local folder on a bigger disk (" + console.PageSnapshots + " page, under Where and how often)."
 
 // checkPGCopyDisk is the preflight executePG runs before the snapshot. It
 // returns the verdict and the line the job's status and history carry, or an
