@@ -285,8 +285,10 @@ func TestBusyCopy_withoutAForwardingAccountIsAsBefore_3109(t *testing.T) {
 	l := &costLogin{copyErr: sw.copyErr}
 	c := costPortConn(t, ctx, l)
 	for name, run := range map[string]func() (busyOutcome, string){
-		"simple":   func() (busyOutcome, string) { return busySimple(ctx, c, l, "SELECT sum(n) FROM big") },
-		"extended": func() (busyOutcome, string) { return busyExtended(ctx, c, l, "SELECT sum(n) FROM big WHERE n = $1", []byte("1")) },
+		"simple": func() (busyOutcome, string) { return busySimple(ctx, c, l, "SELECT sum(n) FROM big") },
+		"extended": func() (busyOutcome, string) {
+			return busyExtended(ctx, c, l, "SELECT sum(n) FROM big WHERE n = $1", []byte("1"))
+		},
 	} {
 		got, msg := run()
 		if got != (busyOutcome{"", "53000", RouteCopy, ReasonNoForwardAccount}) || msg != sqlsandbox.ErrBusy.Error() {
