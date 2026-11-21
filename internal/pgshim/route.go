@@ -21,8 +21,9 @@ import (
 // against a real PostgreSQL. Anything else goes to the source: a function,
 // an operator, a cast or a construct the copy answers differently or not at
 // all, the clock and the session (now(), current_user), text compared or
-// ordered (the source orders text by its collation, the copy by bytes), and
-// a session setting the copy does not reproduce. A statement the copy then
+// ordered (the source orders text by its collation, the copy by bytes), a
+// char(n) column used where its trailing blanks count (padded.go), and a
+// session setting the copy does not reproduce. A statement the copy then
 // refuses, or answers with a column it writes otherwise, is sent to the
 // source before anything is said to the client, so a different answer never
 // reaches it in silence.
@@ -103,7 +104,9 @@ func (s *session) toSource(c classified, qstr string) bool {
 // connection with a forwarding account makes for a statement outside a
 // transaction block in UTC, before the copy is asked (a statement the copy
 // then refuses still goes to the source). types is the copy's column types
-// by lowercased name; nil when not known. For internal/pgcompare.
+// by lowercased name, a column the source pads under its mark (screenTypes,
+// which CopyScreenFor reads from a catalog); nil when not known. For
+// internal/pgcompare.
 func CopyScreen(stmt string, types map[string][]string) string {
 	if w := ownName(stmt); w != "" {
 		return w
@@ -149,7 +152,8 @@ func (s *session) route(c classified, qstr string) routeDecision {
 // that can reach its source.
 func (s *session) routeFree(qstr string) routeDecision {
 	// Screened as the copy runs it (runFree, columnsOf).
-	toks, why := lexSQL(RewriteForCopy(qstr))
+	text := RewriteForCopy(qstr)
+	toks, why := lexSQL(text)
 	first := firstWord(toks)
 	switch first {
 	case "select", "with":
@@ -176,7 +180,17 @@ func (s *session) routeFree(qstr string) routeDecision {
 		s.logger.Debug("pgshim: sent to the source", "reason", ReasonVeto, "construct", w)
 		return routeDecision{RouteSource, ReasonVeto}
 	}
-	if veto := screenForCopy(toks, s.columnTypes()); veto != "" {
+	types, unread := s.columnTypes(text)
+	veto := ""
+	if unread {
+		if veto = catalogUnread(toks); veto != "" {
+			s.warnCatalogUnread()
+		}
+	}
+	if veto == "" {
+		veto = screenForCopy(toks, types)
+	}
+	if veto != "" {
 		s.logger.Debug("pgshim: sent to the source", "reason", ReasonVeto, "construct", veto)
 		return routeDecision{RouteSource, ReasonVeto}
 	}
@@ -185,24 +199,20 @@ func (s *session) routeFree(qstr string) routeDecision {
 
 // columnTypes is the copy's column types by column name, across its tables
 // (lowercased names; the copy engine's type names), from the catalog this
-// connection read; nil when it cannot be read, which screenForCopy takes as
-// "any column may be text".
-func (s *session) columnTypes() map[string][]string {
+// connection read, for the screen of stmt, text as the copy is handed it: a
+// column the source pads (a char(n)) of a table stmt reads is under its mark
+// (screenTypes). nil when there is no catalog to read, which screenForCopy
+// takes as "any column may be text"; unread says the host has one and it
+// could not be read, so that any column may be a char(n) too (catalogUnread).
+func (s *session) columnTypes(stmt string) (types map[string][]string, unread bool) {
 	if s.bound == nil || s.bound.Catalog == nil {
-		return nil
+		return nil, false
 	}
 	v, perr := s.catalog()
 	if perr != nil {
-		return nil
+		return nil, true
 	}
-	out := map[string][]string{}
-	for _, t := range v.tables {
-		for _, c := range t.Columns {
-			n := strings.ToLower(c.Name)
-			out[n] = append(out[n], strings.ToUpper(c.Type))
-		}
-	}
-	return out
+	return screenTypes(v.tables, tablesRead(stmt, v.tables)), false
 }
 
 // canFallBack reports whether a statement the copy does not answer can go
@@ -862,6 +872,9 @@ func typeIsFloat(t string) bool { return t == "DOUBLE" || t == "FLOAT" || t == "
 // types by name (columnTypes); nil when they are not known, and then every
 // name may be a text column.
 func screenForCopy(in []rtToken, types map[string][]string) string {
+	if why := paddedUse(in, types); why != "" {
+		return why
+	}
 	if why := aliasUse(in); why != "" {
 		return why
 	}

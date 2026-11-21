@@ -69,6 +69,13 @@ type CatalogColumn struct {
 	NotNull  bool
 	Default  string
 	Identity string
+	// SourceType and SourceTypeMod are the column's type on the source as
+	// the snapshot recorded it (pg_attribute.atttypid and atttypmod, -1 no
+	// modifier). SourceType 0: the snapshot does not describe the column.
+	// The copy's Type does not show what the source's holds that the copy's
+	// does not: a char(n) is a VARCHAR here (padded.go).
+	SourceType    uint32
+	SourceTypeMod int32
 }
 
 // catalogCacheFor is how long one connection reuses the catalog it read: a

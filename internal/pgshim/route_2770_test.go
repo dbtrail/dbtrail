@@ -239,7 +239,8 @@ func routeSession(forward bool) *session {
 	b := &Binding{Schema: "public", Catalog: func(context.Context) ([]CatalogTable, error) {
 		var cols []CatalogColumn
 		for n, ts := range routeTypes {
-			cols = append(cols, CatalogColumn{Name: n, Type: ts[0]})
+			// Each with a type the snapshot recorded: none is a char(n).
+			cols = append(cols, CatalogColumn{Name: n, Type: ts[0], SourceType: oidText})
 		}
 		return []CatalogTable{{Schema: "public", Name: "pgcmp_orders", Columns: cols}}, nil
 	}}
