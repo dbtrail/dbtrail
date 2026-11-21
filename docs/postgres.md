@@ -315,7 +315,15 @@ from that:
   table is skipped from there on and capture health records the changes stored
   meanwhile, which sends the table to a full read. Fix such a partition's
   identity only once capture has caught up, or run a full read of the table
-  after it.
+  after it. The same goes for a partitioned table whose primary key was moved
+  to other columns while capture was behind: a change of the new key's column
+  made under the old key is stored under the new one.
+- A partitioned table whose root is at `REPLICA IDENTITY NOTHING` is captured
+  under its primary key once the catalog has said the table is partitioned.
+  While that read fails, its `UPDATE` and `DELETE` are skipped and counted
+  (`replica_identity_key_not_sent`), as for a table with no identity: they are
+  missing from the history, and the table's next full read brings the copy up
+  to date.
 
 > **PostgreSQL 18 and generated columns: read this before you set `REPLICA IDENTITY FULL` or create the publication.**
 > On PostgreSQL 18, a table that is at `REPLICA IDENTITY FULL`, belongs to a

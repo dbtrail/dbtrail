@@ -179,10 +179,6 @@ func queryPartitions(ctx context.Context, conn *pgx.Conn, relationID uint32) (Pa
 	return p, nil
 }
 
-// partitionsReader runs queryPartitions on a connection of its own, opened at
-// the first read and again whenever it is found closed (pgx closes a
-// connection whose query was cut by its deadline). Used from the decode loop
-// alone: not safe for concurrent use.
 // partitionsReadTimeout bounds one read of a relation's partitions, opening
 // its connection included. One attempt a minute at most is made while reads
 // fail (Decoder.partsDownUntil), so a catalog that hangs holds the
@@ -190,6 +186,10 @@ func queryPartitions(ctx context.Context, conn *pgx.Conn, relationID uint32) (Pa
 // wal_sender_timeout (60 s by default).
 const partitionsReadTimeout = 3 * time.Second
 
+// partitionsReader runs queryPartitions on a connection of its own, opened at
+// the first read and again whenever it is found closed (pgx closes a
+// connection whose query was cut by its deadline). Used from the decode loop
+// alone: not safe for concurrent use.
 type partitionsReader struct {
 	dsn  string
 	conn *pgx.Conn
