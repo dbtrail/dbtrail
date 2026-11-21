@@ -2655,6 +2655,15 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 			// change": with deltas on, its previous file is linked forward
 			// whatever the flag above says.
 			TableDeltas: upBaselineTableDeltas,
+			// The rule the refresh ends chains of table deltas by, so the
+			// rotation form refuses a retention on the same line (#2959).
+			// Only where a supervisor updates copies at all: the same
+			// expression as Enabled above. Without one no schedule runs, and
+			// the form must not refuse over updates nobody makes.
+			MinRetainForTableDeltas: minRetainIfRefreshing(upBaselineRefreshEvery != "" || upConsoleBaselineTrigger),
+			TableDeltaMaxAge:        reconstruct.TableDeltaMaxAge,
+			RefreshEvery:            refreshEveryOrZero(upBaselineRefreshEvery),
+			RefreshEveryRaw:         strings.TrimSpace(upBaselineRefreshEvery),
 		},
 		AllowSetup: opts.AllowSetup,
 		// watch's spelling of the flags the bind refusal quotes.
@@ -2762,6 +2771,29 @@ func rotationSettingsProvider(reg *console.Registry) func() rotation.Settings {
 		}
 		return upRotationCfg
 	}
+}
+
+// minRetainIfRefreshing is the rule the rotation form refuses by, or nil in a
+// daemon that updates no copy.
+func minRetainIfRefreshing(refreshing bool) func(time.Duration) (must, comfortable time.Duration, ok bool) {
+	if !refreshing {
+		return nil
+	}
+	return minRetainForTableDeltas
+}
+
+// refreshEveryOrZero is --baseline-refresh-interval as a duration, zero when
+// it is not set or does not parse (startBaselineRefreshLoop refuses that one
+// by name; this is only what the web interface is told).
+func refreshEveryOrZero(raw string) time.Duration {
+	if strings.TrimSpace(raw) == "" {
+		return 0
+	}
+	d, err := cliutil.ParseInterval(strings.TrimSpace(raw))
+	if err != nil {
+		return 0
+	}
+	return max(d, 0)
 }
 
 // resolveBintrailIDFunc is the seam tests stub to avoid a real DB.

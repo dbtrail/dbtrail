@@ -625,7 +625,11 @@ var refreshStatusWritten = func(refreshRequest) {}
 // the same read, folds every cycle and says so too.
 func (s *baselineSupervisor) chainStartFloor(req refreshRequest, at time.Time, interval time.Duration) time.Time {
 	floor, err := readLiveFloor(s.ctx, req.IndexDSN)
-	line, ok := s.coverageRuleFor(s.ctx, req, interval).reanchorBy(floor, at)
+	rule := s.coverageRuleFor(s.ctx, req, interval)
+	line, ok := rule.reanchorBy(floor, at)
+	if s.tableDeltas && !req.SourcePostgres {
+		s.reportNoRoomForChains(req, rule)
+	}
 	if err == nil && !ok {
 		err = errNoLiveFloor
 	}
@@ -641,6 +645,41 @@ func (s *baselineSupervisor) chainStartFloor(req refreshRequest, at time.Time, i
 		return time.Time{}
 	}
 	return line
+}
+
+// reportNoRoomForChains says, at most once a day per server and cadence, that
+// the retention in force ends every chain of table deltas at the cycle after the
+// one that began it (#2959, coverageRule.chainOutlivesCycle), and resolves the
+// condition once it no longer does. The rotation panel refuses to save such a
+// retention, and this is every other way to arrive at one: the daemon's own
+// --rotate-retain, a policy saved before the refusal existed, a schedule made
+// longer, deltas turned on over a short retention. Until this line the only
+// trace was one Info line per table per cycle.
+func (s *baselineSupervisor) reportNoRoomForChains(req refreshRequest, rule coverageRule) {
+	if s.gateEdge == nil {
+		return
+	}
+	// Per cadence: a server can be updated by its own schedule and by the
+	// daemon-wide interval, and the verdict of one must not resolve, or fire
+	// again, the other's.
+	key := noRoomForChainsKey(req.ServerID, rule.interval)
+	if !rule.retentionEndsEveryChain() {
+		s.gateEdge.Resolve(key)
+		return
+	}
+	if s.gateEdge.Fire(key, rule.dropsOn().String()) {
+		must, comfortable, _ := minRetainForTableDeltas(rule.interval)
+		slog.Warn("snapshot refresh: table deltas are on and the index retention leaves no room for them, so every update "+
+			"writes its tables in full. Set a longer retention (Settings, Retention in the web interface, or --rotate-retain), "+
+			"or turn table deltas off (baseline-table-deltas = false in dbtrail.cnf)",
+			"server", req.ServerName, "id", req.ServerID, "retention", rule.dropsOn().String(),
+			"update_every", rule.interval.String(), "retention_must_exceed", must.String(),
+			"retention_works_well_from", comfortable.String())
+	}
+}
+
+func noRoomForChainsKey(serverID string, interval time.Duration) string {
+	return "no-room-for-chains:" + serverID + ":" + interval.String()
 }
 
 // publishedReadsFrom is where the readers of the snapshot this cycle just

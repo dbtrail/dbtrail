@@ -58,6 +58,14 @@ type backupScheduleDTO struct {
 	// this schedule; Reason says why not.
 	Runnable bool   `json:"runnable"`
 	Reason   string `json:"reason,omitempty"`
+	// DeltasWarning says every update of this server writes every table in
+	// full, and why (#2959): table deltas are on and the index retention in
+	// use is too short for an update every Every. Empty otherwise.
+	DeltasWarning string `json:"deltas_warning,omitempty"`
+	// DeltasNote says, with no alarm, that this schedule's updates are too
+	// far apart for table deltas on any retention, so every update writes
+	// every table in full (#2959). Never beside DeltasWarning.
+	DeltasNote string `json:"deltas_note,omitempty"`
 	// Running: a job this schedule started is in flight.
 	Running bool `json:"running,omitempty"`
 	// HistoryUnavailable: the run history could not be opened at boot, so
@@ -235,6 +243,8 @@ func (s *Server) backupScheduleDTO(ctx context.Context, e ServerEntry, now time.
 			dto.NextFullRun = p.NextFullRun(now).Format(time.RFC3339)
 		}
 	}
+	dto.DeltasWarning = s.scheduleDeltasWarning(e)
+	dto.DeltasNote = s.scheduleDeltasNote(e)
 	gates := s.scheduleGates()
 	fullErr := CheckFullCopy(e, sched, gates)
 	if fullErr != nil {

@@ -175,10 +175,83 @@ func (r coverageRule) reanchorBy(liveFloor, now time.Time) (time.Time, bool) {
 			floor = p
 		}
 	}
-	if m := floor.Add(time.Hour + r.interval); m.After(line) && !r.floorHolds(liveFloor, now) {
+	if m := floor.Add(cycleMargin(r.interval)); m.After(line) && !r.floorHolds(liveFloor, now) {
 		line = m
 	}
 	return line, true
+}
+
+// cycleMargin is how far above the index's floor a start has to be for the
+// next cycle to still find it there: the hour the floor moves by and the
+// interval nothing looks again for (reanchorBy's third bound, and floorHolds).
+func cycleMargin(interval time.Duration) time.Duration { return time.Hour + interval }
+
+// dropsOn is the window this index's events are dropped on as far as the rule
+// knows: the configured retention, or the index's own window when that is
+// shorter (no retention chosen, and an index created under a shorter one).
+// Zero when neither is known.
+func (r coverageRule) dropsOn() time.Duration {
+	w := r.retain
+	if r.dropsAfter > 0 && (w <= 0 || r.dropsAfter < w) {
+		w = r.dropsAfter
+	}
+	return max(w, 0)
+}
+
+// chainOutlivesCycle reports whether a chain of table deltas begun by one
+// cycle can still be there at the next one (#2959), in steady state: an index
+// as old as its window, whose oldest live hour sits where rotation leaves it.
+// It asks reanchorBy, the line the fold ends chains on: a chain a cycle began
+// starts at that cycle, the next one runs an interval later, and the floor is
+// put exactly one window behind now, the furthest back it counts for (an
+// older live hour is raised to there, a newer one only moves the line later).
+// False means every update writes its tables in full for as long as the
+// daemon runs. An index younger than its window is not this question:
+// floorHolds spares its chains for a while, and then it is in steady state.
+//
+// True with no window known: nothing is then dropped on a clock this daemon
+// knows, and the observed floor decides cycle by cycle.
+func (r coverageRule) chainOutlivesCycle() bool {
+	w := r.dropsOn()
+	if w <= 0 {
+		return true
+	}
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Add(w)
+	line, ok := r.reanchorBy(now.Add(-w), now)
+	return ok && now.Add(-r.interval).After(line)
+}
+
+// retentionEndsEveryChain reports whether the RETENTION is why no chain of
+// table deltas outlives a cycle (#2959): chainOutlivesCycle is false, and the
+// cycles are close enough for a chain to live at all. At a day apart or more
+// (reconstruct.TableDeltaMaxAge) the fold ends every chain by age at the next
+// cycle on any retention, so a longer one would buy nothing and is not asked
+// for.
+func (r coverageRule) retentionEndsEveryChain() bool {
+	return r.interval < reconstruct.TableDeltaMaxAge && !r.chainOutlivesCycle()
+}
+
+// minRetainForTableDeltas is the retention table deltas need MORE than when
+// the copy is updated every interval (#2959): the interval a chain has to
+// live through, plus the margin reanchorBy keeps above the floor. At or under
+// it chainOutlivesCycle is false; a test holds the two together, so a change
+// to the line cannot leave this figure behind.
+//
+// It is the line under which a chain NEVER survives, not one over which it
+// always does: rotation drops whole hours, so the floor can sit up to an hour
+// later than now minus the retention, and just over this figure most cycles
+// still end their chains. comfortable is the retention from which a chain
+// survives a cycle wherever the floor sits in its hour.
+//
+// ok is false when no retention makes room for a chain: updates a day apart
+// or more, which the fold ends by age (reconstruct.TableDeltaMaxAge).
+func minRetainForTableDeltas(interval time.Duration) (must, comfortable time.Duration, ok bool) {
+	interval = max(interval, 0)
+	if interval >= reconstruct.TableDeltaMaxAge {
+		return 0, 0, false
+	}
+	must = interval + cycleMargin(interval)
+	return must, must + time.Hour, true
 }
 
 // floorHolds reports whether rotation is known to leave the oldest live hour
@@ -200,7 +273,7 @@ func (r coverageRule) floorHolds(liveFloor, now time.Time) bool {
 	if window <= 0 {
 		return false
 	}
-	return !liveFloor.Before(now.Add(-window).Add(time.Hour + r.interval))
+	return !liveFloor.Before(now.Add(-window).Add(cycleMargin(r.interval)))
 }
 
 // readLiveFloor reads the oldest hour the index's live partitions still hold,

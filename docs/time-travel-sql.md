@@ -3054,13 +3054,163 @@ different order are counted apart and never fail the run: ties in an `ORDER
 BY` resolve differently on each engine, and so does a collation difference
 in the sort key; read those by hand.
 
+#### When the router stops
+
+An application that connects to this port depends on the router, which is
+one process. While the router is down the application gets errors on this
+port with MySQL up: nothing on the port sends it to MySQL another way. MySQL
+itself is not touched. DBTrail does not run two routers over one list of
+servers, and capture moving to another host is a different subject.
+
+What follows was measured in one run on one host: DBTrail 0.137.0 from the
+Docker Compose stack, a MySQL 8.0.46 source, the router forwarding writes
+(`ROUTER_READ_ONLY=0`), and a Python client (PyMySQL) that inserted a row
+and read one by key ten times a second, plus a `GROUP BY` over 300,000 rows
+once a second, which the copy answers.
+
+**The application connected straight to the port.**
+
+| What was done to the router | What the client got | For how long |
+|---|---|---|
+| Stopped (`docker compose stop router`), started 30 seconds later | The statement in flight: `2013 Lost connection to MySQL server during query`. A long `SELECT` in flight: `2006 MySQL server has gone away (the port's connection to the source was lost: context canceled); reconnect to continue`. Every new connection: `2003 Can't connect to MySQL server on '127.0.0.1' ([Errno 111] Connection refused)`, answered in 1 ms | Until it was started. It took connections again within the same second |
+| Killed (`kill -9` of its process) | `2013` on the statement in flight, then two failed connections: one refused, one cut during the handshake (`2013`) | Under a second. Docker restarted the container in 0.3 seconds (the stack's `restart: unless-stopped`) and the client's third attempt connected |
+| Frozen for 30 seconds (`docker compose pause router`): the process does not run, the port still accepts connections | No error from the port. A statement waited until the client's own read timeout, 20 seconds there (`2013 Lost connection to MySQL server during query (timed out)`), and a new connection waited 10 seconds, until the router ran again. On clients with a 60 second timeout, statements waited 22 seconds and were then answered | As long as the freeze, or the client's timeout |
+
+- **Open connections are closed, not left waiting**, when the router stops
+  or is killed: the next statement on an idle connection failed with `2013`
+  at once. Only the frozen router left clients waiting, so give the
+  application a connect timeout and a read timeout.
+- **A transaction that was open is rolled back** when the router stops or is
+  killed. Its next statement failed with `2013`, and none of its rows were
+  on MySQL. Across the freeze it stayed open, and committed once the router
+  ran again.
+- **Every write the client had an answer for was on MySQL**: 694 of 694 with
+  the stop, 995 of 995 with the kill. The one `INSERT` in flight each time
+  ended in `2013` and was not on MySQL. That is what this run saw, not a
+  rule: treat a write that ended in `2013` as unknown, as with any MySQL
+  connection lost during a statement.
+- **MySQL was not touched.** A second client writing straight to MySQL
+  during each of those runs had 1,000 of 1,000 inserts answered, the slowest
+  in 16 ms.
+- Under the deb and rpm packages it is systemd that starts the router again
+  (`Restart=always`, `RestartSec=5` in `bintrail-router.service`). That was
+  not part of the run.
+
+**A proxy in front that falls back to MySQL.** DBTrail does not send the
+application to MySQL when its router stops. A proxy the application connects
+to can. ProxySQL checks every backend, and takes one that does not answer
+out of use until it answers again. The port is made to sit behind ProxySQL:
+it takes [an application login](#application-login) and
+[a monitor login](#monitor-login), and
+[Step 2](#step-2--install-proxysql) below installs ProxySQL. What follows
+adds the fallback to that setup.
+
+Two hostgroups. The first holds MySQL alone and takes writes, transactions
+and locking reads, which then never pass through the router. The second
+takes every other `SELECT`: it holds the router with a weight of 10,000,000, and the same MySQL with
+weight 1.
+
+```sql
+-- On ProxySQL's admin port (6032).
+-- The health check: a ping every 2 seconds, given up after 500 ms. Three
+-- missed in a row (ProxySQL's default) take the backend out of use.
+UPDATE global_variables SET variable_value='2000' WHERE variable_name='mysql-monitor_ping_interval';
+UPDATE global_variables SET variable_value='500'  WHERE variable_name='mysql-monitor_ping_timeout';
+UPDATE global_variables SET variable_value='1000' WHERE variable_name='mysql-connect_timeout_server';
+-- The account the check logs in with, on MySQL and on the port alike.
+UPDATE global_variables SET variable_value='monitor' WHERE variable_name='mysql-monitor_username';
+UPDATE global_variables SET variable_value=<the monitor password, in quotes> WHERE variable_name='mysql-monitor_password';
+LOAD MYSQL VARIABLES TO RUNTIME; SAVE MYSQL VARIABLES TO DISK;
+
+INSERT INTO mysql_servers (hostgroup_id, hostname, port, weight, comment) VALUES
+  (10, 'mysql.example.com',   3306, 1,        'MySQL: writes, transactions, locking reads'),
+  (20, 'dbtrail.example.com', 3309, 10000000, 'DBTrail router: every other SELECT'),
+  (20, 'mysql.example.com',   3306, 1,        'MySQL: SELECTs while the router does not answer');
+LOAD MYSQL SERVERS TO RUNTIME; SAVE MYSQL SERVERS TO DISK;
+
+INSERT INTO mysql_users (username, password, default_hostgroup, transaction_persistent)
+  VALUES ('shop_app', <the application password, in quotes>, 10, 1);
+LOAD MYSQL USERS TO RUNTIME; SAVE MYSQL USERS TO DISK;
+
+INSERT INTO mysql_query_rules (rule_id, active, match_digest, destination_hostgroup, apply) VALUES
+  (1, 1, '^SELECT .* FOR (UPDATE|SHARE)', 10, 1),
+  (2, 1, '^SELECT ', 20, 1);
+LOAD MYSQL QUERY RULES TO RUNTIME; SAVE MYSQL QUERY RULES TO DISK;
+```
+
+On DBTrail, save the application's username and password on its server and
+the monitor's on the port, as the two links above describe: ProxySQL logs
+into the router with the accounts it uses on MySQL. The application then
+connects to ProxySQL (port 6033) and nowhere else. While the router is in
+use, about one of that hostgroup's `SELECT`s in ten million goes to MySQL
+instead.
+
+The same run, with ProxySQL 3.1.12 on that host and this configuration. The
+first row of each pair is ProxySQL's own health check (a ping every 10
+seconds, given up after 1 second), the second the one above:
+
+| What was done to the router | Health check | Errors in the client's loop | Slowest statement | Back on the router |
+|---|---|---|---|---|
+| Stopped for 30 seconds | ProxySQL's defaults | None | 297 ms | 24 seconds after it was started |
+| Stopped for 30 seconds | Every 2 seconds | None | 225 ms | 10 seconds after |
+| Killed (`kill -9`) | ProxySQL's defaults | None | 247 ms | 9 seconds after Docker restarted it |
+| Killed (`kill -9`) | Every 2 seconds | None | 251 ms | 10 seconds after |
+| Frozen for 30 seconds | ProxySQL's defaults | Two: `2013` at the client's 20 second timeout, then `9001 Max connect timeout reached while reaching hostgroup 20 after 10000ms` | 20 seconds | Never taken out of use while frozen |
+| Frozen for 30 seconds | Every 2 seconds | None | 8.2 seconds | 10 seconds after it ran again |
+
+- **What it covers.** When the router stopped or was killed, ProxySQL took
+  it out of use within the same second, on the failed connections, and MySQL
+  answered the `SELECT`s from then on. With the router frozen, the ping
+  every 2 seconds took it out 6 seconds in; one `SELECT` waited 8.2 seconds
+  and MySQL answered it. No write failed in any of the six runs, and the
+  transaction that was open when the router went away committed in each,
+  with both of its rows on MySQL: neither passes through the router here.
+- **ProxySQL's default health check is too slow for a router that is
+  frozen.** Three pings 10 seconds apart are 30 seconds, and for those 30
+  seconds the `SELECT`s waited and failed. A router that is stopped or
+  killed refuses connections, which ProxySQL acts on at once with either
+  setting.
+- **A `SELECT` in flight on the router is not always saved.** In three of
+  the four runs where the router was stopped or killed, ProxySQL ran the
+  statement again on MySQL and the client got its answer late and with no
+  error: a `SELECT SLEEP(40)` that had run for 20 seconds was answered after
+  60. In the fourth the client got `2013`. With the router frozen, the
+  client gave up at its own 60 second timeout before any answer came.
+- **MySQL then runs the heavy reads too.** The `GROUP BY` took about 70 ms
+  on the copy and 167 ms on MySQL. With the reports the copy is there for,
+  the difference is the whole reason for it: while the router is out, your
+  MySQL carries them.
+- **It comes back on its own.** ProxySQL tried the router again and found it
+  9 to 24 seconds after it was back (`mysql-shun_recovery_time_sec`, 10 by
+  default). Nothing has to be done by hand.
+- **Only what MySQL can answer falls back.** `_flashback`, `_snapshot`,
+  `_diff` and `SHOW ROUTER STATUS` exist on the router alone.
+- **ProxySQL is now what the application depends on.** This moves the
+  question to the proxy; it does not make the router highly available.
+
+Sending every statement through the router's hostgroup instead
+(`default_hostgroup` 20 for the user, no rules, and the router forwarding
+writes) was measured too, and is worse. Each time the router went away one
+statement in flight ended in `2013`, a write among them, and the open
+transaction was lost: its next statement failed with `2013` and none of its
+rows were on MySQL. The connection that was writing then stayed on MySQL for
+as long as it was watched after the router was back (50 and 79 seconds),
+with the router still listed `SHUNNED`; a new connection went to the router
+at once.
+
+Not measured: a router host that cannot be reached at all, where a
+connection attempt waits for a timeout instead of being refused; ProxySQL on
+another machine than the router; and the packaged service under systemd.
+
 <a id="the-router-the-same-port-as-a-service-of-its-own-experimental"></a>
 ### The router: the process that serves the port
 
 `bintrail-console router` is the process that serves the MySQL port. It runs
 beside `bintrail-console watch`, the process that captures, and not inside
 it. `watch` opens no MySQL port. If the router is not running, nothing
-answers on 3309, even with the port turned on in the web interface.
+answers on 3309, even with the port turned on in the web interface. What an
+application connected to it then sees, and a proxy that falls back to MySQL:
+[When the router stops](#when-the-router-stops).
 
 ```bash
 bintrail-console router --listen 127.0.0.1:3309
