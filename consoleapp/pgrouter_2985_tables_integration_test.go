@@ -382,4 +382,21 @@ func TestIntegrationPGRouterOnlyTheSourcesTablesAreHeldBack_2985(t *testing.T) {
 		}
 	}
 	apartAgain("at the end")
+
+	// The port's status line (#3021) counts each statement once, on the side
+	// that answered it: one the copy was held back for is the source's.
+	pgTestWait(t, "the status line's counts to add up", 10*time.Second, func() (bool, string) {
+		n := routes.doc("").Servers[e.ID]
+		c := pgPortCountsOf(n)
+		var byReason, bySource uint64
+		for reason, k := range n.Reasons {
+			byReason += k
+			if reason != pgshim.ReasonAnswersTheSame {
+				bySource += k
+			}
+		}
+		ok := c.copy == n.Reasons[pgshim.ReasonAnswersTheSame] && c.source == bySource && c.refused == 0 &&
+			c.copy+c.source == byReason && n.Reasons[pgshim.ReasonCopyTooOld] > 0
+		return ok, fmt.Sprintf("the line counts dbtrail=%d postgresql=%d refused=%d; the reasons are %v", c.copy, c.source, c.refused, n.Reasons)
+	})
 }
