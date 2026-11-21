@@ -310,9 +310,9 @@ func TestIntegrationFreshNeverTailsHalfAStatement_3043(t *testing.T) {
 		want   string // "" when the engine does not resolve the name
 		tailed bool
 	}{
-		{b.Table, "paid/paid", true},                // bare: the view, in the schema in use
+		{b.Table, "paid/paid", true},                  // bare: the view, in the schema in use
 		{"memory.shop." + b.Table, "paid/paid", true}, // the engine's catalog written out: the view
-		{"memory." + b.Table, "", false},             // no view of that name: the engine has none either
+		{"memory." + b.Table, "", false},              // no view of that name: the engine has none either
 		// The table's own file, by its path: the parse reports a relation
 		// of that name, which is no view and is the table all the same.
 		{"'" + b.Path + "'", "new/new", false},
