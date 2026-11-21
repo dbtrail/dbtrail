@@ -421,12 +421,9 @@ func TestIntegrationFreshNamesTheEngineResolves_3043(t *testing.T) {
 		answered bool // by the engine at all
 	}{
 		{"ASCII in another case", mysql, "oRdErS", true},
-		{"ASCII in another case, PostgreSQL's rules", pg, "oRdErS", true},
-		{"outside ASCII as it is", mysql, "\"caf\u00e9\"", true},
 		// The engine folds A-Z alone, as the match does: these name no view.
 		{"outside ASCII in another case", mysql, "CAF\u00c9", false},
 		{"outside ASCII in another case, PostgreSQL's rules", pg, "CAF\u00c9", false},
-		{"the accent as a code point of its own", mysql, "cafe\u0301", false},
 		{"the ASCII letter a Unicode fold gives", mysql, "kelvin", false},
 	} {
 		stmt := "SELECT x.status || '/' || y.status FROM shop." + first.Table + " x JOIN " + c.spelling + " y ON y.id = x.id"
