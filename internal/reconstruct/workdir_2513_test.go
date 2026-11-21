@@ -292,7 +292,7 @@ func TestWorkDirSweep_leavesWhatIsNotItsOwn_2513(t *testing.T) {
 		"bintrail-fold-v2-" + host + "-abc",
 		"bintrail-fold-v2--123",
 		"bintrail-fold-v3-" + host + "-123",
-		"bintrail-fold-v2-db-host-123",       // host "db-host", not this one
+		"bintrail-fold-v2-db-host-123",        // host "db-host", not this one
 		"bintrail-fold-v2-" + host + "-1-123", // host "db-host-1-1"
 		"bintrail-fold-v2-other-123",
 		"xbintrail-fold-123",
