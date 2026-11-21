@@ -1071,15 +1071,33 @@ jobs:
           # psql is the client the port is for: the tests run it, and with
           # this its absence is a failure, not a skip.
           BINTRAIL_REQUIRE_PSQL: "1"
+          # Each psql major writes \dt, \d and \l as statements of its own,
+          # and the port answers each (#3059): the catalog test runs every
+          # one of these, and fails when one is missing.
+          BINTRAIL_REQUIRE_PSQL_MAJORS: "13 14 15 16 17 18"
           BINTRAIL_TEST_PG_TLS_DSN: "postgres://postgres:testpg@127.0.0.1:15433/pgtest"
           BINTRAIL_REQUIRE_PG_TLS: "1"
         run: |
           command -v psql >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends postgresql-client; }
+          # The runner has one psql (14 on ubuntu-22.04). The others come
+          # from the PostgreSQL images, each of which carries its own.
+          psql_images=""
+          for major in 13 14 15 16 17 18; do
+            psql_images="$psql_images ${TEST_IMAGES}/library/postgres:$major"
+          done
+          # shellcheck disable=SC2086 # one argument per image
+          bash scripts/pull-test-images.sh $psql_images
+          export BINTRAIL_TEST_PSQL_IMAGES="$psql_images"
           bash scripts/pg-console-tests.sh run /tmp/pg-console-it.out
           # A subtest, which the script's check does not read: psql itself
           # talked to the port.
           grep -q -- '--- PASS: TestIntegrationPGRouter/psql ' /tmp/pg-console-it.out \
             || { echo "FATAL: psql did not run against the PostgreSQL router — false-green tripwire" >&2; exit 1; }
+          # And each psql major listed the copy's tables through the port.
+          for major in 13 14 15 16 17 18; do
+            grep -qE -- "--- PASS: TestIntegrationPGRouterCatalog/psql/$major[^0-9]" /tmp/pg-console-it.out \
+              || { echo "FATAL: psql $major did not run the catalog test against the PostgreSQL port" >&2; exit 1; }
+          done
 
   integration-postgres-extensions:
     # Extension-type round-trip coverage (#1210): PostGIS geometry/geography
