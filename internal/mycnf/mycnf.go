@@ -28,6 +28,12 @@ type Client struct {
 	// Includes are the !include and !includedir lines of the file, as
 	// written. They were not followed.
 	Includes []string
+	// CaptureAccount is the value of a capture-account line (DBTrail's own
+	// option, under [dbtrail-forward]: whether the port may forward with the
+	// user DBTrail connects with), as written; "" when there is none or it is
+	// written with nothing after its =, "1" for the option alone on its
+	// line.
+	CaptureAccount string
 }
 
 // Load reads the file at path. See Parse for groups.
@@ -116,8 +122,10 @@ func Parse(data []byte, groups ...string) (Client, error) {
 		value string
 		rank  int
 		set   bool
+		// bare: the option alone on its line, with no = after it.
+		bare bool
 	}
-	opts := map[string]*setting{"host": {}, "port": {}, "user": {}, "password": {}, "socket": {}}
+	opts := map[string]*setting{"host": {}, "port": {}, "user": {}, "password": {}, "socket": {}, "capture-account": {}}
 
 	var out Client
 	current := -1
@@ -141,7 +149,7 @@ func Parse(data []byte, groups ...string) (Client, error) {
 		if current < 0 {
 			continue
 		}
-		name, rest, _ := strings.Cut(line, "=")
+		name, rest, hasValue := strings.Cut(line, "=")
 		name = strings.ReplaceAll(strings.TrimSpace(name), "_", "-")
 		// An option alone on its line ("password") may still carry a comment.
 		if i := strings.IndexByte(name, '#'); i >= 0 {
@@ -156,10 +164,16 @@ func Parse(data []byte, groups ...string) (Client, error) {
 		if o.set && current < o.rank {
 			continue
 		}
-		o.value, o.rank, o.set = value, current, true
+		o.value, o.rank, o.set, o.bare = value, current, true, !hasValue
 	}
 	out.Host, out.Port, out.User = opts["host"].value, opts["port"].value, opts["user"].value
 	out.Password, out.Socket = opts["password"].value, opts["socket"].value
+	out.CaptureAccount = opts["capture-account"].value
+	if o := opts["capture-account"]; o.set && o.bare {
+		// An option alone on its line is on, as in MySQL. One written with
+		// an = and nothing after it stays empty: it says nothing.
+		out.CaptureAccount = "1"
+	}
 	return out, nil
 }
 

@@ -422,7 +422,7 @@ func TestInstaller_endTextCoversTheTerminalPostgresAndARemoteMachine(t *testing.
 			}
 			for _, s := range []string{
 				"dbtrail server add --help shows the SQL",
-				"/dbtrail server add --flavor postgres -h <host> -u dbtrail -p -d <db> --publication <name>\nIt then asks for the forwarding user: a role of its own, with SELECT on what the PostgreSQL port should read.\n",
+				"/dbtrail server add --flavor postgres -h <host> -u dbtrail -p -d <db> --publication <name>\nIt then asks once whether the PostgreSQL port may forward with that user, read-only and only to the copy's tables (Enter is yes).\n",
 				"https://www.dbtrail.com/docs/postgres/",
 				"SELECT on your tables",
 				`sudo ln -s "` + r.dir + `/dbtrail" /usr/local/bin/dbtrail`,

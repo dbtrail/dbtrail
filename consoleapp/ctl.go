@@ -21,6 +21,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/cli"
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/ttyflush"
 )
 
 // The commands in this file's family (`server add`, `server list`, ...) do
@@ -333,6 +334,23 @@ type terminalAsker struct {
 }
 
 func (a *terminalAsker) Interactive() bool { return a.isTerm() }
+
+// Say writes text where the questions go (stderr), so an explanation stays
+// beside the question it goes with when stdout is sent elsewhere.
+func (a *terminalAsker) Say(text string) { fmt.Fprint(os.Stderr, text) }
+
+// DiscardTypeAhead drops what was typed and not read yet: lines a reader
+// already holds and what the terminal itself still queues. A question asked
+// after a wait whose empty answer means yes must not take an Enter pressed
+// during the wait (#3054).
+func (a *terminalAsker) DiscardTypeAhead() {
+	if a.in != nil {
+		_, _ = a.in.Discard(a.in.Buffered())
+	}
+	if a.isTerm() {
+		_ = ttyflush.Input(os.Stdin.Fd())
+	}
+}
 
 func (a *terminalAsker) Line(question, def string) (string, error) {
 	if def != "" {

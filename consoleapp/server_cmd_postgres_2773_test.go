@@ -25,14 +25,14 @@ func TestResolveAddInputPostgres(t *testing.T) {
 			flags: addFlags{Host: "pg1", User: "u", Flavor: "postgres", Database: " shop ", Publication: " shop_pub ", Slot: " shop_slot "},
 			ask:   fakeAsker{tty: true, secret: "pw"},
 			want: addInput{Host: "pg1", Port: "5432", User: "u", Password: "pw", Flavor: "postgres",
-				Database: "shop", Publication: "shop_pub", Slot: "shop_slot", FwdAsk: true},
+				Database: "shop", Publication: "shop_pub", Slot: "shop_slot"},
 		},
 		{
 			name:  "postgresql, in capitals, is postgres",
 			flags: addFlags{Host: "pg1", Port: "6432", User: "u", Flavor: " PostgreSQL ", Database: "shop", Publication: "p", Slot: "s"},
 			ask:   fakeAsker{tty: true, secret: "pw"},
 			want: addInput{Host: "pg1", Port: "6432", User: "u", Password: "pw", Flavor: "postgres",
-				Database: "shop", Publication: "p", Slot: "s", FwdAsk: true},
+				Database: "shop", Publication: "p", Slot: "s"},
 		},
 		{
 			name:  "the slot is named after the database when none is given, without a terminal",
@@ -47,14 +47,14 @@ func TestResolveAddInputPostgres(t *testing.T) {
 			ask: fakeAsker{tty: true, secret: "pw", lines: map[string]string{
 				"Database": "shop", "Publication (you create it; see docs/postgres.md)": "", "Replication slot (DBTrail creates it)": ""}},
 			want: addInput{Host: "pg1", Port: "5432", User: "u", Password: "pw", Flavor: "postgres",
-				Database: "shop", Publication: "bintrail_pub", Slot: "bintrail_shop", FwdAsk: true},
+				Database: "shop", Publication: "bintrail_pub", Slot: "bintrail_shop"},
 		},
 		{
 			name:  "a host asked for offers PostgreSQL's port",
 			flags: addFlags{User: "u", Flavor: "postgres", Database: "shop", Publication: "p", Slot: "s"},
 			ask:   fakeAsker{tty: true, secret: "pw", lines: map[string]string{"Host": "pg1", "Port": ""}},
 			want: addInput{Host: "pg1", Port: "5432", User: "u", Password: "pw", Flavor: "postgres",
-				Database: "shop", Publication: "p", Slot: "s", FwdAsk: true},
+				Database: "shop", Publication: "p", Slot: "s"},
 		},
 		{name: "no database, no terminal", flags: addFlags{Flavor: "postgres", Publication: "p"}, cnf: pgcnf, wantErr: "-d"},
 		{name: "no publication, no terminal", flags: addFlags{Flavor: "postgres", Database: "shop"}, cnf: pgcnf, wantErr: "--publication"},
@@ -92,10 +92,17 @@ func TestResolveAddInputPostgres(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.FwdAsk != c.ask.tty || got.FwdUser != "" {
-				t.Errorf("the forwarding user is asked for on a terminal and nowhere else: %+v", got)
+			// A forwarding user is not asked for (#3054): on a terminal the
+			// question is about the capture account, and without one the
+			// answer is no, and said.
+			wantCapture := captureNotAsked
+			if c.ask.tty {
+				wantCapture = captureAsk
 			}
-			got.ask = nil
+			if got.FwdAsk || got.FwdUser != "" || got.Capture != wantCapture {
+				t.Errorf("the capture account is asked about on a terminal and nowhere else: %+v", got)
+			}
+			got.ask, got.Capture, got.captureWhy = nil, 0, ""
 			if got != c.want {
 				t.Fatalf("got %+v\nwant %+v", got, c.want)
 			}
@@ -191,13 +198,13 @@ func TestPrintNewServerPortPG(t *testing.T) {
 		{"already on, on another address", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on, Host: "10.0.0.5", Port: "3309"}}, false,
 			[]string{"is on, and takes the password it already has", `psql "host=10.0.0.5 port=5433 dbname=shop `}, []string{"shown only now", "3309", "forward"}},
 		{"already on, and no forwarding user named", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on, Host: "10.0.0.5", Port: "3309"}}, true,
-			[]string{"sslmode=require\"\n\nUntil \"shop\" has a forwarding user, the copy answers its statements alone, and a statement it cannot answer gets an error:\n  bintrail-console server forward-user shop -u <user> -p\n\n"}, []string{"shown only now", "3309"}},
+			[]string{"sslmode=require\"\n\nUntil \"shop\" forwards, the copy answers its statements alone, and a statement it cannot answer gets an error. Let the port forward with the user DBTrail connects with:\n  bintrail-console server forward-user shop --capture-account\nor set a forwarding user of its own:\n  bintrail-console server forward-user shop -u <user> -p\n\n"}, []string{"shown only now", "3309"}},
 		{"turned on and no password in the answer", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on}, TurnedOn: true}, false,
 			[]string{"is on now", "port new-password"}, []string{"shown only now", "forward"}},
 		{"turned on, the password made before the server is kept", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on, HasPassword: true}, TurnedOn: true}, false,
 			[]string{"is on now", "Its password is the one made before this server was added, which is not shown again."}, []string{"shown only now", "No password came"}},
 		{"turned on, and no forwarding user named", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on}, TurnedOn: true}, true,
-			[]string{"is on now", "ready.\nUntil \"shop\" has a forwarding user, the copy answers its statements alone, and a statement it cannot answer gets an error:\n  bintrail-console server forward-user shop -u <user> -p\n\n"}, nil},
+			[]string{"is on now", "ready.\nUntil \"shop\" forwards, the copy answers its statements alone, and a statement it cannot answer gets an error. Let the port forward with the user DBTrail connects with:\n  bintrail-console server forward-user shop --capture-account\nor set a forwarding user of its own:\n  bintrail-console server forward-user shop -u <user> -p\n\n"}, nil},
 		{"not turned on", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &off}, NotTurnedOn: "DBTrail already had servers."}, true,
 			[]string{"was not turned on: DBTrail already had servers.\n"}, []string{"psql", "forward"}},
 		{"off, as saved", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &off}}, true, []string{"is off, as it was saved", "port on"}, []string{"psql", "forward"}},
