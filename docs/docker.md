@@ -280,6 +280,7 @@ What a stale compose file costs:
 | the `iceberg-export` profile and its volume | there is no one-shot Iceberg export to run | `docker compose --profile iceberg-export run ...` says the service does not exist |
 | the `host.docker.internal` mapping (`extra_hosts`) | on Linux, a database on this same machine cannot be reached by that name | Adding the server fails with `lookup host.docker.internal: no such host` |
 | `cpu_shares` on the `router` service (file version 7) | statements on the copy run with half the machine's cores, about half as fast on an analytical query (a full-table aggregate over 78 M rows: 7 to 10 s against 3 s on 4 cores) | the router's startup line and its card in the web interface say "statements use 2 of this machine's 4 cores". Taking the version 7 file gives them all |
+| `cpu_shares` on the `pg-router` service | statements on the PostgreSQL port and capture share the cores on equal terms, so on a machine whose cores are all busy capture can fall behind while they run | **Silent.** Nothing says so; `PG_ROUTER_CPU_SHARES` in `.env` has no effect. An installation with MySQL or MariaDB servers only loses nothing |
 | `SQL_FRESH` passed to the `router` service (file version 8) | nothing changes while `.env` does not set it | `SQL_FRESH=on` or `=off` in `.env` has no effect: the router's startup line says each server answers in its own mode and its card in the web interface says the same. Taking the version 8 file lets it through |
 | the `index-mysql` entrypoint that sizes the buffer pool when `INDEX_BUFFER_POOL` is unset (file version 6) | without a value in `.env`, the index MySQL keeps InnoDB's 128 MB buffer pool, which caps capture on a busy source and slows every refresh of the copy for SQL | `doctor` warns "Index buffer pool" at 128 MB on a machine with about 4 GB or more; capture lag keeps growing. Taking the version 6 file changes this on the next `up -d`: an index MySQL that ran at 128 MB restarts with a quarter of the machine's memory. To keep it lower, set `INDEX_BUFFER_POOL` in `.env` first |
 | `--innodb-buffer-pool-size=${INDEX_BUFFER_POOL:-128M}` on `index-mysql` | `INDEX_BUFFER_POOL` in `.env` does nothing, and the index MySQL keeps the 128 MB buffer pool | as above |
@@ -912,6 +913,20 @@ SQL memory (2GB unless set), so four at once can take 8GB, plus the recent
 changes fresh mode holds for each server in fresh mode: on a machine with
 16GB, set `PG_ROUTER_WORKERS=2` or `PG_ROUTER_MEMORY`.
 
+**CPU priority.** Like the MySQL router, the service runs at a lower CPU
+priority than capture (`cpu_shares: 256` in the file, `PG_ROUTER_CPU_SHARES`
+in `.env`; `CPUWeight=25` in the packaged systemd unit). While the machine has
+idle cores nothing changes. When statements on the copy, capture and the
+snapshot update want the same cores, the kernel serves capture and the update
+first, and the statements take longer. Unlike the MySQL router, this service
+does not read its priority: how many statements run at once and their threads
+stay what `PG_ROUTER_WORKERS` and `PG_ROUTER_THREADS` say. Two setups this
+does not protect: capture's service lowered as well (leave the other services
+at the default priority), and Kubernetes, where a container's weight competes
+only inside its pod; set a CPU limit on the container there. A compose file
+from before this line keeps running the service at the default priority, as
+it did: take the current file to get it.
+
 | `.env` | What it sets | Unset |
 |---|---|---|
 | `PG_ROUTER_WORKERS` | statements that run on the copy at once (1 to 16) | 4 |
@@ -919,6 +934,7 @@ changes fresh mode holds for each server in fresh mode: on a machine with
 | `PG_ROUTER_MAX_CONNECTIONS` | clients connected at once; one more is refused | 256 |
 | `PG_ROUTER_MAX_WAIT` | how long a statement waits for its turn, e.g. `30s` | no limit of its own |
 | `PG_ROUTER_MEMORY`, `PG_ROUTER_CPUS` | ceilings for the whole service, e.g. `8g` and `4` | none |
+| `PG_ROUTER_CPU_SHARES` | CPU priority of the service against the others (`cpu_shares`); `1024` is the default priority, the same as capture's | 256, below capture |
 | `SQL_MEMORY` | memory each statement may use (shared with the other services) | 2GB |
 
 ### Time-travel SQL (`AS OF`) and the compose stack

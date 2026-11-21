@@ -42,10 +42,12 @@ func TestCompose_onlyTheRouterRunsAtALowerCPUPriority(t *testing.T) {
 		t.Errorf("router cpu_shares = %v, want ${ROUTER_CPU_SHARES:-256}", got)
 	}
 	// Lowering capture too would take the router's advantage away: the
-	// scheduler weighs them against each other.
+	// scheduler weighs them against each other. The PostgreSQL router is the
+	// other service that answers statements on the copy, and runs below
+	// capture too (pgrouter_cpu_priority_test.go).
 	for name, svc := range doc.Services {
-		if _, ok := svc["cpu_shares"]; ok && name != "router" {
-			t.Errorf("service %s sets cpu_shares; only the router may", name)
+		if _, ok := svc["cpu_shares"]; ok && name != "router" && name != "pg-router" {
+			t.Errorf("service %s sets cpu_shares; only the two routers may", name)
 		}
 	}
 }

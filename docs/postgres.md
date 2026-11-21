@@ -1314,6 +1314,15 @@ the SQL memory, so four at once can take 8GB, plus the recent changes fresh
 mode holds (up to a fifth of the process's memory for each server in fresh
 mode): on a 16GB machine, set `--workers 2`.
 
+Capture comes first on the cores. The compose service and the packaged
+systemd unit run this process at a lower CPU priority than capture
+(`cpu_shares: 256`, `PG_ROUTER_CPU_SHARES` in the compose `.env`;
+`CPUWeight=25` in the unit), as they run the MySQL router: when every core is
+busy, capture and the snapshot update are served first and the statements
+here take longer. The process does not read that priority; `--workers` and
+`--threads` stay as set. Started by hand it has the priority of whatever
+starts it.
+
 | Flag | Environment variable | Default | What it does |
 |---|---|---|---|
 | `--listen` | `BINTRAIL_PG_ROUTER_LISTEN` | `127.0.0.1:5433` | Where the port listens |

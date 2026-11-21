@@ -523,7 +523,9 @@ does not start one you stopped. It needs no settings to start and accepts no
 connection until the port for SQL clients is on. An installation serves one
 database family, so with MySQL or MariaDB servers it has nothing to answer
 for: it waits and uses next to nothing. To stop it for good:
-`sudo systemctl disable --now bintrail-pg-router`.
+`sudo systemctl disable --now bintrail-pg-router`. Its unit runs it at a
+lower CPU priority than the service that captures (`CPUWeight=25`, as the
+router's unit), so capture is served first when every core is busy.
 
 ```sh
 systemctl status bintrail-pg-router
@@ -538,7 +540,7 @@ so choose another), `BINTRAIL_PG_ROUTER_TLS_CERT` and
 `BINTRAIL_PG_ROUTER_TLS_KEY` (a certificate clients can verify; unset,
 `sslmode=require` works and `verify-ca` and `verify-full` do not), and
 `BINTRAIL_PG_ROUTER_WORKERS`, `BINTRAIL_PG_ROUTER_THREADS` and
-`BINTRAIL_PG_ROUTER_MAX_CONNECTIONS` (2, 2 and 16 unless set), and
+`BINTRAIL_PG_ROUTER_MAX_CONNECTIONS` (4, 2 and 256 unless set), and
 `BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS` (16), the connections it holds to
 the servers' own PostgreSQL for the transaction blocks it sends there. The login is
 SCRAM-SHA-256, so the password never crosses the network; the port cannot turn
