@@ -179,7 +179,10 @@ func TestPGTailCopy_aBuildOutOfTimeTwiceIsRefusedUntilTheNextCut(t *testing.T) {
 	if e := entry(); fills() != 3 || (e != nil && e.cut == tailCutOf(cut2) && e.refused != "") {
 		t.Fatalf("at the next cut: %d builds, entry %+v; want it built again, and not refused at its first time", fills(), e)
 	}
+	// A read with time to end: the engine's read of the file takes longer
+	// than the short time the builds above were given.
 	src.late.Store(false)
+	k.buildTimeout = time.Minute
 	got := settled(t, ctx, k, cut2)
 	v, ok := got[key]
 	if !ok {
