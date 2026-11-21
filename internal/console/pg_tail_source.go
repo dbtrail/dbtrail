@@ -98,6 +98,13 @@ type pgTailSource struct {
 	// left out (what a crash in the middle of a large transaction leaves)
 	// would otherwise be read again at every refresh.
 	skipped struct{ from, to uint64 }
+	// started is, by tailKey, the tail Start built last, until its Fill
+	// begins (pg_tail_copy.go).
+	started map[string]pgStarted
+	// copyBytes is how much text one read of a table's copy may bring into a
+	// tail being built: the tails' memory budget, 0 for no bound. Set before
+	// the source is used, never after.
+	copyBytes int64
 }
 
 // pgBrokenMemo is one table's last answer to Broken and what it was made
@@ -503,6 +510,11 @@ func (x *pgTailSource) Start(ctx context.Context, t views.BaselineTable) (tailTa
 		}
 		return nil, "", err
 	}
+	// A large value PostgreSQL did not send and no change of the window
+	// holds is read from the table's copy: by Fill for the window, by the
+	// keeper's updates after (pg_tail_copy.go).
+	tail.AwaitCopyValues()
+	x.noteStarted(t, tail)
 	return tail, "", nil
 }
 
@@ -517,6 +529,9 @@ func (c pgCut) windowOptions(t views.BaselineTable) query.Options {
 // then asks whether the index still holds every hour of the window.
 func (x *pgTailSource) Fill(ctx context.Context, t views.BaselineTable, upTo uint64, page func([]query.ResultRow) error) (string, error) {
 	name := t.Schema + "." + t.Table
+	// The tail Start built for this cut, taken now so that no way out of
+	// this function leaves it held.
+	started := x.takeStarted(t)
 	c := x.cut(t)
 	if c.refusal != "" {
 		return c.refusal, nil
@@ -573,7 +588,9 @@ func (x *pgTailSource) Fill(ctx context.Context, t views.BaselineTable, upTo uin
 	case err != nil:
 		return "", fmt.Errorf("check the index holds %s's changes since its snapshot: %w", name, err)
 	}
-	return "", nil
+	// Last, over a window known to be whole: the large values no change of
+	// it holds, read from the cut the window starts at.
+	return x.fillStartedFromCopy(ctx, t, started)
 }
 
 // pgTailPage is rows as a tail is fed them: the ones with an id up to upTo
