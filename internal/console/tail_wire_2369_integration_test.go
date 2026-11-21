@@ -82,9 +82,20 @@ func TestIntegrationPortReadsTheTail(t *testing.T) {
 		t.Errorf("indexed through %q, want the newest event's %s", st["last_answer_indexed_through"], at.Format(time.RFC3339))
 	}
 
-	// A statement the parse cannot tell the tables of reads no tail: it
-	// would build one for every table of the copy.
+	// A WITH that reads another WITH reads the table's tail (#3043): the
+	// parse reports the inner WITH's name as a relation, which is no table
+	// of the copy and has no tail, and the table the statement names has.
 	res, err := q.Run(context.Background(), "WITH a AS (SELECT * FROM shop."+tbl.Table+"), b AS (SELECT * FROM a) SELECT CAST(id AS VARCHAR) || '=' || status FROM b ORDER BY id", "", sqlsandbox.Session{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rows) != 2 || res.Rows[0][0].(string) != "1=paid" || res.Rows[1][0].(string) != "2=two" {
+		t.Errorf("a WITH that reads another WITH: %v, want the table with its tail", res.Rows)
+	}
+	// A statement the parse cannot tell the tables of reads no tail: it
+	// would build one for every table of the copy. A table function can
+	// read a table the statement does not name.
+	res, err = q.Run(context.Background(), "SELECT CAST(id AS VARCHAR) || '=' || status FROM shop."+tbl.Table+", range(1) ORDER BY id", "", sqlsandbox.Session{})
 	if err != nil {
 		t.Fatal(err)
 	}
