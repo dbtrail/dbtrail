@@ -94,7 +94,7 @@ func TestReplicaIdentityResults(t *testing.T) {
 				"  ALTER TABLE \"public\".\"accounts\" REPLICA IDENTITY DEFAULT;\n" +
 				"  ALTER TABLE \"public\".\"wide\" REPLICA IDENTITY FULL;\n" +
 				"\nREPLICA IDENTITY DEFAULT sends the primary key. REPLICA IDENTITY FULL works for every table and also makes its changes undoable, at the cost of more WAL. " +
-				"Recording of the table starts by itself after the statement; the changes skipped before it stay missing until the next full copy of the table.",
+				"Recording of the table starts by itself after the statement. The changes skipped before it are never recorded: the next full copy of the table brings its rows up to date, and the history of that stretch stays missing.",
 		}
 		if key.Name != want.Name || key.Status != want.Status || key.Detail != want.Detail || key.Remediation != want.Remediation {
 			t.Errorf("got  %+v\nwant %+v", key, want)
@@ -132,6 +132,22 @@ func TestReplicaIdentityResults(t *testing.T) {
 		}
 		if want := `2 tables of the publication are not at REPLICA IDENTITY FULL: "public"."orders", "public"."events" (2 of its partitions)`; undo.Detail != want {
 			t.Errorf("detail %q\nwant   %q", undo.Detail, want)
+		}
+	})
+
+	t.Run("a partition whose own identity leaves the key out fails for its table", func(t *testing.T) {
+		root := pgcapture.TableIdentity{Schema: "public", Table: "events", Identity: "f",
+			PartitionsBelowFull: []string{`"public"."events_1"`}, PartitionsMissKey: []string{`"public"."events_1"`}}
+		undo, key := replicaIdentityResults([]pgcapture.TableIdentity{root})
+		t.Logf("%s\n%s", key.Detail, key.Remediation)
+		if undo.Status != doctor.StatusPass || key.Status != doctor.StatusFail {
+			t.Fatalf("statuses %s, %s: a table that is not captured is a failure and is not listed as recorded", undo.Status, key.Status)
+		}
+		if want := `1 table of the publication has a replica identity that does not hold the primary key: "public"."events" (in 1 partition: "public"."events_1")`; key.Detail != want {
+			t.Errorf("detail %q\nwant   %q", key.Detail, want)
+		}
+		if !strings.Contains(key.Remediation, "\n\n  ALTER TABLE \"public\".\"events_1\" REPLICA IDENTITY DEFAULT;\n\n") || strings.Contains(key.Remediation, `ALTER TABLE "public"."events" `) {
+			t.Errorf("the statement must be the partition's:\n%s", key.Remediation)
 		}
 	})
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/parser"
 	"github.com/dbtrail/dbtrail/internal/pgcapture"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
@@ -333,13 +334,49 @@ func TestDecode_RowOutsideTransactionFailsLoud(t *testing.T) {
 	}
 }
 
-func TestDecode_PKColumnDriftFailsLoud(t *testing.T) {
-	// The catalog reports a PK column absent from the relation's in-band columns
-	// (schema drift during stream lag) → fail loud rather than build a wrong PK.
-	d := pgcapture.NewDecoder(pkResolver("ghost"), event.Filters{}, nil)
-	_, _, err := d.Decode(relMsg(1, "public", "t", "id", "v"))
-	if err == nil {
-		t.Error("expected error when a PK column is absent from the relation columns")
+func TestDecode_PKColumnDriftSkipsTheTable(t *testing.T) {
+	// The catalog reports a PK column absent from the relation's in-band columns:
+	// capture is behind, and the key was moved to a column added after these
+	// changes were written. It used to end the stream (for every table, and again
+	// at every restart). A key cannot be built, so the TABLE is skipped under a
+	// reason of its own and the others go on; described again with the column, it
+	// is captured.
+	for _, ri := range []uint8{'f', 'd'} {
+		t.Run(string(rune(ri)), func(t *testing.T) {
+			var buf bytes.Buffer
+			skips := parser.NewSkipCounters(slog.New(slog.DiscardHandler))
+			d := pgcapture.NewDecoder(pkResolver("ghost"), event.Filters{},
+				slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})), pgcapture.WithSkipCounters(skips))
+			old := relMsg(1, "public", "t", "id", "v")
+			old.ReplicaIdentity = ri
+			old.Columns[0].Flags = 1
+			ev, emit, err := d.Decode(old)
+			if err != nil || emit {
+				t.Fatalf("want the table skipped, no error and no description: emit=%v err=%v %+v", emit, err, ev)
+			}
+			mustDecode(t, d, beginMsg())
+			if _, emit := mustDecode(t, d, &pglogrepl.InsertMessage{RelationID: 1, Tuple: tuple(textCol("1"), textCol("x"))}); emit {
+				t.Fatal("a change of the skipped table was emitted")
+			}
+			raw, _ := skips.Snapshot()
+			t.Logf("ledger: %s\nwarning: %s", raw, buf.String())
+			if n := skips.Count(pgcapture.SkipPrimaryKeyNotInDescription); n != 1 || skips.Total() != 1 {
+				t.Errorf("want 1 skip under %q, got %d of %d", pgcapture.SkipPrimaryKeyNotInDescription, n, skips.Total())
+			}
+			if !strings.Contains(raw, "ghost") || !strings.Contains(buf.String(), "primary key is not among the columns PostgreSQL described") {
+				t.Errorf("the ledger and the log must name the column and say why")
+			}
+			now := relMsg(1, "public", "t", "id", "v", "ghost")
+			now.ReplicaIdentity = ri
+			now.Columns[2].Flags = 1
+			if _, emit := mustDecode(t, d, now); !emit {
+				t.Fatal("described with the key column, the table is cached and described")
+			}
+			ev, emit = mustDecode(t, d, &pglogrepl.InsertMessage{RelationID: 1, Tuple: tuple(textCol("1"), textCol("x"), textCol("g"))})
+			if !emit || ev.PKValues != "g" {
+				t.Errorf("after the description with the key the table flows: emit=%v pk=%q", emit, ev.PKValues)
+			}
+		})
 	}
 }
 

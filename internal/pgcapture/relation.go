@@ -56,14 +56,14 @@ type relationInfo struct {
 
 	// partial reports that the earlier row of every UPDATE and DELETE of the
 	// relation is captured in part (decoder.go, partialBefore): the relation is
-	// below FULL, or it is a partitioned table published through its root whose
-	// partitions are not all at FULL (see PartitionsBelowFullResolver).
+	// below FULL, or it is a partitioned table at FULL with a partition whose
+	// own identity can send values outside the primary key (Partitions.Wide).
 	partial bool
-	// partitioned reports that the catalog says the relation is a partitioned
-	// table. An old tuple of one that holds nothing outside the key is stored
-	// in part even when every partition is at FULL now (decoder.go,
-	// keyOnlyShaped).
-	partitioned bool
+	// byShape reports that an old tuple of the relation is taken as whole or as
+	// key-only ROW BY ROW, by what it holds (decoder.go, keyOnlyShaped): the
+	// relation is described at FULL and is a partitioned table, or the catalog
+	// could not say what it is.
+	byShape bool
 
 	// skipped marks a relation whose row changes are dropped and recorded in the
 	// capture-skip ledger instead of indexed, under skipReason with skipDetail:
@@ -77,8 +77,7 @@ type relationInfo struct {
 	skipDetail string
 }
 
-// PartitionsBelowFullResolver returns how many partitions of a relation are
-// not at REPLICA IDENTITY FULL; 0 for a table that is not partitioned.
+// PartitionsResolver says what the catalog knows of a relation's partitions.
 //
 // It exists for one case the stream cannot show. A partitioned table published
 // through its root (publish_via_partition_root) is described with the ROOT's
@@ -89,39 +88,83 @@ type relationInfo struct {
 // at DEFAULT sends a key-only tuple labeled as a whole row: every column
 // outside the key reads as NULL (seen on PostgreSQL 16,
 // TestCapturer_BelowFull_Partitioned_Integration). Nothing in the message
-// tells it from a row whose other columns really are NULL; the catalog does.
-// The decoder asks it at each description of a relation at FULL.
+// says which partition a change was made in.
 //
-// What it reads is the catalog as it is now, and capture that is behind reads
-// changes made under an earlier one: a partition altered to FULL, detached or
-// dropped since. Two belts narrow that (Decoder.cacheRelation, keyOnlyShaped);
-// what is left is stated in docs/postgres.md.
-type PartitionsBelowFullResolver func(relationID uint32, schema, table string) (Partitions, error)
+// The decoder asks at each description of a relation at FULL, and decides
+// from the answer (Decoder.cacheRelation). It reads the catalog as it is now,
+// while capture that is behind reads changes made under an earlier one, so
+// the answer is never taken as "every old row is whole": under a partitioned
+// root, and whenever the catalog has no answer, each old row is judged by
+// what it holds (keyOnlyShaped).
+type PartitionsResolver func(relationID uint32, schema, table string) (Partitions, error)
 
-// Partitions is what the catalog says of a relation's partitions.
+// Partitions is what the catalog says of a relation and its partitions.
 type Partitions struct {
+	// Known reports that the catalog holds the relation. A relation dropped
+	// since its changes were written is not known: it may have been
+	// partitioned.
+	Known bool
 	// Partitioned reports that the relation is a partitioned table.
 	Partitioned bool
-	// BelowFull counts its leaf partitions that are not at REPLICA IDENTITY FULL.
+	// BelowFull counts its leaf partitions that are not at REPLICA IDENTITY
+	// FULL: their UPDATE and DELETE cannot be undone.
 	BelowFull int
+	// Wide counts its leaf partitions whose own replica identity is an index
+	// with a column outside the primary key. A key-only row of such a
+	// partition holds a value outside the key, so it cannot be told from a
+	// whole row by its shape.
+	Wide int
+	// MissesKey counts its leaf partitions whose own replica identity is an
+	// index that leaves a primary-key column out. A change of the primary key
+	// made in one arrives with no earlier row at all.
+	MissesKey int
 }
 
-// partitionsBelowFullQuery counts the leaf partitions under relation $1 that
-// are not at REPLICA IDENTITY FULL. pg_partition_tree lists a table that is
-// not partitioned as its own only leaf, which is left out: the description
-// already gives that table's identity.
-const partitionsBelowFullQuery = `SELECT
-	COALESCE((SELECT relkind = 'p' FROM pg_class WHERE oid = $1::oid), false),
-	(SELECT count(*)
-	 FROM pg_partition_tree($1::oid::regclass) pt
-	 JOIN pg_class c ON c.oid = pt.relid
-	 WHERE pt.isleaf AND pt.relid <> $1::oid AND c.relreplident <> 'f')`
+// partitionsQuery reads Partitions for relation $1: the relation and, when it
+// is a partitioned table, every leaf under it, through pg_inherits. It reads
+// catalogs only and takes no lock on any table: pg_partition_tree() locks each
+// partition (ACCESS SHARE), so it waits behind a VACUUM FULL, a rewriting ALTER
+// or a long TRUNCATE of one partition, and a tree of thousands takes as many
+// locks (seen on PostgreSQL 16, TestPartitionCatalogReadsTakeNoLock_Integration).
+//
+// A leaf's identity index is the one flagged indisreplident, valid and not
+// deferrable (relcache's rule); its key columns are the first indnkeyatts. The
+// primary-key columns are read as the capture reads them (pkColumnsQuery).
+const partitionsQuery = `
+WITH RECURSIVE tree AS (
+	SELECT c.oid, c.relkind, c.relreplident FROM pg_class c WHERE c.oid = $1::oid
+	UNION ALL
+	SELECT c.oid, c.relkind, c.relreplident
+	FROM tree t
+	JOIN pg_inherits i ON i.inhparent = t.oid
+	JOIN pg_class c ON c.oid = i.inhrelid
+	WHERE t.relkind = 'p'
+), leaves AS (
+	SELECT t.oid, t.relreplident FROM tree t WHERE t.relkind <> 'p' AND t.oid <> $1::oid
+), idx AS (
+	SELECT l.oid,
+	       EXISTS (SELECT 1 FROM unnest(ri.indkey::int2[]) WITH ORDINALITY AS k(att, ord)
+	               WHERE k.ord <= ri.indnkeyatts
+	                 AND NOT EXISTS (SELECT 1 FROM pg_index pk WHERE pk.indrelid = l.oid AND pk.indisprimary AND k.att = ANY(pk.indkey))) AS wide,
+	       EXISTS (SELECT 1 FROM pg_index pk, unnest(pk.indkey::int2[]) AS a(att)
+	               WHERE pk.indrelid = l.oid AND pk.indisprimary AND a.att > 0
+	                 AND NOT EXISTS (SELECT 1 FROM unnest(ri.indkey::int2[]) WITH ORDINALITY AS k(att, ord)
+	                                 WHERE k.ord <= ri.indnkeyatts AND k.att = a.att)) AS misses
+	FROM leaves l
+	JOIN pg_index ri ON ri.indrelid = l.oid AND ri.indisreplident AND ri.indisvalid AND ri.indimmediate
+	WHERE l.relreplident = 'i'
+)
+SELECT EXISTS (SELECT 1 FROM tree WHERE oid = $1::oid),
+       COALESCE((SELECT relkind = 'p' FROM tree WHERE oid = $1::oid), false),
+       (SELECT count(*) FROM leaves WHERE relreplident <> 'f'),
+       (SELECT count(*) FROM idx WHERE wide),
+       (SELECT count(*) FROM idx WHERE misses)`
 
-// queryPartitionsBelowFull is the catalog-backed PartitionsBelowFullResolver body.
-func queryPartitionsBelowFull(ctx context.Context, conn *pgx.Conn, relationID uint32) (Partitions, error) {
+// queryPartitions is the catalog-backed PartitionsResolver body.
+func queryPartitions(ctx context.Context, conn *pgx.Conn, relationID uint32) (Partitions, error) {
 	var p Partitions
-	if err := conn.QueryRow(ctx, partitionsBelowFullQuery, relationID).Scan(&p.Partitioned, &p.BelowFull); err != nil {
-		return Partitions{}, fmt.Errorf("pgcapture: reading the replica identity of the partitions of relation OID %d: %w", relationID, err)
+	if err := conn.QueryRow(ctx, partitionsQuery, relationID).Scan(&p.Known, &p.Partitioned, &p.BelowFull, &p.Wide, &p.MissesKey); err != nil {
+		return Partitions{}, fmt.Errorf("pgcapture: reading the partitions of relation OID %d: %w", relationID, err)
 	}
 	return p, nil
 }

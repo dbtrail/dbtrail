@@ -175,11 +175,26 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 	if err := CheckGeneratedColumns(startupCtx, queryConn, c.cfg.Publication); err != nil {
 		return err
 	}
-	// The publication as it is now. The decoder asks again, table by table,
-	// each time PostgreSQL describes one (WithDeferrableResolver), and there a
-	// table with a deferrable key is skipped while the others go on.
-	if err := CheckDeferrableKeys(startupCtx, queryConn, c.cfg.Publication); err != nil {
-		return err
+	// A table whose primary key is DEFERRABLE does not stop capture: the
+	// decoder skips it, each time PostgreSQL describes it
+	// (WithDeferrableResolver), and the other tables go on. Refusing to start
+	// over one such table kept EVERY table uncaptured, and for good: each
+	// automatic restart (a network cut, a write that timed out) was refused
+	// again, while the slot went on retaining WAL on the source. Said here once,
+	// for the tables already in the publication; a failed read only loses the
+	// warning.
+	if found, err := QueryDeferrableKeys(startupCtx, queryConn, c.cfg.Publication); err != nil {
+		c.logger.Warn("pgcapture: could not list the published tables whose primary key is DEFERRABLE; each table is still checked when PostgreSQL describes it", "error", err)
+	} else {
+		var kept []DeferrableKey
+		for _, k := range found {
+			if c.cfg.Filters.Matches(k.Schema, k.Table) {
+				kept = append(kept, k)
+			}
+		}
+		if len(kept) > 0 {
+			c.logger.Warn("pgcapture: " + DeferrableKeysProblem(kept) + " Until then the changes of " + thisOrThese(len(kept)) + " are NOT captured (each one is counted as skipped in capture health); the other tables are captured normally")
+		}
 	}
 	// A table below REPLICA IDENTITY FULL is captured: PostgreSQL sends at most
 	// the key of the row an UPDATE or a DELETE changed, and only undo needs the
@@ -276,16 +291,17 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 		defer cancel()
 		return queryDeferrableKey(qctx, queryConn, relationID)
 	}
-	// Catalog-backed count of a relation's partitions below REPLICA IDENTITY
-	// FULL, asked at every description of a relation at FULL; same conn +
-	// bounding.
-	partitionsBelowFull := func(relationID uint32, schema, table string) (Partitions, error) {
+	// What the catalog says of a relation's partitions, asked at every
+	// description of a relation at FULL; same conn + bounding. A failed or
+	// timed-out read does not stop the stream (the decoder then judges each
+	// old row by what it holds).
+	partitions := func(relationID uint32, schema, table string) (Partitions, error) {
 		qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		return queryPartitionsBelowFull(qctx, queryConn, relationID)
+		return queryPartitions(qctx, queryConn, relationID)
 	}
 	opts := []DecoderOption{WithAttrResolver(attrResolver), WithSkipCounters(c.cfg.Skips),
-		WithDeferrableResolver(deferrable), WithPartitionsBelowFullResolver(partitionsBelowFull)}
+		WithDeferrableResolver(deferrable), WithPartitionsResolver(partitions)}
 	stampsClose := func() {}
 	defer func() { stampsClose() }()
 	if c.cfg.LastChange != nil && c.cfg.LoadKnownShapes != nil {

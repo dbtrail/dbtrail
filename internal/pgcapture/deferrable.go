@@ -26,11 +26,17 @@ import (
 // change before it left (reconstruct.pgRowLink). So the catalog is asked, in
 // two places:
 //
-//   - when capture starts, over the whole publication (CheckDeferrableKeys):
-//     a table with a deferrable key refuses the start;
 //   - each time PostgreSQL describes a relation (Decoder.cacheRelation, through
 //     a DeferrableResolver): that table alone is skipped, under
-//     SkipDeferrablePrimaryKey, and the others go on.
+//     SkipDeferrablePrimaryKey, and the others go on. Every table is described
+//     before its first change of a run, so this covers the start too;
+//   - when capture starts, over the whole publication (QueryDeferrableKeys),
+//     only to say it once in the log. It no longer refuses the start: that kept
+//     every table uncaptured over one, at every automatic restart.
+//
+// CheckDeferrableKeys is the refusing form, for a caller that reports
+// (`doctor` fails on such a table, so a server is not added or started with
+// one).
 //
 // A primary key cannot be made deferrable in place: ALTER TABLE ... ALTER
 // CONSTRAINT works on foreign keys only (PostgreSQL 16 answers 42809, "is not
@@ -44,7 +50,8 @@ import (
 // today's catalog. A key that was deferrable while those changes were made and
 // is not any more is not seen at all; the reverse (not deferrable then,
 // deferrable now) skips changes that were safe. A change of the key that
-// PostgreSQL does not describe the table again for is seen at the next start.
+// PostgreSQL does not describe the table again for is seen at the next start,
+// where every table is described again.
 
 // ErrDeferrableKey marks the condition, so a caller can tell it from a failed
 // catalog read.
@@ -119,6 +126,13 @@ func DeferrableKeysProblem(found []DeferrableKey) string {
 	}
 	b.WriteString(" Or take the table out of the publication.")
 	return b.String()
+}
+
+func thisOrThese(n int) string {
+	if n == 1 {
+		return "this table"
+	}
+	return "these tables"
 }
 
 func hasOrHave(n int) string {

@@ -276,12 +276,23 @@ type TableIdentity struct {
 	// this is empty AND the table itself is at FULL. A partitioned table at
 	// FULL with any is listed for that reason alone (Identity is then "f").
 	PartitionsBelowFull []string
+	// PartitionsMissKey names, the same way, the partitions whose own replica
+	// identity is an index that leaves a primary-key column out. A
+	// partitioned table published through its root with any is not captured,
+	// as a table with such an identity is not.
+	PartitionsMissKey []string
+}
+
+// Captured reports whether capture takes the table's changes, as far as its
+// replica identity says.
+func (t TableIdentity) Captured() bool {
+	return len(t.MissesKey) == 0 && len(t.PartitionsMissKey) == 0
 }
 
 // tableIdentitiesQuery lists the tables of publication $1 below REPLICA
-// IDENTITY FULL, and the partitioned ones with a partition below it (a table
-// that is not partitioned is its own only leaf in pg_partition_tree, left
-// out), with the index PostgreSQL takes their identity from: the
+// IDENTITY FULL, and the partitioned ones with a partition below it (read
+// through pg_inherits, which takes no lock on any partition: see
+// partitionsQuery), with the index PostgreSQL takes their identity from: the
 // primary key under DEFAULT, the chosen index under USING INDEX, and only one
 // that is valid and not deferrable (relcache's own rule, RelationGetIndexList).
 // The identity is that index's KEY columns (not its INCLUDE columns); the
@@ -295,19 +306,39 @@ const tableIdentitiesQuery = `
 	                 WHERE pk.indrelid = c.oid AND pk.indisprimary AND ri.indexrelid IS NOT NULL
 	                   AND NOT EXISTS (SELECT 1 FROM unnest(ri.indkey::int2[]) WITH ORDINALITY AS k(att, ord)
 	                                   WHERE k.ord <= ri.indnkeyatts AND k.att = a.attnum)), '{}')::text[],
-	       parts.below
+	       parts.below, parts.misses
 	FROM pg_publication_tables pt
 	JOIN pg_namespace n ON n.nspname = pt.schemaname
 	JOIN pg_class c ON c.relname = pt.tablename AND c.relnamespace = n.oid
 	LEFT JOIN pg_index ri ON ri.indrelid = c.oid AND ri.indisvalid AND ri.indimmediate
 	     AND ((c.relreplident = 'd' AND ri.indisprimary) OR (c.relreplident = 'i' AND ri.indisreplident))
 	CROSS JOIN LATERAL (
-	     SELECT COALESCE(array_agg('"' || replace(ln.nspname, '"', '""') || '"."' || replace(lc.relname, '"', '""') || '"'
-	                               ORDER BY ln.nspname, lc.relname), '{}')::text[] AS below
-	     FROM pg_partition_tree(c.oid) ptree
-	     JOIN pg_class lc ON lc.oid = ptree.relid
-	     JOIN pg_namespace ln ON ln.oid = lc.relnamespace
-	     WHERE ptree.isleaf AND ptree.relid <> c.oid AND lc.relreplident <> 'f') parts
+	     WITH RECURSIVE tree AS (
+	          SELECT c.oid AS oid, c.relkind AS relkind, c.relreplident AS ident
+	          UNION ALL
+	          SELECT ch.oid, ch.relkind, ch.relreplident
+	          FROM tree t
+	          JOIN pg_inherits i ON i.inhparent = t.oid
+	          JOIN pg_class ch ON ch.oid = i.inhrelid
+	          WHERE t.relkind = 'p'
+	     ), leaves AS (
+	          SELECT t.oid, t.ident,
+	                 '"' || replace(ln.nspname, '"', '""') || '"."' || replace(lc.relname, '"', '""') || '"' AS quoted
+	          FROM tree t
+	          JOIN pg_class lc ON lc.oid = t.oid
+	          JOIN pg_namespace ln ON ln.oid = lc.relnamespace
+	          WHERE t.relkind <> 'p' AND t.oid <> c.oid
+	     )
+	     SELECT COALESCE((SELECT array_agg(l.quoted ORDER BY l.quoted) FROM leaves l WHERE l.ident <> 'f'), '{}')::text[] AS below,
+	            COALESCE((SELECT array_agg(l.quoted ORDER BY l.quoted)
+	                      FROM leaves l
+	                      JOIN pg_index lri ON lri.indrelid = l.oid AND lri.indisreplident AND lri.indisvalid AND lri.indimmediate
+	                      WHERE l.ident = 'i'
+	                        AND EXISTS (SELECT 1 FROM pg_index lpk, unnest(lpk.indkey::int2[]) AS a(att)
+	                                    WHERE lpk.indrelid = l.oid AND lpk.indisprimary AND a.att > 0
+	                                      AND NOT EXISTS (SELECT 1 FROM unnest(lri.indkey::int2[]) WITH ORDINALITY AS k(att, ord)
+	                                                      WHERE k.ord <= lri.indnkeyatts AND k.att = a.att))), '{}')::text[] AS misses
+	) parts
 	WHERE pt.pubname = $1 AND (c.relreplident <> 'f' OR cardinality(parts.below) > 0)
 	ORDER BY 1, 2`
 
@@ -324,7 +355,7 @@ func QueryTableIdentities(ctx context.Context, conn *pgx.Conn, publication strin
 	var out []TableIdentity
 	for rows.Next() {
 		var t TableIdentity
-		if err := rows.Scan(&t.Schema, &t.Table, &t.Identity, &t.NoIdentity, &t.MissesKey, &t.PartitionsBelowFull); err != nil {
+		if err := rows.Scan(&t.Schema, &t.Table, &t.Identity, &t.NoIdentity, &t.MissesKey, &t.PartitionsBelowFull, &t.PartitionsMissKey); err != nil {
 			return nil, fmt.Errorf("pgcapture: scanning replica identity for publication %q: %w", publication, err)
 		}
 		out = append(out, t)
@@ -349,30 +380,6 @@ func CheckWALLevel(ctx context.Context, conn *pgx.Conn) error {
 // CheckPublication verifies the publication exists and covers the requested tables.
 func CheckPublication(ctx context.Context, conn *pgx.Conn, publication string, filters event.Filters) error {
 	return validatePublication(ctx, conn, publication, filters)
-}
-
-// QueryReplicaIdentityNotFull returns, sorted, the "schema.table (relreplident=x)" of
-// the published tables NOT at REPLICA IDENTITY FULL (empty = all FULL), and of the
-// partitioned ones with a partition below it: the tables whose UPDATE and DELETE
-// cannot be undone (QueryTableIdentities). The
-// streaming daemon polls it for the console health panel (#599) — a signal the
-// operator reads, not a startup gate.
-func QueryReplicaIdentityNotFull(ctx context.Context, conn *pgx.Conn, publication string) ([]string, error) {
-	all, err := QueryTableIdentities(ctx, conn, publication)
-	if err != nil {
-		return nil, err
-	}
-	// Not the tables whose identity leaves the primary key out: those are not
-	// captured, and are reported as skipped changes (degraded capture), not as
-	// tables that are recorded without undo.
-	names := []string{}
-	for _, t := range all {
-		if len(t.MissesKey) == 0 {
-			names = append(names, t.Name())
-		}
-	}
-	sort.Strings(names)
-	return names, nil
 }
 
 // listUnloggedCaptureTables returns the "schema.table" of every UNLOGGED base table in
@@ -829,7 +836,7 @@ func SplitTableIdentities(all []TableIdentity) (withoutUndo, missesKey, noIdenti
 		switch {
 		case t.NoIdentity:
 			noIdentity = append(noIdentity, t)
-		case len(t.MissesKey) > 0:
+		case !t.Captured():
 			missesKey = append(missesKey, t)
 		default:
 			withoutUndo = append(withoutUndo, t)

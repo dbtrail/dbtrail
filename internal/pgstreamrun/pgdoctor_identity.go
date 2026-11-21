@@ -80,6 +80,13 @@ func tableNames(ts []pgcapture.TableIdentity) string {
 	return strings.Join(names, ", ")
 }
 
+func partitionCount(n int) string {
+	if n == 1 {
+		return "1 partition"
+	}
+	return fmt.Sprintf("%d partitions", n)
+}
+
 func tableCount(n int) string {
 	if n == 1 {
 		return "1 table"
@@ -168,6 +175,9 @@ func identityKeyResult(missesKey []pgcapture.TableIdentity) doctor.CheckResult {
 	parts := make([]string, len(missesKey))
 	for i, t := range missesKey {
 		parts[i] = fmt.Sprintf("%s (primary-key column %s left out)", quotedTable(t), strings.Join(t.MissesKey, ", "))
+		if len(t.MissesKey) == 0 {
+			parts[i] = fmt.Sprintf("%s (in %s: %s)", quotedTable(t), partitionCount(len(t.PartitionsMissKey)), strings.Join(t.PartitionsMissKey, ", "))
+		}
 	}
 	has := "have"
 	if len(missesKey) == 1 {
@@ -180,16 +190,23 @@ func identityKeyResult(missesKey []pgcapture.TableIdentity) doctor.CheckResult {
 		"(each one is counted as skipped in capture health) and records the other tables normally. " +
 		"For an UPDATE of the primary key PostgreSQL would send no earlier row, and for a DELETE an earlier row without the primary key, " +
 		"so a change could not be matched to the row it changed. Run this on the database:\n\n")
-	stmts := make([]string, len(missesKey))
-	for i, t := range missesKey {
-		stmts[i] = "ALTER TABLE " + quotedTable(t) + " REPLICA IDENTITY FULL;"
-		if t.Identity == "i" {
-			stmts[i] = "ALTER TABLE " + quotedTable(t) + " REPLICA IDENTITY DEFAULT;"
+	var stmts []string
+	for _, t := range missesKey {
+		switch {
+		case len(t.MissesKey) > 0 && t.Identity == "i":
+			stmts = append(stmts, "ALTER TABLE "+quotedTable(t)+" REPLICA IDENTITY DEFAULT;")
+		case len(t.MissesKey) > 0:
+			stmts = append(stmts, "ALTER TABLE "+quotedTable(t)+" REPLICA IDENTITY FULL;")
+		}
+		// A partition with an identity of its own that leaves the key out:
+		// the statement is the partition's.
+		for _, part := range t.PartitionsMissKey {
+			stmts = append(stmts, "ALTER TABLE "+part+" REPLICA IDENTITY DEFAULT;")
 		}
 	}
 	identityStatements(&rem, stmts)
 	rem.WriteString("\nREPLICA IDENTITY DEFAULT sends the primary key. REPLICA IDENTITY FULL works for every table and also makes its changes undoable, at the cost of more WAL. " +
-		"Recording of the table starts by itself after the statement; the changes skipped before it stay missing until the next full copy of the table.")
+		"Recording of the table starts by itself after the statement. The changes skipped before it are never recorded: the next full copy of the table brings its rows up to date, and the history of that stretch stays missing.")
 	return doctor.CheckResult{
 		Name:        identityKeyCheck,
 		Status:      doctor.StatusFail,

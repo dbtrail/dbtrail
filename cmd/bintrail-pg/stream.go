@@ -45,13 +45,26 @@ PostgreSQL sends only the key of the row an UPDATE or a DELETE changed, so
 undo" with the ALTER TABLE that makes its later changes undoable (the table then
 writes more WAL).
 
-Two kinds of table are NOT captured, while the others keep flowing: one whose
-replica identity is an index that leaves a primary-key column out, and one whose
-primary key is DEFERRABLE (checked at startup, where it stops the stream, and
-again each time PostgreSQL describes a table). Their changes are skipped, the
-log names the table with the statement to run, and 'status' reports capture as
-degraded under replica_identity_index_without_primary_key or
-primary_key_deferrable. After the fix, capture of the table resumes by itself.
+Some tables are NOT captured, while the others keep flowing. Their changes are
+skipped, the log names the table with the statement to run, and 'status' reports
+capture as degraded under one of these reasons:
+
+  replica_identity_index_without_primary_key
+      the table's replica identity (or that of one of its partitions) is an
+      index that leaves a primary-key column out
+  primary_key_deferrable
+      the table's primary key is DEFERRABLE; checked when capture starts and
+      each time PostgreSQL describes a table, and never a reason to refuse the
+      start
+  primary_key_not_in_description
+      capture is behind, and the primary key was moved to a column added after
+      the changes it is reading were written; nothing to run
+  replica_identity_key_not_sent
+      one change (not a table) arrived without a value for a primary-key
+      column; PostgreSQL is not known to send one
+
+After the fix, capture of the table resumes by itself. The changes skipped
+before it are never recorded.
 
 The replication slot (--slot) is created on first run if absent and reused on
 restart. The durable checkpoint is the last committed LSN, persisted to

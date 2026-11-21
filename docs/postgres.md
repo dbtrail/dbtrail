@@ -33,7 +33,7 @@ writes to your source.
 | **A role with `REPLICATION`** | **Yes** | Used for the replication stream and to create the slot. |
 | **`REPLICA IDENTITY FULL`** on a captured table | **No. Only for undo** | A table without it is captured and everything works on it except undo of its `UPDATE` and `DELETE`. `doctor` warns and prints the statement ([details](#3-replica-identity-full-optional-needed-only-for-undo)). |
 | **A replica identity that holds the primary key** | **Yes** | True of every table left at PostgreSQL's default. A table set to `REPLICA IDENTITY USING INDEX` on an index that leaves a primary-key column out is not captured: `doctor` fails on it with the statement to run, and a server is not added or started until it is fixed. A capture that is already running skips that table while the other tables go on. |
-| **Primary keys that are not `DEFERRABLE`** | **Yes** | The copy is kept by key, and a deferrable key lets two rows share one inside a transaction. Checked in `doctor` and when capture starts (a table with one stops the start, with what to do), and again each time PostgreSQL describes a table while capture runs (that table is skipped, the others go on). See [the limit](#3-replica-identity-full-optional-needed-only-for-undo). |
+| **Primary keys that are not `DEFERRABLE`** | **Yes** | The copy is kept by key, and a deferrable key lets two rows share one inside a transaction. `doctor` fails on a table with one (a server is not added or started with it). Capture itself, when it starts and each time PostgreSQL describes a table, skips that table and captures the others. See [the limit](#3-replica-identity-full-optional-needed-only-for-undo). |
 | **A `PUBLICATION`** covering those tables | **Yes — you create it** | bintrail-pg validates it exists and covers your tables; it does **not** create it. |
 | **A replication slot** | No — created for you | bintrail-pg creates the logical slot on first run and reuses it on restart. |
 | `max_replication_slots` ≥ 1, `max_wal_senders` ≥ 1 | Yes | Defaults (10) are usually fine. A slot consumes one of each. |
@@ -258,25 +258,35 @@ table, `REPLICA IDENTITY` is set **per partition**: the statement on the parent
 does not reach its partitions, and each partition needs it. `doctor` lists
 them.
 
-Three limits of a partitioned table published through its parent
-(`publish_via_partition_root`), where PostgreSQL describes the parent to
-capture and never the partition a change was made in:
+A partitioned table published through its parent
+(`publish_via_partition_root`) is described to capture as the parent, and
+PostgreSQL labels the earlier row of each change by the parent's setting,
+whatever the partition the change was made in logged. With the parent at
+`FULL`, capture reads each earlier row by what it holds: a row from a partition
+at `FULL` is whole and can be undone, a row from a partition at `DEFAULT` holds
+its key only. One partition below `FULL` does not cost the others their undo.
+What follows from that:
 
-- With the parent at `FULL` and a partition that is not, PostgreSQL labels the
-  partition's key-only earlier rows as whole rows. Capture asks the catalog
-  which partitions are below `FULL` and stores those rows as key-only. The
-  catalog is read when capture reads a change, not when the change was made. For
-  a partition altered to `FULL`, detached or dropped in between, capture still
-  stores as key-only an earlier row that holds nothing outside the key (so a
-  row whose other columns really are all NULL is refused by undo as well). What
-  is not seen: such a row after the parent itself was dropped, when capture
-  restarted in between. It is stored with NULL in the columns that were not
-  sent.
+- An earlier row that holds nothing outside the primary key is stored as
+  key-only. A row whose other columns really are all NULL looks the same, so
+  undo refuses a change of such a row in a partitioned table, though it was
+  logged whole. Nothing wrong is stored.
+- A partition with a replica identity of its own that holds **more** than the
+  primary key (`REPLICA IDENTITY USING INDEX` set on the partition, on an index
+  with other columns): its key-only rows carry a value outside the key and look
+  whole. While the catalog shows such a partition, every earlier row of the
+  table is stored as key-only, and undo is refused for all of its partitions.
 - A partition with a replica identity of its own that leaves the primary key
-  out (`REPLICA IDENTITY USING INDEX` set on the partition) is not detected,
-  by capture or by `doctor`: an `UPDATE` of the primary key in it arrives with
-  no earlier row and is recorded as a change of the row at the new key. Keep
-  partitions at `DEFAULT` or `FULL`.
+  **out**: the whole table is skipped, as a table with such an identity is
+  (below), and `doctor` names the partition.
+- Capture reads the partitions from the catalog when PostgreSQL describes the
+  table, not when a change was made. The read takes no lock on any partition,
+  so a `VACUUM FULL` or a rewriting `ALTER` of one does not hold capture up; if
+  it fails, capture goes on and reads each earlier row by what it holds.
+  What is left: a partition with an index wider than the primary key that was
+  dropped, detached or altered before capture read its changes is not seen,
+  and its key-only rows are stored as whole rows, with NULL in the columns
+  PostgreSQL did not send.
 - A parent with no primary key over partitions that have their own is reported
   as a table with no replica identity, although its partitions accept `UPDATE`
   and `DELETE`.
@@ -368,8 +378,8 @@ pgcapture: 2 tables without undo: not at REPLICA IDENTITY FULL. Their changes ar
 ```
 
 The web interface's Status page shows the count in amber, as
-`N tables without undo` (it leaves out the tables that are not captured, below,
-which show as skipped changes). `status` does not report capture as degraded for
+`N tables without undo`. The tables that are not captured (below) are listed
+apart, in red. `status` does not report capture as degraded for
 these tables.
 
 **A table with no replica identity at all** (`REPLICA IDENTITY NOTHING`, or no
@@ -384,35 +394,52 @@ set `REPLICA IDENTITY FULL`.
 
 Capture checks each table as PostgreSQL describes it: when it starts, for a
 table added to the publication later, and after a change of the table's
-definition. Two kinds are **skipped**, while every other table keeps being
+definition. These are **skipped**, while every other table keeps being
 captured:
 
-- **A replica identity that leaves a primary-key column out**: in practice
+- **A replica identity that leaves a primary-key column out**
+  (`replica_identity_index_without_primary_key`): in practice
   `REPLICA IDENTITY USING INDEX` on a unique index that does not include the
-  primary key. For an `UPDATE` of the primary key PostgreSQL then sends no
-  earlier row at all, and for a `DELETE` an earlier row without the primary
-  key, so a change could not be matched to the row it changed. `doctor`
-  reports it under **Replica identity holds the primary key** as a
-  **failure** (a server is not added or started while it fails), with the
-  statement to run
-  (`ALTER TABLE ... REPLICA IDENTITY DEFAULT`, or `FULL`). `USING INDEX` on an
-  index that includes the primary key is captured like `DEFAULT`. A table at
-  `DEFAULT` whose primary key was declared with `INCLUDE` columns is in this
-  group too, and `FULL` is its way out.
-- **A primary key declared `DEFERRABLE`.**
+  primary key, on the table or on one of its partitions. For an `UPDATE` of the
+  primary key PostgreSQL then sends no earlier row at all, and for a `DELETE`
+  an earlier row without the primary key, so a change could not be matched to
+  the row it changed. `doctor` reports it under **Replica identity holds the
+  primary key** as a **failure** (a server is not added or started while it
+  fails), with the statement to run (`ALTER TABLE ... REPLICA IDENTITY
+  DEFAULT`, or `FULL`). `USING INDEX` on an index that includes the primary key
+  is captured like `DEFAULT`. A table at `DEFAULT` whose primary key was
+  declared with `INCLUDE` columns is in this group too, and `FULL` is its way
+  out.
+- **A primary key declared `DEFERRABLE`** (`primary_key_deferrable`). `doctor`
+  reports it under **Primary keys are not deferrable** as a failure. A capture
+  that starts with such a table says so once and skips it; it does not refuse
+  to start.
+- **A primary key that PostgreSQL's description of the table does not hold**
+  (`primary_key_not_in_description`): capture is behind, and the primary key
+  was moved to a column added after the changes it is reading were written.
+  There is nothing to run. The table is captured again from the changes made
+  after the key was changed.
+
+One more reason counts single changes, not a table:
+`replica_identity_key_not_sent` is recorded for a change of a table below
+`FULL` whose earlier row came without a value for a primary-key column.
+PostgreSQL is not known to send one. Should one arrive, that change is skipped
+and counted, and the table goes on being captured.
 
 For a skipped table:
 
 - **Its changes are not captured.** They are dropped and each one is counted.
 - **The log says so**, once each time PostgreSQL describes the table, with the
   statement to run.
-- **`status` shows capture as DEGRADED** under the reason
-  `replica_identity_index_without_primary_key` or `primary_key_deferrable`, and
-  names the table. The count is kept across restarts, like the MySQL path's
-  skip counts.
+- **`status` shows capture as DEGRADED** under the reason, and names the
+  table. The count is kept across restarts, like the MySQL path's skip counts.
+- **The web interface's Status page** lists the tables that are not captured
+  in red, as `N tables NOT captured`.
 - **After you run the statement**, PostgreSQL describes the table again and
   capture of it resumes by itself, with no restart. The changes skipped before
-  it stay missing from the index until the table is next read in full.
+  it are never recorded. The next full copy of the table brings its rows up to
+  date; the history of that stretch stays missing, so nothing in it can be
+  queried or undone.
 
 An index written by a version before this one may hold skips under the reason
 `replica_identity_not_full`: those versions skipped every table that was not at
@@ -433,8 +460,7 @@ when the change was made. So when capture is behind:
   them has those changes skipped too.
 
 A change of a key that PostgreSQL does not describe the table again for is seen
-at the next start of capture, which then refuses to start until the key is not
-deferrable or the table is out of the publication.
+at the next start of capture, where every table is described again.
 
 ### 4. Create a publication
 

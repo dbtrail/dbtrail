@@ -7146,7 +7146,7 @@ const PG_HEALTH_STALE_SEC = 90;
 
 // pgHealthCard renders the persisted PostgreSQL replication-health snapshot. h is the
 // parsed stream.source_health object {exists,active,wal_status,retained_bytes,
-// safe_wal_size,restart_lsn,confirmed_flush_lsn,replica_identity_not_full,checked_at,
+// safe_wal_size,restart_lsn,confirmed_flush_lsn,replica_identity_not_full,not_captured,checked_at,
 // probe_error}. probe_error is the failed-probe discriminator: when set, this snapshot
 // records a probe failure (the slot fields are absent) and the card shows "probe failing".
 function pgHealthCard(h) {
@@ -7176,9 +7176,22 @@ function pgHealthCard(h) {
       card.append(healthKV("consumer", el("span", { class: "kv-v", text: h.active ? "connected" : "—" })));
     }
 
+    // Tables capture does not take at all (a replica identity without the
+    // primary key, a deferrable primary key): a fault, in red, and never
+    // under a green "all FULL". A snapshot written before this list existed
+    // has none.
+    const nc = h.not_captured || [];
+    if (nc.length > 0) {
+      card.append(healthKV("capture", el("span", { class: "hstat hstat-err",
+        text: "✗ " + nc.length + (nc.length === 1 ? " table" : " tables") + " NOT captured" })));
+      card.append(el("div", { class: "hlist", text: "Their changes are skipped and counted; the other tables are recorded. The server's checks show the statement that fixes each." }));
+      const ncList = el("div", { class: "hlist" });
+      nc.forEach((t) => ncList.append(el("div", { text: t })));
+      card.append(ncList);
+    }
     const nf = h.replica_identity_not_full || [];
     if (nf.length === 0) {
-      card.append(healthKV("replica identity", el("span", { class: "hstat hstat-ok", text: "all FULL ✓" })));
+      if (nc.length === 0) card.append(healthKV("replica identity", el("span", { class: "hstat hstat-ok", text: "all FULL ✓" })));
     } else {
       // Not a fault: a table below REPLICA IDENTITY FULL is recorded, and only
       // undo of its UPDATE and DELETE is refused. Amber, with what it means.

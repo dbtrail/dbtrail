@@ -375,7 +375,8 @@ const deferrableKeysCheck = "Primary keys are not deferrable"
 // addDeferrableKeysCheck reports a table of the publication whose primary key
 // is declared DEFERRABLE (pgcapture.CheckDeferrableKeys): the copy is kept by
 // key, and such a key lets two rows share one inside a transaction. A
-// failure: the capture refuses to start on it.
+// failure, so a server is not added or started with one; a capture that is
+// running, or that restarts, skips the table and captures the others.
 func addDeferrableKeysCheck(ctx context.Context, r *doctor.Report, conn *pgx.Conn, publication string) {
 	found, err := pgcapture.QueryDeferrableKeys(ctx, conn, publication)
 	switch {

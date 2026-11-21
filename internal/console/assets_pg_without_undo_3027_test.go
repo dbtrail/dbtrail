@@ -30,8 +30,8 @@ func TestPGWithoutUndoWording_3027(t *testing.T) {
 	}
 	// The health snapshot as the daemon persists it (pgstreamrun.sourceHealthJSON).
 	script := renderHarnessJS + harness + `
-const card = (nf) => { ctx.__h = { exists: true, active: true, wal_status: "reserved", retained_bytes: 16384, safe_wal_size: null,
-  replica_identity_not_full: nf, checked_at: new Date().toISOString() }; return vm.runInContext("pgHealthCard(__h)", ctx); };
+const card = (nf, nc) => { ctx.__h = { exists: true, active: true, wal_status: "reserved", retained_bytes: 16384, safe_wal_size: null,
+  replica_identity_not_full: nf, checked_at: new Date().toISOString() }; if (nc) ctx.__h.not_captured = nc; return vm.runInContext("pgHealthCard(__h)", ctx); };
 const classes = (n, out = []) => { walk(n, (x) => { if (/hstat-/.test(x.className)) out.push(x.className.split(" ").filter((c) => /^hstat-/.test(c)).join(" ") + ":" + x.textContent); }); return out; };
 const f = show({ monitor: true }, null);
 f.elements.flavor.value = "postgres"; f.elements.flavor.fire("change");
@@ -44,6 +44,9 @@ console.log(JSON.stringify({
   none: { text: card([]).textContent, stats: classes(card([])) },
   one: { text: card(["public.orders (relreplident=d)"]).textContent, stats: classes(card(["public.orders (relreplident=d)"])) },
   two: { text: card(["public.a (relreplident=d)", "public.b (relreplident=i)"]).textContent },
+  notCaptured: { text: card([], ["public.acc (replica identity without the primary key)"]).textContent, stats: classes(card([], ["public.acc (replica identity without the primary key)"])) },
+  both: { text: card(["public.a (relreplident=d)"], ["public.acc (replica identity without the primary key)", "public.q (primary key DEFERRABLE)"]).textContent },
+  noneNew: { text: card([], []).textContent },
   form: pgNodes,
 }));
 `
@@ -60,8 +63,12 @@ console.log(JSON.stringify({
 			Text  string
 			Stats []string
 		}
-		Two  struct{ Text string }
-		Form []struct {
+		NotCaptured struct {
+			Text  string
+			Stats []string
+		}
+		Two, Both, NoneNew struct{ Text string }
+		Form               []struct {
 			Tag, Text string
 			On        bool
 		}
@@ -71,8 +78,41 @@ console.log(JSON.stringify({
 	}
 	t.Logf("health card, one table below FULL: %s", got.One.Text)
 
-	if !strings.Contains(got.None.Text, "replica identityall FULL ✓") {
-		t.Errorf("every table at FULL: %q", got.None.Text)
+	// Green only when no table is without undo AND none is left uncaptured
+	// (a snapshot from before the second list existed carries none).
+	for _, text := range []string{got.None.Text, got.NoneNew.Text} {
+		if !strings.Contains(text, "replica identityall FULL ✓") {
+			t.Errorf("every table at FULL: %q", text)
+		}
+	}
+	// A table that is not captured is never under a green "all FULL": the
+	// list of tables without undo is empty for it, and the card says so in red.
+	t.Logf("health card, one table not captured: %s", got.NotCaptured.Text)
+	if strings.Contains(got.NotCaptured.Text, "all FULL") || strings.Contains(got.NotCaptured.Text, "without undo") {
+		t.Errorf("a table that is not captured must not read as fine: %q", got.NotCaptured.Text)
+	}
+	for _, want := range []string{"capture✗ 1 table NOT captured",
+		"Their changes are skipped and counted; the other tables are recorded. The server's checks show the statement that fixes each.",
+		"public.acc (replica identity without the primary key)"} {
+		if !strings.Contains(got.NotCaptured.Text, want) {
+			t.Errorf("the card lacks %q:\n%s", want, got.NotCaptured.Text)
+		}
+	}
+	redCount := false
+	for _, s := range got.NotCaptured.Stats {
+		redCount = redCount || strings.HasPrefix(s, "hstat-err:✗ 1 table NOT captured")
+		// (The slot's own "reserved" is green and is another matter.)
+		if strings.HasPrefix(s, "hstat-ok") && strings.Contains(s, "FULL") {
+			t.Errorf("a green mark for the tables beside one that is not captured: %v", got.NotCaptured.Stats)
+		}
+	}
+	if !redCount {
+		t.Errorf("the count of tables not captured must be red (hstat-err): %v", got.NotCaptured.Stats)
+	}
+	for _, want := range []string{"✗ 2 tables NOT captured", "public.q (primary key DEFERRABLE)", "⚠ 1 table without undo", "public.a (relreplident=d)"} {
+		if !strings.Contains(got.Both.Text, want) {
+			t.Errorf("both lists: the card lacks %q:\n%s", want, got.Both.Text)
+		}
 	}
 	const explain = "Not at REPLICA IDENTITY FULL: recorded, and everything else works. Undo of an UPDATE or a DELETE is refused; ALTER TABLE ... REPLICA IDENTITY FULL makes later changes undoable."
 	for _, want := range []string{"replica identity⚠ 1 table without undo", explain, "public.orders (relreplident=d)"} {

@@ -250,17 +250,19 @@ func TestCapturer_BelowFull_Integration(t *testing.T) {
 		t.Errorf("QueryTableIdentities = %v\nwant %v (nf_full is at FULL and not listed)", gotIDs, wantIDs)
 	}
 
-	// What the health panel lists as "without undo": the tables that are
-	// captured. The two whose identity leaves the key out are not in it (they
-	// show as skipped changes).
-	listed, err := pgcapture.QueryReplicaIdentityNotFull(ctx, setup, pub)
-	if err != nil {
-		t.Fatalf("QueryReplicaIdentityNotFull: %v", err)
-	}
+	// What the health panel lists: as "without undo" the tables that are
+	// captured, and as not captured the two whose identity leaves the key out.
+	// A table outside the capture's scope is in neither.
+	listed, notCaptured := pgcapture.HealthTableLists(ids, nil, event.Filters{})
 	wantListed := []string{"public.NF Quoted (relreplident=d)", "public.nf_bigkey (relreplident=d)", "public.nf_def (relreplident=d)",
 		"public.nf_idx (relreplident=i)", "public.nf_idxonly (relreplident=i)", "public.nf_nopk (relreplident=d)", "public.nf_nothing (relreplident=n)"}
-	if !slices.Equal(listed, wantListed) {
-		t.Errorf("health list = %q\nwant %q", listed, wantListed)
+	wantNot := []string{"public.nf_idxnopk (replica identity without the primary key)", "public.nf_pkinclude (replica identity without the primary key)"}
+	if !slices.Equal(listed, wantListed) || !slices.Equal(notCaptured, wantNot) {
+		t.Errorf("health lists:\nwithout undo %q\nwant         %q\nnot captured %q\nwant         %q", listed, wantListed, notCaptured, wantNot)
+	}
+	scoped, scopedNot := pgcapture.HealthTableLists(ids, nil, event.Filters{Tables: map[string]bool{"public.nf_def": true}})
+	if !slices.Equal(scoped, []string{"public.nf_def (relreplident=d)"}) || len(scopedNot) != 0 {
+		t.Errorf("with the capture limited to nf_def: without undo %q, not captured %q", scoped, scopedNot)
 	}
 
 	r := startNofull(t, ctx, setup, baseDSN, slot, pub)
@@ -450,12 +452,14 @@ func TestCapturer_BelowFull_Integration(t *testing.T) {
 	}
 }
 
-// A partitioned table. Published by its partitions, each is described with
-// its own identity. Published through its root, the description carries the
-// ROOT's identity while each change carries what its PARTITION sends: with
-// the root at FULL and the partition left at DEFAULT (ALTER TABLE on the
-// parent does not reach the partitions), key-only tuples arrive under a
-// description that says FULL.
+// A partitioned table with one partition at DEFAULT and one at FULL.
+// Published by its partitions, each is described with its own identity.
+// Published through its root, the description carries the ROOT's identity
+// and PostgreSQL labels every old row by it, while each row holds what its
+// PARTITION logged (ALTER TABLE on the parent does not reach the partitions).
+// Either way a change made in the partition at FULL is stored whole and can
+// be undone, and one made in the partition at DEFAULT with its key only: one
+// partition below FULL does not cost the others their undo.
 func TestCapturer_BelowFull_Partitioned_Integration(t *testing.T) {
 	baseDSN := testutil.SkipIfNoPostgres(t)
 	ctx := context.Background()
@@ -482,52 +486,74 @@ func TestCapturer_BelowFull_Partitioned_Integration(t *testing.T) {
 					t.Fatalf("exec %q: %v", q, err)
 				}
 			}
+			const bigVal = "(SELECT string_agg(md5(i::text), '') FROM generate_series(1, 100) i)"
+			var big string
+			if err := setup.QueryRow(ctx, "SELECT "+bigVal).Scan(&big); err != nil {
+				t.Fatal(err)
+			}
 			mustExec("CREATE TABLE nf_parted (id int PRIMARY KEY, v text, big text) PARTITION BY RANGE (id)")
-			mustExec("CREATE TABLE nf_parted_1 PARTITION OF nf_parted FOR VALUES FROM (0) TO (1000)")
-			mustExec("ALTER TABLE nf_parted_1 ALTER COLUMN big SET STORAGE EXTERNAL")
+			mustExec("CREATE TABLE nf_parted_1 PARTITION OF nf_parted FOR VALUES FROM (0) TO (1000)")    // DEFAULT
+			mustExec("CREATE TABLE nf_parted_2 PARTITION OF nf_parted FOR VALUES FROM (1000) TO (2000)") // FULL
+			mustExec("ALTER TABLE nf_parted_2 REPLICA IDENTITY FULL")
+			for _, part := range []string{"nf_parted_1", "nf_parted_2"} {
+				mustExec("ALTER TABLE " + part + " ALTER COLUMN big SET STORAGE EXTERNAL")
+			}
 			mustExec("CREATE TABLE nf_part_end (id int PRIMARY KEY)")
-			table := "nf_parted_1"
+			belowTable, fullTable := "nf_parted_1", "nf_parted_2"
 			if viaRoot {
-				table = "nf_parted"
+				belowTable, fullTable = "nf_parted", "nf_parted"
 				mustExec("ALTER TABLE nf_parted REPLICA IDENTITY FULL") // the root only
 			}
 			mustExec(fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE nf_parted, nf_part_end WITH (publish_via_partition_root = %v)", pub, viaRoot))
 
 			// What the doctor and the health panel read: a root at FULL is
-			// listed for its partition alone.
+			// listed for its partition below FULL alone.
 			ids, err := pgcapture.QueryTableIdentities(ctx, setup, pub)
 			if err != nil {
 				t.Fatalf("QueryTableIdentities: %v", err)
 			}
 			var gotIDs []string
 			for _, ti := range ids {
-				gotIDs = append(gotIDs, fmt.Sprintf("%s %s none=%v misses=%v parts=%v", ti.Table, ti.Identity, ti.NoIdentity, ti.MissesKey, ti.PartitionsBelowFull))
+				gotIDs = append(gotIDs, fmt.Sprintf("%s %s none=%v misses=%v parts=%v partsmiss=%v", ti.Table, ti.Identity, ti.NoIdentity, ti.MissesKey, ti.PartitionsBelowFull, ti.PartitionsMissKey))
 			}
-			wantIDs := []string{"nf_part_end d none=false misses=[] parts=[]", "nf_parted_1 d none=false misses=[] parts=[]"}
+			wantIDs := []string{"nf_part_end d none=false misses=[] parts=[] partsmiss=[]", "nf_parted_1 d none=false misses=[] parts=[] partsmiss=[]"}
 			if viaRoot {
 				// The parent has an identity (it is at FULL): it is listed
 				// for its partition, and is not a table without one.
-				wantIDs = []string{`nf_part_end d none=false misses=[] parts=[]`, `nf_parted f none=false misses=[] parts=["public"."nf_parted_1"]`}
+				wantIDs = []string{`nf_part_end d none=false misses=[] parts=[] partsmiss=[]`, `nf_parted f none=false misses=[] parts=["public"."nf_parted_1"] partsmiss=[]`}
 			}
 			if !slices.Equal(gotIDs, wantIDs) {
 				t.Errorf("QueryTableIdentities = %q, want %q", gotIDs, wantIDs)
 			}
 
 			r := startNofull(t, ctx, setup, baseDSN, slot, pub)
-			mustExec("INSERT INTO nf_parted VALUES (1, 'a', (SELECT string_agg(md5(i::text), '') FROM generate_series(1, 100) i))")
-			mustExec("UPDATE nf_parted SET v = 'b' WHERE id = 1")
-			mustExec("UPDATE nf_parted SET id = 2 WHERE id = 1")
-			mustExec("DELETE FROM nf_parted WHERE id = 2")
+			for _, id := range []string{"1", "1001"} { // one row in each partition
+				mustExec("INSERT INTO nf_parted VALUES (" + id + ", 'a', " + bigVal + ")")
+				mustExec("UPDATE nf_parted SET v = 'b' WHERE id = " + id)
+				mustExec("UPDATE nf_parted SET id = id + 1 WHERE id = " + id)
+				mustExec("DELETE FROM nf_parted WHERE id = " + id + " + 1")
+			}
 			mustExec("INSERT INTO nf_part_end VALUES (1)")
 			evs := r.until(func(ev event.Event) bool { return ev.Table == "nf_part_end" })
 			r.stop()
 			t.Logf("capture log:\n%s", r.logText())
 
-			got := of(evs, table)
-			if rowKinds(got) != "IUUD" {
-				t.Fatalf("%s: events %q, want IUUD (all events: %d)", table, rowKinds(got), len(evs))
+			byPK := func(table string, low bool) []event.Event {
+				var out []event.Event
+				for _, ev := range of(evs, table) {
+					if (len(ev.PKValues) < 4) == low {
+						out = append(out, ev)
+					}
+				}
+				return out
 			}
 			cols := []string{"id", "v", "big"}
+
+			// The partition at DEFAULT: key-only earlier rows.
+			got := byPK(belowTable, true)
+			if rowKinds(got) != "IUUD" {
+				t.Fatalf("%s, partition at DEFAULT: events %q, want IUUD (all events: %d)", belowTable, rowKinds(got), len(evs))
+			}
 			assertPartialBefore(t, got[1], cols, map[string]string{"id": "1"})
 			if !event.IsUnchangedToastMarker(got[1].RowAfter["big"]) {
 				t.Errorf("UPDATE: after[big] = %T, want the unchanged-TOAST marker", got[1].RowAfter["big"])
@@ -537,13 +563,201 @@ func TestCapturer_BelowFull_Partitioned_Integration(t *testing.T) {
 				t.Errorf("key-changing UPDATE: pk=%q after[id]=%v", got[2].PKValues, got[2].RowAfter["id"])
 			}
 			assertPartialBefore(t, got[3], cols, map[string]string{"id": "2"})
+
+			// The partition at FULL: whole earlier rows, the large value the
+			// UPDATE left alone taken from them, and undo possible.
+			got = byPK(fullTable, false)
+			if rowKinds(got) != "IUUD" {
+				t.Fatalf("%s, partition at FULL: events %q, want IUUD", fullTable, rowKinds(got))
+			}
+			for i, ev := range got[1:] {
+				if cols := event.NotCapturedColumns(ev.RowBefore); len(cols) > 0 || ev.RowBefore["big"] != big {
+					t.Errorf("partition at FULL, change %d: the earlier row must be whole; not captured %v, big real=%v", i+1, cols, ev.RowBefore["big"] == big)
+				}
+				if ev.RowAfter != nil && ev.RowAfter["big"] != big {
+					t.Errorf("partition at FULL, change %d: after[big] = %T, want the value taken from the whole earlier row", i+1, ev.RowAfter["big"])
+				}
+				if err := event.CheckUnresolvedToast(ev.Schema, ev.Table, ev.PKValues, stored(t, ev.RowBefore), stored(t, ev.RowAfter)); err != nil {
+					t.Errorf("partition at FULL, change %d: it can be undone, got %v", i+1, err)
+				}
+			}
+			if got[1].RowBefore["v"] != "a" || got[3].RowBefore["v"] != "b" {
+				t.Errorf("partition at FULL: before[v] = %v, %v", got[1].RowBefore["v"], got[3].RowBefore["v"])
+			}
+
 			if r.skips.Total() != 0 {
 				t.Errorf("nothing is skipped, got %d", r.skips.Total())
 			}
-			if viaRoot != strings.Contains(r.logText(), "partitioned table without undo") {
+			if viaRoot != strings.Contains(r.logText(), "partitioned table with partitions without undo") {
 				t.Errorf("the warning about partitions below FULL must be given through the root only (viaRoot=%v)", viaRoot)
 			}
 		})
+	}
+}
+
+// A partition with a replica identity of its own (USING INDEX), under a root
+// at FULL published in its stead. Capture cannot see which partition a change
+// was made in; it reads the catalog.
+//   - The index leaves the primary key out: an UPDATE of the primary key made
+//     there arrives with no earlier row at all, so the table is skipped, as a
+//     table with such an identity is, and the doctor's list names the partition.
+//   - The index holds the primary key and another column: a key-only row then
+//     carries a value outside the key and looks whole, so every earlier row of
+//     the table is stored with its key only.
+func TestCapturer_PartitionOwnIdentity_Integration(t *testing.T) {
+	baseDSN := testutil.SkipIfNoPostgres(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name, index string
+		skipped     bool
+	}{
+		{"index without the primary key", "(u, id2)", true},
+		{"index wider than the primary key", "(id, u)", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const slot = "bintrail_nofull_partid_it"
+			const pub = "bintrail_nofull_partid_pub"
+			setup, err := pgx.Connect(ctx, baseDSN)
+			if err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+			t.Cleanup(func() { setup.Close(context.Background()) })
+			cleanup := func() {
+				bg := context.Background()
+				_, _ = setup.Exec(bg, "DROP PUBLICATION IF EXISTS "+pub)
+				_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS nf_pid, nf_pid_end")
+				_, _ = setup.Exec(bg, "SELECT pg_drop_replication_slot($1) WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)", slot)
+			}
+			cleanup()
+			t.Cleanup(cleanup)
+			mustExec := func(q string) {
+				t.Helper()
+				if _, err := setup.Exec(ctx, q); err != nil {
+					t.Fatalf("exec %q: %v", q, err)
+				}
+			}
+			// id2 is the partition key too, so a unique index may leave id out.
+			mustExec("CREATE TABLE nf_pid (id int, id2 int NOT NULL, u int NOT NULL, v text, PRIMARY KEY (id, id2)) PARTITION BY RANGE (id2)")
+			mustExec("CREATE TABLE nf_pid_1 PARTITION OF nf_pid FOR VALUES FROM (0) TO (1000)")
+			mustExec("CREATE UNIQUE INDEX nf_pid_1_uk ON nf_pid_1 " + strings.Replace(tc.index, "(id, u)", "(id, id2, u)", 1))
+			mustExec("ALTER TABLE nf_pid_1 REPLICA IDENTITY USING INDEX nf_pid_1_uk")
+			mustExec("ALTER TABLE nf_pid REPLICA IDENTITY FULL")
+			mustExec("CREATE TABLE nf_pid_end (id int PRIMARY KEY)")
+			mustExec("ALTER TABLE nf_pid_end REPLICA IDENTITY FULL")
+			mustExec("CREATE PUBLICATION " + pub + " FOR TABLE nf_pid, nf_pid_end WITH (publish_via_partition_root = true)")
+
+			ids, err := pgcapture.QueryTableIdentities(ctx, setup, pub)
+			if err != nil || len(ids) != 1 {
+				t.Fatalf("QueryTableIdentities: %+v, %v", ids, err)
+			}
+			wantMiss := []string{}
+			if tc.skipped {
+				wantMiss = []string{`"public"."nf_pid_1"`}
+			}
+			if !slices.Equal(ids[0].PartitionsMissKey, wantMiss) || ids[0].Captured() == tc.skipped {
+				t.Errorf("the catalog read: %+v, want partitions without the key %v", ids[0], wantMiss)
+			}
+
+			r := startNofull(t, ctx, setup, baseDSN, slot, pub)
+			mustExec("INSERT INTO nf_pid VALUES (1, 1, 10, 'a')")
+			mustExec("UPDATE nf_pid SET id = 2 WHERE id = 1") // the primary key
+			mustExec("DELETE FROM nf_pid WHERE id = 2")
+			mustExec("INSERT INTO nf_pid_end VALUES (1)")
+			evs := r.until(func(ev event.Event) bool { return ev.Table == "nf_pid_end" })
+			r.stop()
+			got := of(evs, "nf_pid")
+			const reason = pgcapture.SkipReplicaIdentityIndexWithoutPrimaryKey
+			if tc.skipped {
+				if len(got) != 0 || r.skips.Count(reason) != 3 {
+					t.Fatalf("the table must be skipped: %d events, %d skips under %q\nlog:\n%s", len(got), r.skips.Count(reason), reason, r.logText())
+				}
+				assertLedgerNames(t, r.skips, reason, "public.nf_pid")
+				return
+			}
+			if rowKinds(got) != "IUD" || r.skips.Total() != 0 {
+				t.Fatalf("events %q (want IUD), skips %d\nlog:\n%s", rowKinds(got), r.skips.Total(), r.logText())
+			}
+			cols := []string{"id", "id2", "u", "v"}
+			assertPartialBefore(t, got[1], cols, map[string]string{"id": "1", "id2": "1"})
+			if got[1].PKValues != "1|1" || got[1].RowAfter["id"] != "2" {
+				t.Errorf("key-changing UPDATE: pk=%q after=%v", got[1].PKValues, got[1].RowAfter)
+			}
+			assertPartialBefore(t, got[2], cols, map[string]string{"id": "2", "id2": "1"})
+		})
+	}
+}
+
+// A table whose primary key is DEFERRABLE when capture starts: capture starts
+// all the same, says so once, skips that table's changes under
+// primary_key_deferrable, and captures the other tables. Refusing the start
+// kept every table uncaptured, at every automatic restart.
+func TestCapturer_DeferrableKeyAtStart_TableSkippedOthersCaptured(t *testing.T) {
+	baseDSN := testutil.SkipIfNoPostgres(t)
+	ctx := context.Background()
+	const slot = "bintrail_defstart_it"
+	const pub = "bintrail_defstart_it_pub"
+	setup, err := pgx.Connect(ctx, baseDSN)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { setup.Close(context.Background()) })
+	cleanup := func() {
+		bg := context.Background()
+		_, _ = setup.Exec(bg, "DROP PUBLICATION IF EXISTS "+pub)
+		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS defstart_a, defstart_t")
+		_, _ = setup.Exec(bg, "SELECT pg_drop_replication_slot($1) WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)", slot)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	mustExec := func(q string) {
+		t.Helper()
+		if _, err := setup.Exec(ctx, q); err != nil {
+			t.Fatalf("exec %q: %v", q, err)
+		}
+	}
+	mustExec("CREATE TABLE defstart_a (id int PRIMARY KEY, v text)")
+	mustExec("CREATE TABLE defstart_t (id int, v text, CONSTRAINT defstart_t_pkey PRIMARY KEY (id) DEFERRABLE)")
+	mustExec("ALTER TABLE defstart_t REPLICA IDENTITY FULL")
+	mustExec("CREATE PUBLICATION " + pub + " FOR TABLE defstart_a, defstart_t")
+
+	// What the health panel is given: the table is not captured, and is not
+	// listed as recorded.
+	ids, err := pgcapture.QueryTableIdentities(ctx, setup, pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := pgcapture.QueryDeferrableKeys(ctx, setup, pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	undo, not := pgcapture.HealthTableLists(ids, keys, event.Filters{})
+	if !slices.Equal(undo, []string{"public.defstart_a (relreplident=d)"}) || !slices.Equal(not, []string{"public.defstart_t (primary key DEFERRABLE)"}) {
+		t.Errorf("health lists: without undo %q, not captured %q", undo, not)
+	}
+
+	for run := 1; run <= 2; run++ { // a restart is not refused either
+		r := startNofull(t, ctx, setup, baseDSN, slot, pub)
+		mustExec(fmt.Sprintf("INSERT INTO defstart_t VALUES (%d, 'skipped')", run))
+		mustExec(fmt.Sprintf("INSERT INTO defstart_a VALUES (%d, 'captured')", run))
+		evs := r.until(func(ev event.Event) bool { return ev.Table == "defstart_a" && ev.PKValues == fmt.Sprint(run) })
+		r.stop()
+		if got := of(evs, "defstart_t"); len(got) != 0 {
+			t.Errorf("run %d: changes of the table with a deferrable key were captured: %d", run, len(got))
+		}
+		const reason = pgcapture.SkipDeferrablePrimaryKey
+		if r.skips.Count(reason) < 1 || r.skips.Total() != r.skips.Count(reason) {
+			t.Errorf("run %d: want the change recorded under %q and nothing else, got %d of %d", run, reason, r.skips.Count(reason), r.skips.Total())
+		}
+		assertLedgerNames(t, r.skips, reason, "public.defstart_t")
+		logs := r.logText()
+		if run == 1 {
+			t.Logf("startup log:\n%s", logs)
+		}
+		for _, want := range []string{"1 table of the publication has a primary key declared DEFERRABLE", "defstart_t", "the other tables are captured normally"} {
+			if !strings.Contains(logs, want) {
+				t.Errorf("run %d: the startup warning lacks %q", run, want)
+			}
+		}
 	}
 }
 
