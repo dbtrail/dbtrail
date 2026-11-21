@@ -319,8 +319,11 @@ only wrong text. Keep the table-deltas note in mind for the snapshot files.
 Said in the same voice as the strengths. A copy you can trust is one whose
 edges you know.
 
-- **Not high availability.** Your application never points at the copy, and
-  nothing fails over to it.
+- **Not high availability.** Nothing fails over to the copy. An application
+  that only reads these files does not depend on DBTrail being up. One that
+  connects to the MySQL port with Engine Routing on does: while the router is
+  down it gets connection errors on that port, with MySQL up and untouched.
+  See [When the router stops](time-travel-sql.md#when-the-router-stops).
 - **Not your backup.** History starts the day you install it. Keep your
   physical backups.
 - **Minutes behind, not seconds, for the files.** The snapshot interval is

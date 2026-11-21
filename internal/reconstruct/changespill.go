@@ -96,6 +96,9 @@ type spillRecord struct {
 // changeSpill is one table's changes on disk, one gob stream per group.
 type changeSpill struct {
 	dir string
+	// work is dir with the lock that keeps another process's start from
+	// removing it while this fold lives (newWorkDir, #2513).
+	work *workDir
 	// limit is the in-memory limit the fold passed; the merge sizes its passes
 	// with it, and tables names the tables folding at once for the refusal.
 	limit  int64
@@ -120,11 +123,11 @@ type changeSpill struct {
 }
 
 func newChangeSpill(limit int64) (*changeSpill, error) {
-	dir, err := os.MkdirTemp("", "bintrail-fold-*")
+	w, err := newWorkDir("", workDirFold)
 	if err != nil {
 		return nil, fmt.Errorf("create a directory for changed rows in the temporary directory %s: %w", os.TempDir(), err)
 	}
-	return &changeSpill{dir: dir, limit: limit}, nil
+	return &changeSpill{dir: w.path, work: w, limit: limit}, nil
 }
 
 // spillBucket is the group a pk_values string belongs to. The fold and every
@@ -366,5 +369,8 @@ func (s *changeSpill) remove() error {
 	if err := s.finish(); err != nil {
 		slog.Debug("closing changed rows on disk before removing them", "dir", s.dir, "error", err)
 	}
-	return os.RemoveAll(s.dir)
+	if s.work == nil {
+		return os.RemoveAll(s.dir)
+	}
+	return s.work.remove()
 }

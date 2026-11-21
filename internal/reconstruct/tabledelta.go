@@ -67,6 +67,12 @@ import (
 // the rewrite read every column of it per pass and wrote it again.
 const tableDeltaMaxAge = 24 * time.Hour
 
+// TableDeltaMaxAge is tableDeltaMaxAge for the daemon's rule about the
+// retention table deltas need (#2959): a copy updated this far apart or more
+// has every chain ended by age at the update after the one that began it,
+// whatever the index keeps, so no retention makes room for one.
+const TableDeltaMaxAge = tableDeltaMaxAge
+
 // The size rule: rewrite once the chain's files together pass
 // tableDeltaMaxFraction of the base, but never while they are under
 // tableDeltaMinCompactBytes. The floor is for small tables: a 40 KB base with a
@@ -1357,11 +1363,14 @@ func materializeBaseWithDelta(ctx context.Context, basePath string, d *tableDelt
 			return "", nil, err
 		}
 	}
-	tmpDir, err := os.MkdirTemp(dir, "bintrail-compact-*")
+	// Locked for as long as it is used, so what a killed process leaves in
+	// the system's temporary directory is told from this one (#2513).
+	work, err := newWorkDir(dir, workDirCompact)
 	if err != nil {
 		return "", nil, fmt.Errorf("mkdir temp: %w", err)
 	}
-	cleanup := func() { os.RemoveAll(tmpDir) }
+	tmpDir := work.path
+	cleanup := func() { _ = work.remove() }
 	tmpPath := filepath.Join(tmpDir, "baseline.parquet")
 	ddb, err := sql.Open("duckdb", "")
 	if err != nil {

@@ -197,6 +197,11 @@ password copied from this page.
   checks of `server add` pass and the first snapshot then fails with
   `permission denied for table ...` (`42501`). The same goes for a table added
   to the publication later, which is read in full once.
+- **Disk for the first copy.** It is written into the server's Local folder as
+  compressed Parquet. Before it starts, DBTrail compares the tables' size
+  with the free space there: it refuses below 1 GiB free and warns below 1.3×
+  the tables' size. See
+  [Disk for a PostgreSQL snapshot](capacity.md#disk-for-a-postgresql-snapshot-the-snapshot-folder-is-the-one-that-fills).
 - `GRANT SELECT ON ALL TABLES IN SCHEMA` covers the tables that exist when it
   runs. For the ones created later, run once
   `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO dbtrail;`
