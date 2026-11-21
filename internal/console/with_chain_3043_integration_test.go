@@ -270,8 +270,8 @@ func TestIntegrationFreshWithBlocksAsksOnlyForTheTablesNamed_3043(t *testing.T) 
 }
 
 // A name the engine can resolve to a table of the copy without it matching
-// a view by its schema (memory.<table> is the catalog and a table of the
-// schema in use) keeps the whole statement from tails: laying changes over
+// a view (memory.<table> is the catalog and a table of the schema in use; a
+// quoted path is the table's file) keeps the whole statement from tails: laying changes over
 // the table named in full and not over that one would join rows of two
 // moments, under an answer that says every table was read with its changes.
 func TestIntegrationFreshNeverTailsHalfAStatement_3043(t *testing.T) {
@@ -311,7 +311,9 @@ func TestIntegrationFreshNeverTailsHalfAStatement_3043(t *testing.T) {
 	if got, age, err := run(both); err != nil || got != "paid/paid" || !age.Tailed {
 		t.Fatalf("both tables named in full: %q, tailed %v, %v", got, age.Tailed, err)
 	}
-	for _, other := range []string{"memory." + b.Table, "memory.shop." + b.Table, b.Table} {
+	// And the table's own file, by its path: the parse reports a relation of
+	// that name, which is no view and is the table all the same.
+	for _, other := range []string{"memory." + b.Table, "memory.shop." + b.Table, b.Table, "'" + b.Path + "'"} {
 		stmt := "SELECT x.status || '/' || y.status FROM shop." + a.Table + " x JOIN " + other + " y ON y.id = x.id"
 		got, age, err := run(stmt)
 		if err != nil {

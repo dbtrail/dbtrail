@@ -52,6 +52,11 @@ func TestSQLTailTables(t *testing.T) {
 		{"the same beside the name of a WITH", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), {Catalog: "memory", Name: "customers"}, ref("x")}}, nil, false, false},
 		{"another catalog", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("other", "shop", "customers")}}, nil, false, false},
 		{"the engine's catalog, written out", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("memory", "shop", "orders"), ref("x")}}, []string{"shop.orders"}, true, false},
+		{"a file of the copy by its path", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("/c/shop/customers.parquet")}}, nil, false, false},
+		{"files by a pattern", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("/c/shop/*")}}, nil, false, false},
+		{"a file in the working directory", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("customers.parquet")}}, nil, false, false},
+		{"a name with a space", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("my block")}}, nil, false, false},
+		{"a WITH named in another alphabet", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("año_2026$")}}, []string{"shop.orders"}, true, false},
 		{"a system table in a schema", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("shop", "orders"), ref("information_schema", "tables")}}, nil, false, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {

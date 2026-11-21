@@ -702,11 +702,14 @@ func sqlNamedTables(in views.Input, refs sqlsandbox.Refs) []views.BaselineTable 
 //
 // Not known, and no tail read, as before: a statement that can read what it
 // does not name (Refs.Unsure: a table function, a catalog listing), one
-// that names no table of the copy, and a qualified name that matched no
-// view. That last one the engine may still resolve to a table of the copy
-// (memory.orders is the catalog and a table of the schema in use), and a
-// statement given tails for its other tables would read that one from the
-// snapshot while its answer says every table was read with its changes.
+// that names no table of the copy, a qualified name that matched no view,
+// and a bare name that is not a plain word (sqlPlainName). The last two can
+// still be a table of the copy: memory.orders is the catalog and a table of
+// the schema in use, and a quoted path ('/copy/shop/orders.parquet' in a
+// FROM) is the table's own file, which the parse reports as a relation of
+// that name. A statement given tails for its other tables would read that
+// one from the snapshot while its answer says every table was read with its
+// changes.
 func sqlTailTables(in views.Input, refs sqlsandbox.Refs, wanted views.ViewSet, named []views.BaselineTable) ([]views.BaselineTable, bool) {
 	if wanted != nil {
 		return named, true
@@ -717,6 +720,9 @@ func sqlTailTables(in views.Input, refs sqlsandbox.Refs, wanted views.ViewSet, n
 	names := in.ViewNames()
 	for _, r := range refs.Tables {
 		if r.Catalog == "" && r.Schema == "" {
+			if !sqlPlainName(r.Name) {
+				return nil, false
+			}
 			continue
 		}
 		schema, name := sqlFoldName(r.Schema), sqlFoldName(r.Name)
@@ -734,6 +740,25 @@ func sqlTailTables(in views.Input, refs sqlsandbox.Refs, wanted views.ViewSet, n
 		}
 	}
 	return named, true
+}
+
+// sqlPlainName reports whether a relation's name is made of letters, digits,
+// underscores and dollar signs only (any byte outside ASCII counts as a
+// letter). The engine reads a file for a name that is a path, a URL or a
+// pattern of files, and each of those has a character that is none of these.
+func sqlPlainName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 0x80, c == '_', c == '$', '0' <= c && c <= '9', 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // sqlChainRefusalFor is the refusal for a statement whose tables hold more
