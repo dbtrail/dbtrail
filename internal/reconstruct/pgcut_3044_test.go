@@ -113,6 +113,10 @@ func TestResolvePGRunEnd_eventWrittenBetweenTheTwoReads(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer db.Close()
+			// Read once, before the first read of the newest event, and
+			// kept through every read after it (pgRunEnd.caughtUpAt).
+			caught := at.Add(-time.Minute)
+			mock.ExpectQuery("SELECT pg_caught_up_source_at FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"pg_caught_up_source_at"}).AddRow(caught))
 			for _, n := range c.newest {
 				rows := sqlmock.NewRows([]string{"end_pos", "event_timestamp", "event_id"})
 				if n.lsn != 0 {
@@ -149,7 +153,14 @@ func TestResolvePGRunEnd_eventWrittenBetweenTheTwoReads(t *testing.T) {
 			if run.none != c.wantNone {
 				t.Fatalf("none = %v, want %v", run.none, c.wantNone)
 			}
+			if !run.caughtUpAt.Equal(caught) {
+				t.Errorf("caughtUpAt = %s, want the one read first, %s", run.caughtUpAt, caught)
+			}
 			if c.wantNone {
+				// Nothing of the read before it is left in the run.
+				if run.newestEnd != 0 || !run.newestAt.IsZero() || run.until != 0 || !run.allIn {
+					t.Errorf("an emptied index: run = %+v, want no newest change, no end, all in", run)
+				}
 				return
 			}
 			if run.until != c.wantUntil {

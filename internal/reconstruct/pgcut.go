@@ -311,8 +311,8 @@ func resolvePGRunEnd(ctx context.Context, db *sql.DB, at time.Time) (pgRunEnd, e
 			break
 		}
 		if attempt >= pgRunEndAttempts {
-			return pgRunEnd{}, fmt.Errorf("the changes in the index after %s were written after each of %d reads of its newest change, and gone again by the next, "+
-				"as when capture starts again: where a PostgreSQL fold stops could not be read; the next update reads it again",
+			return pgRunEnd{}, fmt.Errorf("the first change in the index after %s was written after the newest change read just before it, %d reads in a row: "+
+				"where a PostgreSQL fold stops could not be read (a capture that keeps starting again does this, and so would index rows that record no end position)",
 				at.UTC().Format(time.RFC3339), attempt)
 		}
 	}
