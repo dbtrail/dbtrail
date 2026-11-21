@@ -389,7 +389,7 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 	tryPair := fromPair == "" && pgPairEligible(cfg, p.baselinePath, bmeta, fileSince, fold, capGap)
 	foldPair := prev != nil && fromPair != "" && fold.Spill == nil && capGap == nil
 	if tryPair || foldPair {
-		written, perr := writePGPair(ctx, in, fold, rep, prev, fromPair)
+		written, perr := writePGPair(ctx, in, fold, rep, prev, fromPair, start)
 		if perr != nil {
 			return nil, "", perr
 		}
@@ -417,7 +417,9 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 		if tmp == "" {
 			tmp = cfg.snapshotDir
 		}
+		materializeAt := time.Now()
 		merged, done, merr := materializePGBaseWithPair(ctx, p.baselinePath, prev, cfg.DuckDBTuning, tmp, cfg.SpaceCheck)
+		materialize := time.Since(materializeAt)
 		if merr != nil {
 			if cerr := ctx.Err(); cerr != nil {
 				return nil, "", cerr
@@ -430,12 +432,15 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 		in.LocalBaselinePath = merged
 		rep.DeltaCompacted = fromPair
 		slog.Info("table written in full from its previous file and the delta beside it",
-			"schema", schema, "table", table, "reason", fromPair, "file_lsn", lsnText(bmeta.LSN), "delta_lsn", lsnText(prev.meta.LSN))
+			"schema", schema, "table", table, "reason", fromPair, "file_lsn", lsnText(bmeta.LSN), "delta_lsn", lsnText(prev.meta.LSN),
+			"fetch_ms", rep.FetchDuration.Milliseconds(), "fold_ms", rep.FoldDuration.Milliseconds(),
+			"materialize_ms", materialize.Milliseconds(), "total_ms", time.Since(start).Milliseconds())
 	}
 	merge := mergeBaselineIntoParquet
 	if cfg.OutputFormat == OutputFormatPsql {
 		merge = mergeBaselineIntoPsql
 	}
+	mergeAt := time.Now()
 	if err := merge(ctx, in, rep); err != nil {
 		return nil, "", err
 	}
@@ -448,6 +453,9 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 		"updates_applied", rep.UpdatesApplied,
 		"inserts_emitted", rep.InsertsEmitted,
 		"deletes_skipped", rep.DeletesSkipped,
+		"fetch_ms", rep.FetchDuration.Milliseconds(),
+		"fold_ms", rep.FoldDuration.Milliseconds(),
+		"merge_ms", time.Since(mergeAt).Milliseconds(),
 		"duration_ms", rep.Duration.Milliseconds())
 	return rep, "", nil
 }
