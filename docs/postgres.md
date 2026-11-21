@@ -1175,6 +1175,8 @@ server, closes the connections that use it; clients reconnect.
   holds an `INSERT`, `UPDATE`, `DELETE` or `MERGE`, and `EXPLAIN` of anything
   but a query. PostgreSQL refuses each of them in a read-only transaction
   too; the port says so first, with the reason.
+  In a `WITH`, an `EXPLAIN` or a `DECLARE`, a column or alias named `insert`,
+  `update`, `delete` or `merge` has to be written in double quotes.
 - **Functions that act beyond a read are refused by family** (`0A000`),
   schema-qualified or quoted alike: stopping or cancelling a session
   (`pg_terminate_backend`, `pg_cancel_backend`), the server's files
