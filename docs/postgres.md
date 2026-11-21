@@ -420,9 +420,11 @@ that the value was not sent, never a NULL in its place:
   | Rows in the table | At `FULL` | Not at `FULL` |
   |---|---|---|
   | 2 million (a 3.8 GB copy) | 1.3 s behind the source (median) | 2.8 s behind, and the server's other tables with it |
-  | 20 million (a 39 GB copy) | 2.5 s behind, with one stretch of minutes while the host was saturated | No fresh mode while the table is written to: statements read the copy as of its last snapshot, 21 to 31 minutes old in that run |
+  | 6 million (an 11.5 GB copy) | not measured | No fresh mode while the table is written to: statements read the copy as of its last snapshot, 6 to 13 minutes old in that run |
+  | 20 million (a 39 GB copy) | 2.5 s behind, with one stretch of minutes while the host was saturated | No fresh mode while the table is written to: 21 to 31 minutes old in that run |
 
-  So a large table that needs fresh mode should be at `REPLICA IDENTITY FULL`.
+  On that host the line fell between 2 and 6 million rows of that width. So a
+  table of some size that needs fresh mode should be at `REPLICA IDENTITY FULL`.
   A table left without fresh mode still answers with correct rows, as of its
   snapshot, and does not hold the other tables back. One run, one host: these
   are not limits to plan with.
