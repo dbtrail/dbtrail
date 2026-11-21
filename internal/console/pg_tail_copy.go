@@ -311,6 +311,10 @@ func pgCopyValues(ctx context.Context, src pgCopySource, t views.BaselineTable, 
 	return src.CopyValues(ctx, t, keyCols, keys, cols, maxBytes)
 }
 
+// pgCopyBuildValues is the read a build makes of the copy (pgCopyValues), a
+// seam: a test makes it run out of the build's time.
+var pgCopyBuildValues = pgCopyValues
+
 // pgCopyTextBytes is how much text rows hold.
 func pgCopyTextBytes(rows map[string]map[string]*string) int64 {
 	var n int64
@@ -410,14 +414,21 @@ func (x *pgTailSource) fillStartedFromCopy(ctx context.Context, t views.Baseline
 	if err := reconstruct.PGCutCheck(t.Path); err != nil {
 		return fmt.Sprintf("the copy of %s does not pass its snapshot's record: %v", name, err), nil
 	}
-	rows, err := pgCopyValues(ctx, x, t, tail.PKColumns(), keys, cols, x.copyBytes)
+	// A build whose time was up before the read began counts nothing
+	// against the copy: what was slow was the rest of the build.
+	spentBefore := ctx.Err() != nil
+	rows, err := pgCopyBuildValues(ctx, x, t, tail.PKColumns(), keys, cols, x.copyBytes)
 	switch {
 	case errors.Is(err, pgdelta.ErrBaseValuesTooLarge):
 		return fmt.Sprintf("the large values to read from the copy of %s for %d key(s) are more than the tails' memory budget (%d MiB, BINTRAIL_SQL_TAIL_MAX_BYTES)",
 			name, len(keys), x.copyBytes>>20), nil
 	case err != nil && ctx.Err() != nil:
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if !spentBefore && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			if n := x.noteCopyLate(t); n >= pgCopyLateBuilds {
+				// Said at Warn: the table has no tail until its next
+				// snapshot, and the keeper says its refusal at Info.
+				slog.Warn("Engine Routing: a table's tail is not built again over this snapshot: its read of the copy ran out of the build's time again",
+					"table", name, "keys", len(keys), "times", n)
 				return fmt.Sprintf("reading the large values of %d key(s) from the copy of %s did not end before the build of its tail ran out of time, %d times over this snapshot; it is tried again at the table's next snapshot",
 					len(keys), name, n), nil
 			}
@@ -447,9 +458,13 @@ func (x *pgTailSource) fillStartedFromCopy(ctx context.Context, t views.Baseline
 // first time is not refused: the build may have been slow for a reason of
 // its own (a busy host, a slot it waited for), and is tried again as before.
 //
-// Only the build's deadline counts. A read cut short because the build was
-// no longer wanted, the keeper closed, or the context was cancelled for any
-// other reason is an error as before, and counts nothing.
+// Only the build's deadline counts, and only when it ran out during the read
+// itself: a build whose time was up before the read began counts nothing
+// against the copy. A read cut short because the build was no longer
+// wanted, the keeper closed, or the context was cancelled for any other
+// reason is an error as before, and counts nothing. The count is the
+// source's, not the keeper's entry's: a cut the keeper forgot and builds
+// again keeps its count, as it is the same cut.
 const pgCopyLateBuilds = 2
 
 // pgCopyLate is one table's count of builds cut short in their read of the

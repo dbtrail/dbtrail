@@ -48,13 +48,24 @@ func TestPGTailSource_aCopyReadOutOfTimeTwiceRefusesItsCut(t *testing.T) {
 		}
 		return tail.(*reconstruct.PGTail)
 	}
-	late, stop := context.WithDeadline(ctx, time.Now().Add(-time.Second))
+	slowCopyReads(t)
+	// late is a build's context whose time runs out during the read.
+	late := func() context.Context {
+		c, stop := context.WithTimeout(ctx, 200*time.Millisecond)
+		t.Cleanup(stop)
+		return c
+	}
+	spent, stop := context.WithDeadline(ctx, time.Now().Add(-time.Second))
 	defer stop()
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
 	read := func(x *pgTailSource, c context.Context, tbl views.BaselineTable) (string, error) {
 		t.Helper()
-		return x.fillStartedFromCopy(c, tbl, waiting(tbl))
+		tail := waiting(tbl)
+		if c == nil {
+			c = late()
+		}
+		return x.fillStartedFromCopy(c, tbl, tail)
 	}
 	tried := func(what string, why string, err error) {
 		t.Helper()
@@ -70,40 +81,58 @@ func TestPGTailSource_aCopyReadOutOfTimeTwiceRefusesItsCut(t *testing.T) {
 	}
 
 	x := &pgTailSource{}
-	why, err := read(x, late, cut)
+	why, err := read(x, nil, cut)
 	tried("the first read out of time", why, err)
 	for i := 0; i < 3; i++ {
 		why, err = read(x, cancelled, cut)
 		tried("a read cut short by a cancel", why, err)
+		why, err = read(x, spent, cut)
+		tried("a build whose time was up before the read began", why, err)
 	}
-	why, err = read(x, late, items)
+	why, err = read(x, nil, items)
 	tried("another table's first read out of time", why, err)
-	why, err = read(x, late, cut)
+	why, err = read(x, nil, cut)
 	refused("the second read out of time over the same cut", why, err)
-	why, err = read(x, late, cut)
+	why, err = read(x, nil, cut)
 	refused("and the third", why, err)
-	why, err = read(x, late, other)
+	why, err = read(x, nil, other)
 	tried("the first read out of time over the next cut", why, err)
-	why, err = read(x, late, other)
+	why, err = read(x, nil, other)
 	refused("the second over the next cut", why, err)
 
 	// A read that ended forgets the count.
 	y := &pgTailSource{}
-	why, err = read(y, late, cut)
+	why, err = read(y, nil, cut)
 	tried("a first read out of time", why, err)
 	if why, err := read(y, ctx, cut); why != "" || err != nil {
 		t.Fatalf("a read with time: %q, %v", why, err)
 	}
-	why, err = read(y, late, cut)
+	why, err = read(y, nil, cut)
 	tried("the next read out of time, after one that ended", why, err)
+}
+
+// slowCopyReads makes, for one test, a build's read of the copy wait out its
+// context while the switch it returns is set (it starts set).
+func slowCopyReads(t *testing.T) *atomic.Bool {
+	t.Helper()
+	slow := new(atomic.Bool)
+	slow.Store(true)
+	prev := pgCopyBuildValues
+	pgCopyBuildValues = func(ctx context.Context, src pgCopySource, tbl views.BaselineTable, keyCols, keys, cols []string, maxBytes int64) (map[string]map[string]*string, error) {
+		if slow.Load() {
+			<-ctx.Done()
+		}
+		return prev(ctx, src, tbl, keyCols, keys, cols, maxBytes)
+	}
+	t.Cleanup(func() { pgCopyBuildValues = prev })
+	return slow
 }
 
 // pgLateSource is pgCopyIndex with the real source's build path: Start notes
 // the tail it built and Fill reads the copy for it at its end, as
-// pgTailSource does; with late set, Fill first waits out the build's time.
+// pgTailSource does.
 type pgLateSource struct {
 	*pgCopyIndex
-	late atomic.Bool
 }
 
 func (s *pgLateSource) Start(ctx context.Context, t views.BaselineTable) (tailTable, string, error) {
@@ -118,9 +147,6 @@ func (s *pgLateSource) Fill(ctx context.Context, t views.BaselineTable, upTo uin
 	started := s.real.takeStarted(t)
 	if why, err := s.pgCopyIndex.Fill(ctx, t, upTo, page); why != "" || err != nil {
 		return why, err
-	}
-	if s.late.Load() {
-		<-ctx.Done()
 	}
 	return s.real.fillStartedFromCopy(ctx, t, started)
 }
@@ -139,9 +165,11 @@ func TestPGTailCopy_aBuildOutOfTimeTwiceIsRefusedUntilTheNextCut(t *testing.T) {
 	f.floors[cut1.Path], f.floors[cut2.Path] = 0x500, 0x500
 	f.update("orders", 0x600, "1", pgCopyUnsent, "n")
 	src := &pgLateSource{pgCopyIndex: f}
-	src.late.Store(true)
+	slow := slowCopyReads(t)
 	k := newTailKeeper(src, t.TempDir(), tailBudget{Keys: 1000}, time.Minute, time.Hour)
-	k.buildTimeout = 20 * time.Millisecond
+	// Enough for the build to reach its read of the copy, which then waits
+	// it out.
+	k.buildTimeout = 200 * time.Millisecond
 	k.retryMin, k.retryMax = 0, 0
 	t.Cleanup(k.close)
 	key := tailKey("public", "orders")
@@ -181,7 +209,7 @@ func TestPGTailCopy_aBuildOutOfTimeTwiceIsRefusedUntilTheNextCut(t *testing.T) {
 	}
 	// A read with time to end: the engine's read of the file takes longer
 	// than the short time the builds above were given.
-	src.late.Store(false)
+	slow.Store(false)
 	k.buildTimeout = time.Minute
 	got := settled(t, ctx, k, cut2)
 	v, ok := got[key]
