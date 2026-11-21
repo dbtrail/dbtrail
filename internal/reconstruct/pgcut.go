@@ -159,6 +159,12 @@ func resolvePGFoldBounds(ctx context.Context, db *sql.DB, at time.Time, floor ui
 //     with an LSN below its floor in boundsFor. Not caught once the other
 //     cluster's LSNs pass the old ones everywhere this looks: no cluster
 //     identity is recorded.
+//   - The two events are read one after the other while capture writes, so
+//     the first one past at can be an event written after the newest one was
+//     read: later in the WAL than it, on the same cluster (#3044). Its
+//     event_id says so, and the newest event is then read again: an LSN goes
+//     backwards only between two events of which the one written first has
+//     the higher LSN.
 //   - An event with LSN 0 is refused: no commit has it, the index row is
 //     damaged, and no bound can be placed around it.
 //
@@ -260,31 +266,55 @@ func noArchives(ctx context.Context, db *sql.DB) bool {
 	return db.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT 1 FROM archive_state LIMIT 1) one`).Scan(&n) == nil && n == 0
 }
 
+// pgRunEndAttempts is how many times resolvePGRunEnd reads the newest event
+// and the first one past the point before it gives up on an index whose
+// events past the point keep being written after the newest one it read. One
+// more read settles it while the event found stays in the index: the newest
+// event read after it was found is that event or a later one. Only a capture
+// that starts again in between, and removes what it indexed past its saved
+// position, asks for more.
+const pgRunEndAttempts = 3
+
 // resolvePGRunEnd reads a run's pgRunEnd at the point at.
 func resolvePGRunEnd(ctx context.Context, db *sql.DB, at time.Time) (pgRunEnd, error) {
-	// First: see pgRunEnd.caughtUpAt.
+	// First: see pgRunEnd.caughtUpAt. Not read again with the newest event:
+	// an earlier stamp says less, never more.
 	run := pgRunEnd{at: at, caughtUpAt: readPGCaughtUpAt(ctx, db)}
-	err := db.QueryRowContext(ctx, `SELECT end_pos, event_timestamp FROM binlog_events
-		WHERE binlog_file IS NOT NULL AND end_pos IS NOT NULL
-		ORDER BY event_id DESC LIMIT 1`).Scan(&run.newestEnd, &run.newestAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		// No change in the live index. A fold of such a run reads nothing
-		// (pgFoldBounds.empty), archives included, so the bound may move
-		// only when there is no archive that could hold a change past the
-		// floor: an index rotated empty with its changes archived keeps the
-		// bound it had, and the next fold that finds a change reads them.
-		run.none, run.allIn = true, noArchives(ctx, db)
-		return run, nil
-	}
-	if err != nil {
-		return pgRunEnd{}, fmt.Errorf("find where a PostgreSQL fold stops (newest indexed event): %w", err)
-	}
-	if run.newestEnd == 0 {
-		return pgRunEnd{}, errors.New("the newest change in the index has LSN 0, which no PostgreSQL commit has: the index row is damaged; a fold cannot place its bounds")
-	}
-	cut, _, err := pgFirstEventPast(ctx, db, at, 0)
-	if err != nil {
-		return pgRunEnd{}, err
+	var cut *query.BinlogPos
+	for attempt := 1; ; attempt++ {
+		var newestID uint64
+		err := db.QueryRowContext(ctx, `SELECT end_pos, event_timestamp, event_id FROM binlog_events
+			WHERE binlog_file IS NOT NULL AND end_pos IS NOT NULL
+			ORDER BY event_id DESC LIMIT 1`).Scan(&run.newestEnd, &run.newestAt, &newestID)
+		if errors.Is(err, sql.ErrNoRows) {
+			// No change in the live index. A fold of such a run reads nothing
+			// (pgFoldBounds.empty), archives included, so the bound may move
+			// only when there is no archive that could hold a change past the
+			// floor: an index rotated empty with its changes archived keeps the
+			// bound it had, and the next fold that finds a change reads them.
+			return pgRunEnd{at: at, caughtUpAt: run.caughtUpAt, none: true, allIn: noArchives(ctx, db)}, nil
+		}
+		if err != nil {
+			return pgRunEnd{}, fmt.Errorf("find where a PostgreSQL fold stops (newest indexed event): %w", err)
+		}
+		if run.newestEnd == 0 {
+			return pgRunEnd{}, errors.New("the newest change in the index has LSN 0, which no PostgreSQL commit has: the index row is damaged; a fold cannot place its bounds")
+		}
+		var cutID uint64
+		cut, cutID, err = pgFirstEventPast(ctx, db, at, 0)
+		if err != nil {
+			return pgRunEnd{}, err
+		}
+		// Written after the newest event was read (#3044): the two are not
+		// one picture of the index, and say nothing about each other's LSN.
+		if cut == nil || cutID <= newestID {
+			break
+		}
+		if attempt >= pgRunEndAttempts {
+			return pgRunEnd{}, fmt.Errorf("the changes in the index after %s were written after each of %d reads of its newest change, and gone again by the next, "+
+				"as when capture starts again: where a PostgreSQL fold stops could not be read; the next update reads it again",
+				at.UTC().Format(time.RFC3339), attempt)
+		}
 	}
 	if cut != nil {
 		switch {
@@ -292,6 +322,8 @@ func resolvePGRunEnd(ctx context.Context, db *sql.DB, at time.Time) (pgRunEnd, e
 			return pgRunEnd{}, fmt.Errorf("the first change in the index after %s has LSN 0, which no PostgreSQL commit has: the index row is damaged; a fold cannot place its bounds",
 				at.UTC().Format(time.RFC3339))
 		case cut.Pos > run.newestEnd:
+			// The event found was in the index when the newest one was read
+			// (the loop above), written before it.
 			return pgRunEnd{}, fmt.Errorf("the first change in the index after %s (LSN %s) is later in the WAL than the newest change (LSN %s): "+
 				"the index now follows another PostgreSQL cluster than the one the snapshot was taken from; take a new snapshot (`bintrail-pg baseline`)",
 				at.UTC().Format(time.RFC3339), lsnText(cut.Pos), lsnText(run.newestEnd))
@@ -300,7 +332,7 @@ func resolvePGRunEnd(ctx context.Context, db *sql.DB, at time.Time) (pgRunEnd, e
 		return run, nil
 	}
 	var checkpoint sql.NullInt64
-	err = db.QueryRowContext(ctx, `SELECT binlog_position FROM stream_state WHERE id = 1 AND flavor = 'postgres'`).Scan(&checkpoint)
+	err := db.QueryRowContext(ctx, `SELECT binlog_position FROM stream_state WHERE id = 1 AND flavor = 'postgres'`).Scan(&checkpoint)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return pgRunEnd{}, fmt.Errorf("find where a PostgreSQL fold stops (stream checkpoint): %w", err)
 	}
