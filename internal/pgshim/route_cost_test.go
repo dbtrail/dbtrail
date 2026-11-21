@@ -164,6 +164,10 @@ type fakeSource struct {
 	// noPosition, when set, refuses the read of its WAL position.
 	delay      time.Duration
 	noPosition bool
+	// blockReadWrite, when set, answers that a block the port opened is not
+	// read-only; begins are the texts that opened a block.
+	blockReadWrite bool
+	begins         []string
 	// tables, when set, are the plain tables it confirms a statement read
 	// (proofSQL), by the name as written, each with the [schema, table] it
 	// answers; a name it does not know is not confirmed. nil: it confirms
@@ -353,7 +357,20 @@ func (f *fakeSource) serve(c net.Conn) {
 				be.Send(&pgproto3.CommandComplete{CommandTag: []byte("SET")})
 			case upper == "BEGIN" || strings.HasPrefix(upper, "BEGIN "):
 				tx = 'T'
+				f.mu.Lock()
+				f.begins = append(f.begins, q)
+				f.mu.Unlock()
 				be.Send(&pgproto3.CommandComplete{CommandTag: []byte("BEGIN")})
+				if strings.HasSuffix(upper, "; SHOW TRANSACTION_READ_ONLY") {
+					// The port's question behind its BEGIN.
+					answer := "on"
+					if f.blockReadWrite {
+						answer = "off"
+					}
+					be.Send(&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{{Name: []byte("transaction_read_only"), DataTypeOID: 25, DataTypeSize: -1, TypeModifier: -1}}})
+					be.Send(&pgproto3.DataRow{Values: [][]byte{[]byte(answer)}})
+					be.Send(&pgproto3.CommandComplete{CommandTag: []byte("SHOW")})
+				}
 			case upper == "COMMIT" || upper == "ROLLBACK":
 				tx = 'I'
 				be.Send(&pgproto3.CommandComplete{CommandTag: []byte(upper)})

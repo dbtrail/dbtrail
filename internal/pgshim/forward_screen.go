@@ -39,50 +39,214 @@ var fwdNamed = map[string]bool{
 	"commit": true, "end": true, "abort": true, "rollback": true,
 }
 
-// fwdFuncs are functions a statement on the source may not call: they act on
-// other sessions or on the session's own guard, which the read-only
-// transaction does not stop. set_config can turn default_transaction_read_only
-// off for the next statement; pg_notify sends to other sessions; an advisory
-// lock holds others up; dblink reaches another database.
-var fwdFuncs = regexp.MustCompile(`(^|[^a-z0-9_$])(set_config|pg_notify|pg_advisory_[a-z_]*|pg_try_advisory_[a-z_]*|dblink[a-z_]*)\s*\(`)
+// fwdFuncs are functions a statement on the source may not call: what they
+// do is not undone or refused by a read-only transaction, or is not a read of
+// a table. Whole families are named by what they begin with, so one a later
+// PostgreSQL adds to a family is refused with it.
+//
+//   - the session's own guard and other sessions: set_config can turn
+//     default_transaction_read_only off, pg_notify sends to other sessions, an
+//     advisory lock holds others up, pg_terminate_backend and
+//     pg_cancel_backend stop them;
+//   - another database or other SQL: dblink, and ts_rewrite and the
+//     extensions' crosstab, connectby and xpath_table, which run a text as a
+//     statement (the built-in ones that do are fwdTextFuncs);
+//   - the server itself: its files (pg_read_file, pg_ls_dir, pg_stat_file),
+//     large objects (lo_*), its WAL, backups, replication slots and origins,
+//     its configuration and its statistics counters;
+//   - counters: nextval and setval change a sequence, txid_current and
+//     pg_current_xact_id take a transaction number.
+var fwdFuncs = regexp.MustCompile(`^(set_config|pg_notify|pg_advisory_[a-z0-9_]*|pg_try_advisory_[a-z0-9_]*|dblink[a-z0-9_]*|` +
+	`pg_terminate_backend|pg_cancel_backend|pg_reload_conf|pg_rotate_logfile[a-z0-9_]*|pg_promote|` +
+	`pg_switch_wal|pg_switch_xlog|pg_create_restore_point|pg_backup_[a-z0-9_]*|pg_start_backup|pg_stop_backup|pg_wal_replay_[a-z0-9_]*|pg_xlog_replay_[a-z0-9_]*|` +
+	`pg_[a-z0-9_]*replication_[a-z0-9_]*|pg_logical_[a-z0-9_]*|pg_log_[a-z0-9_]*|` +
+	`pg_stat_[a-z0-9_]*reset[a-z0-9_]*|pg_stat_file|pg_read_[a-z0-9_]*file[a-z0-9_]*|pg_ls_[a-z0-9_]*|pg_file_[a-z0-9_]*|pg_import_system_collations|` +
+	`lo_[a-z0-9_]*|loread|lowrite|nextval|setval|txid_current|pg_current_xact_id|` +
+	`ts_rewrite|crosstab[a-z0-9_]*|connectby|xpath_table)$`)
 
-// fwdWithHold is a cursor kept past its transaction, which the connection to
-// the source it lives on is not: that connection goes back to the port when
-// the block ends.
-var fwdWithHold = regexp.MustCompile(`\swith\s+hold(\s|$)`)
+// fwdTextFuncs are functions that run their first argument, a text, as a
+// statement. One is sent only when that text is written in the statement as a
+// plain string, so this screen can read it, and passes the screen itself.
+var fwdTextFuncs = map[string]bool{"query_to_xml": true, "query_to_xmlschema": true, "query_to_xml_and_xmlschema": true, "ts_stat": true}
+
+// textArgRefusal refuses the call of a fwdTextFuncs function, whose opening
+// parenthesis is toks[open], unless the statement it runs can be read here
+// and is a read.
+func textArgRefusal(q string, toks []scanTok, open int, name string) *pgErr {
+	refusal := &pgErr{"0A000", fmt.Sprintf("this port sends a statement that calls %s() to the source only when the statement it runs is written there as a plain string ('...') and is a read", name)}
+	if open+2 >= len(toks) {
+		return refusal
+	}
+	arg, after := toks[open+1], toks[open+2]
+	if arg.kind != scString || arg.continued || !after.isOp(",") && !after.isOp(")") {
+		return refusal
+	}
+	lit := q[arg.start:arg.end]
+	inner, n, ok := readQuoted(lit, '\'', false)
+	if !ok || n != len(lit) || forwardRefusal(inner) != nil {
+		return refusal
+	}
+	return nil
+}
+
+// fwdNumber is a number with letters or underscores in it that is one number
+// on every PostgreSQL: hexadecimal, octal, binary, or digits set apart with
+// underscores (a name after the digits on one before 16, never a keyword).
+var fwdNumber = regexp.MustCompile(`^(0[xX][0-9a-fA-F_]+|0[oO][0-7_]+|0[bB][01_]+|[0-9][0-9_]*)$`)
+
+// fwdWrites are the first words of the statements that write rows.
+var fwdWrites = map[string]bool{"insert": true, "update": true, "delete": true, "merge": true}
+
+// fwdInner are the first words of what EXPLAIN may explain and a cursor may
+// be declared for on the source.
+var fwdInner = map[string]bool{"select": true, "with": true, "values": true, "table": true, "declare": true}
+
+// scanRefusal is the refusal of a text the port could not cut into tokens
+// with certainty: nothing of it is sent.
+func scanRefusal(why string) *pgErr {
+	return &pgErr{"0A000", "this port sends the source only a statement it reads whole, and this one holds " + why + "; nothing was sent"}
+}
 
 // forwardRefusal says why a statement is not sent to the source, nil when it
-// may be.
+// may be. It reads the text as PostgreSQL's scanner does (sqlscan.go), and a
+// text that cannot be read with certainty is refused.
 func forwardRefusal(qstr string) *pgErr {
 	if strings.IndexByte(qstr, 0) >= 0 {
 		return &pgErr{"22021", "the statement holds a NUL byte"}
 	}
-	plain := plainText(qstr)
-	if unicodeEscapeStart(qstr) {
-		// U&"..." spells a name with escapes, which the screen below would
-		// not read as the name it is.
-		return &pgErr{"0A000", `a name or string written with Unicode escapes (U&"..." or U&'...') is not sent to the source from this port; write it plainly`}
+	toks, why := scanSQL(qstr)
+	if why != "" {
+		return scanRefusal(why)
 	}
-	if m := fwdFuncs.FindStringSubmatch(plain); m != nil {
-		return &pgErr{"0A000", fmt.Sprintf("this port does not send a statement that calls %s() to the source: it acts beyond a read", m[2])}
+	for i, t := range toks {
+		if t.junk && (t.kind == scParam || !fwdNumber.MatchString(t.text)) {
+			// One token here and on PostgreSQL 15 and later, where it is an
+			// error; a number and a word on an earlier one.
+			return scanRefusal("a number or parameter with letters run into it (" + t.text + ")")
+		}
+		if t.kind == scUnicode {
+			// U&"..." spells a name with escapes, which the screen below would
+			// not read as the name it is.
+			return &pgErr{"0A000", `a name or string written with Unicode escapes (U&"..." or U&'...') is not sent to the source from this port; write it plainly`}
+		}
+		if (t.kind == scWord || t.kind == scQuoted) && i+1 < len(toks) && toks[i+1].isOp("(") {
+			name := strings.ToLower(t.text)
+			if fwdFuncs.MatchString(name) {
+				return &pgErr{"0A000", fmt.Sprintf("this port does not send a statement that calls %s() to the source: it acts beyond a read", name)}
+			}
+			if fwdTextFuncs[name] {
+				if perr := textArgRefusal(qstr, toks, i+1, name); perr != nil {
+					return perr
+				}
+			}
+		}
 	}
-	for part := range strings.SplitSeq(plain, ";") {
-		words := strings.Fields(strings.TrimLeft(strings.TrimSpace(part), "( \t\r\n"))
-		if len(words) == 0 {
+	for _, st := range scanStatements(toks) {
+		for len(st) > 0 && st[0].isOp("(") {
+			st = st[1:]
+		}
+		if len(st) == 0 {
 			continue
 		}
-		verb := words[0]
-		if rollbackTo(words) {
+		if st[0].kind != scWord {
+			return verbRefusal("")
+		}
+		verb := st[0].text
+		if kind, _ := savepointWords(st); kind == "rollback" {
+			// ROLLBACK TO SAVEPOINT, and nothing else in the statement.
 			continue
 		}
-		if verb == "declare" && fwdWithHold.MatchString(" "+part) {
-			return &pgErr{"0A000", "a cursor WITH HOLD is not served on this port: it outlives its transaction block, and the connection to the source does not; declare it without HOLD inside the block"}
+		if !fwdReads[verb] {
+			return verbRefusal(verb)
 		}
-		if fwdReads[verb] {
-			continue
-		}
-		if perr := verbRefusal(verb); perr != nil {
+		if perr := readRefusal(st); perr != nil {
 			return perr
+		}
+	}
+	return nil
+}
+
+// savepointWords reads a statement's tokens as savepointStmt reads its text:
+// the tokens are a text already cut, so the two cannot disagree on where a
+// comment or a name ends.
+func savepointWords(st []scanTok) (kind, name string) {
+	var b strings.Builder
+	for _, t := range st {
+		switch t.kind {
+		case scWord:
+			b.WriteString(t.text)
+		case scQuoted:
+			b.WriteString(quoteIdentAlways(t.text))
+		default:
+			return "", ""
+		}
+		b.WriteByte(' ')
+	}
+	return savepointStmt(b.String())
+}
+
+// quoteIdentAlways writes name as a quoted name.
+func quoteIdentAlways(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// readRefusal refuses what a statement that begins as a read holds that is
+// not one: a cursor kept past its block, a table made from a query, rows
+// locked, a write inside the query, and EXPLAIN of anything but a query.
+func readRefusal(st []scanTok) *pgErr {
+	verb := st[0].text
+	if verb == "explain" {
+		i := 1
+		if i < len(st) && st[i].isOp("(") {
+			for depth := 0; i < len(st); i++ {
+				if st[i].isOp("(") {
+					depth++
+				} else if st[i].isOp(")") {
+					depth--
+					if depth == 0 {
+						i++
+						break
+					}
+				}
+			}
+		} else {
+			for i < len(st) && (st[i].isWord("analyze") || st[i].isWord("analyse") || st[i].isWord("verbose")) {
+				i++
+			}
+		}
+		for i < len(st) && st[i].isOp("(") {
+			i++
+		}
+		if i >= len(st) || st[i].kind != scWord || !fwdInner[st[i].text] {
+			return &pgErr{"25006", "this port is read-only toward the source: EXPLAIN of a statement that is not a query is not sent"}
+		}
+	}
+	// outer is set for a statement that can hold another statement after its
+	// own first words: WITH's list, with whatever clauses follow it (SEARCH,
+	// CYCLE), EXPLAIN's options, a cursor's declaration. There a write's first
+	// word outside every parenthesis is the statement's own, wherever it
+	// stands; a column or alias of that name has to be written in quotes.
+	outer := verb == "with" || verb == "explain" || verb == "declare"
+	depth := 0
+	for i, t := range st {
+		next := func(k int, w string) bool { return i+k < len(st) && st[i+k].isWord(w) }
+		if t.isOp("(") {
+			depth++
+		} else if t.isOp(")") {
+			depth--
+		}
+		switch {
+		case outer && depth <= 0 && t.kind == scWord && fwdWrites[t.text] && !(t.text == "update" && i > 0 && (st[i-1].isWord("for") || st[i-1].isWord("key"))):
+			return &pgErr{"25006", fmt.Sprintf("this port is read-only toward the source: a statement that holds %s outside its parentheses is not sent (a column or alias of that name goes in double quotes)", strings.ToUpper(t.text))}
+		case verb == "declare" && t.isWord("with") && next(1, "hold"):
+			return &pgErr{"0A000", "a cursor WITH HOLD is not served on this port: it outlives its transaction block, and the connection to the source does not; declare it without HOLD inside the block"}
+		case t.isWord("into"):
+			return &pgErr{"25006", "this port is read-only toward the source: SELECT ... INTO makes a table, and is not sent"}
+		case t.isWord("for") && (next(1, "update") || next(1, "share") || next(1, "no") && next(2, "key") || next(1, "key") && next(2, "share")):
+			return &pgErr{"25006", "this port is read-only toward the source: a SELECT that locks its rows (FOR UPDATE, FOR SHARE) is not sent"}
+		case t.isOp("(") && (next(1, "insert") && next(2, "into") || next(1, "delete") && next(2, "from") || next(1, "merge") && next(2, "into") ||
+			next(1, "update") && i+2 < len(st) && (st[i+2].kind == scWord || st[i+2].kind == scQuoted)):
+			return &pgErr{"25006", "this port is read-only toward the source: a query that writes (INSERT, UPDATE, DELETE or MERGE inside WITH) is not sent"}
 		}
 	}
 	return nil
@@ -94,49 +258,13 @@ func forwardRefusal(qstr string) *pgErr {
 // flags_mu&1 are a name and the & operator. Strings, quoted names, comments
 // and dollar quotes are skipped, so a U& written inside one is not one.
 func unicodeEscapeStart(q string) bool {
-	for i := 0; i < len(q); {
-		c := q[i]
-		switch {
-		case (c == 'u' || c == 'U') && i+2 < len(q) && q[i+1] == '&' && (q[i+2] == '\'' || q[i+2] == '"') && !continuesName(q, i):
+	toks, _ := scanSQL(q)
+	for _, t := range toks {
+		if t.kind == scUnicode {
 			return true
-		case c == '\'':
-			escapes := i > 0 && (q[i-1] == 'e' || q[i-1] == 'E') && !continuesName(q, i-1)
-			i = stringEnd(q, i+1, escapes)
-		case c == '"':
-			i = stringEnd(q, i+1, false)
-		case c == '-' && i+1 < len(q) && q[i+1] == '-':
-			if j := strings.IndexAny(q[i:], "\n\r"); j >= 0 {
-				i += j + 1
-			} else {
-				i = len(q)
-			}
-		case c == '/' && i+1 < len(q) && q[i+1] == '*':
-			i = commentEnd(q, i+2)
-		case c == '$' && !continuesName(q, i):
-			tag := dollarTag(q, i)
-			if tag == "" {
-				i++
-				continue
-			}
-			if end := strings.Index(q[i+len(tag):], tag); end >= 0 {
-				i += 2*len(tag) + end
-			} else {
-				i = len(q)
-			}
-		default:
-			i++
 		}
 	}
 	return false
-}
-
-// rollbackTo says whether a statement's words are ROLLBACK [WORK |
-// TRANSACTION] TO [SAVEPOINT] name.
-func rollbackTo(words []string) bool {
-	if len(words) < 2 || words[0] != "rollback" {
-		return false
-	}
-	return words[1] == "to" || len(words) > 2 && (words[1] == "work" || words[1] == "transaction") && words[2] == "to"
 }
 
 // isRollbackTo says whether a statement is one ROLLBACK TO SAVEPOINT, alone.

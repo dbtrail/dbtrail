@@ -1150,12 +1150,43 @@ server, closes the connections that use it; clients reconnect.
   that setting, which PostgreSQL 14 and later report, and closes the connection
   if anything turns it off. A source older than 14 is not forwarded to.
   `BEGIN READ WRITE` and `SET default_transaction_read_only = off` are refused.
+- **The text is read as PostgreSQL reads it, and what cannot be read is not
+  sent.** Before a statement goes to the source the port cuts it into words the
+  way PostgreSQL's own scanner does: a `--` comment ends at a line feed or a
+  carriage return, block comments nest, an `E'...'` string and a dollar quote
+  start only where PostgreSQL starts one, and a string written in two pieces
+  a line apart is one string. A text it cannot cut with certainty (a quote or
+  a comment left open, a character that is not SQL outside a string) is
+  refused with `0A000` and nothing of it is sent.
+- **`BEGIN`, `COMMIT`, `ROLLBACK` and `SET TRANSACTION` are sent in the port's
+  own words**, written from what it read of yours (`BEGIN READ ONLY`, with the
+  isolation level you named), never as your text. After its `BEGIN` the port
+  asks the source whether the block is read-only, in the same round trip, and
+  uses the block only when the answer is yes; otherwise the connection to the
+  source is closed and the statement answers `08006`.
 - **Refused by name**: `COPY` (`0A000`; read rows with `SELECT`), `LISTEN` (a
   notification would reach the client only when it next sent a statement),
   `NOTIFY` and `pg_notify()`, `DO`, `PREPARE`/`EXECUTE`, advisory locks,
   `set_config()`, `dblink`, and names written with `U&"..."` escapes. A
   transaction statement inside a longer text (`SELECT 1; COMMIT`) is refused:
   send it on its own.
+- **Refused although it begins as a read** (`25006`): `SELECT ... INTO`, a
+  `SELECT` that locks its rows (`FOR UPDATE`, `FOR SHARE`), a `WITH` that
+  holds an `INSERT`, `UPDATE`, `DELETE` or `MERGE`, and `EXPLAIN` of anything
+  but a query. PostgreSQL refuses each of them in a read-only transaction
+  too; the port says so first, with the reason.
+- **Functions that act beyond a read are refused by family** (`0A000`),
+  schema-qualified or quoted alike: stopping or cancelling a session
+  (`pg_terminate_backend`, `pg_cancel_backend`), the server's files
+  (`pg_read_file`, `pg_ls_*`, `pg_stat_file`), large objects (`lo_*`), WAL,
+  backups, replication slots and origins, `pg_logical_emit_message`,
+  `pg_reload_conf`, the statistics resets (`pg_stat_reset*`), `nextval` and
+  `setval`, `txid_current` and `pg_current_xact_id`, and `ts_rewrite`.
+  `query_to_xml` and `ts_stat`, which run a text as a statement, are sent only
+  when that text is a plain string written in the statement and is itself a
+  read. Most of these an ordinary role cannot run anyway; the ones it can
+  (`pg_logical_emit_message`, `txid_current`, cancelling its own sessions) are
+  not stopped by a read-only transaction, which is why the port refuses them.
 - **The source's answers as it gives them**: its rows as they come, never held
   whole in this process; its errors with their code, detail and position, which
   fail the block as on PostgreSQL; its notices (`RAISE NOTICE`). Savepoints
