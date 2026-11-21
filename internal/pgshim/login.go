@@ -322,6 +322,11 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	waited, apart, named := false, false, 0
 	text, err := s.copyText(qstr)
 	if err == nil {
+		// A char(n) column used where the copy counts its padding (#3068):
+		// the source's, or refused where nothing is sent there.
+		if refusal := s.paddedRefusal(text); refusal != nil {
+			return nil, nil, nil, "", refusal
+		}
 		// On a connection the source answered, the copy first waits to
 		// reach what the source showed it (#2985), or the source answers
 		// instead, before the copy does any work. Unless it reads no table

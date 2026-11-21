@@ -21,9 +21,10 @@ const pgCatalogColumnsSQL = "SELECT table_schema, table_name, column_name, data_
 // pgCopyCatalog is the PostgreSQL port's catalog of a server's copy (#2769):
 // the tables and columns a statement there reads, as the copy's engine has
 // them, and from the snapshot what the source recorded of each table (its
-// OID, NOT NULL, defaults, the primary key). A column the snapshot does not
-// describe is reported with nothing of the source's; a primary key one of
-// whose columns the server hides is not reported at all.
+// OID, each column's type there, NOT NULL, defaults, the primary key). A
+// column the snapshot does not describe is reported with nothing of the
+// source's; a primary key one of whose columns the server hides is not
+// reported at all.
 func pgCopyCatalog(ctx context.Context, copySQL *console.SQLOnCopy, run func(context.Context, string) (sqlsandbox.Result, error)) ([]pgshim.CatalogTable, error) {
 	res, err := run(ctx, pgCatalogColumnsSQL)
 	if res.Spool != nil {
@@ -59,6 +60,13 @@ func pgCopyCatalog(ctx context.Context, copySQL *console.SQLOnCopy, run func(con
 				// The copy's engine matches names without regard to case.
 				if strings.EqualFold(rc.Name, col) {
 					c.NotNull, c.Default, c.Identity = rc.NotNull, rc.Default, rc.Identity
+					// The type on the source, which the port's screen reads
+					// (#3068). Of two columns whose names differ only in
+					// case, a char(n) is the one kept: the copy cannot tell
+					// them apart, and that one is the one to be careful of.
+					if !pgshim.PaddedOnSource(c.SourceType) {
+						c.SourceType, c.SourceTypeMod = rc.TypeOID, rc.TypeMod
+					}
 				}
 			}
 		}
