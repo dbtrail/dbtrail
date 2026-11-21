@@ -888,7 +888,13 @@ func refusedShow(node any) string {
 	switch x := node.(type) {
 	case map[string]any:
 		if t, _ := x["type"].(string); t == "SHOW_REF" {
-			if name, _ := x["table_name"].(string); refusedShowNames[strings.ToLower(name)] {
+			// The parser keeps the name as an identifier, in double quotes
+			// ("variables").
+			name, _ := x["table_name"].(string)
+			if len(name) >= 2 && name[0] == '"' && name[len(name)-1] == '"' {
+				name = strings.ReplaceAll(name[1:len(name)-1], `""`, `"`)
+			}
+			if refusedShowNames[strings.ToLower(name)] {
 				return name
 			}
 		}
