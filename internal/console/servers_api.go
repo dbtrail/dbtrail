@@ -77,14 +77,15 @@ type serverDTO struct {
 	// and cannot be read; the port cannot route with it.
 	RouteIsCapture  bool   `json:"route_is_capture,omitempty"`
 	RouteUnreadable bool   `json:"route_unreadable,omitempty"`
+	SourceServerID  uint32 `json:"source_server_id,omitempty"`
+	Schemas         string `json:"schemas,omitempty"`
+	MonitorDesired  bool   `json:"monitor_desired"`
 	// ForwardWithCaptureAccount is the saved answer about forwarding with
 	// the capture account (#3054). Which port acts on it, and when an
 	// account of its own is used instead: capture_forward.go. Edited through
 	// PUT /api/servers/{id}/route only.
 	ForwardWithCaptureAccount bool `json:"forward_with_capture_account"`
-	SourceServerID  uint32 `json:"source_server_id,omitempty"`
-	Schemas         string `json:"schemas,omitempty"`
-	MonitorDesired  bool   `json:"monitor_desired"`
+
 	// Hidden are the tables and columns the analytical surfaces leave out
 	// for this server (#2529). Edited through /api/servers/{id}/hidden only.
 	Hidden *hiddenListsDTO `json:"hidden,omitempty"`

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	yaml "go.yaml.in/yaml/v2"
 )
@@ -127,6 +128,9 @@ func TestMySQLPortDoesNotForwardWithTheCaptureAccount(t *testing.T) {
 		}
 	}
 	// The line as a client of the port reads it, from the real rows.
+	if s.routing == nil {
+		s.routing = newRoutingStats(time.Now(), nil)
+	}
 	rows := s.RouterStatus(t.Context(), yes.ID, nil)
 	if len(rows) < 3 || rows[1] != [2]string{"forwarding_account", "none"} || rows[2][0] != "forwarding_account_reason" {
 		t.Fatalf("SHOW ROUTER STATUS: %q", rows)
