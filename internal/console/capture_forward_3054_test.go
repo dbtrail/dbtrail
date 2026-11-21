@@ -268,12 +268,12 @@ func TestForwardWithCaptureAccountYAML(t *testing.T) {
 func TestForwardChanged(t *testing.T) {
 	pg := ServerEntry{Flavor: FlavorPostgres, SourceDSN: capPGSource}
 	yes := pg
-	yes.ForwardWithCaptureAccount = true
+	yes.ForwardWithCaptureAccount, yes.ForwardWithCaptureAccountFor = true, "repl@db:5432"
 	own, ownYes := pg, yes
 	own.RouteDSN, ownYes.RouteDSN = "postgres://app:pw@db/shop", "postgres://app:pw@db/shop"
 	my := ServerEntry{SourceDSN: "repl:cap@tcp(db:3306)/"}
 	myYes := my
-	myYes.ForwardWithCaptureAccount = true
+	myYes.ForwardWithCaptureAccount, myYes.ForwardWithCaptureAccountFor = true, "repl@db:3306"
 	for _, c := range []struct {
 		name      string
 		old, next ServerEntry
@@ -311,7 +311,7 @@ func TestRouteCaptureAccountAPI(t *testing.T) {
 	}
 	after := entryOf(t, srv, id)
 	want := before
-	want.ForwardWithCaptureAccount = true
+	want.ForwardWithCaptureAccount, want.ForwardWithCaptureAccountFor = true, "dbtrail@db.example.com:3306"
 	if a, b := entryJSON(t, after), entryJSON(t, want); a != b {
 		t.Errorf("something other than the answer changed:\n got %s\nwant %s", a, b)
 	}

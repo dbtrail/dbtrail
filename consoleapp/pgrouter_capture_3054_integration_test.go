@@ -117,7 +117,10 @@ func TestIntegrationPGRouterCaptureAccount(t *testing.T) {
 
 	t.Run("search_path moved to the schema that is not captured", func(t *testing.T) {
 		c := pgClient(t, ctx, env.portDSN(), nil)
-		one(ctx, c, "SET search_path = pgcap_secret, public")
+		t.Logf("SET search_path = pgcap_secret, public: %s; SHOW: %s", one(ctx, c, "SET search_path = pgcap_secret, public"), one(ctx, c, "SHOW search_path"))
+		one(ctx, c, "BEGIN")
+		t.Logf("on the source: %s", one(ctx, c, "SELECT current_setting('search_path')"))
+		one(ctx, c, "ROLLBACK")
 		if got, want := inBlock(c, "SELECT card FROM vip"), refused+"this statement reads a table the copy does not hold; nothing was sent to the source"; got != want {
 			t.Errorf("got %s\nwant %s", got, want)
 		}
