@@ -3,6 +3,7 @@ package pgdelta
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,7 +41,7 @@ import (
 //   - A call that skips the pass looks at the file again after the join. If
 //     it is not the file remembered any more, the answer is dropped, the
 //     entry too, and the call is made again with both passes.
-//   - Not an S3 or other URL, not something that is not a regular file, and
+//   - Not an S3 or other URL, not a relative path, not something that is not a regular file, and
 //     nothing on a platform that gives no device and inode (fileIDOf): those
 //     run both passes at every call, as before.
 //   - The key columns are part of what is remembered, in the order given and
@@ -87,7 +88,10 @@ func KeyNullPasses() uint64 { return nullPasses.Load() }
 // noNullKeyOf is what basePath and keyColumns are remembered under, and false
 // when they cannot be (see above).
 func noNullKeyOf(basePath string, keyColumns []string) (noNullKey, os.FileInfo, bool) {
-	if strings.Contains(basePath, "://") {
+	// A relative path, or one the engine expands (~), may name another file
+	// for the engine than for os.Stat: only an absolute local path is
+	// remembered.
+	if strings.Contains(basePath, "://") || !filepath.IsAbs(basePath) {
 		return noNullKey{}, nil, false
 	}
 	fi, err := os.Stat(basePath)
