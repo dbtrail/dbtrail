@@ -54,6 +54,10 @@ type Forward struct {
 	// none the port may use, and Refused then says why.
 	DSN     string
 	Refused string
+	// CaptureAccount: DSN is the account DBTrail captures with (#3054), so
+	// every statement sent with it must pass the capture gate first
+	// (capture_gate.go).
+	CaptureAccount bool
 	// Acquire takes one of the connections to sources the port may hold
 	// (Limit of them); release gives it back. When none is free it waits for
 	// one, as a statement waits in line for the copy, for as long as the host
@@ -130,6 +134,9 @@ type upstream struct {
 	// inCycle is set while extended-protocol messages were sent since the
 	// last Sync: the source expects a Sync before the next simple query.
 	inCycle bool
+	// cycle counts the batches ended there (syncCycle): a check of the
+	// capture gate made in one batch holds for that batch only.
+	cycle uint64
 	// failed is set when the source answered an error in this cycle: it
 	// discards everything up to the Sync.
 	failed bool
@@ -658,6 +665,7 @@ func (s *session) syncCycle(up *upstream, out relayOut) (byte, *errSourceLost) {
 		return 0, lost
 	}
 	up.inCycle, up.failed = false, false
+	up.cycle++
 	if k.tx == 'I' {
 		// The implicit transaction ended, and with it every portal.
 		clear(up.portals)
@@ -833,6 +841,12 @@ func (s *session) forwardSimple(qstr string) (ok bool) {
 	if _, lost := s.syncCycle(up, relayClient); lost != nil {
 		s.loseSource(lost.why)
 		s.fail(s.lostError(lost))
+		return false
+	}
+	// With the capture account, nothing goes there that the capture gate
+	// does not let through (#3054), asked before anything of it is sent.
+	if perr := s.captureRefusal(up, qstr); perr != nil {
+		s.fail(perr)
 		return false
 	}
 	ctx, done := s.statementContext()

@@ -962,18 +962,22 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		// tracked like the MySQL port's routed ones, so that a change of the
 		// account, or the server's removal, closes it at once
 		// (console.Server.TrackRoutedConn); it has no MySQL thread to KILL.
-		switch fwdDSN, gen, fwdRefused := srv.PostgresForwardAccount(tgt.ID); {
-		case fwdDSN != "":
-			untrack, ok := srv.TrackRoutedConn(tgt.ID, gen, drop, nil)
+		//
+		// Or as the capture account itself, when the server said yes to that
+		// and has no account of its own (#3054): then every statement passes
+		// the capture gate first (pgshim, capture_gate.go).
+		switch fwd := srv.PostgresForwardTarget(tgt.ID); {
+		case fwd.DSN != "":
+			untrack, ok := srv.TrackRoutedConn(tgt.ID, fwd.Gen, drop, nil)
 			if !ok {
 				bound.Close()
 				return nil, &pgshim.Error{Code: "57P03", Message: "the server's forwarding account changed while connecting; reconnect"}
 			}
 			closers = append(closers, untrack)
-			bound.Forward = &pgshim.Forward{DSN: fwdDSN, Acquire: sources.acquire, Limit: sources.limit(), Timeout: timeout,
+			bound.Forward = &pgshim.Forward{DSN: fwd.DSN, CaptureAccount: fwd.CaptureAccount, Acquire: sources.acquire, Limit: sources.limit(), Timeout: timeout,
 				Barred: pgForwardBarred(tgt.ID, tgt.TimeTravelRefusal, routes, logger), Cost: cost}
-		case fwdRefused != "":
-			bound.Forward = &pgshim.Forward{Refused: fwdRefused}
+		case fwd.Refused != "":
+			bound.Forward = &pgshim.Forward{Refused: fwd.Refused}
 		}
 		if tgt.SQL == nil {
 			// The connection is made and every statement says why it cannot

@@ -248,6 +248,11 @@ func (s *session) routeByCostPlan(text string, generic bool) (d routeDecision, k
 		return failed, true, nil, nil
 	}
 	if s.up != nil && s.up.inCycle {
+		if s.bound != nil && s.bound.Forward != nil && s.bound.Forward.CaptureAccount {
+			// With the capture account the source could not take it either:
+			// its gate cannot be asked in the middle of a batch (#3054).
+			return routeDecision{RouteCopy, ReasonCaptureGate}, false, nil, nil
+		}
 		// An extended batch is open there: a simple query cannot be sent in
 		// the middle of it, and an error of the port's own in it would
 		// discard the client's batch on the source.
@@ -260,6 +265,25 @@ func (s *session) routeByCostPlan(text string, generic bool) (d routeDecision, k
 			return s.copyWhileUnreachable(perr.code + ": " + perr.msg), false, nil, nil
 		}
 		return failed, false, perr, nil
+	}
+	if s.bound != nil && s.bound.Forward != nil && s.bound.Forward.CaptureAccount {
+		// The capture account's gate (#3054): its EXPLAIN would send the
+		// statement's text to the source as that account, and planning can
+		// run a function. Refused there, the statement cannot go to the
+		// source at all: the copy answers it. Not asked inside a block, where
+		// a check the source refused would leave the client's block failed
+		// there unseen: the copy answers without the plan.
+		if up.inTx {
+			return routeDecision{RouteCopy, ReasonCaptureGate}, false, nil, nil
+		}
+		if perr := s.captureRefusal(up, text); perr != nil {
+			if s.up == nil {
+				// The connection was lost asking.
+				return s.copyWhileUnreachable(perr.msg), false, nil, nil
+			}
+			s.logger.Debug("pgshim: sent to the copy", "reason", ReasonCaptureGate, "why", perr.msg)
+			return routeDecision{RouteCopy, ReasonCaptureGate}, false, nil, nil
+		}
 	}
 	opts := "FORMAT JSON"
 	if generic {

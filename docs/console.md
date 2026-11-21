@@ -646,7 +646,22 @@ To set or change it later:
 ```
 dbtrail server forward-user shop -u shop_fwd -p
 dbtrail server forward-user shop --remove
+dbtrail server forward-user shop --capture-account
+dbtrail server forward-user shop --no-capture-account
 ```
+
+`--capture-account` lets the port forward with the user DBTrail records
+changes with, so no second user is needed. It is a yes or no saved on the
+server, off until somebody says yes, and a forwarding user set with `-u` is
+used instead while there is one. The PostgreSQL port acts on it: read-only,
+and only a `SELECT` whose every table is a table of the copy
+([docs/postgres.md](postgres.md#forwarding-with-the-capture-account));
+anything else is refused and not sent. The MySQL port does not yet: it saves
+the answer, keeps forwarding only as a user set with `-u`, and says so in
+`SHOW ROUTER STATUS`. An edit that points the server's source at another user
+or another host takes the answer back; a new password keeps it. The API is
+`PUT /api/servers/{id}/route` with `{"capture_account": true}` (or `false`),
+sent alone.
 
 Give that user the grants of the application that connects to the port, and
 no more. `server list` shows it under FORWARDS AS, and `port routing on` names
