@@ -51,6 +51,7 @@ func pgFullReadRequest(local, s3 string) console.BaselineRequest {
 
 func pgSupervisor(t *testing.T) *baselineSupervisor {
 	t.Helper()
+	pgDiskCheckOff(t)
 	sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
 	sup.history = openHistoryForTest(t)
 	sup.jobs["pg1"] = &console.BaselineStatus{State: "running"}

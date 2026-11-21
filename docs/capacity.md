@@ -189,7 +189,7 @@ A disk can also fill later, while the dump is being converted to Parquet. A full
 
 **Before the first read, from the command line.** `bintrail doctor --source-dsn … --staging-dir <folder>` reads the same table sizes with the same query and compares them with the free space of that folder: a warning under half the data (what the web interface would refuse) and under the data plus the indexes (the dump may not fit), and "cannot tell" when a table is stored compressed, has no size reported, or when the user sees no tables at all (a missing privilege or a misspelled schema look the same as an empty database). It is advisory and never changes doctor's exit code, because it knows less than the check before a real read. It measures the folder **on the machine doctor runs on**, which is the working folder only when that is the DBTrail host and the same path. It sizes the tables `--schemas` selects, not what a server saved in the web interface reads. And it does not know where the snapshot is written, so the 1.8× case is stated as a condition and not graded. Without `--staging-dir`, doctor prints one line saying the check exists and runs before every full read.
 
-**What is not checked.** The size of a PostgreSQL full read is not checked: it writes Parquet directly, with no dump in between. Neither is a dump you run yourself with `bintrail dump`.
+**What is not checked.** A dump you run yourself with `bintrail dump`. A PostgreSQL snapshot writes Parquet directly, with no dump in between, and has its own check: the next section.
 
 **Why both are on disk at once.** A full read (the web interface's **Read database now**, or a scheduled full read) runs mydumper, which writes the **whole dump, uncompressed**, into the working folder. Only after the dump finishes is it converted to Parquet, and the dump is deleted when the run ends. So for a short while both are on disk at once:
 
@@ -210,6 +210,38 @@ A full read started by DBTrail (the web interface's **Read database now**, or a 
 | 90% of rows deleted | stale sizes | stale sizes |
 
 In every case the dump alone stayed below `DATA_LENGTH + INDEX_LENGTH`. `DATA_LENGTH` alone is not a safe bound: numbers and dates are written as text, and one table dumped to 1.6× its `DATA_LENGTH`. With the Parquet copy on the same disk, data that does not compress (random strings, binary) peaked above the tables' size, up to 1.8×. Compressible data stayed near or below it. The table with 90% of its rows deleted kept its file size and reported sizes from before the delete, while its dump held only the live rows (0.08× the file): sizes that lag make the estimate too high, not too low. Compressed storage was not measured: `ROW_FORMAT=COMPRESSED` and MyRocks report their compressed size, so their dump can be larger than the estimate (see "Compressed tables" above, which also says what is not known about InnoDB page compression).
+
+## Disk for a PostgreSQL snapshot: the snapshot folder is the one that fills
+
+A snapshot of a PostgreSQL server has no dump. Each table is copied straight into a Parquet file in the server's **Local folder**, so the working folder is not involved and the snapshot folder is the only one that has to have the room.
+
+**What DBTrail checks.** Before a snapshot starts (the first copy after `server add`, **Read database now**, `snapshot run`, a scheduled full read), DBTrail reads `pg_table_size` of every table the snapshot copies: the publication's tables, in the schemas the server records. That is the heap and its TOAST without indexes, which a snapshot does not hold, and a partitioned table published through its root counts by its partitions. PostgreSQL reads those sizes from the files as they are, so they are current. It compares the sum with the free space of the Local folder, measured where the folder will be created when it does not exist yet:
+
+- Less than **1 GiB free** in the snapshot folder: the snapshot is **refused** before anything is read, and before the replication slot is created. This is the room DBTrail keeps free when it writes a snapshot update, so below it no update would be written afterwards either. The message gives what is free, the 1 GiB, and the size of the tables.
+- Less free than **1.3× the tables' size**: the snapshot runs, with a warning that it may fail with a full disk. Once it has written its snapshot the note says "This read fit. The next one may not."
+- The sizes cannot be read, or the free space cannot be measured: the snapshot runs, and says the check did not run. A guess never refuses a snapshot.
+
+**Why the size of the tables does not refuse.** A snapshot is compressed (zstd), and how much depends on the data. Measured on PostgreSQL 16, as the snapshot's size over `pg_table_size`:
+
+| Table | Snapshot / table size |
+|---|---|
+| The same text in every row | 0.007× |
+| Order rows (numbers, a status, dates, short text) | 0.22× |
+| Long text PostgreSQL already compressed in TOAST | 0.20× |
+| Random hex text, half the rows deleted | 0.31× |
+| Random UUIDs and numbers | 0.65× |
+| Random hex text | 0.69× |
+| Random `bytea` (written as hex) | 1.22× |
+
+No fraction of the tables' size is a line every real snapshot stays above, so refusing by it would turn away snapshots that fit. The warning uses the highest ratio measured, rounded up: it comes early for ordinary data and was not late for any of these. For a MySQL or MariaDB server the same holds for the folder the Parquet goes to: a small one is a warning, never a refusal.
+
+**Tables the sizes say little about.** Three kinds of table have rows the reported size does not cover: one kept by a table access method other than PostgreSQL's own heap (a columnar or compressed store), which can report a compressed size; one with child tables by inheritance (`INHERITS`, or a TimescaleDB hypertable), whose rows are read with it and stored elsewhere; and a foreign table among a partitioned table's partitions. The check counts those tables and names the two largest, and when the free space covers the reported sizes its note opens with "Disk check cannot tell whether this snapshot fits" instead of saying there is room. The same goes for a table the server gave no size for.
+
+**What you see.** The same places as for a MySQL full read: the snapshot's status, its run history and detail, the schedule card, and the message after a snapshot you started yourself. A refusal is recorded as a disk failure, so the schedule does not answer it with another full read into the same disk.
+
+**More room.** Free space in the snapshot folder, or give the server a Local folder on a bigger disk (Snapshots page, under Where and how often).
+
+**From the command line.** `bintrail-pg baseline` writes where `--output` says and does not run this check, as `bintrail baseline` does not for MySQL: the check belongs to the snapshots DBTrail takes for a server it manages. `bintrail-pg doctor` does not report it either: it does not know the snapshot folder, and may run on another machine.
 
 ## Monitoring
 

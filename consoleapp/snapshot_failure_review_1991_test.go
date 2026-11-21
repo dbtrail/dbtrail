@@ -105,6 +105,7 @@ func TestExecutePG_uploadFailureAfterTheSnapshotIsPublished(t *testing.T) {
 	uploadSnapshot = func(context.Context, string, string, string, bool) (int, error) { return 0, errors.New("s3: access denied") }
 	snapshotWriterIDFunc = func(string) (string, error) { return "w", nil }
 
+	pgDiskCheckOff(t)
 	s := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
 	path := filepath.Join(t.TempDir(), "runs.json")
 	hist, err := console.OpenBaselineHistory(path)
