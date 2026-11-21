@@ -130,14 +130,14 @@ func TestCopyScreen_bothBoundsOfBetween(t *testing.T) {
 		`SELECT name FROM ` + c + ` WHERE city BETWEEN name AND 'z'`:    text,
 		`SELECT name FROM ` + c + ` WHERE name NOT BETWEEN 'a' AND 'c'`: text,
 		// Nothing gives two parameters, or a parameter and a string, a type.
-		`SELECT id FROM ` + o + ` WHERE $1 BETWEEN $2 AND $3`:          text,
-		`SELECT id FROM ` + o + ` WHERE $1 BETWEEN 1 AND $2`:           text,
-		`SELECT id FROM ` + o + ` WHERE $1 BETWEEN 1 AND 'x'`:          text,
+		`SELECT id FROM ` + o + ` WHERE $1 BETWEEN $2 AND $3`: text,
+		`SELECT id FROM ` + o + ` WHERE $1 BETWEEN 1 AND $2`:  text,
+		`SELECT id FROM ` + o + ` WHERE $1 BETWEEN 1 AND 'x'`: text,
 		// The AND of a BETWEEN is not one inside a parenthesis of its lower bound.
 		`SELECT id FROM ` + o + ` WHERE qty BETWEEN (CASE WHEN id > 1 AND id < 5 THEN 1 ELSE 2 END) AND note`: text,
-		`SELECT id FROM ` + o + ` WHERE qty BETWEEN SYMMETRIC 9 AND 2`: "SYMMETRIC",
-		`SELECT id FROM ` + o + ` WHERE qty BETWEEN 1`:                 "AND was not found",
-		`SELECT id FROM ` + o + ` WHERE (qty BETWEEN 1) AND 2 = 2`:     "AND was not found",
+		`SELECT id FROM ` + o + ` WHERE qty BETWEEN SYMMETRIC 9 AND 2`:                                        "SYMMETRIC",
+		`SELECT id FROM ` + o + ` WHERE qty BETWEEN 1`:                                                        "AND was not found",
+		`SELECT id FROM ` + o + ` WHERE (qty BETWEEN 1) AND 2 = 2`:                                            "AND was not found",
 	}
 	for q, why := range toSource {
 		if got := CopyScreen(q, routeTypes); !strings.Contains(got, why) {
