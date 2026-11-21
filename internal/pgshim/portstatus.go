@@ -124,8 +124,11 @@ func (s *session) answersStatus(c *sessionCmd) bool { return s.bound != nil && i
 // isStatusStatement reports whether qstr is the status statement on a port
 // that answers it.
 func (s *session) isStatusStatement(qstr string) bool {
-	if s.bound == nil || !mentionsRouter(qstr) {
+	if s.bound == nil || !mayNameStatus(qstr) {
 		return false
+	}
+	if findStatus(qstr) == statusAlone {
+		return true
 	}
 	cmd, ok, _ := parseSessionCmd(qstr)
 	return ok && isStatusCmd(cmd)
@@ -135,42 +138,53 @@ func (s *session) isStatusStatement(qstr string) bool {
 var (
 	statusMySQLSpelling = &pgErr{"42601", "SHOW ROUTER STATUS is the MySQL port's statement; on this port it is " + StatusStatement}
 	statusNotAlone      = &pgErr{"0A000", StatusStatement + " is answered by the port itself and is sent alone; this message holds more than that statement, and nothing in it was run"}
+	statusPrefixedName  = &pgErr{"42601", "SHOW of a name written with a prefix (U&\"...\") is not read on this port; write the name as it is, as in " + StatusStatement}
 	statusNotASetting   = &pgErr{"42704", statusParam + " is not a setting: it cannot be set, reset or read with current_setting; send " + StatusStatement}
 )
 
 // classifyStatus says what classify answers for the status statement and
 // for the statements that would otherwise carry its name to the copy or the
-// source; own is false for every other statement. cmd and ok are what
-// parseSessionCmd read of qstr.
+// source; own is false for every other statement. It is asked first, before
+// the time-travel parser and the session parser read the text: a comment
+// that looks like time travel, an empty statement in front (;SHOW ...) or a
+// comment the two parsers end differently must not send the statement on.
 //
 // Only on a port with a login of its own: the time-travel port answers no
 // SHOW that is not a setting, as before.
-func (s *session) classifyStatus(qstr string, cmd *sessionCmd, ok bool) (c classified, own bool) {
-	if s.bound == nil || !mentionsRouter(qstr) {
+func (s *session) classifyStatus(qstr string) (c classified, own bool) {
+	if s.bound == nil || !mayNameStatus(qstr) {
 		return classified{}, false
 	}
-	if ok {
-		switch {
-		case isStatusCmd(cmd):
-			return classified{kind: kindLocal, cmd: cmd}, true
-		case (cmd.kind == cmdSet || cmd.kind == cmdReset) && cmd.param == statusParam:
-			return classified{kind: kindRefused, perr: statusNotASetting}, true
-		case cmd.kind == cmdFunc:
-			// current_setting of a name this port does not take goes on to
-			// the source otherwise (session.classify).
-			for _, f := range cmd.fns {
-				if f.fn == "current_setting" && f.param == statusParam {
-					return classified{kind: kindRefused, perr: statusNotASetting}, true
-				}
-			}
-		}
-		return classified{}, false
-	}
+	local := classified{kind: kindLocal, cmd: &sessionCmd{kind: cmdShow, param: statusParam}}
 	switch findStatus(qstr) {
+	case statusAlone:
+		return local, true
 	case statusSpelledForMySQL:
 		return classified{kind: kindRefused, perr: statusMySQLSpelling}, true
 	case statusAmongOthers:
 		return classified{kind: kindRefused, perr: statusNotAlone}, true
+	case statusNameUnread:
+		return classified{kind: kindRefused, perr: statusPrefixedName}, true
+	}
+	// What the session parser reads and the screen above does not (a
+	// vertical tab between the words, for one).
+	cmd, ok, _ := parseSessionCmd(qstr)
+	if !ok {
+		return classified{}, false
+	}
+	switch {
+	case isStatusCmd(cmd):
+		return local, true
+	case (cmd.kind == cmdSet || cmd.kind == cmdReset) && cmd.param == statusParam:
+		return classified{kind: kindRefused, perr: statusNotASetting}, true
+	case cmd.kind == cmdFunc:
+		// current_setting of a name this port does not take goes on to
+		// the source otherwise (session.classify).
+		for _, f := range cmd.fns {
+			if f.fn == "current_setting" && f.param == statusParam {
+				return classified{kind: kindRefused, perr: statusNotASetting}, true
+			}
+		}
 	}
 	return classified{}, false
 }
@@ -194,8 +208,12 @@ func (s *session) statusRows() [][][]byte {
 	return rows
 }
 
-// mentionsRouter is the cheap test every statement pays: without the word
-// "router" in it, in any case, a statement is none of this file's.
+// mayNameStatus is the cheap test every statement pays: without the word
+// "router" in it, in any case, or a name written with a prefix (U&"..."),
+// which can spell that word in escapes, a statement is none of this file's.
+func mayNameStatus(q string) bool { return mentionsRouter(q) || strings.Contains(q, `&"`) }
+
+// mentionsRouter reports whether q holds the word "router", in any case.
 func mentionsRouter(q string) bool {
 	const w = "router"
 	for i := 0; i+len(w) <= len(q); i++ {
@@ -217,18 +235,29 @@ const (
 	// statusAmongOthers: one of the message's statements is the status
 	// statement, in either spelling, and the message holds more.
 	statusAmongOthers
+	// statusAlone: the message is the status statement and nothing else,
+	// empty statements aside (;SHOW dbtrail.router_status).
+	statusAlone
+	// statusNameUnread: a SHOW of a name written with a prefix, which
+	// could be this one spelled in escapes and is nobody's otherwise: the
+	// copy does not read it and the port sends no such text to the source.
+	statusNameUnread
 )
 
+// prefixedWhy is how lexSQLSpans says it stopped at a string or a name
+// written with a prefix (route.go).
+const prefixedWhy = "a string or name written with a prefix"
+
 // findStatus looks for the status statement among the statements of a
-// message the session parser did not read as one statement. It reads the
-// text the way the routing screen does (lexSQLSpans), so a mention inside a
-// string, a quoted name or a comment is not one.
+// message. It reads the text the way the routing screen does (lexSQLSpans),
+// so a mention inside a string, a quoted name or a comment is not one, and a
+// comment ends where PostgreSQL ends it.
 //
 // A message that screen cannot read to its end (a dollar quote, a string
-// with escapes) is searched as far as it was read: the status statement before
-// the unreadable part is found, one after it is not, and then goes where
-// the message goes. The source refuses it there as a setting it does not
-// have; nothing is answered in the port's name.
+// with escapes) is searched as far as it was read: the status statement
+// before the unreadable part is found, one after it is not, and then goes
+// where the message goes. The source refuses it there as a setting it does
+// not have; nothing is answered in the port's name.
 func findStatus(q string) statusUse {
 	toks, _, why := lexSQLSpans(q)
 	var stmts [][]rtToken
@@ -243,6 +272,9 @@ func findStatus(q string) statusUse {
 	}
 	if start < len(toks) {
 		stmts = append(stmts, toks[start:])
+	}
+	if n := len(stmts); n > 0 && strings.HasPrefix(why, prefixedWhy) && len(stmts[n-1]) == 1 && isWord(stmts[n-1][0], "show") {
+		return statusNameUnread
 	}
 	own, mysql := false, false
 	for _, st := range stmts {
@@ -261,9 +293,7 @@ func findStatus(q string) statusUse {
 	case mysql:
 		return statusSpelledForMySQL
 	}
-	// The status statement alone, which the session parser reads: not
-	// reached, and nothing to refuse if it were.
-	return statusNotThere
+	return statusAlone
 }
 
 // isName reports whether a token is the name want, quoted or not, in any

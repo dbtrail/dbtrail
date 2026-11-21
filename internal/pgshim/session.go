@@ -359,6 +359,11 @@ var monitorRefusal = &pgErr{"0A000", "this is the port's monitor login, for a pr
 // asks it before a statement runs (to say whether it returns rows, and how
 // its arguments are written).
 func (s *session) classify(qstr string) classified {
+	// The port's own status statement, before anything else reads the text
+	// and can send it on (portstatus.go).
+	if c, own := s.classifyStatus(qstr); own {
+		return c
+	}
 	q, err := shim.Parse(qstr, s.schema())
 	tt := !errors.Is(err, shim.ErrNotTimeTravel)
 	if s.h == nil && tt {
@@ -381,11 +386,6 @@ func (s *session) classify(qstr string) classified {
 		// (SET, SHOW, BEGIN, version()...) are answered here, on either
 		// port; on the time-travel port nothing else is.
 		cmd, ok, syntaxErr := parseSessionCmd(qstr)
-		// The port's own status statement, before anything else can send
-		// it on (portstatus.go).
-		if c, own := s.classifyStatus(qstr, cmd, ok); own {
-			return c
-		}
 		switch {
 		case syntaxErr != nil:
 			return classified{kind: kindRefused, perr: syntaxErr}

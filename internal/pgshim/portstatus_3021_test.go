@@ -116,6 +116,15 @@ func TestStatus_everySpellingIsAnsweredByThePort(t *testing.T) {
 			`SHOW "dbtrail"."router_status"`,
 			`SHOW "dbtrail.router_status"`,
 			`SHOW "DBTrail".router_status`,
+			// An empty statement in front, as PostgreSQL takes it.
+			";SHOW dbtrail.router_status",
+			" ; ;\nSHOW \"dbtrail.router_status\";",
+			// A comment PostgreSQL ends at a carriage return.
+			"SHOW --x\rdbtrail.router_status",
+			"SHOW\vdbtrail.router_status",
+			// Comments that look like time travel.
+			"SHOW dbtrail.router_status -- from _flashback.orders",
+			"SHOW dbtrail.router_status /* as of '2026-01-01' */",
 		} {
 			rows, tx := statusAnswer(t, c, stmt)
 			wantRows(t, fmt.Sprintf("forward=%v %q", forward, stmt), rows, "last_answer=none")
@@ -213,6 +222,13 @@ func TestStatus_insideABlockAndAFailedOne(t *testing.T) {
 		"last_answer_reason_means=the server has no forwarding account, so the copy answers alone", "last_answer_error=yes"}
 	rows, tx = statusAnswer(t, c, stmt+";")
 	wantRows(t, "in a failed block", rows, failed...)
+	for _, spelled := range []string{";" + stmt, "SHOW --x\rdbtrail.router_status", stmt + " -- from _flashback.orders"} {
+		rows, tx2 := statusAnswer(t, c, spelled)
+		wantRows(t, "in a failed block: "+spelled, rows, failed...)
+		if tx2 != "E" {
+			t.Errorf("%q in a failed block: transaction status %s, want E", spelled, tx2)
+		}
+	}
 	if tx != "E" {
 		t.Errorf("after the status in a failed block: transaction status %s, want E", tx)
 	}
@@ -331,6 +347,10 @@ func TestStatus_neverSentOn(t *testing.T) {
 		{"BEGIN; SHOW \"dbtrail\".router_status; COMMIT", "Error 0A000 SHOW dbtrail.router_status is answered by the port itself and is sent alone; this message holds more than that statement, and nothing in it was run"},
 		{"SHOW ROUTER STATUS; SELECT 1", "Error 0A000 SHOW dbtrail.router_status is answered by the port itself and is sent alone; this message holds more than that statement, and nothing in it was run"},
 		{"SHOW dbtrail.router_status; SELECT $$x$$", "Error 0A000 SHOW dbtrail.router_status is answered by the port itself and is sent alone; this message holds more than that statement, and nothing in it was run"},
+		{`SHOW U&"dbtrail.router_status"`, `Error 42601 SHOW of a name written with a prefix (U&"...") is not read on this port; write the name as it is, as in SHOW dbtrail.router_status`},
+		{`SHOW U&"dbtrail.\0072outer_status"`, `Error 42601 SHOW of a name written with a prefix (U&"...") is not read on this port; write the name as it is, as in SHOW dbtrail.router_status`},
+		{`SHOW /* x */ u&"dbtrail.\0072outer_status";`, `Error 42601 SHOW of a name written with a prefix (U&"...") is not read on this port; write the name as it is, as in SHOW dbtrail.router_status`},
+		{"SELECT 1; ;SHOW dbtrail.router_status", "Error 0A000 SHOW dbtrail.router_status is answered by the port itself and is sent alone; this message holds more than that statement, and nothing in it was run"},
 		{"SELECT current_setting('dbtrail.router_status')", "Error 42704 dbtrail.router_status is not a setting: it cannot be set, reset or read with current_setting; send SHOW dbtrail.router_status"},
 		{"SET dbtrail.router_status = 'on'", "Error 42704 dbtrail.router_status is not a setting: it cannot be set, reset or read with current_setting; send SHOW dbtrail.router_status"},
 		{"RESET dbtrail.router_status", "Error 42704 dbtrail.router_status is not a setting: it cannot be set, reset or read with current_setting; send SHOW dbtrail.router_status"},
@@ -447,7 +467,13 @@ func TestFindStatus(t *testing.T) {
 		"x; SHOW DBTRAIL.ROUTER_STATUS;":     statusAmongOthers,
 		`x; SHOW "dbtrail.router_status"`:    statusAmongOthers,
 		"SHOW dbtrail.router_status $$":      statusAmongOthers,
-		"SHOW dbtrail.router_status":         statusNotThere, // the session parser's
+		"SHOW dbtrail.router_status":         statusAlone,
+		";SHOW dbtrail.router_status;;":      statusAlone,
+		"SHOW --x\rdbtrail.router_status":    statusAlone,
+		`SHOW U&"dbtrail.router_status"`:     statusNameUnread,
+		`SELECT 1; SHOW u&"x"`:               statusNameUnread,
+		`SELECT U&"router" FROM t`:           statusNotThere,
+		`SHOW TABLES; SELECT U&"router"`:     statusNotThere,
 		"SHOW dbtrail.router_status_x; x":    statusNotThere,
 		"SHOW other.router_status; SELECT 1": statusNotThere,
 		"SELECT 1; -- SHOW ROUTER STATUS":    statusNotThere,
