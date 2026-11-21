@@ -75,6 +75,10 @@ type pgRouterServerNumbers struct {
 	// it has a forwarding account (it hides tables or columns), as its last
 	// statement found; absent when statements may go there.
 	ForwardingOff string `json:"forwarding_off,omitempty"`
+	// ForwardingAccount is the account the last connection bound for this
+	// server forwards with (#3054): "forwarding user <name>", or "capture
+	// account, read-only, tables of the copy only". Absent when it has none.
+	ForwardingAccount string `json:"forwarding_account,omitempty"`
 	// SQLMode is "fresh" or "fast" as this process answers the server now,
 	// and SQLModeFrom where that comes from ("environment", "saved",
 	// "default"), as in the MySQL router's document. Its warm-up is not
@@ -128,6 +132,7 @@ type pgRouteTally struct {
 	rows                  map[pgShapeKey]*pgShapeRow
 	notCounted            uint64
 	barred                string
+	account               string
 	// The copy's last answer's age (#2756): when it ran, its through, or
 	// ageWhy when it has none; worst is the oldest known since the start
 	// and unknown the count of answers with none.
@@ -288,6 +293,25 @@ func (r *pgRouteStats) setBarred(id, why string) {
 	t.barred = why
 }
 
+// setAccount keeps the account server id's connections forward with, ""
+// for none (#3054).
+func (r *pgRouteStats) setAccount(id, account string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t := r.perServer[id]
+	if t == nil {
+		if account == "" {
+			return
+		}
+		t = &pgRouteTally{reasons: map[string]uint64{}, answers: map[string]*pgRouteAnswers{}}
+		r.perServer[id] = t
+	}
+	t.account = account
+}
+
 // forServer is the callback a connection of server id is bound with.
 func (r *pgRouteStats) forServer(id string) func(pgshim.RouteNote) {
 	if r == nil {
@@ -390,7 +414,7 @@ func (r *pgRouteStats) counts(listen string) pgRouterStatusDoc {
 		Servers: map[string]pgRouterServerNumbers{}}
 	for id, t := range r.perServer {
 		n := pgRouterServerNumbers{Copy: t.copy, Source: t.source, Refused: t.refused,
-			Reasons: maps.Clone(t.reasons), Answers: map[string]console.RouteAnswers{}, ForwardingOff: t.barred}
+			Reasons: maps.Clone(t.reasons), Answers: map[string]console.RouteAnswers{}, ForwardingOff: t.barred, ForwardingAccount: t.account}
 		switch {
 		case t.ageWhy != "":
 			n.DataAgeUnknownReason = t.ageWhy

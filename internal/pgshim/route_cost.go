@@ -261,6 +261,14 @@ func (s *session) routeByCostPlan(text string, generic bool) (d routeDecision, k
 		}
 		return failed, false, perr, nil
 	}
+	if perr := s.captureRefusal(up, text); perr != nil {
+		// The capture account's gate (#3054): its EXPLAIN would send the
+		// statement's text to the source as that account, and planning can
+		// run a function. Refused there, the statement cannot go to the
+		// source at all: the copy answers it.
+		s.logger.Debug("pgshim: sent to the copy", "reason", ReasonCaptureGate, "why", perr.msg)
+		return routeDecision{RouteCopy, ReasonCaptureGate}, false, nil, nil
+	}
 	opts := "FORMAT JSON"
 	if generic {
 		opts = "GENERIC_PLAN, FORMAT JSON"

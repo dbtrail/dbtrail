@@ -839,6 +839,12 @@ func (s *session) forwardSimple(qstr string) (ok bool) {
 		s.fail(s.lostError(lost))
 		return false
 	}
+	// With the capture account, nothing goes there that the capture gate
+	// does not let through (#3054), asked before anything of it is sent.
+	if perr := s.captureRefusal(up, qstr); perr != nil {
+		s.fail(perr)
+		return false
+	}
 	ctx, done := s.statementContext()
 	defer done()
 	up.ctx = ctx
