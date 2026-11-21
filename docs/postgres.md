@@ -1079,18 +1079,24 @@ listener, its own workers, its own memory.
   does not disconnect anyone here.
 - **PostgreSQL servers only.** A MySQL or MariaDB server is refused with an
   error that names it; its copy is read through the MySQL port.
-- **Who answers depends on the server's forwarding user.** `server add` asks
-  for one, as for a MySQL (or takes it from `--forward-user` or
-  `[dbtrail-forward]` in the option file), and the web interface's form has
-  the same two fields. With one, a statement the copy is not known to answer
-  as PostgreSQL does, and a client's transaction block, run on your PostgreSQL
-  as that user, read-only
+- **Who answers depends on what the server forwards with.** `server add` asks
+  once whether the port may forward as the user DBTrail connects with;
+  `--forward-user`, or `[dbtrail-forward]` in the option file, names a
+  forwarding user of its own instead, and the web interface's form has that
+  user's two fields. With the capture account, a `SELECT` whose every table
+  is a table of the copy, and that the copy is not known to answer as
+  PostgreSQL does, runs on your PostgreSQL, read-only
+  ([forwarding with the capture account](#forwarding-with-the-capture-account)).
+  With a forwarding user of its own, every statement the copy is not known to
+  answer as PostgreSQL does, and a client's transaction block, run on your
+  PostgreSQL as that user, read-only
   ([the forwarding user](#transactions-on-the-source-the-forwarding-user)).
-  Without one (the question skipped, `--no-forward`, or a script that named
-  none) the copy answers every statement, nothing is sent to your PostgreSQL,
-  and a statement the copy cannot answer gets an error, until one is set
-  (`bintrail-console server forward-user <server> -u <user> -p`, or the
-  server's Forwarding user in the web interface).
+  With neither (the answer no, `--no-forward`, or a script that said nothing)
+  the copy answers every statement, nothing is sent to your PostgreSQL, and a
+  statement the copy cannot answer gets an error, until one is set
+  (`bintrail-console server forward-user <server> --capture-account`, or
+  `-u <user> -p` for a user of its own, or the server's Forwarding user in the
+  web interface).
 - **Fresh or fast, per server, as on the MySQL port.** In fresh mode, the
   default, each table's newest changes captured from PostgreSQL are laid over
   its snapshot, so a row written a moment ago shows without waiting for the
