@@ -439,6 +439,12 @@ func (k *tailKeeper) refreshLocked(ctx context.Context, tables []views.BaselineT
 		k.through = newest.At
 	}
 	folded = k.now().Sub(start) - read
+	// A PostgreSQL source only (pg_tail_copy.go): it reads from the copy the
+	// large values its tails wait for, and lets the lock go while it reads.
+	// No other source is a pgCopySource, and for them this is no step.
+	if src, ok := k.src.(pgCopySource); ok {
+		k.pgFillFromCopy(ctx, src)
+	}
 	changed, err := k.src.Broken(ctx, tables)
 	if err != nil {
 		return nil, err

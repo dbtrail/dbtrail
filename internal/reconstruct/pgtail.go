@@ -97,6 +97,17 @@ type PGTail struct {
 	// thousand of them between two updates of its copy, and the tails of a
 	// busy source passed their memory budget in minutes.
 	packed map[string]pgPackedRow
+	// fromCopy, wants, copyRefusal: see pgtail_copy.go. wants are the keys
+	// whose change holds a large value PostgreSQL did not send and only the
+	// table's copy can give.
+	fromCopy    bool
+	wants       map[string]struct{}
+	copyRefusal string
+	// copyDeferred counts the updates in a row that left this tail's read
+	// of the copy for later, and copyRoom is the room (bytes of text) one
+	// of them had and found too small, 0 for none: see DeferCopy.
+	copyDeferred int
+	copyRoom     int64
 }
 
 // pgPackedRow is the row of one change, put away. of is the change it is
@@ -297,7 +308,7 @@ func NewPGTail(schema, table string, md baseline.DumpMetadata, fileColumns []str
 	}
 	return &PGTail{schema: schema, table: table, names: append([]string(nil), fileColumns...), inNames: inFile, cols: cols,
 		pkCols: pkCols, pkNames: pkNames, generated: gen,
-		fold: foldResult{Changes: map[string]*query.ResultRow{}}, dirty: map[string]struct{}{}, packed: map[string]pgPackedRow{}}, nil
+		fold: foldResult{Changes: map[string]*query.ResultRow{}}, dirty: map[string]struct{}{}, packed: map[string]pgPackedRow{}, wants: map[string]struct{}{}}, nil
 }
 
 // sameNames: the same names, in any order.
@@ -352,6 +363,7 @@ func (t *PGTail) Apply(page []query.ResultRow) error {
 	// as it arrived, and the change left for each key is its last.
 	for _, key := range touched {
 		t.pack(key)
+		t.noteWant(key)
 	}
 	for i := range own {
 		t.fold.LastEventID = max(t.fold.LastEventID, own[i].EventID)
@@ -388,6 +400,7 @@ func (t *PGTail) PruneThrough(anchor query.BinlogPos, afterID uint64) (int, erro
 		delete(t.fold.pgSrc, k)
 		delete(t.dirty, k)
 		delete(t.packed, k)
+		delete(t.wants, k)
 	}
 	t.needFull = true
 	return len(drop), nil
@@ -475,6 +488,9 @@ func (t *PGTail) write(path string, keys []string) (rows int64, retErr error) {
 	}
 	if err := pgTxnOpenRepeat(open, t.schema, t.table); err != nil {
 		return 0, fmt.Errorf("%s.%s: %w", t.schema, t.table, ErrPGTailTxnOpen)
+	}
+	if err := t.copyPending(keys); err != nil {
+		return 0, err
 	}
 	if missing := droppedBaselineColumns(t.fold.ImageColumns, t.fold.SawImage, t.names); len(missing) > 0 {
 		return 0, &TailRefusal{fmt.Sprintf("%s.%s: column(s) %s of its copy are missing from changes after the copy's cut (dropped at the source)",

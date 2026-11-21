@@ -261,8 +261,14 @@ func roomVerdict(est dumpEstimate, note string) (string, string, error) {
 }
 
 // moveStagingHint is how an operator gives the staging folder more room.
-const moveStagingHint = "Free space there, or move this folder to a bigger disk " +
-	"(the \"Working folder\" setting, or BINTRAIL_CONSOLE_BASELINE_STAGING) and restart DBTrail."
+// The web interface has had no row for it since 0.89.0, so the hint names the
+// two places that do set it.
+const moveStagingHint = "Free space there, or move this folder to a bigger disk: " +
+	"set " + stagingSetWith + ", and restart DBTrail."
+
+// stagingSetWith names the two places the working folder is set, the variable
+// and the option file's line, once for every message that says so.
+const stagingSetWith = "BINTRAIL_CONSOLE_BASELINE_STAGING, or console-baseline-staging in dbtrail.cnf"
 
 // measureFree is diskSpaceFn with the fold check's reading of it: an error,
 // or a filesystem that reports no size, is "cannot tell", never "full".

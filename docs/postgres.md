@@ -412,6 +412,21 @@ that the value was not sent, never a NULL in its place:
   of fresh mode until the next snapshot: statements on it read the copy as of
   its snapshot. Nothing wrong is stored.
 
+  That read costs more as the table grows, because it goes through the key
+  columns of the table's whole file. Measured on one host with 4 CPUs and 16
+  GB (PostgreSQL 17, 200 changes a second to random rows, none of them
+  touching a 2,100-character value stored out of line):
+
+  | Rows in the table | At `FULL` | Not at `FULL` |
+  |---|---|---|
+  | 2 million (a 3.8 GB copy) | 1.3 s behind the source (median) | 2.8 s behind, and the server's other tables with it |
+  | 20 million (a 39 GB copy) | 2.5 s behind, with one stretch of minutes while the host was saturated | No fresh mode while the table is written to: statements read the copy as of its last snapshot, 21 to 31 minutes old in that run |
+
+  So a large table that needs fresh mode should be at `REPLICA IDENTITY FULL`.
+  A table left without fresh mode still answers with correct rows, as of its
+  snapshot, and does not hold the other tables back. One run, one host: these
+  are not limits to plan with.
+
 **`verify` does not cover a table that is not at `FULL`.** On such a table,
 `verify` of a PostgreSQL server (live, and between two snapshots) fails when it
 meets a change captured with its key only, or one that left a large value
@@ -1000,10 +1015,14 @@ What to know:
   value from the old row of the same change, for an ordinary UPDATE and for
   one that changes the key. A change captured with the old row's key only
   (a table that is not at `FULL`) keeps the marker, and a fold gives the row the
-  value of its newest earlier change, or, in a snapshot update, of its row
-  in the table's previous file. What neither holds is refused by name, as is
-  a marker in any other place (beside a whole old row, in an INSERT, in the
-  new row of a change of key); a value is never written as NULL in its
+  value of its newest earlier change, or of its row in the table's copy: in
+  a snapshot update the table's previous file, in fresh mode the snapshot
+  the statement reads (the table delta beside its file first, then the
+  file), read by key for all such rows of a table at once and within the
+  memory fresh mode may hold. What neither holds is refused by name (in
+  fresh mode the table then reads as of its snapshot until the next one), as
+  is a marker in any other place (beside a whole old row, in an INSERT, in
+  the new row of a change of key); a value is never written as NULL in its
   stead.
 - **A table with no change is carried forward** under
   `--carry-forward-unchanged`, as for MySQL: the new snapshot gets the previous

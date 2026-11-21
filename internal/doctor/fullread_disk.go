@@ -179,8 +179,8 @@ func fullReadDiskResult(dir, measuredAt string, free uint64, schemas []string, e
 		tail += " The source may have reported sizes up to a day old."
 	}
 	tail += DumpCompressedSentence(est)
-	fix := "Free space there, or use a folder on a bigger disk: for the web interface that is its Working folder setting " +
-		"(or BINTRAIL_CONSOLE_BASELINE_STAGING). Sizing: docs/capacity.md, \"Disk for a full read\"."
+	fix := "Free space there, or use a folder on a bigger disk: for the web interface that is " +
+		"BINTRAIL_CONSOLE_BASELINE_STAGING, or console-baseline-staging in dbtrail.cnf, read when DBTrail starts. Sizing: docs/capacity.md, \"Disk for a full read\"."
 
 	switch {
 	case free < floor:

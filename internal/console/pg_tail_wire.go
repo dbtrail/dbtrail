@@ -71,6 +71,7 @@ func (s *Server) tailKeeperForPG(id string, b *bundle) *tailKeeper {
 	}
 	src := newPGTailSource(s, b).capturing(captures)
 	src.capturesKey = capturesKey
+	src.copyBytes = pgTailBudgetFromEnv().Bytes
 	k := newTailKeeper(src, os.TempDir(), pgTailBudgetFromEnv(), tailKeepOld, tailIdle)
 	k.pub.auto = true
 	if s.tails.by == nil {
