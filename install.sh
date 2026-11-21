@@ -738,7 +738,7 @@ say "SELECT on your tables): ${START_PG}"
 if [ -n "$CLI" ]; then
   say "Then add it with + Add server (Open the full form, and pick PostgreSQL), or from this terminal:"
   say "  ${DIR}/dbtrail server add --flavor postgres -h <host> -u dbtrail -p -d <db> --publication <name>"
-  say "It then asks for the forwarding user: a role of its own, with SELECT on what the PostgreSQL port should read."
+  say "It then asks once whether the PostgreSQL port may forward with that user, read-only and only to the copy's tables (Enter is yes)."
 else
   say "Then add it with + Add server: Open the full form, and pick PostgreSQL."
 fi
