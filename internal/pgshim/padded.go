@@ -103,10 +103,23 @@ func screenTypes(tables []CatalogTable, read func(*CatalogTable) bool) map[strin
 				typ = m
 			}
 			out[n] = append(out[n], typ)
+			if paddedType(typ) {
+				// The table itself: its name, or its alias, written as a
+				// value stands for every column of it (paddedUse).
+				out[relKey+strings.ToLower(t.Name)] = []string{relType}
+			}
 		}
 	}
 	return out
 }
+
+// relKey is the prefix under which the screen's types name a table that
+// holds a padded column: no name a statement writes starts with it. relType
+// is what stands there; it is not a type, and neither text nor a mark.
+const (
+	relKey  = "\x00"
+	relType = "RELATION"
+)
 
 // CopyScreenFor is CopyScreen as a connection whose copy's catalog is tables
 // decides it: the statement's tables are read from its text, and a column
@@ -216,7 +229,7 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 
 	// One SELECT and nothing else, and where its select list's items are.
 	selects, sel := 0, -1
-	plain, groups := true, false
+	plain, groups, setOps := true, false, false
 	for i, t := range toks {
 		if t.kind != rtWord {
 			continue
@@ -227,7 +240,9 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 			if sel < 0 {
 				sel = i
 			}
-		case "with", "union", "intersect", "except", "values", "table":
+		case "union", "intersect", "except":
+			plain, setOps = false, true
+		case "with", "values", "table":
 			plain = false
 		case "distinct", "group":
 			groups = true
@@ -266,7 +281,8 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 	name := func(t rtToken) bool { return t.kind == rtWord || t.kind == rtQuoted }
 	// wholeItem reports whether the token at i ends a whole select item: the
 	// item is [DISTINCT | ALL] [name .]... <the token> [[AS] alias].
-	wholeItem := func(i int) bool {
+	// alias is where the item's alias stands, -1 when it has none.
+	wholeItem := func(i int) (whole bool, alias int) {
 		for _, it := range items {
 			if i < it[0] || i >= it[1] {
 				continue
@@ -277,23 +293,23 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 			}
 			for ; j < i; j += 2 {
 				if !name(toks[j]) || !isOpTok(toks, j+1, ".") {
-					return false
+					return false, -1
 				}
 			}
 			if j != i {
-				return false
+				return false, -1
 			}
 			switch rest := toks[i+1 : it[1]]; len(rest) {
 			case 0:
-				return true
+				return true, -1
 			case 1:
-				return toks[i].kind != rtOp && name(rest[0]) && !(rest[0].kind == rtWord && rest[0].text == "as")
+				return toks[i].kind != rtOp && name(rest[0]) && !(rest[0].kind == rtWord && rest[0].text == "as"), i + 1
 			case 2:
-				return toks[i].kind != rtOp && rest[0].kind == rtWord && rest[0].text == "as" && name(rest[1])
+				return toks[i].kind != rtOp && rest[0].kind == rtWord && rest[0].text == "as" && name(rest[1]), i + 2
 			}
-			return false
+			return false, -1
 		}
-		return false
+		return false, -1
 	}
 	at := func(i int) rtToken {
 		if i < 0 || i >= len(toks) {
@@ -319,24 +335,86 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 		case rtNumber, rtString, rtParam, rtQuoted, rtTyped:
 			return true
 		case rtWord:
-			return t.text != "from"
+			// * EXCLUDE (...), * REPLACE (...), * LIKE '...': the copy's own
+			// ways to write a row.
+			switch t.text {
+			case "from", "exclude", "replace", "rename", "like", "ilike", "similar":
+				return false
+			}
+			return true
 		}
 		return t.text == "(" || t.text == "-" || t.text == "+"
 	}
+	// given are the names the statement gives a padded column or a table
+	// that holds one (an alias), by where each is given: written anywhere
+	// else, a column's stands for the column, and a table's, with no dot
+	// after it, for the whole row.
+	colAlias, relAlias := map[string]int{}, map[string]int{}
+	const otherRows = " (PostgreSQL ignores a char(n) column's trailing blanks, the copy compares them)"
 
 	for i, t := range toks {
+		// What reaches a column without writing its name. Each is the
+		// source's on a connection that has one (vetoWords, an operator or
+		// a function the screen does not know); here they are said again,
+		// for the connection whose statements the copy answers alone.
+		switch {
+		case t.kind == rtWord && t.text == "natural":
+			return "NATURAL JOIN of a table with a char(n) column: it joins by the column without naming it" + otherRows
+		case t.kind == rtWord && t.text == "table" && !isOpTok(toks, i-1, ".") && !(i == 0 && !setOps && selects == 0):
+			return "TABLE of a table with a char(n) column, where its rows are compared" + otherRows
+		case t.kind == rtWord && t.text == "from" && (isOpTok(toks, i-1, "(") || firstWord(toks) == "from"):
+			return "FROM written first, the copy's own syntax, on a copy that holds a char(n) column" + otherRows
+		case t.kind == rtWord && t.text == "columns" && isOpTok(toks, i+1, "("):
+			return "COLUMNS() on a copy that holds a char(n) column" + otherRows
+		case t.kind == rtOp && strings.Contains(t.text, "#"):
+			return "a column named by its position (#n) on a copy that holds a char(n) column" + otherRows
+		case t.kind == rtWord && isOpTok(toks, i+1, "(") && !parenWords[t.text] && t.text != "over" && t.text != "filter" && t.text != "within":
+			// t AS a(i, x), ) s(p, q): a list that gives the columns other
+			// names. A call is never written right after a name, AS or a
+			// closing parenthesis; a type's modifier (numeric(10,2)) holds
+			// no name.
+			p := at(i - 1)
+			after := p.kind == rtQuoted || isOpTok(toks, i-1, ")") ||
+				p.kind == rtWord && (p.text == "as" || !aliasStop[p.text] && !parenWords[p.text])
+			if end := closingParen(toks, i+1); after && end > 0 {
+				for _, in := range toks[i+2 : end] {
+					if name(in) {
+						return "a list of column names after a table (" + t.text + "(...)) on a copy that holds a char(n) column: it gives the column another name" + otherRows
+					}
+				}
+			}
+		}
 		switch {
 		case name(t):
 			n := strings.ToLower(t.text)
+			if _, rel := types[relKey+n]; rel && !isOpTok(toks, i+1, ".") {
+				// A table that holds a padded column, not before a dot: named
+				// in FROM (its alias is noted), or written as a value.
+				p := at(i - 1)
+				if !(p.kind == rtWord && (p.text == "from" || p.text == "join" || p.text == "table") || isOpTok(toks, i-1, ".")) {
+					return fmt.Sprintf("the table %q, which holds a char(n) column, written where a value or a second table of a list stands", n) + otherRows
+				}
+				j := i + 1
+				if at(j).kind == rtWord && at(j).text == "as" {
+					j++
+				}
+				if a := at(j); a.kind == rtQuoted || a.kind == rtWord && !aliasStop[a.text] {
+					relAlias[strings.ToLower(a.text)] = j
+				}
+			}
 			padded, sized := paddedKind(types, n)
 			if !padded {
 				continue
 			}
-			if !wholeItem(i) {
+			whole, alias := wholeItem(i)
+			if !whole {
 				return paddedWhat(n, sized) + ", used where its trailing blanks count (PostgreSQL ignores them, the copy compares them)"
 			}
 			if !sized && groups {
 				return paddedWhat(n, sized) + ", beside DISTINCT or GROUP BY (PostgreSQL takes values that differ in trailing blanks for one)"
+			}
+			if alias >= 0 {
+				colAlias[strings.ToLower(toks[alias].text)] = alias
 			}
 		case t.kind == rtOp && t.text == "*":
 			if endsValue(i-1) && startsValue(i+1) {
@@ -347,12 +425,27 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 				// count(*) counts rows, whatever they hold.
 				continue
 			}
-			if !wholeItem(i) {
+			if whole, _ := wholeItem(i); !whole {
 				return "* of a table with a char(n) column, outside a plain select list (PostgreSQL ignores its trailing blanks, the copy compares them)"
 			}
 			if !allSized && groups {
 				return "* of a table with a bpchar column, or one of a type the snapshot does not record, beside DISTINCT or GROUP BY"
 			}
+		}
+	}
+	// A name given above, written again: the column under its alias
+	// (SELECT c AS x ... WHERE x = 'ab', which the copy's engine takes), or
+	// the table's whole row (count(DISTINCT a), a = b).
+	for i, t := range toks {
+		if !name(t) {
+			continue
+		}
+		n := strings.ToLower(t.text)
+		if def, ok := colAlias[n]; ok && def != i {
+			return fmt.Sprintf("the name %q, given to a char(n) column, used again", n) + otherRows
+		}
+		if def, ok := relAlias[n]; ok && def != i && !isOpTok(toks, i+1, ".") {
+			return fmt.Sprintf("the name %q, given to a table that holds a char(n) column, written where a value stands", n) + otherRows
 		}
 	}
 	return ""
@@ -364,7 +457,7 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 // no table (SELECT 1).
 func catalogUnread(toks []rtToken) string {
 	for _, t := range toks {
-		if t.kind == rtWord && t.text == "from" {
+		if t.kind == rtWord && (t.text == "from" || t.text == "table") {
 			return "a table read while the copy's columns could not be listed: one may be a char(n) on the source"
 		}
 	}

@@ -198,6 +198,27 @@ func TestPadded_toTheSource(t *testing.T) {
 		`SELECT DISTINCT free FROM codes`,
 		`SELECT free, count(*) FROM codes GROUP BY 1`,
 		`SELECT DISTINCT * FROM codes`,
+		// What reaches the column without writing its name, or under a name
+		// the statement gives it: said by this rule too, for a connection
+		// that sends nothing to its source and has no other screen.
+		`SELECT label FROM plain WHERE name IN (TABLE codes)`,
+		`SELECT name FROM plain EXCEPT TABLE codes`,
+		`SELECT p.id FROM plain p NATURAL JOIN codes`,
+		`SELECT x FROM codes AS a(i, x) WHERE x = 'ab'`,
+		`SELECT x FROM codes a(i, x) WHERE x = 'ab'`,
+		`SELECT code AS x FROM codes WHERE x = 'ab'`,
+		`SELECT code AS x, length(x) FROM codes`,
+		`SELECT code x, x || '!' FROM codes`,
+		`SELECT id FROM codes WHERE #2 = 'ab'`,
+		`SELECT id FROM codes WHERE COLUMNS('c') = 'ab'`,
+		`SELECT name FROM plain WHERE name IN (FROM codes)`,
+		`FROM codes SELECT id WHERE k = 1`,
+		`SELECT DISTINCT ON (id) * EXCLUDE (id) FROM codes`,
+		// The table's whole row as a value.
+		`SELECT count(DISTINCT codes) FROM codes`,
+		`SELECT count(DISTINCT c) FROM codes c`,
+		`SELECT a.id FROM codes a JOIN codes AS b ON a = b`,
+		`SELECT id FROM plain, codes`,
 		// A table whose snapshot records no types.
 		`SELECT id FROM legacy WHERE word = 'x'`,
 		`SELECT id, length(word) FROM legacy`,
@@ -287,6 +308,8 @@ func TestPadded_aTableWithoutOneRoutesAsBefore(t *testing.T) {
 		`SELECT id, upper(code) FROM plain`,
 		`SELECT now()`,
 		`SELECT 1`,
+		`SELECT a.id FROM plain a NATURAL JOIN plain b`,
+		`SELECT count(DISTINCT p) FROM plain p`,
 	} {
 		want := CopyScreen(q, before)
 		got := paddedScreen(q)
@@ -355,6 +378,9 @@ func TestPadded_use(t *testing.T) {
 		`SELECT k * 2, 2 * k, (k) * (k) FROM codes`:    false,
 		`SELECT count(*), count(*) * 2 FROM codes`:     false,
 		`SELECT extract(year FROM d), code FROM codes`: false,
+		`SELECT id, CAST(k AS decimal(10,2)) FROM codes c WHERE c.k IN (1, 2)`: false,
+		`SELECT k, count(*) FILTER (WHERE k > 1), row_number() OVER (PARTITION BY k) FROM codes AS c GROUP BY k`: false,
+		`SELECT id FROM codes c JOIN plain p USING (id) WHERE NOT (c.k = 1) AND p.qty BETWEEN (1) AND (2)`: false,
 		`SELECT 1`:                   false,
 		`SELECT code + 1 FROM codes`: true,
 		`SELECT code, code FROM codes WHERE code = 'a'`:          true,
@@ -482,6 +508,9 @@ func TestPadded_throughThePort(t *testing.T) {
 		`SELECT id, length(code) FROM codes`,
 		`SELECT count(*) FROM (SELECT * FROM codes) s`,
 		`SELECT id FROM legacy WHERE word = 'x'`,
+		`SELECT p.id FROM plain p NATURAL JOIN codes`,
+		`SELECT code AS x FROM codes WHERE x = 'ab'`,
+		`SELECT count(DISTINCT c) FROM codes c`,
 	}
 	plain := []string{
 		`SELECT code FROM codes`,

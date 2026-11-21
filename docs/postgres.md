@@ -1652,7 +1652,10 @@ The source answers:
   subquery, `WITH`, `UNION`, `INTERSECT` or `EXCEPT` (`SELECT id, code FROM t
   WHERE id = 7`, with or without the table's name before it and an alias
   after it). There both sides write the same padded value, and nothing reads
-  it again under another name. So a comparison (`=`, `<>`, `<`, `BETWEEN`,
+  it again under another name: the alias written a second time, a `NATURAL
+  JOIN`, the table's name used as a value (`count(DISTINCT t)`), `TABLE t`
+  inside a larger statement and a list that renames the columns (`t AS
+  a(i, x)`) go to the source as well. So a comparison (`=`, `<>`, `<`, `BETWEEN`,
   `IN`, `LIKE`, `IS DISTINCT FROM`, `IS NULL`), a join's condition or
   `USING`, `GROUP BY`, `ORDER BY`, a function, `||`, a cast, a `CASE` or an
   aggregate of such a column goes to the source, and so does a `*` that
