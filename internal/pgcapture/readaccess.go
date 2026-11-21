@@ -132,8 +132,29 @@ func CheckReadAccess(ctx context.Context, conn *pgx.Conn, publication string, fi
 	if len(acc.Unreadable) == 0 {
 		return nil
 	}
-	return fmt.Errorf("%w: %s. Run on the database, as the tables' owner or a superuser: %s",
-		ErrNoReadAccess, acc.count(), strings.Join(acc.Grants(), " "))
+	return fmt.Errorf("%w: %s", ErrNoReadAccess, acc.oneLine())
+}
+
+// oneLine is the finding and its statements on one line. Grants can end a
+// list it cut with a line that is an SQL comment; on one line everything
+// after "--" is a comment, so pasted as it is the statements behind it would
+// not run. The statements therefore go first and what was cut is said after
+// them, in words. Pure.
+func (a ReadAccess) oneLine() string {
+	var stmts []string
+	cut := false
+	for _, g := range a.Grants() {
+		if strings.HasPrefix(g, "--") {
+			cut = true
+			continue
+		}
+		stmts = append(stmts, g)
+	}
+	line := a.count() + ". Run on the database, as the tables' owner or a superuser: " + strings.Join(stmts, " ")
+	if cut {
+		line += fmt.Sprintf(" These are the first %d schemas of each kind; the role lacks the same on more.", readAccessNamed)
+	}
+	return line
 }
 
 // count says how many of the tables the role cannot read, without a full stop.

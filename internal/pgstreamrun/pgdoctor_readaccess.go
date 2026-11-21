@@ -17,10 +17,14 @@ const readAccessCheck = "Read access to the published tables"
 // addReadAccessCheck reports the published tables the connection's role
 // cannot read (#3022, pgcapture.QueryReadAccess). Capture needs no SELECT and
 // the first copy does, so without this every check passed for a role that
-// the first snapshot then stopped on with 42501. A failure: `server add`
-// refuses, and shows the statements to run. A check that could not run is a
-// warning, never a failure: the copy asks the same question itself before it
-// reads anything.
+// the first snapshot then stopped on with 42501.
+//
+// A warning, never a failure. This report is also what Start reads, and a
+// failure there keeps capture from starting: a role that replicates and
+// cannot read records changes today, and what is missing for one function
+// (the copy) must not stop another (capture). The copy is where it is
+// refused, before it creates or reads anything (pgbaseline.Run). Here it is
+// said early, with the statements to run.
 //
 // It does not depend on wal_level: the publication and the privileges are
 // there to read whatever the WAL carries.
@@ -47,9 +51,9 @@ func readAccessResult(acc pgcapture.ReadAccess) doctor.CheckResult {
 	}
 	problem := acc.Problem()
 	var rem strings.Builder
-	rem.WriteString("Recording changes does not need these permissions. The first copy of the tables does: it reads each one as this role, " +
-		"and would stop with \"permission denied\" (42501). DBTrail grants nothing by itself. " +
-		"Run this on the database, as the tables' owner or a superuser:\n\n")
+	rem.WriteString("Recording changes does not need these permissions, so this does not stop the server from being added or started. " +
+		"The first copy of the tables needs them: it reads each one as this role, and DBTrail refuses to start it until they are there. " +
+		"DBTrail grants nothing by itself. Run this on the database, as the tables' owner or a superuser:\n\n")
 	for _, g := range acc.Grants() {
 		rem.WriteString("  " + g + "\n")
 	}
@@ -65,7 +69,7 @@ func readAccessResult(acc pgcapture.ReadAccess) doctor.CheckResult {
 	detail := strings.TrimSuffix(strings.ToUpper(problem[:1])+problem[1:], ".")
 	return doctor.CheckResult{
 		Name:        readAccessCheck,
-		Status:      doctor.StatusFail,
+		Status:      doctor.StatusWarn,
 		Detail:      detail,
 		Remediation: rem.String(),
 	}

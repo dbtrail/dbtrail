@@ -146,3 +146,49 @@ func TestReadAccessNamesStayOnOneLine(t *testing.T) {
 		t.Errorf("got %s, want %s", got, want)
 	}
 }
+
+// The snapshot's refusal is one line. A list of statements cut with an SQL
+// comment would, on one line, comment out every statement after it: pasted
+// into psql the GRANT SELECTs would not run. No "--" on the line, and every
+// statement of the list is on it.
+func TestReadAccessOneLineHasNoComment(t *testing.T) {
+	acc := ReadAccess{Role: "dbtrail", Tables: 300}
+	for i := range 300 {
+		acc.Unreadable = append(acc.Unreadable, UnreadableTable{Schema: fmt.Sprintf("s%03d", i), Table: "t", NoUsage: true, NoSelect: true})
+	}
+	line := acc.oneLine()
+	if strings.Contains(line, "--") || strings.ContainsAny(line, "\r\n") {
+		t.Fatalf("a comment or a line break on the one line:\n%s", line)
+	}
+	n := 0
+	for _, g := range acc.Grants() {
+		if strings.HasPrefix(g, "--") {
+			continue
+		}
+		n++
+		if !strings.Contains(line, g) {
+			t.Errorf("the line lacks %q", g)
+		}
+	}
+	if n != 2*readAccessNamed || strings.Count(line, "GRANT ") != n {
+		t.Errorf("%d statements in the list, %d on the line", n, strings.Count(line, "GRANT "))
+	}
+	// The last thing on the line that is SQL is a statement, and what was
+	// cut is said after it.
+	if !strings.HasSuffix(line, `GRANT SELECT ON ALL TABLES IN SCHEMA "s009" TO "dbtrail"; These are the first 10 schemas of each kind; the role lacks the same on more.`) {
+		t.Errorf("the end of the line: %s", line[len(line)-200:])
+	}
+	if !strings.HasPrefix(line, `the role "dbtrail" cannot read 300 of the 300 tables the copy reads. Run on the database, as the tables' owner or a superuser: GRANT USAGE ON SCHEMA "s000" TO "dbtrail"; `) {
+		t.Errorf("the start of the line: %s", line[:200])
+	}
+}
+
+// Nothing cut: the line ends with its last statement.
+func TestReadAccessOneLineUncut(t *testing.T) {
+	acc := ReadAccess{Role: "dbtrail", Tables: 2, Unreadable: []UnreadableTable{{Schema: "app", Table: "a", NoUsage: true, NoSelect: true}}}
+	want := `the role "dbtrail" cannot read 1 of the 2 tables the copy reads. Run on the database, as the tables' owner or a superuser: ` +
+		`GRANT USAGE ON SCHEMA "app" TO "dbtrail"; GRANT SELECT ON TABLE "app"."a" TO "dbtrail";`
+	if got := acc.oneLine(); got != want {
+		t.Errorf(" got %s\nwant %s", got, want)
+	}
+}

@@ -15,10 +15,11 @@ import (
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
-// #3022 in the report `server add` and `bintrail-pg doctor` read, against a
-// real PostgreSQL: a role that passes every other check and has no SELECT on
-// a published table fails this one, with the statement to run; after that
-// statement the report has no failure left.
+// #3022 in the report `server add`, Start and `bintrail-pg doctor` read,
+// against a real PostgreSQL: a role that replicates and has no SELECT on a
+// published table gets a warning with the statement to run, and no failure,
+// so the server is added, capture starts and doctor exits 0. After that
+// statement the warning is gone.
 func TestBuildPGReport_ReadAccess_3022(t *testing.T) {
 	dsn := testutil.SkipIfNoPostgres(t)
 	ctx := context.Background()
@@ -63,17 +64,18 @@ func TestBuildPGReport_ReadAccess_3022(t *testing.T) {
 	cfg := pgstreamrun.PGDoctorConfig{QueryDSN: u.String(), SlotName: slot, Publication: pub}
 
 	r := pgstreamrun.BuildPGReport(ctx, cfg)
-	// Every check that existed before this one passes for the role: that is
-	// how the issue's `server add` went through.
-	for _, c := range r.Checks {
-		if c.Name != check && c.Status == doctor.StatusFail {
-			t.Errorf("%s = fail (%s); the role of the issue fails nothing but the new check", c.Name, c.Detail)
-		}
-	}
 	c := findCheck(t, r, check)
 	const grant = `GRANT SELECT ON TABLE "public"."doctor_ra3022_customers" TO "doctor_ra3022_role";`
-	if c.Status != doctor.StatusFail || r.Failed != 1 {
-		t.Fatalf("%s = %s, report failed = %d; want fail and 1", check, c.Status, r.Failed)
+	// No failure at all: Start and the add read Failed, and `bintrail-pg
+	// doctor` exits with Err().
+	if c.Status != doctor.StatusWarn || r.Failed != 0 || r.Err() != nil {
+		for _, ck := range r.Checks {
+			t.Logf("%s = %s (%s)", ck.Name, ck.Status, ck.Detail)
+		}
+		t.Fatalf("%s = %s, report failed = %d, Err() = %v; want a warning and no failure", check, c.Status, r.Failed, r.Err())
+	}
+	if c.Optional {
+		t.Error("the warning is marked optional: a screen would fold it under tips")
 	}
 	if want := `The role "doctor_ra3022_role" cannot read 1 of the 1 table the copy reads: "public"."doctor_ra3022_customers" (no SELECT)`; c.Detail != want {
 		t.Errorf("detail:\n got %s\nwant %s", c.Detail, want)

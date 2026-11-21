@@ -29,17 +29,20 @@ func TestReadAccessResult(t *testing.T) {
 		got := readAccessResult(pgcapture.ReadAccess{Role: "dbtrail", Tables: 3, Unreadable: []pgcapture.UnreadableTable{
 			{Schema: "public", Table: "customers", NoSelect: true},
 		}})
+		// A warning: a failure here would keep capture from starting, and
+		// capture does not need what is missing.
 		want := doctor.CheckResult{
 			Name:   readAccessCheck,
-			Status: doctor.StatusFail,
+			Status: doctor.StatusWarn,
 			Detail: `The role "dbtrail" cannot read 1 of the 3 tables the copy reads: "public"."customers" (no SELECT)`,
-			Remediation: "Recording changes does not need these permissions. The first copy of the tables does: it reads each one as this role, " +
-				"and would stop with \"permission denied\" (42501). DBTrail grants nothing by itself. " +
-				"Run this on the database, as the tables' owner or a superuser:\n\n" +
+			Remediation: "Recording changes does not need these permissions, so this does not stop the server from being added or started. " +
+				"The first copy of the tables needs them: it reads each one as this role, and DBTrail refuses to start it until they are there. " +
+				"DBTrail grants nothing by itself. Run this on the database, as the tables' owner or a superuser:\n\n" +
 				"  GRANT SELECT ON TABLE \"public\".\"customers\" TO \"dbtrail\";\n",
 		}
-		// No kind: a screen then shows the whole fix, prose included.
-		if got.Name != want.Name || got.Status != want.Status || got.Detail != want.Detail || got.Remediation != want.Remediation ||
+		// No kind: a screen then shows the whole fix, prose included. Not
+		// optional either: it is not a tip, the copy will be refused.
+		if got.Optional || got.Name != want.Name || got.Status != want.Status || got.Detail != want.Detail || got.Remediation != want.Remediation ||
 			got.Kind != "" || len(got.Subjects) != 0 || len(got.Statements) != 0 {
 			t.Errorf("got  %+v\nwant %+v", got, want)
 		}

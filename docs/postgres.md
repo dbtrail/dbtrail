@@ -195,12 +195,14 @@ password copied from this page.
   row data over the WAL. **The first copy does.** It reads every table of the
   publication with `COPY (SELECT ...)`, as this role, so without `SELECT` it
   would stop with `permission denied for table ...` (`42501`). `server add`
-  checks it (**Read access to the published tables**) and refuses a role that
-  cannot read one of them, showing the `GRANT` to run; DBTrail grants nothing
-  by itself. A snapshot asks again before it starts, and is refused with the
-  same statement before the slot or any file is created: that covers a table
-  added to the publication later, which is read in full once, and a
-  permission taken away since the server was added.
+  checks it (**Read access to the published tables**) and warns about a role
+  that cannot read one of them, showing the `GRANT` to run; DBTrail grants
+  nothing by itself. It is a warning: the server is added and its changes are
+  recorded, since that needs no `SELECT`. The copy is what is refused. A
+  snapshot asks before it starts, and stops with the same statement before
+  the slot or any file is created, until the permission is there. That also
+  covers a table added to the publication later, which is read in full once,
+  and a permission taken away since the server was added.
 - `GRANT SELECT ON ALL TABLES IN SCHEMA` covers the tables that exist when it
   runs. For the ones created later, run once
   `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO dbtrail;`
@@ -352,9 +354,11 @@ bintrail-pg doctor --query-dsn "$PG" --slot bintrail_shop --publication bintrail
   retaining. The status progresses `reserved` (PASS) → `extended` / `unreserved`
   (**WARN** — retaining WAL and approaching the limit; doctor still exits 0) →
   `lost` (a loud **FAIL** with the re-baseline recovery path).
-- **Read access to the published tables** → FAIL if the role cannot read a
+- **Read access to the published tables** → WARN if the role cannot read a
   table the first copy reads: no `USAGE` on its schema, or `SELECT` neither on
-  the table nor on every column the copy reads. Ownership, a superuser, a role
+  the table nor on every column the copy reads. Doctor still exits 0, and
+  capture starts: recording changes does not need it. A snapshot is refused
+  until it is granted. Ownership, a superuser, a role
   inherited from another and `pg_read_all_data` count, as PostgreSQL itself
   counts them. The check prints one `GRANT` per table, each name quoted; past
   ten tables it prints `GRANT SELECT ON ALL TABLES IN SCHEMA` once per schema,
