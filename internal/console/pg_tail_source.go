@@ -101,6 +101,10 @@ type pgTailSource struct {
 	// started is, by tailKey, the tail Start built last, until its Fill
 	// begins (pg_tail_copy.go).
 	started map[string]pgStarted
+	// copyLate is, by tailKey, how many builds of the table's tail over one
+	// cut had their read of the copy cut short by the build's deadline
+	// (pg_tail_copy.go, pgCopyLateBuilds).
+	copyLate map[string]pgCopyLate
 	// copyBytes is how much text one read of a table's copy may bring into a
 	// tail being built: the tails' memory budget, 0 for no bound. Set before
 	// the source is used, never after.

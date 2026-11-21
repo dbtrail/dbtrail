@@ -390,7 +390,10 @@ func (x *pgTailSource) takeStarted(t views.BaselineTable) *reconstruct.PGTail {
 // once Fill has handed it its whole window; tail is the one Start built for
 // t (takeStarted), nil for none. A refusal when the cut cannot give one or
 // cannot be read; an error for a read cut short by the build's deadline,
-// which is tried again with the build.
+// which is tried again with the build, until pgCopyLateBuilds builds over
+// the same cut ran out of time in it: that one is a refusal, until the
+// table's next cut. A read cut short for any other reason (the keeper
+// closed, the build no longer wanted) is an error and counts nothing.
 func (x *pgTailSource) fillStartedFromCopy(ctx context.Context, t views.BaselineTable, tail *reconstruct.PGTail) (string, error) {
 	if tail == nil {
 		return "", nil
@@ -413,10 +416,17 @@ func (x *pgTailSource) fillStartedFromCopy(ctx context.Context, t views.Baseline
 		return fmt.Sprintf("the large values to read from the copy of %s for %d key(s) are more than the tails' memory budget (%d MiB, BINTRAIL_SQL_TAIL_MAX_BYTES)",
 			name, len(keys), x.copyBytes>>20), nil
 	case err != nil && ctx.Err() != nil:
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			if n := x.noteCopyLate(t); n >= pgCopyLateBuilds {
+				return fmt.Sprintf("reading the large values of %d key(s) from the copy of %s did not end before the build of its tail ran out of time, %d times over this snapshot; it is tried again at the table's next snapshot",
+					len(keys), name, n), nil
+			}
+		}
 		return "", fmt.Errorf("read the large values of %s from its copy: %w", name, err)
 	case err != nil:
 		return fmt.Sprintf("the large values of %s could not be read from its copy: %v", name, err), nil
 	}
+	x.forgetCopyLate(t)
 	given, why := tail.GiveCopyValues(keys, cols, rows)
 	if why != "" {
 		return why, nil
@@ -424,4 +434,54 @@ func (x *pgTailSource) fillStartedFromCopy(ctx context.Context, t views.Baseline
 	slog.Debug("Engine Routing: a table's large values were read from its copy while its tail was built", "table", name,
 		"keys", len(keys), "values", given, "took", time.Since(began))
 	return "", nil
+}
+
+// pgCopyLateBuilds is how many builds of a table's tail over one cut may have
+// their read of the copy cut short by the build's own deadline before the
+// cut is refused (#3076). A read the size of the table's file that does not
+// end in a build's time will not end in the next one's either: tried again
+// for ever, it costs a CPU or two and the table still has no tail. Refused,
+// the table answers from its snapshot, which is what a failed build gives it
+// anyway, and the keeper says so once; the refusal stands until the table's
+// next cut (tailKeeper.install), whose build tries again from no count. The
+// first time is not refused: the build may have been slow for a reason of
+// its own (a busy host, a slot it waited for), and is tried again as before.
+//
+// Only the build's deadline counts. A read cut short because the build was
+// no longer wanted, the keeper closed, or the context was cancelled for any
+// other reason is an error as before, and counts nothing.
+const pgCopyLateBuilds = 2
+
+// pgCopyLate is one table's count of builds cut short in their read of the
+// copy, and the cut it is of (tailCutOf): a count is of one cut only.
+type pgCopyLate struct {
+	cut string
+	n   int
+}
+
+// noteCopyLate counts one more build of t's tail over its cut whose read of
+// the copy ran out of the build's time, and returns the count. A count of
+// another cut is dropped first: one entry per table, so the memo is bounded
+// by the tables a statement reads.
+func (x *pgTailSource) noteCopyLate(t views.BaselineTable) int {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if x.copyLate == nil {
+		x.copyLate = map[string]pgCopyLate{}
+	}
+	key, cut := tailKey(t.Schema, t.Table), tailCutOf(t)
+	c := x.copyLate[key]
+	if c.cut != cut {
+		c = pgCopyLate{cut: cut}
+	}
+	c.n++
+	x.copyLate[key] = c
+	return c.n
+}
+
+// forgetCopyLate drops t's count: its read of the copy ended.
+func (x *pgTailSource) forgetCopyLate(t views.BaselineTable) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	delete(x.copyLate, tailKey(t.Schema, t.Table))
 }
