@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strings"
 	"testing"
 
@@ -23,21 +22,6 @@ import (
 // file. These tests pin what a first pass over every row used to give: a row
 // that cannot be written, wherever it comes in the file, leaves no file, no
 // .tmp and the keys still counted as changed.
-
-// dirNames lists dir, sorted.
-func dirNames(t testing.TB, dir string) []string {
-	t.Helper()
-	es, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	names := make([]string, len(es))
-	for i, e := range es {
-		names[i] = e.Name()
-	}
-	sort.Strings(names)
-	return names
-}
 
 // writeOnceKeys are the keys of the tails below, in the order a file holds
 // them.
