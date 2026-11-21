@@ -705,7 +705,11 @@ func TestDecode_RootWithoutKeyOverPartitionsBelowFull_KeyOnly(t *testing.T) {
 			assertPartialBefore(t, ev, cols, map[string]string{})
 		})
 	}
-	// With every partition at FULL the same root keeps its whole rows.
+	// With every partition at FULL TODAY the same root is key-only all the
+	// same. The answer is the catalog as it is now: a partition that was at
+	// DEFAULT when a change was written, and put at FULL before capture read
+	// it, sent that change with its own key alone, and a root with no key has
+	// nothing to tell such a row by.
 	d := pgcapture.NewDecoder(pkResolver(), event.Filters{}, nil,
 		pgcapture.WithPartitionsResolver(func(uint32, string, string) (pgcapture.Partitions, error) {
 			return pgcapture.Partitions{Known: true, Partitioned: true}, nil
@@ -713,9 +717,19 @@ func TestDecode_RootWithoutKeyOverPartitionsBelowFull_KeyOnly(t *testing.T) {
 	mustDecode(t, d, relMsgRI(1, "public", "nokey", 'f', nil, cols...))
 	mustDecode(t, d, beginMsg())
 	ev, _ := mustDecode(t, d, &pglogrepl.DeleteMessage{RelationID: 1,
+		OldTupleType: pglogrepl.DeleteMessageTupleTypeOld, OldTuple: tuple(textCol("1"), nullCol(), nullCol())})
+	assertPartialBefore(t, ev, cols, map[string]string{})
+	// A root WITH a key over the same partitions keeps its whole rows.
+	d = pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil,
+		pgcapture.WithPartitionsResolver(func(uint32, string, string) (pgcapture.Partitions, error) {
+			return pgcapture.Partitions{Known: true, Partitioned: true}, nil
+		}))
+	mustDecode(t, d, relMsgRI(1, "public", "withkey", 'f', nil, cols...))
+	mustDecode(t, d, beginMsg())
+	ev, _ = mustDecode(t, d, &pglogrepl.DeleteMessage{RelationID: 1,
 		OldTupleType: pglogrepl.DeleteMessageTupleTypeOld, OldTuple: tuple(textCol("7"), textCol("x"), textCol("BIG"))})
 	if len(event.NotCapturedColumns(ev.RowBefore)) != 0 || ev.RowBefore["big"] != "BIG" {
-		t.Errorf("a root without a key over partitions all at FULL: a whole row is whole, got %v", ev.RowBefore)
+		t.Errorf("a root with a key over partitions all at FULL: a whole row is whole, got %v", ev.RowBefore)
 	}
 }
 

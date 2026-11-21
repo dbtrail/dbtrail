@@ -285,13 +285,13 @@ PostgreSQL did not send a value. A table that is not partitioned and is at
   and look whole. While the catalog shows such a partition, every earlier row
   of the table is stored as key-only, and undo is refused for all of its
   partitions.
-- A parent with **no primary key** over a partition that has a key of its own
-  and is not at `FULL`: the same, for the same reason (the parent has no key to
-  tell a key-only row by). Every earlier row of the table is stored as
-  key-only, and undo is refused for all of its partitions, the ones at `FULL`
-  too. Put every partition at `FULL` to get undo back. `doctor` reports such a
-  parent as a table with no replica identity, although its partitions accept
-  `UPDATE` and `DELETE`.
+- A parent with **no primary key**: the same, for the same reason (the parent
+  has no key to tell a key-only row by), whatever its partitions are set to.
+  Every earlier row of the table is stored as key-only, and undo is refused for
+  all of its partitions, the ones at `FULL` too. Give the parent a primary key
+  to get undo back. `doctor` reports a parent at `DEFAULT` without one as a
+  table with no replica identity, although its partitions accept `UPDATE` and
+  `DELETE` when they have a key of their own.
 - A partition with a replica identity of its own that leaves the primary key
   **out**: the whole table is skipped, as a table with such an identity is
   (below), whatever the parent's own setting (`FULL`, `DEFAULT` or

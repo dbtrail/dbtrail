@@ -292,13 +292,18 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 		return queryDeferrableKey(qctx, queryConn, relationID)
 	}
 	// What the catalog says of a relation's partitions, asked at every
-	// description of a relation; same conn + bounding. A failed or timed-out
+	// description of a relation, bounded the same way. A failed or timed-out
 	// read does not stop the stream (the decoder then stores every old row of
-	// the relation with its key only, and asks again after a while).
+	// the relation with its key only, and asks again after a while). On a
+	// connection of its own, opened again when it is found closed: a read that
+	// times out closes the connection it ran on, which would end the stream
+	// at the next primary-key lookup and leave the retry nothing to run on.
+	partsReader := &partitionsReader{dsn: c.cfg.QueryDSN}
+	defer partsReader.close()
 	partitions := func(relationID uint32, schema, table string) (Partitions, error) {
 		qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		return queryPartitions(qctx, queryConn, relationID)
+		return partsReader.read(qctx, relationID)
 	}
 	opts := []DecoderOption{WithAttrResolver(attrResolver), WithSkipCounters(c.cfg.Skips),
 		WithDeferrableResolver(deferrable), WithPartitionsResolver(partitions)}

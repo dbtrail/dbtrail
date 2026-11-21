@@ -135,3 +135,35 @@ func TestQueryPartitions_Integration(t *testing.T) {
 		})
 	}
 }
+
+// The read of the partitions runs on a connection of its own, and a read cut
+// by its deadline closes it (pgx). The next read opens another: the retry the
+// decoder makes after a failed read has something to run on.
+func TestPartitionsReader_ReopensAClosedConnection_Integration(t *testing.T) {
+	dsn := testutil.SkipIfNoPostgres(t)
+	ctx := context.Background()
+	r := &partitionsReader{dsn: dsn}
+	t.Cleanup(r.close)
+	const pgClass = 1259 // pg_class itself: a relation every server holds
+	if got, err := r.read(ctx, pgClass); err != nil || !got.Known || got.Partitioned {
+		t.Fatalf("first read: %+v, %v", got, err)
+	}
+	first := r.conn
+	// A deadline already past: the read fails, and pgx closes the connection.
+	dead, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := r.read(dead, pgClass); err == nil {
+		t.Fatal("a read under a cancelled context must fail")
+	}
+	t.Logf("after the failed read the connection is closed: %v", first.IsClosed())
+	if !first.IsClosed() {
+		_ = first.Close(ctx) // whatever pgx did, the case under test is a closed connection
+	}
+	got, err := r.read(ctx, pgClass)
+	if err != nil || !got.Known {
+		t.Fatalf("the read after a closed connection: %+v, %v; want it answered on a new connection", got, err)
+	}
+	if r.conn == first {
+		t.Error("the reader kept the closed connection")
+	}
+}

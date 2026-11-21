@@ -197,6 +197,34 @@ func queryPartitions(ctx context.Context, conn *pgx.Conn, relationID uint32) (Pa
 	return p, nil
 }
 
+// partitionsReader runs queryPartitions on a connection of its own, opened at
+// the first read and again whenever it is found closed (pgx closes a
+// connection whose query was cut by its deadline). Used from the decode loop
+// alone: not safe for concurrent use.
+type partitionsReader struct {
+	dsn  string
+	conn *pgx.Conn
+}
+
+func (r *partitionsReader) read(ctx context.Context, relationID uint32) (Partitions, error) {
+	if r.conn == nil || r.conn.IsClosed() {
+		conn, err := pgx.Connect(ctx, r.dsn)
+		if err != nil {
+			return Partitions{}, fmt.Errorf("pgcapture: opening the connection that reads the partitions of relation OID %d: %w", relationID, err)
+		}
+		r.conn = conn
+	}
+	return queryPartitions(ctx, r.conn, relationID)
+}
+
+func (r *partitionsReader) close() {
+	if r.conn != nil && !r.conn.IsClosed() {
+		cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = r.conn.Close(cctx)
+	}
+}
+
 // DeferrableResolver returns the name of a relation's primary-key constraint
 // when that key is declared DEFERRABLE, and "" when the table has no primary
 // key or a key that is not deferrable. The capturer implements it with a

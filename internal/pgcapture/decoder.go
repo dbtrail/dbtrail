@@ -600,9 +600,9 @@ func (d *Decoder) cacheRelation(m *pglogrepl.RelationMessage) error {
 //     A row from a partition at FULL is whole and can be undone, one from a
 //     partition at DEFAULT is key-only, whatever the other partitions are;
 //   - a root at FULL with a partition whose identity holds a column outside
-//     the root's key (Partitions.Wide), or with no primary key over a
-//     partition below FULL: a key-only row holds a value outside the key and
-//     looks whole, so every old row is stored in part;
+//     the root's key (Partitions.Wide), or with no primary key at all
+//     (whatever its partitions are today): a key-only row holds a value
+//     outside the key and looks whole, so every old row is stored in part;
 //   - the catalog has no row for the relation (dropped since), or the read
 //     failed or timed out: not known, so every old row is stored in part.
 //     Capture goes on. A failed read is tried again after a while.
@@ -653,7 +653,11 @@ func (d *Decoder) judgePartitions(rel *relationInfo) {
 	case !parts.Partitioned || !full:
 		return
 	}
-	if parts.Wide > 0 || (len(rel.pkCols) == 0 && parts.BelowFull > 0) {
+	// A root with no primary key has nothing to tell a key-only row by, and
+	// the catalog read is today's: a partition that was below FULL when a
+	// change was written can be at FULL when capture reads it. So such a root
+	// is key-only whatever its partitions are now.
+	if parts.Wide > 0 || len(rel.pkCols) == 0 {
 		rel.partial = true
 	} else {
 		rel.byShape = true
@@ -662,7 +666,7 @@ func (d *Decoder) judgePartitions(rel *relationInfo) {
 		consequence := "undo refuses the UPDATE and DELETE made in a partition that is not at FULL. Run ALTER TABLE <partition> REPLICA IDENTITY FULL on each to make its later changes undoable"
 		if rel.partial {
 			// Every partition, the ones at FULL too: said as it is.
-			consequence = "undo refuses the UPDATE and DELETE of EVERY partition, the ones at FULL too: a partition's own replica identity holds a column outside the table's primary key (or the table has none), so a row sent with its key only cannot be told from a whole row, and every earlier row is stored with its key only. Run ALTER TABLE <partition> REPLICA IDENTITY FULL on each partition that is not at FULL to make the table's later changes undoable"
+			consequence = "undo refuses the UPDATE and DELETE of EVERY partition, the ones at FULL too: a partition's own replica identity holds a column outside the table's primary key (or the table has none), so a row sent with its key only cannot be told from a whole row, and every earlier row is stored with its key only. With a primary key on the table: run ALTER TABLE <partition> REPLICA IDENTITY FULL on each partition that is not at FULL to make the table's later changes undoable. Without one: give the table a primary key"
 		}
 		d.logger.Warn("pgcapture: partitioned table with partitions without undo: it is published through its root, which is at REPLICA IDENTITY FULL, and some of its partitions are not (REPLICA IDENTITY is set per partition; ALTER TABLE on the parent does not reach them). The changes of every partition are captured and everything else works on them; "+consequence,
 			"table", name,
