@@ -801,7 +801,8 @@ variant: [streaming.md](streaming.md#the-source-mysql-user).
 - A per-entry **capture lock** (`GET_LOCK`) on the index server makes a
   second daemon wait instead of double-streaming the same entry: it shows
   **WAITING FOR OTHER DBTRAIL** and captures once the first one stops. The
-  holder checks the lock every 5 seconds and stops writing without it
+  holder checks the lock every second and stops writing without it; a slow
+  answer from the index is not a lost lock, 10 seconds with no answer is
   ([deployment.md](deployment.md#when-the-host-dies)).
 - **Stream states**: `PENDING` covers launch through the stream's first
   checkpoint (connecting, snapshotting, finding the start position) — the
