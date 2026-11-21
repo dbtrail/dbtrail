@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
+	"time"
 )
 
 // hiddenPathWord stands in an error a client reads where the engine named a
@@ -69,6 +71,9 @@ func replaceWholePath(msg, root string) string {
 		} else if b.Len() > 0 {
 			before = b.String()[b.Len()-1]
 		}
+		// Right after a folder already hidden, the match is a folder inside
+		// it (/tmp/tmp, /data/copy/tmp), not a folder of its own.
+		afterHidden := strings.HasSuffix(b.String()+rest[:i], hiddenPathWord)
 		after := byte(0)
 		if end < len(rest) {
 			after = rest[end]
@@ -76,7 +81,7 @@ func replaceWholePath(msg, root string) string {
 		// A URL keeps its path: after "scheme://host" the folder follows a
 		// letter of the host or a slash, both of which can be part of a
 		// path, so it is not taken for a folder of the host.
-		if !pathByte(before) && (after == 0 || after == '/' || !pathByte(after)) {
+		if !pathByte(before) && !afterHidden && (after == 0 || after == '/' || !pathByte(after)) {
 			b.WriteString(rest[:i])
 			b.WriteString(hiddenPathWord)
 		} else {
@@ -113,23 +118,39 @@ func (r *Runner) hostRoots(job Job, spill spillSpec, spoolDir string) []string {
 
 // hideHostPathsInError rewrites the two errors whose text a client reads
 // from the engine, a refusal and an engine error, with the host's folders
-// replaced. The original goes to the log at debug level, for the operator.
-// Every other error is returned as is: the ports replace a WorkerError's
-// text before a client sees it, and the rest are this package's own words.
+// replaced. The original text goes to the log for the operator: at info
+// level once a minute, at debug level the rest, so a client that sends such
+// statements in a loop does not fill the log. Every other error is returned
+// as is: the ports replace a WorkerError's text before a client sees it, and
+// the rest are this package's own words.
 func hideHostPathsInError(err error, roots []string) error {
 	var re *RefusedError
 	var qe *QueryError
 	switch {
 	case errors.As(err, &re):
 		if hidden := hideHostPaths(re.Reason, roots); hidden != re.Reason {
-			slog.Debug("sql on the copy: a refusal named a folder of the host; the client reads it without", "reason", re.Reason)
+			logHiddenPath("a refusal", re.Reason)
 			return &RefusedError{Reason: hidden}
 		}
 	case errors.As(err, &qe):
 		if hidden := hideHostPaths(qe.Message, roots); hidden != qe.Message {
-			slog.Debug("sql on the copy: an engine error named a folder of the host; the client reads it without", "error", qe.Message)
+			logHiddenPath("an engine error", qe.Message)
 			return &QueryError{Message: hidden}
 		}
 	}
 	return err
+}
+
+// hiddenPathLoggedAt is when an original text was last logged at info
+// level, in Unix nanoseconds.
+var hiddenPathLoggedAt atomic.Int64
+
+func logHiddenPath(what, original string) {
+	now := time.Now().UnixNano()
+	last := hiddenPathLoggedAt.Load()
+	if now-last >= int64(time.Minute) && hiddenPathLoggedAt.CompareAndSwap(last, now) {
+		slog.Info("sql on the copy: "+what+" named a folder of the host; the client read it with the folder hidden (more of these this minute are logged at debug level)", "text", original)
+		return
+	}
+	slog.Debug("sql on the copy: "+what+" named a folder of the host; the client read it with the folder hidden", "text", original)
 }

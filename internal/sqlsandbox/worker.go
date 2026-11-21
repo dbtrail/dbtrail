@@ -308,7 +308,10 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 	// A settings name qualified with a schema of the copy is the copy's
 	// only if that schema has it, which is known now that the views are in
 	// (#3096); the others were refused with the parse.
-	if reason := copyOwnSettingsName(ctx, conn, settingsCatalogRefs(stmt)); reason != "" {
+	switch reason, err := copyOwnSettingsName(ctx, conn, settingsCatalogRefs(stmt)); {
+	case err != nil:
+		return sessionErr("%v", err)
+	case reason != "":
 		return wireResult{Error: &wireError{Kind: errRefused, Message: reason}}
 	}
 	// The port's USE, before the lock like every other SET. A schema the
@@ -861,21 +864,59 @@ func refusedSettingRead(node any) string {
 // viewTextCatalogs.
 var viewTextFunctions = map[string]bool{"pg_get_viewdef": true}
 
-// settingsCatalogs are the engine's catalog views over its settings, refused
-// on every server (#3096): pg_settings is a view over duckdb_settings(), and
-// a table reference does not show the function it reads. A reference of that
-// name is refused however it is qualified or spelled, with one exception: a
-// schema of the copy that really holds a relation of that name, named with
-// that schema (copyOwnSettingsName). The engine resolves a name through more
-// catalogs and schemas than a spelling shows, so what is refused is the name,
-// not one way of writing it.
-var settingsCatalogs = map[string]bool{"pg_settings": true}
+// refusedEngineViews are the engine's own views over a refused function,
+// refused on every server (#3096): pg_settings reads duckdb_settings(),
+// duckdb_logs reads duckdb_logs(), pg_prepared_statements reads
+// duckdb_prepared_statements(), and a table reference does not show the
+// function it reads (TestEngineViewsOverRefusedFunctionsAreRefused lists
+// them all). A reference of one of these names is refused however it is
+// qualified or spelled, with one exception: a schema of the copy that really
+// holds a relation of that name, named with that schema
+// (copyOwnSettingsName). The engine resolves a name through more catalogs
+// and schemas than a spelling shows, so what is refused is the name, not one
+// way of writing it.
+var refusedEngineViews = map[string]bool{"pg_settings": true, "duckdb_logs": true, "pg_prepared_statements": true}
+
+// refusedShowNames are the SHOW forms the engine answers from a refused
+// function (SHOW VARIABLES reads duckdb_variables()). The parse shows them as
+// a SHOW of that name, not as a call.
+var refusedShowNames = map[string]bool{"variables": true}
+
+// refusedShow returns the first SHOW (or DESCRIBE, SUMMARIZE) in the
+// statement tree of one of refusedShowNames, or "".
+func refusedShow(node any) string {
+	switch x := node.(type) {
+	case map[string]any:
+		if t, _ := x["type"].(string); t == "SHOW_REF" {
+			if name, _ := x["table_name"].(string); refusedShowNames[strings.ToLower(name)] {
+				return name
+			}
+		}
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if r := refusedShow(x[k]); r != "" {
+				return r
+			}
+		}
+	case []any:
+		for _, e := range x {
+			if r := refusedShow(e); r != "" {
+				return r
+			}
+		}
+	}
+	return ""
+}
 
 // engineSchemas are the schemas of the engine's own catalog views: a
 // settings name in one of them is never the copy's.
 var engineSchemas = map[string]bool{"pg_catalog": true, "information_schema": true}
 
-// settingsRef is a table reference whose name is one of settingsCatalogs.
+// settingsRef is a table reference whose name is one of refusedEngineViews.
 type settingsRef struct{ catalog, schema, name string }
 
 // mayBeTheCopys says whether the reference could name a relation of the
@@ -922,7 +963,7 @@ func refusedFunctionCall(node any, names map[string]bool) string {
 }
 
 // settingsCatalogRefs returns every table reference in the statement tree
-// whose name is one of settingsCatalogs, however it is qualified.
+// whose name is one of refusedEngineViews, however it is qualified.
 func settingsCatalogRefs(node any) []settingsRef {
 	var out []settingsRef
 	var walk func(any)
@@ -931,7 +972,7 @@ func settingsCatalogRefs(node any) []settingsRef {
 		case map[string]any:
 			if x["type"] == "BASE_TABLE" {
 				name, _ := x["table_name"].(string)
-				if settingsCatalogs[strings.ToLower(name)] {
+				if refusedEngineViews[strings.ToLower(name)] {
 					schema, _ := x["schema_name"].(string)
 					catalog, _ := x["catalog_name"].(string)
 					out = append(out, settingsRef{catalog: catalog, schema: schema, name: name})
@@ -955,28 +996,33 @@ func settingsCatalogRefs(node any) []settingsRef {
 	return out
 }
 
-// settingsRefusal is the reason a statement naming the engine's settings
-// view is refused.
+// settingsRefusal is the reason a statement naming one of the engine's
+// refusedEngineViews is refused.
 func settingsRefusal(name string) string {
-	return fmt.Sprintf("%s is not allowed here: the engine's settings are not shown on the copy", name)
+	return fmt.Sprintf("%s is not allowed here: it shows the engine's own settings or state, which the copy does not show; "+
+		"a table of the copy with that name is read when named with its schema (schema.%s)", name, name)
 }
 
 // copyOwnSettingsName refuses, once the copy's views are in, a reference
 // that mayBeTheCopys but names no relation the copy really has: then the
-// engine would resolve it to its own settings view. "" when every one is the
-// copy's.
-func copyOwnSettingsName(ctx context.Context, conn *sql.Conn, refs []settingsRef) string {
+// engine would resolve it to its own view. "" when every one is the copy's.
+// A check that cannot run is an error, not a refusal: the statement does not
+// run either way, and the reason is the real one.
+func copyOwnSettingsName(ctx context.Context, conn *sql.Conn, refs []settingsRef) (string, error) {
 	for _, r := range refs {
 		var n int
 		err := conn.QueryRowContext(ctx, `SELECT count(*) FROM (
 			SELECT schema_name, view_name AS name FROM duckdb_views() WHERE NOT internal AND database_name = 'memory'
 			UNION ALL SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = 'memory')
 			WHERE lower(schema_name) = lower(?) AND lower(name) = lower(?)`, r.schema, r.name).Scan(&n)
-		if err != nil || n == 0 {
-			return settingsRefusal(r.name)
+		if err != nil {
+			return "", fmt.Errorf("could not check whether %s.%s is a table of the copy: %w", r.schema, r.name, err)
+		}
+		if n == 0 {
+			return settingsRefusal(r.name), nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // fileReaderFunctions are the allowed table functions that read a file of the
@@ -1178,6 +1224,9 @@ func parseStatement(ctx context.Context, conn *sql.Conn, text string, noFileRead
 		if !ref.mayBeTheCopys() {
 			return nil, settingsRefusal(ref.name)
 		}
+	}
+	if name := refusedShow(parsed.Statements[0]); name != "" {
+		return nil, fmt.Sprintf("SHOW %s is not allowed here: the session's variables are not shown on the copy", name)
 	}
 	return parsed.Statements[0], ""
 }

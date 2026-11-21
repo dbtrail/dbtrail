@@ -85,6 +85,16 @@ func TestHostPaths_introspectionRefused(t *testing.T) {
 		"not listed: optimizers":       "SELECT * FROM duckdb_optimizers()",
 		"not listed: approx db count":  "SELECT * FROM duckdb_approx_database_count()",
 		"not listed: table sample":     "SELECT * FROM duckdb_table_sample('shop.orders')",
+		"show variables":               "SHOW VARIABLES",
+		"show variables lower":         "show variables",
+		"describe variables":           "DESCRIBE variables",
+		"show variables in a subquery": "SELECT * FROM (SHOW VARIABLES)",
+		"summarize variables":          "SUMMARIZE variables",
+		"logs view":                    "SELECT * FROM duckdb_logs",
+		"logs view qualified":          "SELECT * FROM system.main.duckdb_logs",
+		"logs view main":               "SELECT * FROM main.duckdb_logs",
+		"prepared statements view":     "SELECT * FROM pg_catalog.pg_prepared_statements",
+		"prepared statements bare":     "SELECT * FROM pg_prepared_statements",
 	}
 	for name, q := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -268,6 +278,9 @@ func TestHideHostPaths(t *testing.T) {
 		{`allowed: [/data/copy/, /tmp/bintrail-sql-spill-1/]`, `allowed: [` + h + `/, ` + h + `/bintrail-sql-spill-1/]`},
 		{"at /data/copy", "at " + h},
 		{"two /tmp/a and /tmp/b", "two " + h + "/a and " + h + "/b"},
+		// A folder named like the known one, inside it: replaced once.
+		{"at /tmp/tmp/x", "at " + h + "/tmp/x"},
+		{"at /data/copy/data/copy", "at " + h + "/data/copy"},
 		// Not a known folder: a longer name, a folder inside another one, a
 		// URL, a date, a division.
 		{"/tmpfiles/x", "/tmpfiles/x"},
@@ -504,6 +517,45 @@ func TestPathSettingsAreAllListed(t *testing.T) {
 		if !known[n] {
 			t.Errorf("pathSettings lists %q, which this engine does not have", n)
 		}
+	}
+}
+
+// Every view the engine itself defines that reads a refused function is
+// refused too: a view reads its function at run time, so a statement names
+// only the view. A view a new engine version adds over one of them fails
+// here until it is listed.
+func TestEngineViewsOverRefusedFunctionsAreRefused(t *testing.T) {
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// current_setting is refused only for some settings, so a view that calls
+	// it fails the test below until it is reviewed and listed.
+	refused := append(append([]string{}, knownRefusedTableFunctions...), "getvariable", "current_setting")
+	rows, err := db.Query(`SELECT schema_name, view_name, lower(sql) FROM duckdb_views() WHERE internal ORDER BY 1, 2`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var schema, view, text string
+		if err := rows.Scan(&schema, &view, &text); err != nil {
+			t.Fatal(err)
+		}
+		n++
+		for _, fn := range refused {
+			if regexp.MustCompile(`\b`+regexp.QuoteMeta(fn)+`\s*\(`).MatchString(text) && !refusedEngineViews[strings.ToLower(view)] {
+				t.Errorf("the engine's view %s.%s reads %s, refused on the copy, and is not in refusedEngineViews", schema, view, fn)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 {
+		t.Fatal("the engine listed no views of its own: the check above checked nothing")
 	}
 }
 
