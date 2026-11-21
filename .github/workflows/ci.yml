@@ -177,6 +177,10 @@ jobs:
               # What runs in which shard, and how one package is split by
               # test name: a change to it must run the shards.
               - 'scripts/mysql-integration-shard.sh'
+              # Which of the console's tests need a PostgreSQL, and the
+              # check that each ran: a change to it must run both jobs that
+              # call it.
+              - 'scripts/pg-console-tests.sh'
               - '!internal/console/assets_*_test.go'
             console:
               - 'internal/console/**'
@@ -210,6 +214,10 @@ jobs:
               - 'scripts/pull-test-images.sh'
               - '.github/actions/**'
               - 'scripts/mysql-integration-shard.sh'
+              # Which of the console's tests need a PostgreSQL, and the
+              # check that each ran: a change to it must run both jobs that
+              # call it.
+              - 'scripts/pg-console-tests.sh'
               - '!internal/console/**'
               - '!consoleapp/**'
               - '!cmd/bintrail-console/**'
