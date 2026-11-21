@@ -35,6 +35,11 @@ TimeoutStopSec=30
 # Hands the control groups below this unit to the service, which gives each
 # statement on the copy a memory ceiling of its own (see bintrail-router).
 Delegate=yes
+# A lower CPU priority than the console service, which runs capture, the
+# value bintrail-router has (#2531): capture and the snapshot update are
+# served first when they and the statements on the copy want the same cores.
+# It only matters while the machine's cores are all busy.
+CPUWeight=25
 # Unless told otherwise: four statements at once, two threads each
 # (BINTRAIL_PG_ROUTER_WORKERS and BINTRAIL_PG_ROUTER_THREADS in the settings
 # file). For a ceiling on the whole service, `systemctl edit

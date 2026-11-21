@@ -838,6 +838,11 @@ services:
   # ceilings of its own. Each statement may take the memory saved in the web
   # interface (SQL_MEMORY in .env wins; 2GB unless set).
   #
+  # Cores: like the router above, it runs at a lower CPU priority than capture
+  # (cpu_shares below, PG_ROUTER_CPU_SHARES in .env), so capture and the
+  # snapshot update are served first when they and the statements want the
+  # same cores. PG_ROUTER_CPUS sets a hard ceiling instead.
+  #
   # Without this service nothing serves the PostgreSQL port: the web interface
   # can turn it on and nothing listens.
   pg-router:
@@ -922,6 +927,16 @@ services:
     # security_opt:
     #   - writable-cgroups=true
     cpus: ${PG_ROUTER_CPUS:-0}
+    # A lower CPU priority than capture, the router's own value above (#2531):
+    # the statements on the copy use the cores while capture and the snapshot
+    # update are quiet, and the kernel serves those two first when they need
+    # them. It only matters while the machine's cores are all busy. Unlike the
+    # router, this service does not read it: how many statements run at once
+    # and their threads are PG_ROUTER_WORKERS and PG_ROUTER_THREADS, whatever
+    # the priority. PG_ROUTER_CPU_SHARES=1024 in .env is the default priority,
+    # as before. Leave the other services' priority alone: lowering capture's
+    # too takes its protection away.
+    cpu_shares: ${PG_ROUTER_CPU_SHARES:-256}
     volumes:
       - ./dbtrail-config:/etc/dbtrail-config   # the option file (#2671), see the bintrail service
       - bintrail-state:/var/lib/bintrail:ro
