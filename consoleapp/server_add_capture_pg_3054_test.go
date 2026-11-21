@@ -12,7 +12,7 @@ import (
 // may forward with the user DBTrail connects with. Whole outputs, against
 // DBTrail's real web handlers.
 
-const pgCaptureQuestion = "\nThe copy answers this database's statements on the PostgreSQL port. With your yes, the port may also send to your PostgreSQL, read-only, a SELECT whose every table is a table of the copy, as the user DBTrail already connects with (dbtrail), when the copy does not answer it; anything else is refused and not sent. To let the port read more, set a forwarding user of its own instead:  bintrail-console server forward-user <server> -u <user> -p\n"
+const pgCaptureQuestion = "\nThe copy answers this database's statements on the PostgreSQL port. With your yes, the port may also send to your PostgreSQL, read-only, a SELECT whose every table is a table of the copy, as the user DBTrail already connects with (dbtrail), when the copy does not answer it; anything else is refused and not sent. To let the port read more, set a forwarding user of its own instead:  bintrail-console server forward-user shop -u <user> -p\n"
 
 const pgCapturePrompt = "Let the port forward as dbtrail? (yes/no)"
 

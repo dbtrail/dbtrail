@@ -95,8 +95,8 @@ func resolveCapture(in *addInput, f addFlags, file mycnf.Client, ask asker, canA
 }
 
 // captureQuestion is what `server add` says before it asks.
-func captureQuestion(user string) string {
-	return fmt.Sprintf("\nThe copy answers this database's statements on the PostgreSQL port. With your yes, the port may also send to your PostgreSQL, read-only, a SELECT whose every table is a table of the copy, as the user DBTrail already connects with (%s), when the copy does not answer it; anything else is refused and not sent. To let the port read more, set a forwarding user of its own instead:  bintrail-console server forward-user <server> -u <user> -p\n", user)
+func captureQuestion(user, name string) string {
+	return fmt.Sprintf("\nThe copy answers this database's statements on the PostgreSQL port. With your yes, the port may also send to your PostgreSQL, read-only, a SELECT whose every table is a table of the copy, as the user DBTrail already connects with (%s), when the copy does not answer it; anything else is refused and not sent. To let the port read more, set a forwarding user of its own instead:  bintrail-console server forward-user %s -u <user> -p\n", user, mysqlLineUser(name))
 }
 
 // errAddedNoCapture: the database was added and is recording, and the yes
@@ -121,7 +121,7 @@ func addCaptureAnswerPG(ctx context.Context, c *ctlClient, in addInput, res ctlC
 	case captureYes:
 		on = true
 	case captureAsk:
-		fmt.Fprint(out, captureQuestion(in.User))
+		fmt.Fprint(out, captureQuestion(in.User, res.Name))
 		for tries := 0; ; tries++ {
 			answer, err := in.ask.Line(fmt.Sprintf("Let the port forward as %s? (yes/no)", in.User), "yes")
 			if err != nil {
