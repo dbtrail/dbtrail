@@ -65,11 +65,12 @@ type Config struct {
 	// change to a table before an LSN. Both nil = inference off.
 	LoadKnownShapes func(fromLSN uint64) (KnownState, error)
 	LastChange      func(schema, table string, beforeLSN uint64) (lsn uint64, at time.Time, ok bool, err error)
-	// Skips is the capture-skip ledger: each change of a table that is not at
-	// REPLICA IDENTITY FULL is dropped and recorded there under
-	// SkipReplicaIdentityNotFull, and each captured row breaks its run of
-	// consecutive skips. The consumer persists it with its checkpoints. nil
-	// records nothing (the changes are still dropped, with the warning).
+	// Skips is the capture-skip ledger: each change of a table capture does not
+	// take (a primary key declared DEFERRABLE, a replica identity that does not
+	// hold the primary key) is dropped and recorded there under its reason, and
+	// each captured row breaks its run of consecutive skips. The consumer
+	// persists it with its checkpoints. nil records nothing (the changes are
+	// still dropped, with the warning).
 	Skips *parser.SkipCounters
 }
 
@@ -168,27 +169,47 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 	if err := validatePublication(startupCtx, queryConn, c.cfg.Publication, c.cfg.Filters); err != nil {
 		return err
 	}
-	// Before the replica identity gate, whose message tells an operator to
-	// set REPLICA IDENTITY FULL: on PostgreSQL 18 that is what stops the
+	// Before the replica identity warning, whose message tells an operator how
+	// to set REPLICA IDENTITY FULL: on PostgreSQL 18 that is what stops the
 	// source's application from writing to a table with a generated column.
 	if err := CheckGeneratedColumns(startupCtx, queryConn, c.cfg.Publication); err != nil {
 		return err
 	}
+	// The publication as it is now. The decoder asks again, table by table,
+	// each time PostgreSQL describes one (WithDeferrableResolver), and there a
+	// table with a deferrable key is skipped while the others go on.
 	if err := CheckDeferrableKeys(startupCtx, queryConn, c.cfg.Publication); err != nil {
 		return err
 	}
-	// A table below REPLICA IDENTITY FULL no longer stops capture: the decoder
-	// skips its changes (and records each one), so one such table does not take
-	// every other table down with it. Said here once, at start, for the tables
-	// already in the publication; the decoder says it again for each description
-	// of the table it receives.
-	notFull, err := validateReplicaIdentity(startupCtx, queryConn, c.cfg.Publication, c.cfg.Filters)
+	// A table below REPLICA IDENTITY FULL is captured: PostgreSQL sends at most
+	// the key of the row an UPDATE or a DELETE changed, and only undo needs the
+	// rest. Said here once, at start, for the tables already in the
+	// publication; the decoder says it again for each description of the table
+	// it receives, and is where a table whose identity leaves the primary key
+	// out is skipped.
+	belowFull, err := validateReplicaIdentity(startupCtx, queryConn, c.cfg.Publication, c.cfg.Filters)
 	if err != nil {
 		return err
 	}
-	if len(notFull) > 0 {
-		c.logger.Warn("pgcapture: published table(s) not at REPLICA IDENTITY FULL; their changes are NOT captured (each one is counted as skipped in capture health) until each is altered with ALTER TABLE <t> REPLICA IDENTITY FULL, the other tables are captured normally",
-			"tables", strings.Join(notFull, ", "))
+	withoutUndo, missesKey, noIdentity := SplitTableIdentities(belowFull)
+	names := func(ts []TableIdentity) string {
+		out := make([]string, len(ts))
+		for i, t := range ts {
+			out[i] = t.Name()
+		}
+		return strings.Join(out, ", ")
+	}
+	if len(withoutUndo) > 0 {
+		c.logger.Warn("pgcapture: "+countTables(len(withoutUndo))+" without undo: not at REPLICA IDENTITY FULL. Their changes are captured and everything else works on them; undo refuses their UPDATE and DELETE. To make a table's later changes undoable run ALTER TABLE <t> REPLICA IDENTITY FULL (the table then writes more WAL)",
+			"tables", names(withoutUndo))
+	}
+	if len(missesKey) > 0 {
+		c.logger.Warn("pgcapture: "+countTables(len(missesKey))+" whose replica identity does not hold the primary key; their changes are NOT captured (each one is counted as skipped in capture health) until it does, the other tables are captured normally. Run ALTER TABLE <t> REPLICA IDENTITY FULL (or DEFAULT, when the identity is an index that leaves the key out)",
+			"tables", names(missesKey))
+	}
+	if len(noIdentity) > 0 {
+		c.logger.Warn("pgcapture: "+countTables(len(noIdentity))+" with no replica identity (NOTHING, or DEFAULT without a primary key): PostgreSQL itself refuses UPDATE and DELETE on them while they are published, so only their INSERT and TRUNCATE are captured. Give each a primary key, or run ALTER TABLE <t> REPLICA IDENTITY FULL",
+			"tables", names(noIdentity))
 	}
 
 	// Non-fatal capture-coverage warnings (#555 UNLOGGED, #556 FK cascade child): tables
@@ -248,7 +269,23 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 		defer cancel()
 		return queryColumnAttrs(qctx, queryConn, relationID)
 	}
-	opts := []DecoderOption{WithAttrResolver(attrResolver), WithSkipCounters(c.cfg.Skips)}
+	// Catalog-backed check of a deferrable primary key, asked at every
+	// description of a relation; same conn + bounding.
+	deferrable := func(relationID uint32, schema, table string) (string, error) {
+		qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		return queryDeferrableKey(qctx, queryConn, relationID)
+	}
+	// Catalog-backed count of a relation's partitions below REPLICA IDENTITY
+	// FULL, asked at every description of a relation at FULL; same conn +
+	// bounding.
+	partitionsBelowFull := func(relationID uint32, schema, table string) (Partitions, error) {
+		qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		return queryPartitionsBelowFull(qctx, queryConn, relationID)
+	}
+	opts := []DecoderOption{WithAttrResolver(attrResolver), WithSkipCounters(c.cfg.Skips),
+		WithDeferrableResolver(deferrable), WithPartitionsBelowFullResolver(partitionsBelowFull)}
 	stampsClose := func() {}
 	defer func() { stampsClose() }()
 	if c.cfg.LastChange != nil && c.cfg.LoadKnownShapes != nil {

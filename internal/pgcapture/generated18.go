@@ -15,10 +15,11 @@ import (
 // PostgreSQL 18 refuses an UPDATE or a DELETE on a table whose replica
 // identity contains a generated column that a publication the table belongs
 // to does not publish ("Replica identity must not contain unpublished
-// generated columns", SQLSTATE 42P10). Capture needs REPLICA IDENTITY FULL,
+// generated columns", SQLSTATE 42P10). Undo needs REPLICA IDENTITY FULL,
 // which contains every column, so on a table with a generated column the
-// setup this product asks for stops the SOURCE's own application from
-// changing or deleting rows, before capture ever connects. INSERT still works.
+// setting that makes its changes undoable stops the SOURCE's own application
+// from changing or deleting rows, before capture ever connects. INSERT still
+// works.
 //
 // Measured on PostgreSQL 18.7:
 //   - a STORED generated column is published when the publication is created
@@ -163,7 +164,7 @@ func GeneratedColumnsProblem(found []UnpublishedGenerated) string {
 			pubs = append(pubs, p)
 		}
 		sort.Strings(pubs)
-		b.WriteString(" Then, to capture a table whose generated column is STORED (")
+		b.WriteString(" The table is then captured, without undo of its UPDATE and DELETE. To have undo for a table whose generated column is STORED (")
 		b.WriteString(strings.Join(stored, ", "))
 		b.WriteString("), make the publication publish it and set REPLICA IDENTITY FULL again:")
 		for _, p := range pubs {
@@ -173,7 +174,7 @@ func GeneratedColumnsProblem(found []UnpublishedGenerated) string {
 	if len(virtual) > 0 {
 		b.WriteString(" A VIRTUAL generated column (")
 		b.WriteString(strings.Join(virtual, ", "))
-		b.WriteString(") cannot be published by any setting, so its table cannot be captured: take it out of the publication:")
+		b.WriteString(") cannot be published by any setting, so its table cannot be at REPLICA IDENTITY FULL while it is published: leave it at REPLICA IDENTITY DEFAULT (captured, without undo of its UPDATE and DELETE), or take it out of the publication:")
 		vt := make([]string, 0, len(virtualTables))
 		for k := range virtualTables {
 			vt = append(vt, fmt.Sprintf(" ALTER PUBLICATION %s DROP TABLE %s;", pgx.Identifier{k.pub}.Sanitize(), quoteQualified(k.schema, k.table)))

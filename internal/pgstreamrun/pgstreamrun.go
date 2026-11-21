@@ -151,8 +151,10 @@ type pgStreamState struct {
 	checkpointEvent uint64
 	stampEvent      bool
 	// skips is the capture-skip ledger (the MySQL path's #1034 counters): the
-	// capturer records each change it drops (a table not at REPLICA IDENTITY
-	// FULL) and every checkpoint persists it to stream_state.capture_skips, so
+	// capturer records each change it drops (a table whose primary key is
+	// DEFERRABLE, or whose replica identity leaves the primary key out; in an
+	// index written by an earlier version, every table that was not at REPLICA
+	// IDENTITY FULL) and every checkpoint persists it to stream_state.capture_skips, so
 	// `status` reports degraded capture and names the table. Seeded from the
 	// persisted document at start. nil writes NULL, which the save keeps as
 	// whatever is there.

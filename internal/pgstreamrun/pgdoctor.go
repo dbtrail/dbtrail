@@ -22,7 +22,7 @@ const doctorTimeout = 30 * time.Second
 
 // dependentCheckNames are the checks BuildPGReport skips when wal_level is genuinely
 // not 'logical' — logical decoding is impossible, so they cannot meaningfully run.
-var dependentCheckNames = []string{"Publication coverage", "REPLICA IDENTITY FULL", "No UNLOGGED tables", "FK cascade-child coverage", "max_slot_wal_keep_size", "Replication slot health", commitTimestampCheckName, generatedColumnsCheck, deferrableKeysCheck}
+var dependentCheckNames = []string{"Publication coverage", replicaIdentityCheck, identityKeyCheck, "No UNLOGGED tables", "FK cascade-child coverage", "max_slot_wal_keep_size", "Replication slot health", commitTimestampCheckName, generatedColumnsCheck, deferrableKeysCheck}
 
 // PGDoctorConfig is the subset of stream settings a health check needs: a normal
 // (non-replication) connection to the source, the slot to inspect, and the
@@ -96,16 +96,7 @@ func BuildPGReport(ctx context.Context, cfg PGDoctorConfig) *doctor.Report {
 		r.Add(doctor.CheckResult{Name: "Publication coverage", Status: doctor.StatusPass})
 	}
 
-	if err := pgcapture.CheckReplicaIdentity(ctx, conn, cfg.Publication); err != nil {
-		r.Add(doctor.CheckResult{
-			Name:        "REPLICA IDENTITY FULL",
-			Status:      doctor.StatusFail,
-			Detail:      err.Error(),
-			Remediation: "Run ALTER TABLE <t> REPLICA IDENTITY FULL on every replicated table, so before-images (and de-TOASTed unchanged values) are complete. Until a table is at FULL, capture does not record its changes: each one is skipped and counted, and status reports capture as degraded under replica_identity_not_full. Capture of the table resumes by itself after the ALTER; the changes skipped before it stay missing.",
-		})
-	} else {
-		r.Add(doctor.CheckResult{Name: "REPLICA IDENTITY FULL", Status: doctor.StatusPass})
-	}
+	addReplicaIdentityChecks(ctx, r, conn, cfg.Publication)
 
 	addReadAccessCheck(ctx, r, conn, cfg.Publication, filters)
 	addGeneratedColumnsCheck(ctx, r, conn, cfg.Publication)
@@ -260,7 +251,7 @@ func cascadeCoverageResult(children []pgcapture.CascadeChild) doctor.CheckResult
 		Status: doctor.StatusWarn,
 		Detail: strings.Join(parts, "; "),
 		Remediation: "These cascade child tables are not in the publication while their parent is: a delete on the parent fires ON DELETE CASCADE/SET NULL/SET DEFAULT, rewriting the child — and that change is not captured, so it cannot be recovered. " +
-			"Add each child to the publication (ALTER PUBLICATION ... ADD TABLE ...) and set it to REPLICA IDENTITY FULL.",
+			"Add each child to the publication (ALTER PUBLICATION ... ADD TABLE ...), and set it to REPLICA IDENTITY FULL so that the cascade can be undone.",
 	}
 }
 

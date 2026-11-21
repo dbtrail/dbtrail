@@ -94,26 +94,27 @@ func laterChange(a, b *query.ResultRow) bool {
 //  1. The event has a place in the log: a commit LSN (pgRowLSN) and an
 //     event_id. Without them the halves could not be ordered against a later
 //     change of either key.
-//  2. The before-image is the whole old row: it holds exactly the columns the
-//     after-image holds, and every key column in it is text. The DELETE half
-//     needs only the key; the whole row is asked for because of what it
-//     proves about the after-image (3). Capture refuses a table that is not
-//     at REPLICA IDENTITY FULL (pgcapture: at startup and on every relation
-//     message), which is the only way PostgreSQL sends the whole old row.
-//     Under a weaker identity PostgreSQL sends a key-only old row for a key
-//     change, with every other column NULL, and that has the same columns as
-//     a whole row whose other columns really are NULL. The two cannot be told
-//     apart from the event, so an old row with no value outside the key is
-//     taken as whole only when it cannot matter (pgOldRowMayBeKeyOnly). That
-//     the old row is whole is therefore capture's gate plus these checks of
-//     shape, not a proof from the event alone.
+//  2. The before-image holds exactly the columns the after-image holds, and
+//     every key column in it is text. The DELETE half needs only the key.
+//     Under REPLICA IDENTITY FULL the image is the whole old row. Under a
+//     weaker identity PostgreSQL sends a key-only old row for a key change,
+//     and capture stores it with every column outside the key as the
+//     not-captured marker (pgcapture partialBefore), never as NULL: such a row
+//     SAYS it is key-only, and passes here on its key alone. An index written
+//     before the marker existed has no such rows (capture then dropped every
+//     change of a table below FULL), so an old row with no value outside the
+//     key and no marker is one whose other columns really are NULL, or one
+//     from an older capture that stored unsent columns as NULL; the two cannot
+//     be told apart from the event, and it is taken as whole only when it
+//     cannot matter (pgOldRowMayBeKeyOnly).
 //  3. The after-image is the whole new row: every key column is text and no
 //     value is the unchanged-TOAST marker. The INSERT half writes this image
 //     as the row, so a marker would be written as data. Under REPLICA
 //     IDENTITY FULL capture has already replaced an unchanged large value
 //     with the real one from the before-image of the same event
-//     (pgcapture decodeUpdate), so a marker here means the event was captured
-//     without the whole old row and there is nothing to take the value from.
+//     (pgcapture decodeUpdate). Below FULL capture leaves the marker (the
+//     before-image does not hold the value), and a change of key with one is
+//     refused here: the value belongs to the old key's row.
 //  4. The spelling proof of #2501: the old key spelled from the decoded
 //     before-image equals the key the index stores for the event, and both
 //     keys are valid UTF-8 text. A PostgreSQL value is stored as PostgreSQL's
@@ -181,20 +182,19 @@ func splitPGKeyChange(ev *query.ResultRow, schema, table string, pkCols []metada
 // trusted because the before-image may be a key-only old row, or "" when
 // there is none.
 //
-// Capture fills an unchanged large value in the new row from the old row of
-// the same change (pgcapture decodeUpdate). From a key-only old row that
-// value is NULL, stored as if it were the column's value. Capture refuses
-// the tables that send key-only old rows, so no such event is expected in an
-// index; this check is a second belt for that one shape.
+// Under REPLICA IDENTITY FULL capture fills an unchanged large value in the
+// new row from the old row of the same change (pgcapture decodeUpdate). A
+// capture that took a key-only old row for a whole one would fill it with
+// NULL, stored as if it were the column's value. Capture does not: it stores
+// a key-only old row with the not-captured marker outside the key and leaves
+// the unsent value as its own marker in the new row (pgcapture
+// decodePartialUpdate). This check is a second belt for the one shape that
+// carries no marker.
 //
 // It is not a proof that the old row is whole, and nothing in the event can
-// be one: that rests on capture's gate (REPLICA IDENTITY FULL, checked at
-// startup and on every relation message). What this does: an old row with a
-// value outside the key is taken as whole, because a key-only one has none.
-// (Under REPLICA IDENTITY USING INDEX on a unique index wider than the
-// primary key the old row holds that index's columns and nothing else, and
-// passes here; only capture's gate keeps it out.) An old row with no value
-// outside the key may be key-only. Then a NULL outside the key in the new row
+// be one. What this does: an old row with a value outside the key is taken
+// as whole, because a key-only one without markers has none. An old row with
+// no value outside the key may be key-only. Then a NULL outside the key in the new row
 // may be a large value that was lost, and the first such column (by name) is
 // returned; a new row with no NULL outside the key holds only values
 // PostgreSQL sent, whatever the old row was.

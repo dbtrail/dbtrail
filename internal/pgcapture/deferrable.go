@@ -20,11 +20,31 @@ import (
 // not always tell: two rows that are equal in every column share a key with
 // nothing to set them apart (#2760, #2875).
 //
-// The fold refuses the sequences it can recognise. This is the gate before
-// it: the catalog says whether a key is deferrable, so a table with one is
-// refused up front, the way a table that is not at REPLICA IDENTITY FULL is.
-// A key made deferrable while capture runs is not seen here until the next
-// start; the fold's own checks are what is left for it.
+// The fold refuses the sequences it can recognise, and for a table below
+// REPLICA IDENTITY FULL it recognises fewer: with the earlier row captured by
+// its key only, a change no longer shows that it starts from the row the
+// change before it left (reconstruct.pgRowLink). So the catalog is asked, in
+// two places:
+//
+//   - when capture starts, over the whole publication (CheckDeferrableKeys):
+//     a table with a deferrable key refuses the start;
+//   - each time PostgreSQL describes a relation (Decoder.cacheRelation, through
+//     a DeferrableResolver): that table alone is skipped, under
+//     SkipDeferrablePrimaryKey, and the others go on.
+//
+// A primary key cannot be made deferrable in place: ALTER TABLE ... ALTER
+// CONSTRAINT works on foreign keys only (PostgreSQL 16 answers 42809, "is not
+// a foreign key constraint"). It is dropped and added again, and PostgreSQL
+// then describes the table again before its next change, in the same
+// replication session, so the second check sees it while capture runs
+// (TestCapturer_DeferrableKeyMidStream_Integration).
+//
+// The limit: both checks read the catalog as it is when they run, not as it
+// was when a change was made. Capture that is behind reads old changes under
+// today's catalog. A key that was deferrable while those changes were made and
+// is not any more is not seen at all; the reverse (not deferrable then,
+// deferrable now) skips changes that were safe. A change of the key that
+// PostgreSQL does not describe the table again for is seen at the next start.
 
 // ErrDeferrableKey marks the condition, so a caller can tell it from a failed
 // catalog read.

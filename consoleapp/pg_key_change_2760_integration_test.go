@@ -398,10 +398,12 @@ func TestIntegrationPGSnapshotUpdateDeferrableKey(t *testing.T) {
 	defer cancel()
 	logs := captureSlogFor(t)
 
-	// The key is made deferrable AFTER capture starts (below): the capture
-	// refuses to start on a table whose key is deferrable
-	// (pgcapture.CheckDeferrableKeys), so what the fold's own refusal is
-	// left to catch is a key changed while capture runs.
+	// The key is deferrable for the changes only, with capture stopped
+	// meanwhile (pgTestWhileKeyDeferrable, below): capture refuses to start on
+	// a table whose key is deferrable and skips one made so while it runs, so
+	// what the fold's own refusal is left to catch is a key that was
+	// deferrable while the changes were made and is not when capture reads
+	// them.
 	_, source, exec1 := pgTestSource(t, ctx, pgKdTable, pgKdSlot, pgKdPub, "id int PRIMARY KEY, v text")
 	exec1("INSERT INTO " + pgKdTable + " VALUES (1, 'one'), (2, 'two'), (3, 'three'), (4, 'four'), (5, 'five')")
 	const sourceQuery = "SELECT id::text, v FROM " + pgKdTable + " ORDER BY id"
@@ -429,7 +431,6 @@ func TestIntegrationPGSnapshotUpdateDeferrableKey(t *testing.T) {
 		t.Fatalf("save the index connection: %v", err)
 	}
 	pgTestStart(t, ctx, mon, bootDSN, source, e)
-	exec1("ALTER TABLE " + pgKdTable + " DROP CONSTRAINT " + pgKdTable + "_pkey, ADD PRIMARY KEY (id) DEFERRABLE INITIALLY IMMEDIATE")
 
 	if err := sup.Trigger(console.BaselineRequestFor(e)); err != nil {
 		t.Fatalf("start the full read: %v", err)
@@ -448,9 +449,11 @@ func TestIntegrationPGSnapshotUpdateDeferrableKey(t *testing.T) {
 
 	// Every row onto the next one's key, by one statement; then two rows
 	// swapped directly; then the change the wait below looks for.
-	exec1("UPDATE " + pgKdTable + " SET id = id + 1")
-	exec1("UPDATE " + pgKdTable + " SET id = CASE id WHEN 2 THEN 3 WHEN 3 THEN 2 END WHERE id IN (2, 3)")
-	exec1("INSERT INTO " + pgKdTable + " VALUES (100, 'last')")
+	pgTestWhileKeyDeferrable(t, ctx, mon, e, exec1, pgKdTable, "INITIALLY IMMEDIATE", func() {
+		exec1("UPDATE " + pgKdTable + " SET id = id + 1")
+		exec1("UPDATE " + pgKdTable + " SET id = CASE id WHEN 2 THEN 3 WHEN 3 THEN 2 END WHERE id IN (2, 3)")
+		exec1("INSERT INTO " + pgKdTable + " VALUES (100, 'last')")
+	})
 	_, src, err := pgText(t, source, sourceQuery)
 	if err != nil {
 		t.Fatal(err)

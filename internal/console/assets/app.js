@@ -7180,7 +7180,11 @@ function pgHealthCard(h) {
     if (nf.length === 0) {
       card.append(healthKV("replica identity", el("span", { class: "hstat hstat-ok", text: "all FULL ✓" })));
     } else {
-      card.append(healthKV("replica identity", el("span", { class: "hstat hstat-warn", text: "⚠ " + nf.length + " not FULL" })));
+      // Not a fault: a table below REPLICA IDENTITY FULL is recorded, and only
+      // undo of its UPDATE and DELETE is refused. Amber, with what it means.
+      card.append(healthKV("replica identity", el("span", { class: "hstat hstat-warn",
+        text: "⚠ " + nf.length + (nf.length === 1 ? " table" : " tables") + " without undo" })));
+      card.append(el("div", { class: "hlist", text: "Not at REPLICA IDENTITY FULL: recorded, and everything else works. Undo of an UPDATE or a DELETE is refused; ALTER TABLE ... REPLICA IDENTITY FULL makes later changes undoable." }));
       const list = el("div", { class: "hlist" });
       nf.forEach((t) => list.append(el("div", { text: t })));
       card.append(list);
@@ -18511,12 +18515,17 @@ function buildServerForm(offered, familyLine) {
   pgHint.append(el("code", { text: "wal_level=logical" }));
   pgHint.append(", a role with the ");
   pgHint.append(el("code", { text: "REPLICATION" }));
-  pgHint.append(" attribute, a publication you create, and ");
-  pgHint.append(el("code", { text: "REPLICA IDENTITY FULL" }));
-  pgHint.append(" on replicated tables; copy and run on the source:");
+  pgHint.append(" attribute, and a publication you create; copy and run on the source:");
   mon.append(pgHint);
   mon.append(tagFlavor(el("pre", { class: "form-code", text:
-    "CREATE PUBLICATION bintrail_pub FOR ALL TABLES;\n" +
+    "CREATE PUBLICATION bintrail_pub FOR ALL TABLES;" }), "postgres"));
+  // REPLICA IDENTITY FULL is not a prerequisite: a table without it is
+  // recorded, and only undo of its UPDATE and DELETE is refused.
+  const pgUndoHint = tagFlavor(el("p", { class: "form-hint", style: "margin-top:10px" }), "postgres");
+  pgUndoHint.append(el("code", { text: "REPLICA IDENTITY FULL" }));
+  pgUndoHint.append(" is optional, only for undo: without it a table is recorded and everything else works, but its UPDATE and DELETE cannot be undone. To make a table's later changes undoable (the table then writes more WAL):");
+  mon.append(pgUndoHint);
+  mon.append(tagFlavor(el("pre", { class: "form-code", text:
     "ALTER TABLE your_table REPLICA IDENTITY FULL;" }), "postgres"));
   mon.append(el("p", { class: "form-hint", style: "margin-top:10px", text: "Archive to S3: old data is uploaded to S3 before it's deleted locally, so your history is kept and can still be searched. Needs AWS credentials set up where DBTrail runs (environment variables or an IAM role)." }));
   form.append(mon);

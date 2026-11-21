@@ -18,7 +18,9 @@ var doctorCmd = &cobra.Command{
 PASS, FAIL, WARN, or SKIP with copy-pasteable remediation.
 
 It checks the capture prerequisites (wal_level=logical, publication coverage,
-REPLICA IDENTITY FULL) AND the operational WAL-retention health that gates
+a replica identity that holds each table's primary key), warns about the tables
+that are not at REPLICA IDENTITY FULL (captured, but their UPDATE and DELETE
+cannot be undone), AND checks the operational WAL-retention health that gates
 production safety:
 
   - max_slot_wal_keep_size: WARNs when unlimited (-1) — a stalled slot could then
