@@ -41,9 +41,9 @@ import (
 //   - A call that skips the pass looks at the file again after the join. If
 //     it is not the file remembered any more, the answer is dropped, the
 //     entry too, and the call is made again with both passes.
-//   - Not an S3 or other URL, not a relative path, not something that is not a regular file, and
-//     nothing on a platform that gives no device and inode (fileIDOf): those
-//     run both passes at every call, as before.
+//   - Not an S3 or other URL, not a relative path, not something that is
+//     not a regular file, and nothing on a platform that gives no device
+//     and inode (fileIDOf): those run both passes at every call, as before.
 //   - The key columns are part of what is remembered, in the order given and
 //     as their exact bytes: "no NULL in (a, b)" says nothing of (c), nor of a
 //     column "A" beside "a".
