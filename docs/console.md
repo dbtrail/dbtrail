@@ -511,7 +511,7 @@ leave out is asked for.
 | `--name` | What to call the server (default: made from its address). It is the user name on the MySQL port |
 | `--schemas` | Comma-separated schemas to record (default: every user schema) |
 | `--flavor` | `mysql` or `mariadb` (default: asked of the server) |
-| `--forward-user` | The forwarding user: what the MySQL port runs statements as on this database when the copy cannot answer (default: asked on a terminal, or `[dbtrail-forward]` in `--defaults-file`) |
+| `--forward-user` | The forwarding user: what the MySQL port, or the PostgreSQL port, runs statements as on this database when the copy cannot answer (default: asked on a terminal, or `[dbtrail-forward]` in `--defaults-file`) |
 | `--no-forward` | Do not ask for a forwarding user |
 | `-v`, `--verbose` | Also print how to turn on each optional improvement |
 
@@ -630,6 +630,11 @@ capture user is refused, and so is a user with no password and nobody to ask.
 If DBTrail refuses the user itself (it cannot log in, or it lacks grants), the
 server stays added and recording, the command says so and exits 1, and
 `server forward-user` sets it once that is fixed.
+
+A PostgreSQL added with `--flavor postgres` takes its forwarding user the same
+way: the same question, the same two options and the same group in the option
+file. What its port does with it is in
+[docs/postgres.md](postgres.md#transactions-on-the-source-the-forwarding-user).
 
 To set or change it later:
 

@@ -82,6 +82,17 @@ dbtrail server add --flavor postgres -h pg1.example.com -u dbtrail -p -d shop --
 It runs the same checks, prints each one that fails with its fix, and saves
 nothing until they all pass. `--flavor postgres` has to be said: the question
 DBTrail asks an address to learn what answers there is in MySQL's protocol.
+
+Once the server is added, on a terminal, the command asks for its
+[forwarding user](#transactions-on-the-source-the-forwarding-user), as it does
+for a MySQL: the role the PostgreSQL port runs statements as on your
+PostgreSQL, read-only, when the copy is not known to answer them as PostgreSQL
+does. Enter skips it. `--forward-user <role>` names it on the command line
+(its password is asked for), `[dbtrail-forward]` in `--defaults-file` names it
+with its password for a script, and `--no-forward` does not ask. The role DBTrail
+captures with is refused. If DBTrail refuses the role you gave, the server
+stays added and recording, the command says why and exits 1, and
+`dbtrail server forward-user` sets it once that is fixed.
 What it prints at the end is the `psql` line for the PostgreSQL port, with the
 port's password when this was the first server.
 
@@ -786,15 +797,18 @@ listener, its own workers, its own memory.
   does not disconnect anyone here.
 - **PostgreSQL servers only.** A MySQL or MariaDB server is refused with an
   error that names it; its copy is read through the MySQL port.
-- **Who answers depends on the server's forwarding user.** `server add` does
-  not set one for a PostgreSQL, so at first the copy answers every statement,
-  nothing is sent to your PostgreSQL, and a statement the copy cannot answer
-  gets an error. Once one is set
-  (`bintrail-console server forward-user <server> -u <user> -p`, or the
-  server's Forwarding user in the web interface), a statement the copy is not
-  known to answer as PostgreSQL does, and a client's transaction block, run
-  on your PostgreSQL as that user, read-only
+- **Who answers depends on the server's forwarding user.** `server add` asks
+  for one, as for a MySQL (or takes it from `--forward-user` or
+  `[dbtrail-forward]` in the option file), and the web interface's form has
+  the same two fields. With one, a statement the copy is not known to answer
+  as PostgreSQL does, and a client's transaction block, run on your PostgreSQL
+  as that user, read-only
   ([the forwarding user](#transactions-on-the-source-the-forwarding-user)).
+  Without one (the question skipped, `--no-forward`, or a script that named
+  none) the copy answers every statement, nothing is sent to your PostgreSQL,
+  and a statement the copy cannot answer gets an error, until one is set
+  (`bintrail-console server forward-user <server> -u <user> -p`, or the
+  server's Forwarding user in the web interface).
 - **Fresh or fast, per server, as on the MySQL port.** In fresh mode, the
   default, each table's newest changes captured from PostgreSQL are laid over
   its snapshot, so a row written a moment ago shows without waiting for the
@@ -1076,6 +1090,10 @@ server's **forwarding user**, a role of its own on the source:
 CREATE ROLE app_ro LOGIN PASSWORD <a password>;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO app_ro;
 ```
+
+`server add` takes it when the server is added: it asks for it on a terminal,
+or reads `--forward-user app_ro`, or `[dbtrail-forward]` in the option file.
+To set or change it on a server that is already added:
 
 ```bash
 bintrail-console server forward-user <server> -u app_ro -p
