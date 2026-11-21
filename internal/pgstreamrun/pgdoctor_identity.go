@@ -157,7 +157,8 @@ func withoutUndoResult(undo, noIdentity []pgcapture.TableIdentity) doctor.CheckR
 		}
 		fmt.Fprintf(&rem, "\n\n%s of them %s no replica identity at all (REPLICA IDENTITY NOTHING, or no usable primary key): %s. "+
 			"PostgreSQL itself refuses UPDATE and DELETE on such a table while it is in a publication, with or without DBTrail, so only its INSERT and TRUNCATE are recorded. "+
-			"Give the table a primary key, or run the statement above for it.",
+			"Give the table a primary key, or run the statement above for it. "+
+			"A partitioned table is the exception: PostgreSQL checks the replica identity of each partition, so the UPDATE and DELETE made in a partition that has one are accepted and recorded, without undo.",
 			tableCount(len(noIdentity)), have, tableNames(noIdentity))
 	}
 	return doctor.CheckResult{

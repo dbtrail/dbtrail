@@ -56,19 +56,28 @@ type relationInfo struct {
 
 	// partial reports that the earlier row of every UPDATE and DELETE of the
 	// relation is captured in part (decoder.go, partialBefore): the relation is
-	// below FULL; or it is described at FULL and the catalog did not say what
-	// its partitions are, or said that a key-only row of one of them cannot be
-	// told from a whole row (Decoder.judgePartitions).
+	// described below FULL.
 	partial bool
 	// byShape reports that an old tuple of the relation is taken as whole or as
-	// key-only ROW BY ROW, by what it holds (decoder.go, keyOnlyShaped): the
-	// relation is described at FULL, is a partitioned table with a primary
-	// key, and the catalog answered that no partition's identity holds a
-	// column outside that key. Never set when the catalog did not answer.
+	// key-only ROW BY ROW, by what it holds (decoder.go, holdsEmpty): the
+	// relation is described at FULL, and is a partitioned table or one the
+	// catalog did not answer for (Decoder.judgePartitions).
 	byShape bool
+	// partitioned reports that the catalog answered that the relation is a
+	// partitioned table.
+	partitioned bool
 	// partsRetryAt, when not zero, is when the read of the relation's
 	// partitions, which failed, is tried again (Decoder.relationFor).
 	partsRetryAt time.Time
+	// unsureStored counts the changes of the relation stored while
+	// partsRetryAt was set, the first at commit LSN unsureFrom: should the
+	// catalog then show that the table had to be skipped, the ledger is told
+	// of that stretch.
+	unsureStored int
+	unsureFrom   uint64
+	// keyNotSent counts the changes of the relation dropped under
+	// SkipReplicaIdentityKeyNotSent, to space their warning.
+	keyNotSent int
 
 	// skipped marks a relation whose row changes are dropped and recorded in the
 	// capture-skip ledger instead of indexed, under skipReason with skipDetail:
@@ -102,10 +111,10 @@ type relationInfo struct {
 // The decoder asks at each description of a relation, whatever its identity,
 // and decides from the answer (Decoder.judgePartitions). It reads the catalog
 // as it is now, while capture that is behind reads changes made under an
-// earlier one, so the answer is never taken as "every old row is whole":
-// under a partitioned root each old row is judged by what it holds
-// (keyOnlyShaped) when the answer shows that is possible, and every old row
-// is stored with its key only when it does not, or when there is no answer.
+// earlier one, so the answer is used only for what the rows cannot show
+// (whether the relation is partitioned, and a partition that leaves the key
+// out), never to say what an old row holds: that is read from the row
+// (holdsEmpty).
 type PartitionsResolver func(relationID uint32, schema, table string) (Partitions, error)
 
 // Partitions is what the catalog says of a relation and its partitions.
@@ -119,15 +128,6 @@ type Partitions struct {
 	// BelowFull counts its leaf partitions that are not at REPLICA IDENTITY
 	// FULL: their UPDATE and DELETE cannot be undone.
 	BelowFull int
-	// Wide counts its leaf partitions below FULL whose own replica identity
-	// (their primary key under DEFAULT, their chosen index under USING INDEX)
-	// holds a column that is not in the primary key of the RELATION ASKED
-	// FOR, the root, which is the key the decoder judges a row's shape by. A
-	// key-only row of such a partition holds a value outside that key, so it
-	// cannot be told from a whole row by its shape. A root with no primary
-	// key over a partition that has one counts it: every column of that key
-	// is outside the root's.
-	Wide int
 	// MissesKey counts its leaf partitions whose own replica identity is an
 	// index that leaves a primary-key column out. A change of the primary key
 	// made in one arrives with no earlier row at all.
@@ -141,17 +141,9 @@ type Partitions struct {
 // or a long TRUNCATE of one partition, and a tree of thousands takes as many
 // locks (seen on PostgreSQL 16, TestPartitionCatalogReadsTakeNoLock_Integration).
 //
-// A leaf's identity index is its primary key under DEFAULT and the one
-// flagged indisreplident under USING INDEX, valid and not deferrable either
-// way (relcache's rule); its key columns are the first indnkeyatts. The
+// A leaf's identity index is the one flagged indisreplident, valid and not
+// deferrable (relcache's rule); its key columns are the first indnkeyatts. The
 // primary-key columns are read as the capture reads them (pkColumnsQuery).
-//
-// "wide" compares the leaf's identity columns with the ROOT's primary key, by
-// NAME: a partition's columns carry the parent's names, not always its
-// attribute numbers (a partition attached with its columns in another order,
-// or after a column was dropped). "misses" compares a leaf's chosen index
-// with the leaf's own primary key, which is the root's whenever the root has
-// one.
 const partitionsQuery = `
 WITH RECURSIVE tree AS (
 	SELECT c.oid, c.relkind, c.relreplident FROM pg_class c WHERE c.oid = $1::oid
@@ -163,35 +155,25 @@ WITH RECURSIVE tree AS (
 	WHERE t.relkind = 'p'
 ), leaves AS (
 	SELECT t.oid, t.relreplident FROM tree t WHERE t.relkind <> 'p' AND t.oid <> $1::oid
-), rootkey AS (
-	SELECT a.attname
-	FROM pg_index pk
-	JOIN pg_attribute a ON a.attrelid = pk.indrelid AND a.attnum = ANY(pk.indkey)
-	WHERE pk.indrelid = $1::oid AND pk.indisprimary
-), ident AS (
-	SELECT l.oid, l.relreplident,
-	       EXISTS (SELECT 1 FROM unnest(ri.indkey::int2[]) WITH ORDINALITY AS k(att, ord)
-	               JOIN pg_attribute a ON a.attrelid = l.oid AND a.attnum = k.att
-	               WHERE k.ord <= ri.indnkeyatts
-	                 AND a.attname NOT IN (SELECT attname FROM rootkey)) AS wide,
+), idx AS (
+	SELECT l.oid,
 	       EXISTS (SELECT 1 FROM pg_index pk, unnest(pk.indkey::int2[]) AS a(att)
 	               WHERE pk.indrelid = l.oid AND pk.indisprimary AND a.att > 0
 	                 AND NOT EXISTS (SELECT 1 FROM unnest(ri.indkey::int2[]) WITH ORDINALITY AS k(att, ord)
 	                                 WHERE k.ord <= ri.indnkeyatts AND k.att = a.att)) AS misses
 	FROM leaves l
-	JOIN pg_index ri ON ri.indrelid = l.oid AND ri.indisvalid AND ri.indimmediate
-	     AND ((l.relreplident = 'd' AND ri.indisprimary) OR (l.relreplident = 'i' AND ri.indisreplident))
+	JOIN pg_index ri ON ri.indrelid = l.oid AND ri.indisreplident AND ri.indisvalid AND ri.indimmediate
+	WHERE l.relreplident = 'i'
 )
 SELECT EXISTS (SELECT 1 FROM tree WHERE oid = $1::oid),
        COALESCE((SELECT relkind = 'p' FROM tree WHERE oid = $1::oid), false),
        (SELECT count(*) FROM leaves WHERE relreplident <> 'f'),
-       (SELECT count(*) FROM ident WHERE wide),
-       (SELECT count(*) FROM ident WHERE misses AND relreplident = 'i')`
+       (SELECT count(*) FROM idx WHERE misses)`
 
 // queryPartitions is the catalog-backed PartitionsResolver body.
 func queryPartitions(ctx context.Context, conn *pgx.Conn, relationID uint32) (Partitions, error) {
 	var p Partitions
-	if err := conn.QueryRow(ctx, partitionsQuery, relationID).Scan(&p.Known, &p.Partitioned, &p.BelowFull, &p.Wide, &p.MissesKey); err != nil {
+	if err := conn.QueryRow(ctx, partitionsQuery, relationID).Scan(&p.Known, &p.Partitioned, &p.BelowFull, &p.MissesKey); err != nil {
 		return Partitions{}, fmt.Errorf("pgcapture: reading the partitions of relation OID %d: %w", relationID, err)
 	}
 	return p, nil
@@ -201,6 +183,13 @@ func queryPartitions(ctx context.Context, conn *pgx.Conn, relationID uint32) (Pa
 // the first read and again whenever it is found closed (pgx closes a
 // connection whose query was cut by its deadline). Used from the decode loop
 // alone: not safe for concurrent use.
+// partitionsReadTimeout bounds one read of a relation's partitions, opening
+// its connection included. One attempt a minute at most is made while reads
+// fail (Decoder.partsDownUntil), so a catalog that hangs holds the
+// replication loop for this long once a minute, well inside the server's
+// wal_sender_timeout (60 s by default).
+const partitionsReadTimeout = 3 * time.Second
+
 type partitionsReader struct {
 	dsn  string
 	conn *pgx.Conn

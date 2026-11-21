@@ -262,61 +262,60 @@ A partitioned table published through its parent
 (`publish_via_partition_root`) is described to capture as the parent, and
 PostgreSQL labels the earlier row of each change by the parent's setting,
 whatever the partition the change was made in logged. With the parent at
-`FULL`, capture reads each earlier row by what it holds: a row from a partition
-at `FULL` is whole and can be undone, a row from a partition at `DEFAULT` holds
-its key only. One partition below `FULL` does not cost the others their undo.
+`FULL`, capture reads each earlier row by what it holds. One partition below
+`FULL` does not cost the others their undo.
 
-The rule behind it: an earlier row labelled whole is stored whole only when the
-catalog answered and a key-only row of any partition could be told from a whole
-one by what it holds. That needs the parent to have a primary key, and no
-partition with an identity of its own that holds a column outside it. In every
-other case, and whenever capture does not know, every earlier row of the table
-is stored as key-only: undo is refused for it, and NULL is never stored where
-PostgreSQL did not send a value. A table that is not partitioned and is at
-`FULL` is not affected: its earlier rows are whole. What follows from that:
+The rule: in a partitioned table, an earlier row labelled whole is stored whole
+only when **none of its columns arrives empty**. A row that holds an empty
+column is stored as key-only. The reason is what PostgreSQL sends: a key-only
+row holds a value in the columns of the identity it was logged under and
+nothing in any other column, whatever that identity was when the change was
+made. So capture does not need the catalog to tell the two apart, and a
+partition put at `FULL` later, an identity index dropped, or a primary key made
+narrower, before capture read the change, makes no difference. What follows
+from that:
 
-- An earlier row that holds nothing outside the primary key is stored as
-  key-only. A row whose other columns really are all NULL looks the same, so
-  undo refuses a change of such a row in a partitioned table, though it was
-  logged whole. Nothing wrong is stored.
-- A partition with a replica identity of its own that holds **more** than the
-  parent's primary key (`REPLICA IDENTITY USING INDEX` set on the partition, on
-  an index with other columns): its key-only rows carry a value outside the key
-  and look whole. While the catalog shows such a partition, every earlier row
-  of the table is stored as key-only, and undo is refused for all of its
-  partitions.
-- A parent with **no primary key**: the same, for the same reason (the parent
-  has no key to tell a key-only row by), whatever its partitions are set to.
-  Every earlier row of the table is stored as key-only, and undo is refused for
-  all of its partitions, the ones at `FULL` too. Give the parent a primary key
-  to get undo back. `doctor` reports a parent at `DEFAULT` without one as a
-  table with no replica identity, although its partitions accept `UPDATE` and
-  `DELETE` when they have a key of their own.
+- A row from a partition at `FULL` that holds a value in every column is whole
+  and can be undone.
+- A row from a partition that is not at `FULL` (at `DEFAULT`, or with an
+  identity index of its own, wider than the primary key or not) is stored as
+  key-only, and undo refuses it.
+- **The cost**: a row of a partitioned table that really holds a NULL in some
+  column looks like a key-only row, so it is stored as key-only too and undo
+  refuses that change, though its partition is at `FULL`. Nothing wrong is
+  stored: NULL is never written where PostgreSQL did not send a value. A table
+  that is **not** partitioned and is at `FULL` is not affected: its earlier
+  rows are whole, NULLs included.
+- A parent with no primary key is read the same way. Its changes are stored
+  with no key (as for any table without a primary key).
 - A partition with a replica identity of its own that leaves the primary key
   **out**: the whole table is skipped, as a table with such an identity is
   (below), whatever the parent's own setting (`FULL`, `DEFAULT` or
   `USING INDEX`), and `doctor` names the partition.
-- Capture reads the partitions from the catalog when PostgreSQL describes the
-  table, not when a change was made. The read takes no lock on any partition,
-  so a `VACUUM FULL` or a rewriting `ALTER` of one does not hold capture up. If
-  the read fails or times out, or the table has been dropped since, capture
-  goes on and stores **every** earlier row of that table as key-only until the
-  catalog answers; it asks again at the table's next change after a minute,
-  and when PostgreSQL describes the table again. The log says so.
-- What is left, because capture that is behind reads old changes with today's
-  catalog. (1) A partition with an identity wider than the parent's primary key
-  that was dropped, detached or altered before capture read its changes is not
-  seen, and its key-only rows are stored as whole rows, with NULL in the
-  columns PostgreSQL did not send. (2) The same happens when the parent's
-  primary key was made **narrower** before capture read the changes written
-  under the wider one (from `(id, region, x)` to `(id, region)`): the key-only
-  rows written before hold a value in `x`, which is outside today's key. (3) A
-  partition whose identity left the primary key out and no longer does (or was
-  dropped) when capture reads its changes is not seen either: a change of the
-  primary key made there is stored under the new key, and the old row stays in
-  the copy until the table's next full read. Keeping capture close to the
-  source, and changing a partition's identity or the primary key only once
-  capture has caught up, avoids all three.
+- A parent at `REPLICA IDENTITY NOTHING` (or whose identity index is gone) over
+  partitions that have a key: PostgreSQL checks the identity in each partition,
+  so it accepts `UPDATE` and `DELETE` there, and sends the primary key of the
+  row. Capture stores those changes under the primary key, without undo.
+- Capture reads from the catalog, when PostgreSQL describes the table, only
+  what the rows cannot show: whether the table is partitioned, and whether a
+  partition leaves the primary key out. The read takes no lock on any
+  partition, so a `VACUUM FULL` or a rewriting `ALTER` of one does not hold
+  capture up. If the read fails or times out, or the table has been dropped
+  since, capture goes on and reads that table's earlier rows as it reads a
+  partitioned table's. After a failed read it does not ask for any table's
+  partitions for a minute (one attempt a minute for all tables, each of three
+  seconds at most), and the log says so once, with the cause.
+- **What is left.** A partition whose identity left the primary key out when a
+  change was made, and no longer does (or was dropped) when capture reads that
+  change, is not seen: capture reads old changes with today's catalog. An
+  `UPDATE` of the primary key made there arrives with no earlier row, so it is
+  stored under the row's **new** key, and the row under its old key stays in
+  the copy until the table's next full read. The same can happen while the
+  catalog cannot be read; if it then answers that such a partition exists, the
+  table is skipped from there on and capture health records the changes stored
+  meanwhile, which sends the table to a full read. Fix such a partition's
+  identity only once capture has caught up, or run a full read of the table
+  after it.
 
 > **PostgreSQL 18 and generated columns: read this before you set `REPLICA IDENTITY FULL` or create the publication.**
 > On PostgreSQL 18, a table that is at `REPLICA IDENTITY FULL`, belongs to a
@@ -415,7 +414,10 @@ PostgreSQL itself refuses `UPDATE` and `DELETE` on it while it is in a
 publication, with `cannot update table "..." because it does not have a
 replica identity and publishes updates`. Its `INSERT`s and `TRUNCATE`s are
 captured. The warning names such tables apart. Give the table a primary key, or
-set `REPLICA IDENTITY FULL`.
+set `REPLICA IDENTITY FULL`. A partitioned table published through its
+parent is the exception: PostgreSQL checks the identity of the partition a
+statement changes, not the parent's, so `UPDATE` and `DELETE` made in a
+partition that has a key are accepted and captured, without undo.
 
 #### Tables that are not captured
 

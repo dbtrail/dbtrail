@@ -78,15 +78,31 @@ type Decoder struct {
 	// whatever they hold (judgePartitions). nil = not asked.
 	partitions PartitionsResolver
 
-	// now dates a failed read of a relation's partitions, which is tried again
-	// partitionsRetryAfter later. time.Now outside tests.
+	// now dates a failed read of a relation's partitions. time.Now outside
+	// tests.
 	now func() time.Time
+	// partsDownUntil is until when NO relation's partitions are read, after a
+	// read that failed: one wait for every table, so a catalog that hangs
+	// costs one attempt a minute and not one per table (each attempt runs in
+	// the loop that also tells the server the stream is alive).
+	partsDownUntil time.Time
+	// partsFailures counts the failed reads in a row, for a warning given at
+	// the first and then every partitionsWarnEvery-th.
+	partsFailures int
 }
 
 // partitionsRetryAfter is how long after a failed read of a relation's
-// partitions the read is tried again, at the relation's next change. Until it
-// answers, every earlier row of the relation is stored with its key only.
+// partitions any such read is tried again.
 const partitionsRetryAfter = time.Minute
+
+// partitionsWarnEvery spaces the warning of a read of the partitions that
+// keeps failing: the first failure, then every tenth.
+const partitionsWarnEvery = 10
+
+// keyNotSentWarnEvery spaces the warning of changes dropped under
+// SkipReplicaIdentityKeyNotSent, per table: the first, then every thousandth.
+// Each one is counted in the ledger all the same.
+const keyNotSentWarnEvery = 1000
 
 // The capture-skip reasons (parser.SkipCounters, persisted in
 // stream_state.capture_skips). Stable strings: `status` shows them verbatim, and
@@ -551,19 +567,35 @@ func (d *Decoder) cacheRelation(m *pglogrepl.RelationMessage) error {
 		pkCols:          pkCols,
 		replicaIdentity: m.ReplicaIdentity,
 	}
+	// Changes stored while the catalog could not say what the relation's
+	// partitions are stay to be accounted for until it does (judgePartitions).
+	if prev := d.relations[m.RelationID]; prev != nil && !prev.partsRetryAt.IsZero() {
+		rel.unsureStored, rel.unsureFrom = prev.unsureStored, prev.unsureFrom
+	}
 	d.relations[m.RelationID] = rel
 	d.judgePartitions(rel)
 	if rel.skipped {
 		return nil
 	}
 	if m.ReplicaIdentity != 'f' && inScope {
-		if hasIdentity {
+		if !hasIdentity && rel.partitioned {
+			// PostgreSQL checks the identity in the PARTITION a statement
+			// changes, not in the root it is published through.
+			keyed := "the table has no primary key, so they are stored with no key at all (the copy cannot follow them); give the table a primary key"
+			if len(pkCols) > 0 {
+				keyed = "they are captured under the table's primary key, which every partition that accepts them sends"
+			}
+			d.logger.Warn("pgcapture: partitioned table whose root has no replica identity (NOTHING, or DEFAULT without a primary key), published through that root. PostgreSQL checks the replica identity in each partition, so the UPDATE and DELETE made in a partition that has one are accepted and arrive; "+keyed+". Undo refuses them. The statement in fix, run on the root and on each partition, makes later changes undoable",
+				"table", m.Namespace+"."+m.RelationName,
+				"replica_identity", replicaIdentityName(m.ReplicaIdentity),
+				"fix", replicaIdentityFix(m.Namespace, m.RelationName))
+		} else if hasIdentity {
 			d.logger.Warn("pgcapture: table without undo: not at REPLICA IDENTITY FULL. Its changes are captured and everything else works on them; undo refuses its UPDATE and DELETE. The statement in fix makes later changes undoable (the table then writes more WAL; on PostgreSQL 18 run `bintrail-pg doctor` first, a FULL table with a generated column the publication does not publish refuses UPDATE and DELETE)",
 				"table", m.Namespace+"."+m.RelationName,
 				"replica_identity", replicaIdentityName(m.ReplicaIdentity),
 				"fix", replicaIdentityFix(m.Namespace, m.RelationName))
 		} else {
-			d.logger.Warn("pgcapture: table has no replica identity (NOTHING, or DEFAULT without a primary key): PostgreSQL itself refuses UPDATE and DELETE on it while it is published, so only its INSERT and TRUNCATE are captured. Give it a primary key, or run the statement in fix",
+			d.logger.Warn("pgcapture: table has no replica identity (NOTHING, or DEFAULT without a primary key): PostgreSQL itself refuses UPDATE and DELETE on it while it is published, so only its INSERT and TRUNCATE are captured (a partitioned table is the exception: PostgreSQL checks each partition's identity). Give it a primary key, or run the statement in fix",
 				"table", m.Namespace+"."+m.RelationName,
 				"replica_identity", replicaIdentityName(m.ReplicaIdentity),
 				"fix", replicaIdentityFix(m.Namespace, m.RelationName))
@@ -575,66 +607,80 @@ func (d *Decoder) cacheRelation(m *pglogrepl.RelationMessage) error {
 // judgePartitions asks the catalog for rel's partitions and sets from the
 // answer how the earlier rows of rel are read (partial, byShape), or skips
 // rel. It runs at every description of the relation, whatever its identity,
-// and again partitionsRetryAfter after a read that failed (relationFor);
-// nothing is remembered from an earlier answer.
+// and again after a read that failed (relationFor); nothing is remembered
+// from an earlier answer.
 //
 // THE RULE. Under a partitioned root the label of an old tuple is the root's
-// and what it holds is the partition's (PartitionsResolver). An old row
-// labeled whole is stored whole only when the catalog answered AND a key-only
-// row of ANY partition could be told from a whole one by what it holds: the
-// root has a primary key, and no partition's own identity holds a column
-// outside it. In every other case, and whenever it is not known, every old
-// row of the relation is stored with its key only. Undo is lost for those
-// changes; a NULL is never stored where PostgreSQL did not send a value.
+// and what it holds is the partition's (PartitionsResolver). In a relation
+// that is partitioned, or that the catalog did not answer for, an old row
+// labeled whole is stored whole only when NONE of its columns arrives empty
+// ('n'); with any empty column it is stored with its key only (holdsEmpty).
+// A key-only row holds a value in the columns of the identity it was logged
+// under and nothing in any other, WHATEVER that identity was when the change
+// was made: so the rule does not depend on the catalog, which is today's while
+// capture that is behind reads changes made under an earlier one (a partition
+// put at FULL since, an identity index dropped, a primary key made narrower).
+// What it costs: a row of a partitioned table that really holds a NULL is
+// stored key-only, and undo refuses that change. NULL is never stored where
+// PostgreSQL did not send a value.
 //
-//   - not asked (no resolver): by the description alone, as below;
-//   - not partitioned: by the description alone. At FULL every old row is
-//     whole, as ever; below FULL every one is stored in part;
-//   - a partition whose own identity index leaves the primary key out: the
-//     table is SKIPPED, whatever the root's identity, as a table with such an
-//     identity is. An UPDATE of the primary key made there arrives with no
-//     earlier row, and stored from the new row it would leave the old row in
-//     the copy for good;
-//   - a root at FULL, partitioned, with a primary key, no partition's
-//     identity wider than it: each old row by what it holds (keyOnlyShaped).
-//     A row from a partition at FULL is whole and can be undone, one from a
-//     partition at DEFAULT is key-only, whatever the other partitions are;
-//   - a root at FULL with a partition whose identity holds a column outside
-//     the root's key (Partitions.Wide), or with no primary key at all
-//     (whatever its partitions are today): a key-only row holds a value
-//     outside the key and looks whole, so every old row is stored in part;
-//   - the catalog has no row for the relation (dropped since), or the read
-//     failed or timed out: not known, so every old row is stored in part.
-//     Capture goes on. A failed read is tried again after a while.
+// The catalog is asked for the two things the rows cannot show:
+//   - whether the relation is partitioned. A table that is not, described at
+//     FULL, keeps every old row whole, as ever, NULLs and all;
+//   - a partition whose own identity index leaves the primary key out. The
+//     table is then SKIPPED, whatever the root's identity, as a table with
+//     such an identity is: an UPDATE of the primary key made there arrives
+//     with no earlier row, and stored from the new row it would leave the old
+//     row in the copy for good.
 //
-// A root below FULL is stored in part by its description already; the catalog
-// is asked for it all the same, for the partition that leaves the key out.
+// A root below FULL is stored in part by its description. A partitioned root
+// whose description flags no identity column at all (NOTHING, or an identity
+// index that is gone) still receives UPDATE and DELETE: PostgreSQL checks the
+// identity in the partition. Every partition that accepts one sends the
+// primary key (one that does not skips the table, above), so the primary key
+// is taken as the identity of such a root (seen on PostgreSQL 16,
+// TestCapturer_RootAtNothing_Partitioned_Integration).
+//
+// No answer (the read failed or timed out, or the catalog no longer holds
+// the relation) is read as "may be partitioned": each old row by what it
+// holds. After a failed read no relation's partitions are read for
+// partitionsRetryAfter (Decoder.partsDownUntil).
 func (d *Decoder) judgePartitions(rel *relationInfo) {
 	full := rel.replicaIdentity == 'f'
-	rel.partial, rel.byShape, rel.partsRetryAt = !full, false, time.Time{}
+	rel.partial, rel.byShape, rel.partitioned, rel.partsRetryAt = !full, false, false, time.Time{}
 	if d.partitions == nil {
 		return
 	}
-	inScope := d.filters.Matches(rel.schema, rel.table)
 	name := rel.schema + "." + rel.table
+	now := d.now()
+	if now.Before(d.partsDownUntil) {
+		// Another read failed less than partitionsRetryAfter ago.
+		rel.byShape, rel.partsRetryAt = full, d.partsDownUntil
+		return
+	}
 	parts, err := d.partitions(rel.oid, rel.schema, rel.table)
-	switch {
-	case err != nil:
-		rel.partial = true
-		rel.partsRetryAt = d.now().Add(partitionsRetryAfter)
-		if inScope {
-			d.logger.Warn("pgcapture: could not read the table's partitions from the catalog; capture goes on. Until the catalog answers, every earlier row of the table is stored with its key only (undo refuses those changes), and a partition whose own replica identity leaves the primary key out would not be seen. The read is tried again at the table's next change after a minute, and when PostgreSQL describes the table again",
-				"table", name, "replica_identity", replicaIdentityName(rel.replicaIdentity), "error", err)
+	if err != nil {
+		d.partsDownUntil = now.Add(partitionsRetryAfter)
+		rel.byShape, rel.partsRetryAt = full, d.partsDownUntil
+		d.partsFailures++
+		if d.partsFailures%partitionsWarnEvery == 1 {
+			d.logger.Warn("pgcapture: could not read a table's partitions from the catalog; capture goes on, and no table's partitions are read for the next minute (one attempt a minute for all tables). Until the catalog answers, for each table described meanwhile: an earlier row labelled whole that holds an empty column is stored with its key only (undo refuses that change), and a partition whose own replica identity leaves the primary key out is not seen (a change of the primary key made there is stored under its new key; it is accounted for when the catalog answers). This warning is given at the first failure and then every tenth",
+				"table", name, "error", err, "failures_in_a_row", d.partsFailures)
 		}
 		return
+	}
+	if d.partsFailures > 0 {
+		d.logger.Info("pgcapture: the catalog answers again for the partitions of tables", "failures_in_a_row", d.partsFailures)
+		d.partsFailures = 0
+	}
+	unsureStored, unsureFrom := rel.unsureStored, rel.unsureFrom
+	rel.unsureStored, rel.unsureFrom = 0, 0
+	switch {
 	case !parts.Known:
-		rel.partial = true
-		if full && inScope {
-			d.logger.Warn("pgcapture: the catalog no longer holds the table (dropped since these changes were written), so it cannot be said whether it was partitioned; every earlier row of it is stored with its key only (undo refuses those changes)",
-				"table", name)
-		}
+		rel.byShape = full
 		return
 	case parts.MissesKey > 0:
+		detail := fmt.Sprintf("%d partition(s) of the table have a replica identity of their own (USING INDEX) that does not hold the primary key; fix: ALTER TABLE <partition> REPLICA IDENTITY DEFAULT (or FULL) on each (`bintrail-pg doctor` lists them)", parts.MissesKey)
 		*rel = relationInfo{
 			oid:             rel.oid,
 			schema:          rel.schema,
@@ -642,36 +688,52 @@ func (d *Decoder) judgePartitions(rel *relationInfo) {
 			replicaIdentity: rel.replicaIdentity,
 			skipped:         true,
 			skipReason:      SkipReplicaIdentityIndexWithoutPrimaryKey,
-			skipDetail:      fmt.Sprintf("%d partition(s) of the table have a replica identity of their own (USING INDEX) that does not hold the primary key; fix: ALTER TABLE <partition> REPLICA IDENTITY DEFAULT (or FULL) on each (`bintrail-pg doctor` lists them)", parts.MissesKey),
+			skipDetail:      detail,
+		}
+		inScope := d.filters.Matches(rel.schema, rel.table)
+		stretch := ""
+		if unsureStored > 0 && inScope {
+			// The catalog did not answer when the table was described, and
+			// its changes were stored meanwhile. One ledger entry for that
+			// stretch: the table's copy is then brought up to date by a full
+			// read, like after any skipped change.
+			stretch = fmt.Sprintf("%d change(s) of the table were stored from %s on, while the catalog could not be read: an UPDATE of the primary key among them made in such a partition is filed under its NEW key, and the row under its old key stays in the copy until the table's next full read",
+				unsureStored, pglogrepl.LSN(unsureFrom))
+			d.recordSkip(rel, SkipReplicaIdentityIndexWithoutPrimaryKey, detail+"; "+stretch)
 		}
 		if inScope {
 			d.logger.Warn("pgcapture: a partition of the table has a replica identity of its own that does not hold the primary key; the table's changes are NOT captured (each one is counted as skipped in capture health) until it does, the other tables keep flowing. PostgreSQL would send no earlier row for an UPDATE of the primary key made in that partition. Run ALTER TABLE <partition> REPLICA IDENTITY DEFAULT (or FULL) on each such partition; `bintrail-pg doctor` lists them",
 				"table", name,
-				"partitions", parts.MissesKey)
+				"partitions", parts.MissesKey,
+				"stored_before_the_catalog_answered", stretch)
 		}
 		return
-	case !parts.Partitioned || !full:
+	case !parts.Partitioned:
 		return
 	}
-	// A root with no primary key has nothing to tell a key-only row by, and
-	// the catalog read is today's: a partition that was below FULL when a
-	// change was written can be at FULL when capture reads it. So such a root
-	// is key-only whatever its partitions are now.
-	if parts.Wide > 0 || len(rel.pkCols) == 0 {
-		rel.partial = true
-	} else {
-		rel.byShape = true
-	}
-	if parts.BelowFull > 0 && inScope {
-		consequence := "undo refuses the UPDATE and DELETE made in a partition that is not at FULL. Run ALTER TABLE <partition> REPLICA IDENTITY FULL on each to make its later changes undoable"
-		if rel.partial {
-			// Every partition, the ones at FULL too: said as it is.
-			consequence = "undo refuses the UPDATE and DELETE of EVERY partition, the ones at FULL too: a partition's own replica identity holds a column outside the table's primary key (or the table has none), so a row sent with its key only cannot be told from a whole row, and every earlier row is stored with its key only. With a primary key on the table: run ALTER TABLE <partition> REPLICA IDENTITY FULL on each partition that is not at FULL to make the table's later changes undoable. Without one: give the table a primary key"
+	rel.partitioned = true
+	if !full {
+		// See above: a root that flags no identity column.
+		flagged := false
+		for _, c := range rel.columns {
+			flagged = flagged || c.inIdentity
 		}
-		d.logger.Warn("pgcapture: partitioned table with partitions without undo: it is published through its root, which is at REPLICA IDENTITY FULL, and some of its partitions are not (REPLICA IDENTITY is set per partition; ALTER TABLE on the parent does not reach them). The changes of every partition are captured and everything else works on them; "+consequence,
+		if !flagged {
+			for i := range rel.columns {
+				for _, pk := range rel.pkCols {
+					if rel.columns[i].name == pk.Name {
+						rel.columns[i].inIdentity = true
+					}
+				}
+			}
+		}
+		return
+	}
+	rel.byShape = true
+	if parts.BelowFull > 0 && d.filters.Matches(rel.schema, rel.table) {
+		d.logger.Warn("pgcapture: partitioned table with partitions without undo: it is published through its root, which is at REPLICA IDENTITY FULL, and some of its partitions are not (REPLICA IDENTITY is set per partition; ALTER TABLE on the parent does not reach them). The changes of every partition are captured and everything else works on them; undo refuses the UPDATE and DELETE made in a partition that is not at FULL. Run ALTER TABLE <partition> REPLICA IDENTITY FULL on each to make its later changes undoable",
 			"table", name,
-			"partitions_not_at_full", parts.BelowFull,
-			"every_change_stored_with_its_key_only", rel.partial)
+			"partitions_not_at_full", parts.BelowFull)
 	}
 }
 
@@ -844,7 +906,7 @@ func (d *Decoder) decodeUpdate(m *pglogrepl.UpdateMessage) (event.Event, bool, e
 	}
 	// With no old tuple the earlier row was not sent at all: REPLICA IDENTITY
 	// FULL always sends it whole.
-	if m.OldTuple == nil || earlierRowIsPartial(rel, m.OldTupleType) || keyOnlyShaped(rel, m.OldTuple) {
+	if m.OldTuple == nil || earlierRowIsPartial(rel, m.OldTupleType) || holdsEmpty(rel, m.OldTuple) {
 		return d.decodePartialUpdate(rel, m)
 	}
 	// REPLICA IDENTITY FULL: OldTuple is the whole old row ('O'). Decoded as a
@@ -875,33 +937,28 @@ func earlierRowIsPartial(rel *relationInfo, oldTupleType uint8) bool {
 	return rel.partial || oldTupleType == pglogrepl.UpdateMessageTupleTypeKey
 }
 
-// keyOnlyShaped reports whether an old tuple of a relation read row by row
-// (relationInfo.byShape: a partitioned table described at FULL whose
-// partitions the catalog answered for, none with an identity outside the
-// root's primary key; judgePartitions) holds nothing outside the primary key:
-// every other column is 'n', and there is one. That is what a partition below
-// FULL logs, under a root whose description says FULL (PartitionsResolver). A
-// row from a partition at FULL holds its values and is whole.
+// holdsEmpty reports whether an old tuple of a relation read row by row
+// (relationInfo.byShape: described at FULL, and partitioned or not answered
+// for by the catalog; judgePartitions) holds an empty column ('n'). Such a
+// tuple is not taken as a whole row: a key-only row, which a partition below
+// FULL logs under a root whose description says FULL (PartitionsResolver),
+// holds nothing in any column outside the identity it was logged under,
+// whatever that identity was. A tuple with a value in every column is whole.
 //
-// A key-only tuple cannot be told from a whole row whose other columns really
-// are NULL, so that row is stored in part too: undo refuses a change it could
-// have undone, and never writes NULL over values that were there. A table the
+// A key-only tuple cannot be told from a whole row that really holds a NULL,
+// so that row is stored in part too: undo refuses a change it could have
+// undone, and never writes NULL over values that were there. A table the
 // catalog says is not partitioned is never asked: its description is its own.
-func keyOnlyShaped(rel *relationInfo, t *pglogrepl.TupleData) bool {
+func holdsEmpty(rel *relationInfo, t *pglogrepl.TupleData) bool {
 	if !rel.byShape || len(t.Columns) != len(rel.columns) {
 		return false
 	}
-	outside := 0
-	for i, col := range t.Columns {
-		if rel.columns[i].inIdentity {
-			continue
+	for _, col := range t.Columns {
+		if col.DataType == pglogrepl.TupleDataTypeNull {
+			return true
 		}
-		if col.DataType != pglogrepl.TupleDataTypeNull {
-			return false
-		}
-		outside++
 	}
-	return outside > 0
+	return false
 }
 
 // decodePartialUpdate is decodeUpdate for a change whose earlier row was not
@@ -961,7 +1018,7 @@ func (d *Decoder) decodeDelete(m *pglogrepl.DeleteMessage) (event.Event, bool, e
 	if m.OldTuple == nil {
 		return event.Event{}, false, fmt.Errorf("pgcapture: DELETE on %s.%s carries no before-image (no replica identity?) — cannot index an un-reversible delete", rel.schema, rel.table)
 	}
-	if earlierRowIsPartial(rel, m.OldTupleType) || keyOnlyShaped(rel, m.OldTuple) {
+	if earlierRowIsPartial(rel, m.OldTupleType) || holdsEmpty(rel, m.OldTuple) {
 		// Below REPLICA IDENTITY FULL: the key of the deleted row and nothing
 		// else. Enough to delete it from the copy and to show it in history;
 		// undo refuses it (event.CheckUnresolvedToast).
@@ -1050,12 +1107,19 @@ func (d *Decoder) skipKeyNotSent(rel *relationInfo, before, after map[string]any
 	detail := fmt.Sprintf("replica identity %s: PostgreSQL sent a change without a value for primary-key column(s) %s; fix: %s",
 		replicaIdentityName(rel.replicaIdentity), strings.Join(missing, ", "), replicaIdentityFix(rel.schema, rel.table))
 	d.recordSkip(rel, SkipReplicaIdentityKeyNotSent, detail)
-	d.logger.Warn("pgcapture: a change arrived without a value for a primary-key column of its row; it is NOT captured (counted as skipped in capture health), the stream goes on",
-		"table", rel.schema+"."+rel.table,
-		"replica_identity", replicaIdentityName(rel.replicaIdentity),
-		"primary_key_columns", strings.Join(missing, ", "),
-		"commit_lsn", d.txn.commitLSN.String(),
-		"fix", replicaIdentityFix(rel.schema, rel.table))
+	// Every such change is in the ledger; the log gets the first of a table
+	// and then one in keyNotSentWarnEvery, so a table that sends them all the
+	// time does not fill it.
+	rel.keyNotSent++
+	if rel.keyNotSent%keyNotSentWarnEvery == 1 {
+		d.logger.Warn("pgcapture: a change arrived without a value for a primary-key column of its row; it is NOT captured (counted as skipped in capture health), the stream goes on. This warning is given for the first such change of a table and then every thousandth; capture health counts them all",
+			"table", rel.schema+"."+rel.table,
+			"replica_identity", replicaIdentityName(rel.replicaIdentity),
+			"primary_key_columns", strings.Join(missing, ", "),
+			"commit_lsn", d.txn.commitLSN.String(),
+			"such_changes_of_the_table", rel.keyNotSent,
+			"fix", replicaIdentityFix(rel.schema, rel.table))
+	}
 	return true
 }
 
@@ -1072,8 +1136,9 @@ func (d *Decoder) relationFor(oid uint32) (*relationInfo, error) {
 		return nil, fmt.Errorf("pgcapture: row event for unknown relation OID %d (no preceding Relation message)", oid)
 	}
 	// A read of the relation's partitions that failed is tried again, once it
-	// is due, before the change is decoded: the answer can turn the relation's
-	// key-only rows whole again, or skip it (judgePartitions).
+	// is due, before the change is decoded: the answer can say the relation
+	// is not partitioned (its old rows are then whole, NULLs and all), or
+	// skip it (judgePartitions).
 	if !rel.partsRetryAt.IsZero() && !d.now().Before(rel.partsRetryAt) && d.filters.Matches(rel.schema, rel.table) {
 		d.judgePartitions(rel)
 	}
@@ -1200,6 +1265,15 @@ func (d *Decoder) rowEvent(rel *relationInfo, typ event.EventType, before, after
 	// compares on (see event.Event); the durable cursor advances on EventCommit.
 	if d.infer != nil {
 		d.infer.noteChange(rel.oid, d.txn)
+	}
+	// A change stored while the catalog could not say what the relation's
+	// partitions are: counted, for the ledger, should the answer be that the
+	// table had to be skipped (judgePartitions).
+	if !rel.partsRetryAt.IsZero() {
+		if rel.unsureStored == 0 {
+			rel.unsureFrom = uint64(d.txn.commitLSN)
+		}
+		rel.unsureStored++
 	}
 	// A captured row breaks the ledger's consecutive-skip run, so a busy skipped
 	// table beside captured ones does not read as "capture stopped".

@@ -710,11 +710,10 @@ func TestCapturer_PartitionOwnIdentity_Integration(t *testing.T) {
 // A partitioned root with NO primary key, at FULL, published in the stead of
 // its partitions: one has a primary key of its own and is at DEFAULT, the
 // other is at FULL. PostgreSQL labels the old row of the first as a whole row
-// and it holds that partition's key alone; the root has no key to tell it by,
-// so every earlier row of the table is stored with its key only (here: no
-// column at all, the root's key being empty), and NULL is never stored for a
-// value PostgreSQL did not send. The price is the undo of the partition at
-// FULL.
+// and it holds that partition's key alone: it holds empty columns, so it is
+// stored with its key only (here: no column at all, the root's key being
+// empty), and NULL is never stored for a value PostgreSQL did not send. The
+// rows of the partition at FULL hold a value in every column and stay whole.
 func TestCapturer_RootWithoutKey_PartitionWithOwnKey_Integration(t *testing.T) {
 	baseDSN := testutil.SkipIfNoPostgres(t)
 	ctx := context.Background()
@@ -740,6 +739,10 @@ func TestCapturer_RootWithoutKey_PartitionWithOwnKey_Integration(t *testing.T) {
 		}
 	}
 	const bigVal = "(SELECT string_agg(md5(i::text), '') FROM generate_series(1, 100) i)"
+	var big string
+	if err := setup.QueryRow(ctx, "SELECT "+bigVal).Scan(&big); err != nil {
+		t.Fatal(err)
+	}
 	mustExec("CREATE TABLE nf_nokey (id int NOT NULL, v text, big text) PARTITION BY RANGE (id)")
 	mustExec("CREATE TABLE nf_nokey_1 PARTITION OF nf_nokey FOR VALUES FROM (0) TO (1000)")
 	mustExec("ALTER TABLE nf_nokey_1 ADD PRIMARY KEY (id)") // its own key, at DEFAULT
@@ -773,21 +776,176 @@ func TestCapturer_RootWithoutKey_PartitionWithOwnKey_Integration(t *testing.T) {
 		if ev.EventType == event.EventInsert {
 			continue
 		}
-		for c, v := range ev.RowBefore {
-			if v == nil {
-				t.Errorf("change %d (%v): before[%s] is NULL: a value PostgreSQL did not send was stored as NULL", i, ev.EventType, c)
-			}
-		}
-		assertPartialBefore(t, ev, cols, map[string]string{})
 		if ev.PKValues != "" {
 			t.Errorf("change %d: pk_values %q, want none (the table as published has no primary key)", i, ev.PKValues)
 		}
-		if ev.EventType == event.EventUpdate && !event.IsUnchangedToastMarker(ev.RowAfter["big"]) {
-			t.Errorf("change %d: after[big] = %T, want the unchanged-TOAST marker", i, ev.RowAfter["big"])
+		if i < 4 {
+			// The partition at DEFAULT with a key of its own.
+			for c, v := range ev.RowBefore {
+				if v == nil {
+					t.Errorf("change %d (%v): before[%s] is NULL: a value PostgreSQL did not send was stored as NULL", i, ev.EventType, c)
+				}
+			}
+			assertPartialBefore(t, ev, cols, map[string]string{})
+			if ev.EventType == event.EventUpdate && !event.IsUnchangedToastMarker(ev.RowAfter["big"]) {
+				t.Errorf("change %d: after[big] = %T, want the unchanged-TOAST marker", i, ev.RowAfter["big"])
+			}
+			continue
+		}
+		// The partition at FULL: whole, and undoable.
+		if nc := event.NotCapturedColumns(ev.RowBefore); len(nc) > 0 || ev.RowBefore["big"] != big {
+			t.Errorf("change %d, partition at FULL: the earlier row must be whole; not captured %v, big real=%v", i, nc, ev.RowBefore["big"] == big)
+		}
+		if err := event.CheckUnresolvedToast(ev.Schema, ev.Table, ev.PKValues, stored(t, ev.RowBefore), stored(t, ev.RowAfter)); err != nil {
+			t.Errorf("change %d, partition at FULL: it can be undone, got %v", i, err)
 		}
 	}
-	if !strings.Contains(r.logText(), "every_change_stored_with_its_key_only=true") {
-		t.Errorf("the log must say every change of the table is stored with its key only")
+}
+
+// The identity of a partition is changed between a change being written and
+// capture reading it: a DELETE made while the partition's identity was an
+// index wider than the primary key, the partition put at FULL (what the
+// doctor asks for), and only then capture started again. PostgreSQL sends the
+// old row labelled whole, holding the index's columns alone; today's catalog
+// shows every partition at FULL. The row holds an empty column, so it is
+// stored with its key only: never as a whole row with NULL in the columns
+// PostgreSQL did not send.
+func TestCapturer_PartitionIdentityChangedBeforeCaptureRead_Integration(t *testing.T) {
+	baseDSN := testutil.SkipIfNoPostgres(t)
+	ctx := context.Background()
+	const slot = "bintrail_nofull_stale_it"
+	const pub = "bintrail_nofull_stale_pub"
+	setup, err := pgx.Connect(ctx, baseDSN)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { setup.Close(context.Background()) })
+	cleanup := func() {
+		bg := context.Background()
+		_, _ = setup.Exec(bg, "DROP PUBLICATION IF EXISTS "+pub)
+		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS nf_stale, nf_stale_end")
+		_, _ = setup.Exec(bg, "SELECT pg_drop_replication_slot($1) WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)", slot)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	mustExec := func(q string) {
+		t.Helper()
+		if _, err := setup.Exec(ctx, q); err != nil {
+			t.Fatalf("exec %q: %v", q, err)
+		}
+	}
+	mustExec("CREATE TABLE nf_stale (id int PRIMARY KEY, u int NOT NULL, v text, w text) PARTITION BY RANGE (id)")
+	mustExec("CREATE TABLE nf_stale_1 PARTITION OF nf_stale FOR VALUES FROM (0) TO (1000)")
+	mustExec("CREATE UNIQUE INDEX nf_stale_1_uk ON nf_stale_1 (id, u)")
+	mustExec("ALTER TABLE nf_stale_1 REPLICA IDENTITY USING INDEX nf_stale_1_uk")
+	mustExec("ALTER TABLE nf_stale REPLICA IDENTITY FULL")
+	mustExec("CREATE TABLE nf_stale_end (id int PRIMARY KEY)")
+	mustExec("ALTER TABLE nf_stale_end REPLICA IDENTITY FULL")
+	mustExec("CREATE PUBLICATION " + pub + " FOR TABLE nf_stale, nf_stale_end WITH (publish_via_partition_root = true)")
+
+	// A first run, so that the slot exists and holds the changes that follow.
+	r := startNofull(t, ctx, setup, baseDSN, slot, pub)
+	mustExec("INSERT INTO nf_stale VALUES (1, 10, 'a', 'w'), (2, 20, 'a', 'w'), (3, 30, 'a', 'w')")
+	mustExec("INSERT INTO nf_stale_end VALUES (1)")
+	r.until(func(ev event.Event) bool { return ev.Table == "nf_stale_end" })
+	r.stop()
+
+	// Capture is not running. Changes under the wide identity ...
+	mustExec("DELETE FROM nf_stale WHERE id = 1")
+	mustExec("UPDATE nf_stale SET u = 21 WHERE id = 2")
+	// ... then the partition is put at FULL, and a change is made under that.
+	mustExec("ALTER TABLE nf_stale_1 REPLICA IDENTITY FULL")
+	mustExec("DELETE FROM nf_stale WHERE id = 3")
+	mustExec("INSERT INTO nf_stale_end VALUES (2)")
+
+	r = startNofull(t, ctx, setup, baseDSN, slot, pub)
+	evs := r.until(func(ev event.Event) bool { return ev.Table == "nf_stale_end" && ev.PKValues == "2" })
+	r.stop()
+	t.Logf("capture log:\n%s", r.logText())
+	var got []event.Event
+	for _, ev := range of(evs, "nf_stale") {
+		if ev.EventType != event.EventInsert {
+			got = append(got, ev)
+		}
+	}
+	if rowKinds(got) != "DUD" || r.skips.Total() != 0 {
+		t.Fatalf("events %q (want DUD), skips %d", rowKinds(got), r.skips.Total())
+	}
+	cols := []string{"id", "u", "v", "w"}
+	for i, ev := range got[:2] {
+		t.Logf("change %d made under the wide identity: before=%v", i, ev.RowBefore)
+		for c, v := range ev.RowBefore {
+			if v == nil {
+				t.Errorf("change %d: before[%s] is NULL: a value PostgreSQL did not send was stored as NULL", i, c)
+			}
+		}
+		assertPartialBefore(t, ev, cols, map[string]string{"id": fmt.Sprint(i + 1)})
+	}
+	// The change made at FULL is whole.
+	if nc := event.NotCapturedColumns(got[2].RowBefore); len(nc) > 0 || got[2].RowBefore["v"] != "a" || got[2].RowBefore["u"] != "30" {
+		t.Errorf("the change made after the partition was put at FULL must be whole, got %v", got[2].RowBefore)
+	}
+}
+
+// A partitioned table whose ROOT is at REPLICA IDENTITY NOTHING, published
+// through that root, its partition at DEFAULT. PostgreSQL checks the replica
+// identity in the partition, so UPDATE and DELETE are accepted, and the old
+// row it sends holds the primary key. The root's description flags no
+// identity column; capture takes the primary key as the identity and stores
+// the changes under it. Without that every one of them was dropped, with a
+// warning each.
+func TestCapturer_RootAtNothing_Partitioned_Integration(t *testing.T) {
+	baseDSN := testutil.SkipIfNoPostgres(t)
+	ctx := context.Background()
+	const slot = "bintrail_nofull_rootnothing_it"
+	const pub = "bintrail_nofull_rootnothing_pub"
+	setup, err := pgx.Connect(ctx, baseDSN)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { setup.Close(context.Background()) })
+	cleanup := func() {
+		bg := context.Background()
+		_, _ = setup.Exec(bg, "DROP PUBLICATION IF EXISTS "+pub)
+		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS nf_rootn, nf_rootn_end")
+		_, _ = setup.Exec(bg, "SELECT pg_drop_replication_slot($1) WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)", slot)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	mustExec := func(q string) {
+		t.Helper()
+		if _, err := setup.Exec(ctx, q); err != nil {
+			t.Fatalf("exec %q: %v", q, err)
+		}
+	}
+	mustExec("CREATE TABLE nf_rootn (id int PRIMARY KEY, v text) PARTITION BY RANGE (id)")
+	mustExec("CREATE TABLE nf_rootn_1 PARTITION OF nf_rootn FOR VALUES FROM (0) TO (1000)")
+	mustExec("ALTER TABLE nf_rootn REPLICA IDENTITY NOTHING") // the root only
+	mustExec("CREATE TABLE nf_rootn_end (id int PRIMARY KEY)")
+	mustExec("CREATE PUBLICATION " + pub + " FOR TABLE nf_rootn, nf_rootn_end WITH (publish_via_partition_root = true)")
+
+	r := startNofull(t, ctx, setup, baseDSN, slot, pub)
+	mustExec("INSERT INTO nf_rootn VALUES (1, 'a')")
+	mustExec("UPDATE nf_rootn SET v = 'b' WHERE id = 1")
+	mustExec("UPDATE nf_rootn SET id = 2 WHERE id = 1")
+	mustExec("DELETE FROM nf_rootn WHERE id = 2")
+	mustExec("INSERT INTO nf_rootn_end VALUES (1)")
+	evs := r.until(func(ev event.Event) bool { return ev.Table == "nf_rootn_end" })
+	r.stop()
+	t.Logf("capture log:\n%s", r.logText())
+	got := of(evs, "nf_rootn")
+	if rowKinds(got) != "IUUD" || r.skips.Total() != 0 {
+		t.Fatalf("events %q (want IUUD), skips %d", rowKinds(got), r.skips.Total())
+	}
+	cols := []string{"id", "v"}
+	assertPartialBefore(t, got[1], cols, map[string]string{"id": "1"})
+	assertPartialBefore(t, got[2], cols, map[string]string{"id": "1"})
+	if got[2].PKValues != "1" || got[2].RowAfter["id"] != "2" {
+		t.Errorf("key-changing UPDATE: pk=%q after=%v", got[2].PKValues, got[2].RowAfter)
+	}
+	assertPartialBefore(t, got[3], cols, map[string]string{"id": "2"})
+	if logs := r.logText(); !strings.Contains(logs, "partitioned table whose root has no replica identity") || strings.Contains(logs, "a change arrived without a value for a primary-key column") {
+		t.Errorf("the log must say what PostgreSQL does for such a root, and warn of no dropped change")
 	}
 }
 

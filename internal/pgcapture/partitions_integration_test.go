@@ -56,7 +56,6 @@ func TestQueryPartitions_Integration(t *testing.T) {
 				"CREATE TABLE pq_sub_1_1 PARTITION OF pq_sub_1 FOR VALUES FROM (0) TO (10)",
 			},
 			Partitions{Known: true, Partitioned: true, BelowFull: 1}},
-		// The root has no key, so the partition's own key is outside it.
 		{"a root without a primary key over a partition with its own, at DEFAULT", "pq_nokey",
 			[]string{
 				"CREATE TABLE pq_nokey (id int NOT NULL, v text) PARTITION BY RANGE (id)",
@@ -65,7 +64,7 @@ func TestQueryPartitions_Integration(t *testing.T) {
 				"CREATE TABLE pq_nokey_2 PARTITION OF pq_nokey FOR VALUES FROM (10) TO (20)",
 				"ALTER TABLE pq_nokey_2 REPLICA IDENTITY FULL",
 			},
-			Partitions{Known: true, Partitioned: true, BelowFull: 1, Wide: 1}},
+			Partitions{Known: true, Partitioned: true, BelowFull: 1}},
 		{"a root without a primary key over a partition with a unique index as its identity", "pq_nokeyidx",
 			[]string{
 				"CREATE TABLE pq_nokeyidx (id int NOT NULL, v text) PARTITION BY RANGE (id)",
@@ -73,7 +72,7 @@ func TestQueryPartitions_Integration(t *testing.T) {
 				"CREATE UNIQUE INDEX pq_nokeyidx_1_uk ON pq_nokeyidx_1 (id)",
 				"ALTER TABLE pq_nokeyidx_1 REPLICA IDENTITY USING INDEX pq_nokeyidx_1_uk",
 			},
-			Partitions{Known: true, Partitioned: true, BelowFull: 1, Wide: 1}},
+			Partitions{Known: true, Partitioned: true, BelowFull: 1}},
 		{"a partition whose identity index is wider than the primary key", "pq_wide",
 			[]string{
 				"CREATE TABLE pq_wide (id int, id2 int NOT NULL, u int NOT NULL, PRIMARY KEY (id, id2)) PARTITION BY RANGE (id2)",
@@ -82,9 +81,8 @@ func TestQueryPartitions_Integration(t *testing.T) {
 				"ALTER TABLE pq_wide_1 REPLICA IDENTITY USING INDEX pq_wide_1_uk",
 				"CREATE TABLE pq_wide_2 PARTITION OF pq_wide FOR VALUES FROM (10) TO (20)",
 			},
-			Partitions{Known: true, Partitioned: true, BelowFull: 2, Wide: 1}},
-		// Whatever the root's identity (here DEFAULT). The index's u is outside
-		// the root's key too.
+			Partitions{Known: true, Partitioned: true, BelowFull: 2}},
+		// Whatever the root's identity (here DEFAULT).
 		{"a partition whose identity index leaves the primary key out, root at DEFAULT", "pq_miss",
 			[]string{
 				"CREATE TABLE pq_miss (id int, id2 int NOT NULL, u int NOT NULL, PRIMARY KEY (id, id2)) PARTITION BY RANGE (id2)",
@@ -92,7 +90,7 @@ func TestQueryPartitions_Integration(t *testing.T) {
 				"CREATE UNIQUE INDEX pq_miss_1_uk ON pq_miss_1 (u, id2)",
 				"ALTER TABLE pq_miss_1 REPLICA IDENTITY USING INDEX pq_miss_1_uk",
 			},
-			Partitions{Known: true, Partitioned: true, BelowFull: 1, Wide: 1, MissesKey: 1}},
+			Partitions{Known: true, Partitioned: true, BelowFull: 1, MissesKey: 1}},
 		// The identity index is the primary key's columns in another order.
 		{"a partition whose identity index is the primary key again", "pq_same",
 			[]string{
