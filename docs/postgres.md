@@ -1305,7 +1305,8 @@ server, closes the connections that use it; clients reconnect.
   fail the block as on PostgreSQL; its notices (`RAISE NOTICE`). Savepoints
   (`ROLLBACK TO SAVEPOINT` brings a failed block back, and the session's
   settings to what they were at the savepoint, as psql's `ON_ERROR_ROLLBACK`
-  and JDBC's `autosave` expect),
+  and JDBC's `autosave` expect; a savepoint's name is told apart as
+  PostgreSQL tells it, so `"A"` in quotes is not `a`),
   cursors and the extended protocol work as on the source: a statement a driver
   prepared outside the block (pgx, JDBC) is prepared on the source the first
   time it runs inside one. When the copy had described its columns with
@@ -1404,7 +1405,10 @@ The source answers:
   (the copy matched no row), `->` and `->>` (PostgreSQL answers `json`, and
   writes a nested value with spaces), a number with an exponent (a `numeric`
   on PostgreSQL), `::text` of a
-  float, `upper`, `lower` and `ILIKE` (PostgreSQL folds case by the database's
+  float, a `DATE`, `TIMESTAMP` or `TIME` literal written with a time zone
+  (`TIMESTAMP '2026-03-02 10:00:00+02'`: the type holds none and PostgreSQL
+  does not read it, so the literal is 10:00 there) and a string with one in
+  either bound of a `BETWEEN` on a `timestamp` column, `upper`, `lower` and `ILIKE` (PostgreSQL folds case by the database's
   character type), `COLLATE`, `AT TIME ZONE`, `FOR UPDATE`, `jsonb` operators,
   `generate_series` and every function the list does not name.
 - **The clock and the session**: `now()`, `CURRENT_DATE`, `CURRENT_TIMESTAMP`,

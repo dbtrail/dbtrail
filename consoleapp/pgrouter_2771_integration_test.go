@@ -267,6 +267,53 @@ func TestIntegrationPGRouterForward(t *testing.T) {
 		if got := one(ctx, c, "SHOW TimeZone"); got != "UTC" {
 			t.Errorf("SHOW TimeZone after ROLLBACK: %q", got)
 		}
+		// Two savepoints whose names differ only as PostgreSQL tells names
+		// apart (#3026): "A" in quotes is not a. The rollback goes to the
+		// outer one, on the source and in what the port says.
+		one(ctx, c, "BEGIN")
+		one(ctx, c, "SET TimeZone = 'Asia/Tokyo'")
+		one(ctx, c, `SAVEPOINT "A"`)
+		one(ctx, c, "SET TimeZone = 'Europe/Paris'")
+		one(ctx, c, "SAVEPOINT a")
+		one(ctx, c, "SET TimeZone = 'America/Bogota'")
+		if got := one(ctx, c, `ROLLBACK TO "A"`); got != "ROLLBACK" {
+			t.Errorf(`ROLLBACK TO "A": %q`, got)
+		}
+		if got := one(ctx, c, "SELECT current_setting('TimeZone')"); got != "Asia/Tokyo" {
+			t.Errorf(`TimeZone on the source after ROLLBACK TO "A": %q`, got)
+		}
+		if got := one(ctx, c, "SHOW TimeZone"); got != "Asia/Tokyo" {
+			t.Errorf(`SHOW TimeZone after ROLLBACK TO "A": %q`, got)
+		}
+		// a was made after "A" and went with the rollback.
+		if got := one(ctx, c, "ROLLBACK TO a"); !strings.HasPrefix(got, "error 3B001") {
+			t.Errorf("ROLLBACK TO a, a savepoint that is gone: %q", got)
+		}
+		one(ctx, c, "ROLLBACK")
+		// A name without quotes in any case is one name, and its release
+		// lets the name be used again.
+		one(ctx, c, "BEGIN")
+		one(ctx, c, "SET TimeZone = 'Asia/Tokyo'")
+		one(ctx, c, "SAVEPOINT Mark")
+		one(ctx, c, "SET TimeZone = 'Europe/Paris'")
+		if got := one(ctx, c, "RELEASE SAVEPOINT MARK"); got != "RELEASE" {
+			t.Errorf("RELEASE SAVEPOINT MARK: %q", got)
+		}
+		one(ctx, c, `SAVEPOINT "mark"`)
+		one(ctx, c, "SET TimeZone = 'America/Bogota'")
+		if got := one(ctx, c, "ROLLBACK TO mArK"); got != "ROLLBACK" {
+			t.Errorf("ROLLBACK TO mArK: %q", got)
+		}
+		if got := one(ctx, c, "SELECT current_setting('TimeZone')"); got != "Europe/Paris" {
+			t.Errorf("TimeZone on the source after ROLLBACK TO mArK: %q", got)
+		}
+		if got := one(ctx, c, "SHOW TimeZone"); got != "Europe/Paris" {
+			t.Errorf("SHOW TimeZone after ROLLBACK TO mArK: %q", got)
+		}
+		one(ctx, c, "ROLLBACK")
+		if got := one(ctx, c, "SHOW TimeZone"); got != "UTC" {
+			t.Errorf("SHOW TimeZone after the second ROLLBACK: %q", got)
+		}
 		for _, mode := range []pgx.QueryExecMode{pgx.QueryExecModeCacheStatement, pgx.QueryExecModeExec} {
 			// A deadline of its own: a hang here must not take the rest of
 			// the test's time.
