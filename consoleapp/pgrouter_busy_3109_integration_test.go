@@ -135,12 +135,20 @@ func TestIntegrationPGRouterBusyCopyRefusesNotForwards(t *testing.T) {
 		t.Fatalf("the source plans the read by key with a sequential scan of %v rows", r)
 	}
 
+	// What the fixture did on the source (its snapshot reads the table
+	// whole) is published by then. Nothing below runs on the source until
+	// the copy is held: the copy answers it.
+	time.Sleep(pgStatsSettle)
+	seq0, idx0 := scans()
+	t.Logf("the source's scans of the table before the copy is held: %d sequential, %d by index", seq0, idx0)
+
 	numbers := func() pgRouterServerNumbers { return env.routes.doc("").Servers[env.serverID] }
 	want := strconv.Itoa(pgBusyRows)
 	// Connections that will read the copy, each with the copy's list of
-	// columns already read (kept 10 seconds), so that what is refused first
-	// below is the statement's own run, not that list. The source never
-	// answers them, which keeps them on the copy afterwards (#2985).
+	// columns already read (kept 10 seconds, so read just before the copy
+	// is held), so that what is refused first below is the statement's own
+	// run, not that list. The source never answers them, which keeps them
+	// on the copy afterwards (#2985).
 	p1 := pgClient(t, ctx, env.portDSN(), nil)
 	p2 := pgClient(t, ctx, env.portDSN(), nil)
 	ext := pgxConn(t, ctx, env.portDSN(), pgx.QueryExecModeCacheStatement)
@@ -160,11 +168,6 @@ func TestIntegrationPGRouterBusyCopyRefusesNotForwards(t *testing.T) {
 	if r := numbers().Reasons[pgshim.ReasonAnswersTheSame]; r < 4 {
 		t.Fatalf("reasons %v, want 4 answers_the_same", numbers().Reasons)
 	}
-	// What the fixture did on the source (its snapshot reads the table
-	// whole) is published by then.
-	time.Sleep(pgStatsSettle)
-	seq0, idx0 := scans()
-	t.Logf("the source's scans of the table before the copy is held: %d sequential, %d by index", seq0, idx0)
 
 	// The copy's one worker held.
 	hctx, stopHolder := context.WithCancel(ctx)
