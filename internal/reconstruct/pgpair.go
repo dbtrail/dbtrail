@@ -122,8 +122,12 @@ func pgPairEligible(cfg FullTableConfig, srcPath string, bmeta baseline.DumpMeta
 // (pgFoldPairIntoFile), from the file and the pair this call would have left.
 // A pair that turns out too large for its file ends the same way, with end
 // set here. written is then true and the table is its one new file.
-func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *TableReport, prev *pgPrevPair, end string) (written bool, err error) {
+//
+// start is when the table's run began: every line this call logs says how
+// long each step took (pgPairSteps), and the whole since start.
+func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *TableReport, prev *pgPrevPair, end string, start time.Time) (written bool, err error) {
 	src, bmeta := in.SourceBaseline.Path, in.SourceBaseline.Metadata
+	steps := pgPairSteps{start: start, fetch: rep.FetchDuration, fold: rep.FoldDuration}
 	dst := filepath.Join(in.SnapshotDir, in.Schema, in.Table+".parquet")
 	// blamePrev: a refusal below makes the caller read every change since
 	// the file instead of writing the table from the pair before. Always
@@ -147,8 +151,8 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 			prev.distrust = why
 		}
 		slog.Warn("PostgreSQL table delta not written; the table is written without it",
-			"schema", in.Schema, "table", in.Table, "reason", why, "error", cause,
-			"continuing_the_delta_before", prev != nil)
+			append([]any{"schema", in.Schema, "table", in.Table, "reason", why, "error", cause,
+				"continuing_the_delta_before", prev != nil}, steps.attrs(false)...)...)
 		return false, nil
 	}
 	// The same checks the full merge makes of the file's columns against
@@ -229,7 +233,9 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	stepAt := time.Now()
 	positions, err := pgdelta.BasePositionsOf(ctx, duck, src, keyCols, keys)
+	steps.positions = time.Since(stepAt)
 	if err != nil {
 		return full("could not find the changed rows in the table file", err)
 	}
@@ -240,7 +246,10 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 			blamePrev = true
 			return full("the delta beside the previous file was written for another file", nil)
 		}
-		if carriedDead, err = pgdelta.ReadDead(ctx, duck, prev.dead); err != nil {
+		stepAt = time.Now()
+		carriedDead, err = pgdelta.ReadDead(ctx, duck, prev.dead)
+		steps.prevDead = time.Since(stepAt)
+		if err != nil {
 			blamePrev = true
 			return full("could not read the rows the previous delta takes away", err)
 		}
@@ -341,12 +350,14 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		dead, rows = prev.dead, prev.rows
 	} else {
 		var pairKeys int64
+		stepAt = time.Now()
 		dead, rows, pairKeys, err = pgdelta.WritePair(pgdelta.PairInput{
 			BasePath: dst, Seq: 0, Base: baseID, Run: run,
 			Columns: colNames, KeyColumns: keyCols,
 			Positions: positions, CarriedDead: carriedDead, Changes: changes,
 			Metadata: md,
 		})
+		steps.pairWrite = time.Since(stepAt)
 		if errors.Is(err, pgdelta.ErrPairExists) {
 			// Never the full merge here: it would write the table's file beside
 			// a pair written for another one, and whatever reads the pair would
@@ -406,7 +417,9 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		}
 		// The footer a table file carries: the run's own, without the keys
 		// of a pair.
+		stepAt = time.Now()
 		folded, total, ferr := pgFoldPair(ctx, duck, src, dead, rows, dst, snapshotFileMetadata(in))
+		steps.foldPair = time.Since(stepAt)
 		// The pair goes before the file takes its place: a table file with
 		// the pair of another beside it must never be in a folder.
 		if terr := takeBack(); terr != nil {
@@ -423,7 +436,7 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 				return false, cerr
 			}
 			slog.Warn("a table's delta could not be folded into its file by the engine; the table is written row by row instead",
-				"schema", in.Schema, "table", in.Table, "reason", end, "error", ferr)
+				append([]any{"schema", in.Schema, "table", in.Table, "reason", end, "error", ferr}, steps.attrs(true)...)...)
 			return false, nil
 		}
 		rep.BaselineRows = total - int64(puts)
@@ -432,9 +445,9 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		rep.Files = []string{filepath.Join(in.Schema, in.Table+".parquet")}
 		rep.DeltaCompacted = end
 		slog.Info("table written in full from its previous file and its delta",
-			"schema", in.Schema, "table", in.Table, "reason", end,
-			"lsn", lsnText(in.PGCutLSN), "file_lsn", lsnText(bmeta.LSN), "rows", total,
-			"changed_keys", len(keys), "continued_the_delta_before", prev != nil)
+			append([]any{"schema", in.Schema, "table", in.Table, "reason", end,
+				"lsn", lsnText(in.PGCutLSN), "file_lsn", lsnText(bmeta.LSN), "rows", total,
+				"changed_keys", len(keys), "continued_the_delta_before", prev != nil}, steps.attrs(true)...)...)
 		return true, nil
 	}
 
@@ -460,11 +473,52 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		filepath.Join(in.Schema, filepath.Base(rows)),
 	}
 	slog.Info("table published as its previous file and a delta",
-		"schema", in.Schema, "table", in.Table, "linked", linked,
-		"lsn", lsnText(in.PGCutLSN), "file_lsn", lsnText(bmeta.LSN),
-		"file_rows", baseRows, "changed_keys", len(keys), "dead_rows", deadRows,
-		"kept_from_previous_delta", kept, "from_previous_delta", prev != nil)
+		append([]any{"schema", in.Schema, "table", in.Table, "linked", linked,
+			"lsn", lsnText(in.PGCutLSN), "file_lsn", lsnText(bmeta.LSN),
+			"file_rows", baseRows, "changed_keys", len(keys), "dead_rows", deadRows,
+			"kept_from_previous_delta", kept, "from_previous_delta", prev != nil}, steps.attrs(false)...)...)
 	return true, nil
+}
+
+// pgPairSteps is how long each step of writePGPair took, for its lines: the
+// steps of one table, in the order they run, and the table's start for the
+// whole. A step that did not run is 0. The steps do not overlap, so with
+// what else the table did they add up to no more than the whole:
+//
+//   - fetch: reading the window's changes from the index (and its archives);
+//   - fold: folding them into one change per key, in this process;
+//   - positions: finding the changed keys' rows in the table file
+//     (pgdelta.BasePositionsOf: a pass over the file's key columns for a
+//     NULL, unless the file is remembered, and the join);
+//   - prev_dead: reading the rows the pair before takes away (.pgdead);
+//   - pair_write: writing the new pair, which reads the pair before's rows
+//     (.pgnew) as it goes, so that read is in this step;
+//   - fold_pair: when the pair ends, writing the table in full from its file
+//     and the pair, by the engine.
+type pgPairSteps struct {
+	start time.Time
+	fetch time.Duration
+	fold  time.Duration
+
+	positions time.Duration
+	prevDead  time.Duration
+	pairWrite time.Duration
+	foldPair  time.Duration
+}
+
+// attrs is the steps as a log line's fields, in milliseconds, and total_ms
+// since the table's start. fold_pair_ms only on the lines of a pair that
+// ends (ending).
+func (s pgPairSteps) attrs(ending bool) []any {
+	a := []any{
+		"fetch_ms", s.fetch.Milliseconds(), "fold_ms", s.fold.Milliseconds(),
+		"positions_ms", s.positions.Milliseconds(), "prev_dead_ms", s.prevDead.Milliseconds(),
+		"pair_write_ms", s.pairWrite.Milliseconds(),
+	}
+	if ending {
+		a = append(a, "fold_pair_ms", s.foldPair.Milliseconds())
+	}
+	return append(a, "total_ms", time.Since(s.start).Milliseconds())
 }
 
 // pgFoldPair is pgFoldPairIntoFile, a seam: a test makes it fail to reach
