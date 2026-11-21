@@ -3080,8 +3080,10 @@ once a second, which the copy answers.
   or is killed: the next statement on an idle connection failed with `2013`
   at once. Only the frozen router left clients waiting, so give the
   application a connect timeout and a read timeout.
-- **A transaction that was open is rolled back.** Its next statement failed
-  with `2013`, and none of its rows were on MySQL.
+- **A transaction that was open is rolled back** when the router stops or is
+  killed. Its next statement failed with `2013`, and none of its rows were
+  on MySQL. Across the freeze it stayed open, and committed once the router
+  ran again.
 - **Every write the client had an answer for was on MySQL**: 694 of 694 with
   the stop, 995 of 995 with the kill. The one `INSERT` in flight each time
   ended in `2013` and was not on MySQL. That is what this run saw, not a
