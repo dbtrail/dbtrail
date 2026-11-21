@@ -241,7 +241,9 @@ func readsOf(q string, alsoPure map[string]bool) (r stmtReads, why string) {
 	if w := firstWord(toks); w != "select" && w != "with" {
 		return r, "not a SELECT"
 	}
-	word := func(i int, w string) bool { return i >= 0 && i < len(toks) && toks[i].kind == rtWord && toks[i].text == w }
+	word := func(i int, w string) bool {
+		return i >= 0 && i < len(toks) && toks[i].kind == rtWord && toks[i].text == w
+	}
 
 	// The opening WITH: each name, an optional column list, AS, and a body
 	// in parentheses. skip are the header's tokens; bodies the "(" of each
@@ -317,11 +319,11 @@ func readsOf(q string, alsoPure map[string]bool) (r stmtReads, why string) {
 		fExpr         // an expression, or a call's arguments
 	)
 	const (
-		cStart = iota // before SELECT
-		cSelect       // the select list
-		cFrom         // the FROM clause
-		cOther        // WHERE and after
-		cSetOp        // after UNION, INTERSECT or EXCEPT
+		cStart  = iota // before SELECT
+		cSelect        // the select list
+		cFrom          // the FROM clause
+		cOther         // WHERE and after
+		cSetOp         // after UNION, INTERSECT or EXCEPT
 	)
 	type frame struct {
 		kind   int
