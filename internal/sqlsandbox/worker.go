@@ -791,13 +791,70 @@ var allowedTableFunctions = map[string]bool{
 }
 
 // refusedScalarFunctions are the scalar functions a statement may not call
-// at any depth, because they return the engine's settings (which hold the
-// copy's directories, the spill directory and the secrets directory) or the
-// session's variables (which the views set to the copy's directories). The
-// scalar functions are many and a statement needs them, so these are refused
-// by name; TestScalarFunctionsNamedLikeTheHostAreReviewed watches the
-// engine's list for one more of the kind.
-var refusedScalarFunctions = map[string]bool{"current_setting": true, "getvariable": true}
+// at any depth: getvariable returns the session's variables, which the views
+// set to the copy's directories. The scalar functions are many and a
+// statement needs them, so these are refused by name;
+// TestScalarFunctionsNamedLikeTheHostAreReviewed watches the engine's list
+// for one more of the kind. current_setting is the other one of the kind,
+// refused only for the settings below (refusedSettingRead).
+var refusedScalarFunctions = map[string]bool{"getvariable": true}
+
+// pathSettings are the engine's settings that hold a path, a list of
+// folders, an extension repository, a proxy or where a log or profile is
+// written, by every name and alias the pinned engine knows them by: their
+// value is not shown on the copy (#3096). Every other setting is, through
+// current_setting (the session's time zone, threads, memory, the lock).
+// TestPathSettingsAreAllListed checks this against the engine's settings.
+var pathSettings = map[string]bool{
+	"allowed_directories": true, "allowed_paths": true,
+	"autoinstall_extension_repository": true, "custom_extension_repository": true,
+	"extension_directories": true, "extension_directory": true,
+	"file_search_path": true, "home_directory": true, "secret_directory": true, "temp_directory": true,
+	"http_logging_output": true, "log_query_path": true, "profile_output": true, "profiling_output": true,
+	"http_proxy": true, "http_proxy_password": true, "http_proxy_username": true,
+}
+
+// refusedSettingRead returns why a current_setting call in the statement
+// tree is refused, or "": a setting of pathSettings, or a name that is not
+// written as a fixed text (an expression or a parameter could name any
+// setting).
+func refusedSettingRead(node any) string {
+	switch x := node.(type) {
+	case map[string]any:
+		if name, _ := x["function_name"].(string); x["type"] == "FUNCTION" && strings.EqualFold(name, "current_setting") {
+			children, _ := x["children"].([]any)
+			if len(children) != 1 {
+				return fmt.Sprintf("the function %s is not allowed here with %d arguments; name one setting as a text", name, len(children))
+			}
+			arg, _ := children[0].(map[string]any)
+			value, _ := arg["value"].(map[string]any)
+			setting, isText := value["value"].(string)
+			if arg["type"] != "VALUE_CONSTANT" || !isText {
+				return fmt.Sprintf("the function %s is not allowed here unless the setting is named as a fixed text", name)
+			}
+			if pathSettings[strings.ToLower(strings.TrimSpace(setting))] {
+				return fmt.Sprintf("the function %s is not allowed here for %s: the engine's settings that hold a path are not shown on the copy", name, setting)
+			}
+		}
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if r := refusedSettingRead(x[k]); r != "" {
+				return r
+			}
+		}
+	case []any:
+		for _, e := range x {
+			if r := refusedSettingRead(e); r != "" {
+				return r
+			}
+		}
+	}
+	return ""
+}
 
 // viewTextFunctions print a view's text, which names the copy's files and
 // the hidden columns: refused on a server with hidden rules (#2529), like
@@ -1112,7 +1169,10 @@ func parseStatement(ctx context.Context, conn *sql.Conn, text string, noFileRead
 		return nil, fmt.Sprintf("the table function %s is not allowed here; only readers (read_parquet, glob, the parquet_* metadata functions, range, unnest, json_each) and the catalog (duckdb_tables, duckdb_columns, duckdb_schemas, duckdb_views and the like) can run on the copy", name)
 	}
 	if name := refusedFunctionCall(parsed.Statements[0], refusedScalarFunctions); name != "" {
-		return nil, fmt.Sprintf("the function %s is not allowed here: the engine's settings and session variables are not shown on the copy", name)
+		return nil, fmt.Sprintf("the function %s is not allowed here: the session's variables are not shown on the copy", name)
+	}
+	if reason := refusedSettingRead(parsed.Statements[0]); reason != "" {
+		return nil, reason
 	}
 	for _, ref := range settingsCatalogRefs(parsed.Statements[0]) {
 		if !ref.mayBeTheCopys() {

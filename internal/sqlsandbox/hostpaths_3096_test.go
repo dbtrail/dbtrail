@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -63,6 +64,13 @@ func TestHostPaths_introspectionRefused(t *testing.T) {
 		"current_setting qualified":     "SELECT pg_catalog.current_setting('temp_directory') FROM shop.orders",
 		"current_setting in WHERE":      "SELECT id FROM shop.orders WHERE current_setting('temp_directory') LIKE '/%'",
 		"current_setting in a CTE":      "WITH s AS (SELECT current_setting('home_directory') AS v) SELECT v FROM s",
+		"current_setting by alias":      "SELECT current_setting('profiling_output')",
+		"current_setting mixed case":    "SELECT current_setting('Temp_Directory')",
+		"current_setting of a column":   "SELECT current_setting(n) FROM (SELECT 'temp_directory' AS n) t",
+		"current_setting of an expr":    "SELECT current_setting('temp_' || 'directory')",
+		"current_setting of a cast":     "SELECT current_setting('temp_directory'::VARCHAR)",
+		"current_setting extensions":    "SELECT current_setting('extension_directory')",
+		"current_setting proxy":         "SELECT current_setting('http_proxy_password')",
 		"getvariable":                   "SELECT getvariable('x')",
 		"getvariable upper":             "SELECT GETVARIABLE('x')",
 		"pg_settings":                   "SELECT * FROM pg_settings",
@@ -171,6 +179,10 @@ func TestHostPaths_catalogStillAnswers(t *testing.T) {
 		"DESCRIBE shop.orders",
 		"SELECT * FROM pragma_table_info('shop.orders')",
 		"SELECT current_database(), current_schema(), version()",
+		// The settings that hold no path stay readable: a session's time
+		// zone, threads, memory and lock.
+		"SELECT current_setting('TimeZone'), current_setting('threads'), current_setting('memory_limit'), current_setting('lock_configuration')",
+		"SELECT CURRENT_SETTING('timezone'), pg_catalog.current_setting('default_collation') FROM shop.orders",
 		"SELECT count(*) FROM read_parquet('" + filepath.Join(f.archiveRoot, "**", "*.parquet") + "')",
 		// A column or alias that is only named like a refused function.
 		"SELECT 1 AS current_setting, 2 AS getvariable, 3 AS pg_settings",
@@ -370,8 +382,9 @@ func TestTableFunctionsAreAllClassified(t *testing.T) {
 // folders, files, caches, variables, the environment or the logs must be
 // reviewed and listed here, refused or found harmless.
 var reviewedScalarFunctions = map[string]bool{
-	// Refused (refusedScalarFunctions).
-	"current_setting": true, "getvariable": true,
+	// Refused (refusedScalarFunctions), and refused for the settings that
+	// hold a path (pathSettings, refusedSettingRead).
+	"getvariable": true, "current_setting": true,
 	// Harmless: they work on the text or value they are given, or name the
 	// in-memory database and schema.
 	"current_database": true, "current_catalog": true, "has_database_privilege": true,
@@ -403,6 +416,93 @@ func TestScalarFunctionsNamedLikeTheHostAreReviewed(t *testing.T) {
 	for n := range refusedScalarFunctions {
 		if !reviewedScalarFunctions[n] {
 			t.Errorf("refusedScalarFunctions has %q, not listed as reviewed here", n)
+		}
+	}
+}
+
+// reviewedSafeSettings are the engine's settings whose name speaks of
+// folders, files, extensions, secrets, logs or caches but whose value is a
+// switch, a level, a size or a format, never a path: readable with
+// current_setting.
+var reviewedSafeSettings = map[string]bool{
+	"allow_community_extensions": true, "allow_extensions_metadata_mismatch": true,
+	"allow_parser_override_extension": true, "allow_persistent_secrets": true,
+	"allow_unredacted_secrets": true, "allow_unsigned_extensions": true, "allowed_configs": true,
+	"arrow_output_list_view": true, "arrow_output_version": true, "autoinstall_known_extensions": true,
+	"autoload_known_extensions": true, "catalog_error_max_schemas": true, "custom_profiling_settings": true,
+	"default_secret_storage": true, "deprecated_using_key_syntax": true, "disabled_filesystems": true,
+	"disabled_log_types": true, "enable_external_file_cache": true, "enable_http_logging": true,
+	"enable_http_metadata_cache": true, "enable_logging": true, "enable_object_cache": true,
+	"enable_profiling": true, "enabled_log_types": true, "explain_output": true, "lock_configuration": true,
+	"logging_level": true, "logging_mode": true, "logging_storage": true, "max_temp_directory_size": true,
+	"parquet_metadata_cache": true, "partitioned_write_max_open_files": true,
+	"prefetch_all_parquet_files": true, "profiling_coverage": true, "profiling_mode": true,
+	"search_path": true, "temp_file_encryption": true, "validate_external_file_cache": true,
+}
+
+// Every setting of the pinned engine, by name and alias, whose name speaks of
+// a path is either refused (pathSettings) or reviewed as holding none; and in
+// a session locked as the copy's, every setting whose value names a folder
+// is refused. A setting a new engine version adds fails here until it is
+// classified.
+func TestPathSettingsAreAllListed(t *testing.T) {
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	spill := t.TempDir()
+	for _, stmt := range lockdownStatements([]string{t.TempDir()}, spillSpec{Dir: spill, MaxBytes: 1 << 30}) {
+		if _, err := conn.ExecContext(context.Background(), stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	rows, err := conn.QueryContext(context.Background(), `SELECT name, coalesce(value, ''), coalesce(aliases, []) FROM duckdb_settings()`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	suspicious := regexp.MustCompile(`dir|path|file|secret|home|extension|log|profil|output|repositor|cache|temp|url|endpoint|cert|key|proxy|config|env`)
+	// An absolute path anywhere in the value; a time zone (Etc/UTC) is not.
+	absolutePath := regexp.MustCompile(`(^|[\[\s,'"(])/[^/\s]`)
+	home, _ := os.UserHomeDir()
+	known := map[string]bool{}
+	for rows.Next() {
+		var name, value string
+		var aliases []any
+		if err := rows.Scan(&name, &value, &aliases); err != nil {
+			t.Fatal(err)
+		}
+		names := []string{strings.ToLower(name)}
+		for _, a := range aliases {
+			if s, ok := a.(string); ok {
+				names = append(names, strings.ToLower(s))
+			}
+		}
+		for _, n := range names {
+			known[n] = true
+			if suspicious.MatchString(n) && !pathSettings[n] && !reviewedSafeSettings[n] {
+				t.Errorf("setting %q is in neither pathSettings nor reviewedSafeSettings: refuse it if it can hold a path", n)
+			}
+			if pathSettings[names[0]] != pathSettings[n] {
+				t.Errorf("setting %q and its alias %q are not refused alike", names[0], n)
+			}
+		}
+		if !pathSettings[names[0]] && (absolutePath.MatchString(value) || home != "" && strings.Contains(value, home)) {
+			t.Errorf("in a locked session setting %q holds %q, which names a folder, and is not refused", name, value)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for n := range pathSettings {
+		if !known[n] {
+			t.Errorf("pathSettings lists %q, which this engine does not have", n)
 		}
 	}
 }
