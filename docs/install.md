@@ -49,7 +49,7 @@ With a bare `docker run`, that restart is yours to set up.
   bundles one).
 - **Other sources:** besides MySQL, DBTrail can also capture from **MariaDB**
   ([10.11+](./mariadb.md), with 10.11, 11.4, 11.8 and 12.3 tested in CI) and
-  **PostgreSQL** ([beta](./postgres.md), 14+). Each is added in the web
+  **PostgreSQL** ([14+](./postgres.md)). Each is added in the web
   interface (**+ Add server** → pick the source type); PostgreSQL also ships a
   standalone `bintrail-pg` binary for headless/CLI deployments. Each has its
   own prerequisites; see the linked guide. An installation serves one family:
