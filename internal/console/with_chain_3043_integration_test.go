@@ -131,7 +131,7 @@ func TestIntegrationPGFreshWithBlocks_3043(t *testing.T) {
 		return out, res.Note, nil
 	}
 	settleTails(t, r.s, func() { run("SELECT status FROM public." + tbl.Table) })
-	checkWithChainShapes(t, "id || '=' || status", "public."+tbl.Table, "public."+none.Table,, "1=one", run)
+	checkWithChainShapes(t, "id || '=' || status", "public."+tbl.Table, "public."+none.Table, "1=one", run)
 }
 
 // On a MySQL server's copy: the same statements through the same steps.
@@ -169,7 +169,7 @@ func TestIntegrationFreshWithBlocks_3043(t *testing.T) {
 		return out, res.Note, nil
 	}
 	settleTails(t, r.s, func() { run("SELECT status FROM shop." + tbl.Table) })
-	checkWithChainShapes(t, "CAST(id AS VARCHAR) || '=' || status", "shop."+tbl.Table, "shop."+none.Table,, "1=new", run)
+	checkWithChainShapes(t, "CAST(id AS VARCHAR) || '=' || status", "shop."+tbl.Table, "shop."+none.Table, "1=new", run)
 }
 
 // settleTails has the boot server's keeper build and publish the tail of the
