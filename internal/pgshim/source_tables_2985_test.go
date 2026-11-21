@@ -143,6 +143,8 @@ func TestReadsOf_whatMarksEveryTable(t *testing.T) {
 		{"FROM after WHERE", "SELECT 1 FROM a WHERE true FROM t"},
 		{"an alias before a table, the copy's own syntax", "WITH a AS (SELECT 1) SELECT 1 FROM a: t"},
 		{"SELECT DISTINCT FROM", "SELECT DISTINCT FROM t"},
+		{"a column named is, aliased distinct", "SELECT o.is distinct FROM t o"},
+		{"a column named is, after NOT", "SELECT o.is not distinct FROM t o"},
 		{"four parts", "SELECT 1 FROM a.b.c.d"},
 		{"a name outside ASCII, which PostgreSQL folds otherwise", "SELECT 1 FROM TABLÉ_Ñ"},
 		{"a trailing comma in FROM", "SELECT 1 FROM a, WHERE true"},
@@ -645,6 +647,64 @@ func TestSourceTables_2985_aPortalBoundBeforeTheSearchPathChanged(t *testing.T) 
 	}
 	if cells, code := until(); code != "" || len(cells) != 1 || cells[0] != "42" {
 		t.Errorf("a report on another table: %q %s, want the source's 42: every table is marked", cells, code)
+	}
+	if n := p.l.last(); n.Reason != ReasonCopyTooOld {
+		t.Errorf("noted %s/%s, want copy_too_old", n.Side, n.Reason)
+	}
+}
+
+// A batch that never reached its Sync, then a simple query: what the source
+// sent in the batch was never confirmed, so every table is marked, whatever
+// the simple query's own tables are.
+func TestSourceTables_2985_aBatchLeftOpenThenASimpleQuery(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	p := newTablesPort(t)
+	c := costPortConn(t, ctx, p.l)
+	fe := c.Frontend()
+	read := func(done func(pgproto3.BackendMessage) bool) (cells []string, code string) {
+		t.Helper()
+		for {
+			msg, err := c.ReceiveMessage(ctx)
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			switch m := msg.(type) {
+			case *pgproto3.DataRow:
+				cells = append(cells, string(m.Values[0]))
+			case *pgproto3.ErrorResponse:
+				code = m.Code
+			}
+			if done(msg) {
+				return cells, code
+			}
+		}
+	}
+	ready := func(m pgproto3.BackendMessage) bool { _, ok := m.(*pgproto3.ReadyForQuery); return ok }
+	fe.Send(&pgproto3.Parse{Name: "k", Query: "SELECT n FROM t WHERE id = 1"})
+	fe.Send(&pgproto3.Bind{DestinationPortal: "a", PreparedStatement: "k"})
+	fe.Send(&pgproto3.Execute{Portal: "a"})
+	fe.Send(&pgproto3.Flush{})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if cells, code := read(func(m pgproto3.BackendMessage) bool { _, ok := m.(*pgproto3.CommandComplete); return ok }); code != "" || len(cells) != 1 {
+		t.Fatalf("the batch's rows: %q %s", cells, code)
+	}
+	// No Sync: a simple query, which the source answers about hb.
+	fe.Send(&pgproto3.Query{String: "SELECT n FROM hb WHERE id = 1"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if cells, code := read(ready); code != "" || len(cells) != 1 || cells[0] != "42" {
+		t.Fatalf("the simple query: %q %s", cells, code)
+	}
+	fe.Send(&pgproto3.Query{String: "SELECT sum(n) FROM big"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if cells, code := read(ready); code != "" || len(cells) != 1 || cells[0] != "42" {
+		t.Errorf("a report on a third table: %q %s, want the source's 42: the batch's tables were never confirmed", cells, code)
 	}
 	if n := p.l.last(); n.Reason != ReasonCopyTooOld {
 		t.Errorf("noted %s/%s, want copy_too_old", n.Side, n.Reason)

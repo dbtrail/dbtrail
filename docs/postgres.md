@@ -1363,13 +1363,14 @@ What this costs and where it can go wrong:
   `coalesce`, `now`, `date_trunc` and the like). Then the source itself, in
   the same write as the statement and right behind it, with one query of
   its catalog: each name must resolve, under the session's `search_path`,
-  to a plain permanent table with no child table and no row-level
-  security, and the database must hold none of the things that run a
+  to a plain permanent table that has no child table, is no partition or
+  child itself, and has no row-level security, and the database must hold none of the things that run a
   user's code where the text shows none. The tables kept are the ones the
   source names in that answer. So each of these, answered by the source,
   marks every table: a view, a temporary or foreign table, a partitioned
-  table or an inheritance parent (reading it reads its children), a table
-  with row-level security, a function in `FROM`, a function the port does
+  table or an inheritance parent (reading it reads its children), a
+  partition or an inheritance child (the copy can hold its rows under its
+  parent's name), a table with row-level security, a function in `FROM`, a function the port does
   not know to read no table (a function of yours, `nextval`,
   `query_to_xml`), a function written with its schema, `TABLE x`,
   `LATERAL`, `ONLY`, `TABLESAMPLE`, `FOR UPDATE`, a `WITH` that is not at
@@ -1379,10 +1380,9 @@ What this costs and where it can go wrong:
   written outside ASCII without quotes, more than 32 tables in one
   statement, a `search_path` that names `pg_catalog` or `pg_temp`, and
   any statement at all while the database holds an operator or a cast
-  written in SQL or PL/pgSQL, a domain with a constraint, a function in
-  one of those languages that takes one row (PostgreSQL lets it be called
-  as a column, `t.f`), or a function or aggregate of yours with the name
-  of a function the statement calls. Past 64 tables a connection stops
+  written in SQL or PL/pgSQL, a domain with a constraint, or a function or
+  aggregate of yours whose name the statement calls or writes after a dot
+  (PostgreSQL calls `f(t)` for `t.f` when `t` has no column `f`). Past 64 tables a connection stops
   keeping names and every table is marked. In an extended-protocol batch
   the tables are confirmed once the batch is over (its `Sync`): a statement
   for the copy inside the same batch, before that, is held back. Names are
