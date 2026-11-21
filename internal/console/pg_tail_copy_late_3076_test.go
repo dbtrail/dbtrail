@@ -174,7 +174,9 @@ func TestPGTailCopy_aBuildOutOfTimeTwiceIsRefusedUntilTheNextCut(t *testing.T) {
 	}
 
 	build(cut2)
-	if e := entry(); fills() != 3 || (e != nil && e.refused != "") {
+	// The entry the keeper holds is still the older cut's refusal: a build
+	// that failed installs nothing. None of the newer cut is refused.
+	if e := entry(); fills() != 3 || (e != nil && e.cut == tailCutOf(cut2) && e.refused != "") {
 		t.Fatalf("at the next cut: %d builds, entry %+v; want it built again, and not refused at its first time", fills(), e)
 	}
 	src.late.Store(false)
