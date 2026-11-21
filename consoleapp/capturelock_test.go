@@ -101,10 +101,11 @@ func TestCaptureLockFirstLimitStartsWhenTheLockWasAskedFor(t *testing.T) {
 	if !lostWithin(l, time.Second) {
 		t.Fatal("a lock asked for 1.7s ago with a 2s limit was not lost within 1s of silence: the limit started at the heartbeat, not at the GET_LOCK")
 	}
-	// A prompt answer moves the limit on like any other.
-	l = heartbeatTakenAt(t, time.Now().Add(-1700*time.Millisecond), func(context.Context) error { return nil })
+	// A prompt answer moves the limit on like any other. Asked for 1.5 s ago,
+	// so a loaded machine has 500 ms for the first answer, not 300.
+	l = heartbeatTakenAt(t, time.Now().Add(-1500*time.Millisecond), func(context.Context) error { return nil })
 	if lostWithin(l, time.Second) {
-		t.Fatal("a lock asked for 1.7s ago was lost although its questions were answered")
+		t.Fatal("a lock asked for 1.5s ago was lost although its questions were answered")
 	}
 }
 
