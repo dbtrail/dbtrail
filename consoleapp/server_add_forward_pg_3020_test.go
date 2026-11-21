@@ -201,6 +201,15 @@ type pgAddDaemon struct {
 	reg   *console.Registry
 	id    string
 	calls []string
+	// port is what the check says about the port for SQL clients: turned on
+	// by this add unless a test says it was on already.
+	port map[string]any
+}
+
+// pgPortAlreadyOn is the check's answer about a port that was on before this
+// add: a second PostgreSQL server.
+func pgPortAlreadyOn() map[string]any {
+	return map[string]any{"enabled": true, "turned_on": false, "routing_on": true, "port": "3309"}
 }
 
 const pgAddSourceURL = "postgres://dbtrail:capture-pw@pg1:5432/shopdb?sslmode=require"
@@ -217,7 +226,8 @@ func newPGAddDaemon(t *testing.T, sourceURL string) (*pgAddDaemon, *ctlClient) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &pgAddDaemon{t: t, reg: f.owner, id: e.ID}
+	d := &pgAddDaemon{t: t, reg: f.owner, id: e.ID,
+		port: map[string]any{"enabled": true, "turned_on": true, "routing_on": true, "port": "3309", "password": "bfp_portpw"}}
 	daemon := srv.Handler()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		d.calls = append(d.calls, r.Method+" "+r.URL.Path)
@@ -248,8 +258,7 @@ func newPGAddDaemon(t *testing.T, sourceURL string) (*pgAddDaemon, *ctlClient) {
 			t.Errorf("the real list does not hold the server: %s", rec.Body.String())
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "name": "shop", "started": true, "doctor": passReport(), "server": dto,
-			"port": map[string]any{"enabled": true, "turned_on": true, "routing_on": true, "port": "3309", "password": "bfp_portpw"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "name": "shop", "started": true, "doctor": passReport(), "server": dto, "port": d.port})
 	}))
 	t.Cleanup(ts.Close)
 	return d, &ctlClient{base: ts.URL, token: "tok", hc: ts.Client()}
@@ -307,6 +316,26 @@ const pgNoForwardYet = `Until "shop" has a forwarding user, the copy answers its
 
 const pgNextLine = "Next, the first copy of its tables:  bintrail-console snapshot run shop\n"
 
+// pgAlreadyOnHead is pgAddedHead for a port that was on before this add.
+const pgAlreadyOnHead = `
+Added "shop". DBTrail is recording its changes.
+
+The port for SQL clients is on, and takes the password it already has. PostgreSQL clients connect to the PostgreSQL port (5433, unless the PostgreSQL router was given another), with the server's name as the database and any user:
+
+  psql "host=127.0.0.1 port=5433 dbname=shop user=app sslmode=require"
+`
+
+const pgSkipped = "Skipped: the copy answers alone. Set it later:  bintrail-console server forward-user shop -u <user> -p\n\n"
+
+// pgForwardsWant is what is printed once "shop" forwards as user, written
+// out here and not taken from the function that prints it.
+func pgForwardsWant(user string) string {
+	return `"shop" forwards as ` + user + `: the PostgreSQL port sends to your PostgreSQL, as that user and read-only, every statement the copy is not known to answer as PostgreSQL does, and a client's transaction blocks.
+The login was not tried: a wrong password, or a role that cannot log in, shows with the first statement the port sends there. To check it, run BEGIN; SELECT 1; COMMIT; through the PostgreSQL port.
+
+`
+}
+
 func TestServerAddPostgresSetsTheForwardingUserItWasGiven(t *testing.T) {
 	d, c := newPGAddDaemon(t, pgAddSourceURL)
 	in := pgAddInput()
@@ -315,9 +344,7 @@ func TestServerAddPostgresSetsTheForwardingUserItWasGiven(t *testing.T) {
 	if err := runServerAdd(context.Background(), c, in, false, &out); err != nil {
 		t.Fatalf("err = %v\n%s", err, out.String())
 	}
-	want := pgAddedHead + "\n" +
-		`"shop" forwards as app_ro: the PostgreSQL port sends to your PostgreSQL, as that user and read-only, every statement the copy is not known to answer as PostgreSQL does, and a client's transaction blocks.` + "\n\n" +
-		pgNextLine
+	want := pgAddedHead + "\n" + pgForwardsWant("app_ro") + pgNextLine
 	if got := afterAdded(t, out.String()); got != want {
 		t.Fatalf("output:\n%s\nwant:\n%s", got, want)
 	}
@@ -381,8 +408,7 @@ func TestServerAddPostgresAsksForTheForwardingUser(t *testing.T) {
 		if err := runServerAdd(context.Background(), c, in, false, &out); err != nil {
 			t.Fatalf("err = %v\n%s", err, out.String())
 		}
-		want := pgAddedHead + pgNoForwardYet + "\n" + pgQuestionIntro +
-			"Skipped: the copy answers alone. Set it later:  bintrail-console server forward-user shop -u <user> -p\n\n" + pgNextLine
+		want := pgAddedHead + "\n" + pgQuestionIntro + pgSkipped + pgNextLine
 		if got := afterAdded(t, out.String()); got != want {
 			t.Fatalf("output:\n%s\nwant:\n%s", got, want)
 		}
@@ -399,8 +425,7 @@ func TestServerAddPostgresAsksForTheForwardingUser(t *testing.T) {
 		if err := runServerAdd(context.Background(), c, in, false, &out); err != nil {
 			t.Fatalf("err = %v\n%s", err, out.String())
 		}
-		want := pgAddedHead + pgNoForwardYet + "\n" + pgQuestionIntro +
-			`"shop" forwards as app_ro: the PostgreSQL port sends to your PostgreSQL, as that user and read-only, every statement the copy is not known to answer as PostgreSQL does, and a client's transaction blocks.` + "\n\n" + pgNextLine
+		want := pgAddedHead + "\n" + pgQuestionIntro + pgForwardsWant("app_ro") + pgNextLine
 		if got := afterAdded(t, out.String()); got != want {
 			t.Fatalf("output:\n%s\nwant:\n%s", got, want)
 		}
@@ -455,7 +480,7 @@ func TestServerAddPostgresRefusesTheCaptureUser(t *testing.T) {
 	var out bytes.Buffer
 	err := runServerAdd(context.Background(), c, in, false, &out)
 	const want = `the database was added and is recording, without a forwarding user: dbtrail is the user DBTrail reads "shop" with, and the port never forwards as that one: it can read far more than an application should. Create another user on your PostgreSQL, with the application's grants, and set that one
-Set it once that is fixed:  bintrail-console server forward-user shop -u dbtrail -p`
+Set it once that is fixed:  bintrail-console server forward-user shop -u <user> -p`
 	if !errors.Is(err, errAddedNoForward) || err.Error() != want {
 		t.Fatalf("err = %v\nwant  %s", err, want)
 	}
@@ -509,7 +534,7 @@ func TestServerForwardUserStillWorksAfterAPostgresAdd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := out.String(), `"shop" forwards as report_ro: the PostgreSQL port sends to your PostgreSQL, as that user and read-only, every statement the copy is not known to answer as PostgreSQL does, and a client's transaction blocks.`+"\n"; got != want {
+	if got, want := out.String(), strings.TrimSuffix(pgForwardsWant("report_ro"), "\n"); got != want {
 		t.Fatalf("output:\n%s\nwant:\n%s", got, want)
 	}
 	if got := d.forwardURL(); got != "postgres://report_ro:report-pw@pg1:5432/shopdb?sslmode=require" {
@@ -580,5 +605,90 @@ func TestPGShellUser(t *testing.T) {
 		if got := pgShellUser(in); got != want {
 			t.Errorf("pgShellUser(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// What `server add` prints about the forwarding user, for every way it can
+// go: the port turned on by this add or on already, and a forwarding user
+// that will be asked for (answered, or skipped with Enter) or will not. The
+// line that says how to set one later is printed once, never right before the
+// question that asks for it, and never left out when no user was set.
+func TestServerAddPostgresForwardingUserOutputInEveryCase(t *testing.T) {
+	const question = "Forwarding user (Enter to skip)"
+	for _, tc := range []struct {
+		name      string
+		alreadyOn bool
+		ask       bool
+		answer    string // typed at the question; "" is Enter
+		want      string
+		wantSaved bool
+	}{
+		{name: "port turned on, not asked", want: pgAddedHead + pgNoForwardYet + "\n" + pgNextLine},
+		{name: "port turned on, asked, Enter", ask: true, want: pgAddedHead + "\n" + pgQuestionIntro + pgSkipped + pgNextLine},
+		{name: "port turned on, asked, a user", ask: true, answer: "app_ro", wantSaved: true,
+			want: pgAddedHead + "\n" + pgQuestionIntro + pgForwardsWant("app_ro") + pgNextLine},
+		{name: "port already on, not asked", alreadyOn: true, want: pgAlreadyOnHead + "\n" + pgNoForwardYet + "\n" + pgNextLine},
+		{name: "port already on, asked, Enter", alreadyOn: true, ask: true, want: pgAlreadyOnHead + "\n" + pgQuestionIntro + pgSkipped + pgNextLine},
+		{name: "port already on, asked, a user", alreadyOn: true, ask: true, answer: "app_ro", wantSaved: true,
+			want: pgAlreadyOnHead + "\n" + pgQuestionIntro + pgForwardsWant("app_ro") + pgNextLine},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, c := newPGAddDaemon(t, pgAddSourceURL)
+			if tc.alreadyOn {
+				d.port = pgPortAlreadyOn()
+			}
+			in := pgAddInput()
+			if tc.ask {
+				ask := &seqAsker{t: t, tty: true, lines: map[string]string{question: tc.answer}}
+				if tc.answer != "" {
+					ask.secrets = []string{"fwd-pw"}
+				}
+				in.FwdAsk, in.ask = true, ask
+			}
+			var out bytes.Buffer
+			if err := runServerAdd(context.Background(), c, in, false, &out); err != nil {
+				t.Fatalf("err = %v\n%s", err, out.String())
+			}
+			got := afterAdded(t, out.String())
+			if got != tc.want {
+				t.Fatalf("output:\n%s\nwant:\n%s", got, tc.want)
+			}
+			// Whoever ends without a forwarding user was told, once, the
+			// command that sets one.
+			if n := strings.Count(got, "bintrail-console server forward-user shop -u <user> -p"); (n == 1) == tc.wantSaved {
+				t.Fatalf("the command that sets it later is printed %d times, forwarding user saved: %v\n%s", n, tc.wantSaved, got)
+			}
+			if (d.forwardURL() != "") != tc.wantSaved {
+				t.Fatalf("saved forwarding account %q, want one: %v", d.forwardURL(), tc.wantSaved)
+			}
+		})
+	}
+}
+
+// --password-stdin spends stdin on the capture password, on a terminal too:
+// the forwarding user's password cannot be asked for, and nothing is sent.
+func TestResolveAddInputPostgresForwardWithPasswordStdin(t *testing.T) {
+	f := addFlags{Host: "pg1", User: "dbtrail", PasswordStdin: true, Flavor: "postgres", Database: "shop", Publication: "bintrail_pub", ForwardUser: "app_ro"}
+	ask := &seqAsker{t: t, tty: true}
+	_, err := resolveAddInput(f, ask, strings.NewReader("capture-pw\n"))
+	const want = "no password for the forwarding user app_ro: this is not a terminal, so it cannot be asked for. Put it under [dbtrail-forward] in the option file, or use --no-forward"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v\nwant  %s", err, want)
+	}
+	if len(ask.asks) != 0 || len(ask.asked) != 0 {
+		t.Fatalf("asked %q %q", ask.asked, ask.asks)
+	}
+	// With the group in the option file it needs nobody to ask.
+	f.PasswordStdin, f.ForwardUser, f.Slot = false, "", "bintrail_shop"
+	f.DefaultsFile = writeCnf(t, "[client]\npassword=capture-pw\n[dbtrail-forward]\nuser=app_ro\npassword=fwd-pw\n")
+	in, err := resolveAddInput(f, ask, strings.NewReader(""))
+	if err != nil || in.FwdUser != "app_ro" || in.FwdPassword != "fwd-pw" || in.FwdAsk {
+		t.Fatalf("got %+v, %v", in, err)
+	}
+	// And without a forwarding user named, --password-stdin asks for none.
+	f = addFlags{Host: "pg1", User: "dbtrail", PasswordStdin: true, Flavor: "postgres", Database: "shop", Publication: "bintrail_pub"}
+	in, err = resolveAddInput(f, ask, strings.NewReader("capture-pw\n"))
+	if err != nil || in.FwdAsk || in.FwdUser != "" || in.Password != "capture-pw" {
+		t.Fatalf("got %+v, %v", in, err)
 	}
 }

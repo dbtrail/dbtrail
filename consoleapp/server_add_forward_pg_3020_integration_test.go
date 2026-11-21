@@ -79,7 +79,7 @@ func TestIntegrationServerAddPostgresSetsTheForwardingUser(t *testing.T) {
 	}
 	for _, want := range []string{
 		`Added "add3020". DBTrail is recording its changes.`,
-		`"add3020" forwards as ` + role + `: the PostgreSQL port sends to your PostgreSQL, as that user and read-only, every statement the copy is not known to answer as PostgreSQL does, and a client's transaction blocks.`,
+		`"add3020" forwards as ` + role + `: the PostgreSQL port sends to your PostgreSQL, as that user and read-only, every statement the copy is not known to answer as PostgreSQL does, and a client's transaction blocks.` + "\nThe login was not tried: a wrong password, or a role that cannot log in, shows with the first statement the port sends there. To check it, run BEGIN; SELECT 1; COMMIT; through the PostgreSQL port.\n",
 		"Next, the first copy of its tables:  bintrail-console snapshot run add3020\n",
 	} {
 		if !strings.Contains(out.String(), want) {

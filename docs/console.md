@@ -625,15 +625,20 @@ as the user DBTrail records changes with.
 printed the port's password: Enter skips it. Without a terminal it is taken
 from `--forward-user` and `[dbtrail-forward]`, and never asked for; with the
 Docker command, which sends the option file on standard input, that group is
-the way. Everything about it is checked before the server is saved: the
-capture user is refused, and so is a user with no password and nobody to ask.
-If DBTrail refuses the user itself (it cannot log in, or it lacks grants), the
-server stays added and recording, the command says so and exits 1, and
-`server forward-user` sets it once that is fixed.
+the way. What can be checked without the server is checked before it is
+saved: the capture user is refused, and so is a user with no password and
+nobody to ask. If DBTrail refuses the user when it saves it (the capture user,
+an empty password, a source the account cannot be built on), the server stays
+added and recording, the command says so and exits 1, and
+`server forward-user` sets it once that is fixed. No login is tried with the
+user when it is saved, by `server add` or by `server forward-user`: a wrong
+password, or a user that cannot log in or lacks grants, shows with the first
+statement the port forwards. In the web interface, Test connection on the
+server's form tries the login of a MySQL or MariaDB server's forwarding user.
 
 A PostgreSQL added with `--flavor postgres` takes its forwarding user the same
 way: the same question, the same two options and the same group in the option
-file. What its port does with it is in
+file, and the same refusals when it is saved. What its port does with it is in
 [docs/postgres.md](postgres.md#transactions-on-the-source-the-forwarding-user).
 
 To set or change it later:

@@ -82,6 +82,8 @@ dbtrail server add --flavor postgres -h pg1.example.com -u dbtrail -p -d shop --
 It runs the same checks, prints each one that fails with its fix, and saves
 nothing until they all pass. `--flavor postgres` has to be said: the question
 DBTrail asks an address to learn what answers there is in MySQL's protocol.
+What it prints at the end is the `psql` line for the PostgreSQL port, with the
+port's password when this was the first server.
 
 Once the server is added, on a terminal, the command asks for its
 [forwarding user](#transactions-on-the-source-the-forwarding-user), as it does
@@ -89,12 +91,17 @@ for a MySQL: the role the PostgreSQL port runs statements as on your
 PostgreSQL, read-only, when the copy is not known to answer them as PostgreSQL
 does. Enter skips it. `--forward-user <role>` names it on the command line
 (its password is asked for), `[dbtrail-forward]` in `--defaults-file` names it
-with its password for a script, and `--no-forward` does not ask. The role DBTrail
-captures with is refused. If DBTrail refuses the role you gave, the server
-stays added and recording, the command says why and exits 1, and
-`dbtrail server forward-user` sets it once that is fixed.
-What it prints at the end is the `psql` line for the PostgreSQL port, with the
-port's password when this was the first server.
+with its password for a script, and `--no-forward` does not ask.
+
+What is refused when it is saved: the role DBTrail captures with, an empty
+password, and a source the account cannot be laid over (one reached through a
+socket directory, or whose URL names its user or host as a parameter). The
+server then stays added and recording, the command says why and exits 1, and
+`dbtrail server forward-user` sets it once that is fixed. No login is tried
+with the role when it is saved, by `server add` or by `server forward-user`: a
+wrong password, or a role that cannot log in, shows with the first statement
+the port sends to your PostgreSQL. To check it, run `BEGIN; SELECT 1; COMMIT;`
+through the PostgreSQL port, once the first copy is ready.
 
 The **index stays MySQL**; only the *source* is PostgreSQL. The source type is
 fixed once saved — to change a server's capture engine, delete and re-create it.

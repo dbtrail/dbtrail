@@ -954,7 +954,9 @@ func runServerAdd(ctx context.Context, c *ctlClient, in addInput, verbose bool, 
 		// forwarding user is asked for or set, so neither a Ctrl-C at the
 		// question nor a refused account loses it.
 		if pg {
-			printNewServerPortPG(out, res.Port, res.Name, in.FwdUser == "")
+			// Not said when the question comes next: it says it itself,
+			// whether it is answered or skipped.
+			printNewServerPortPG(out, res.Port, res.Name, in.FwdUser == "" && !in.FwdAsk)
 			err := addForwardUserPG(ctx, c, in, res, out)
 			fmt.Fprintf(out, "Next, the first copy of its tables:  bintrail-console snapshot run %s\n", res.Name)
 			return err
@@ -1032,8 +1034,8 @@ func printNewServerPort(out io.Writer, p *ctlNewServerPort, name string, noForwa
 // client connects to is the PostgreSQL router, which listens on 5433 unless
 // its own setting says otherwise, and this command cannot see that setting:
 // the line says so. The database a client names is the server's name. No
-// Engine Routing. noForwardYet: no forwarding user was named (#3020), so
-// until one is set the copy answers alone.
+// Engine Routing. noForwardYet: no forwarding user was named and none is
+// about to be asked for (#3020), so until one is set the copy answers alone.
 func printNewServerPortPG(out io.Writer, p *ctlNewServerPort, name string, noForwardYet bool) {
 	if p == nil || p.Enabled == nil {
 		return
