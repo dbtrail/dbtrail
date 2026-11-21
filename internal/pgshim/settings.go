@@ -1093,6 +1093,12 @@ func (s *session) zoneOnCopy(z zoneSetting, atStatement bool) *pgErr {
 			s.logger.Debug("pgshim: the copy could not be asked about a time zone now; the next statement asks", "zone", z.duck, "err", err)
 			return nil
 		}
+		if why := busyReason(err); why != "" && s.canFallBack() {
+			// The statement is the copy's, and the copy is busy (#3109,
+			// route.go): refused, not sent to the source (runFree).
+			s.busyRefused = why
+			return busyRefusal(why)
+		}
 		return s.statementError(ctx, err)
 	case len(res.Rows) != 1 || len(res.Rows[0]) != len(instants):
 		s.logger.Error("pgshim: the copy answered a time zone question with an unexpected shape", "rows", len(res.Rows))

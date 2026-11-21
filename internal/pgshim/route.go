@@ -184,10 +184,18 @@ func (s *session) routeFree(qstr string) routeDecision {
 	types, unread := s.columnTypes(text)
 	if unread && s.catalogBusy != "" {
 		// The copy is too busy to list its columns (#3109), so the screen
-		// cannot be run, and nothing of the statement can go to the copy.
-		// The source's plan still decides: what it finds cheap the source
+		// cannot be run whole, and nothing of the statement can go to the
+		// copy. What the screen vetoes whatever the columns' types (a
+		// function, a literal with a time zone, an alias in WHERE) goes to
+		// the source, as it always did: it is screened as if every name were
+		// a column of whole numbers, the type that vetoes least. The rest is
+		// decided by the source's plan: what it finds cheap the source
 		// answers, as it would have; what it sends to the copy is refused as
 		// busy, not handed to the source (withScreenBusy).
+		if veto := screenForCopy(toks, untypedAsInteger(toks)); veto != "" {
+			s.logger.Debug("pgshim: sent to the source", "reason", ReasonVeto, "construct", veto)
+			return routeDecision{RouteSource, ReasonVeto}
+		}
 		s.screenBusy = s.catalogBusy
 		return routeDecision{RouteCopy, ReasonAnswersTheSame}
 	}
@@ -227,6 +235,23 @@ func (s *session) columnTypes(stmt string) (types map[string][]string, unread bo
 		return nil, true
 	}
 	return screenTypes(v.tables, tablesRead(stmt, v.tables)), false
+}
+
+// untypedAsInteger is a column type for every name in toks: INTEGER, the type
+// under which the screen vetoes least (no text compared or sorted, no
+// padding, a division and a concatenation allowed). What it still vetoes is
+// the statement's own, whatever its columns are (routeFree, #3109).
+func untypedAsInteger(toks []rtToken) map[string][]string {
+	types := map[string][]string{}
+	for _, t := range toks {
+		switch t.kind {
+		case rtWord:
+			types[t.text] = []string{"INTEGER"}
+		case rtQuoted:
+			types[strings.ToLower(t.text)] = []string{"INTEGER"}
+		}
+	}
+	return types
 }
 
 // canFallBack reports whether a statement the copy does not answer can go

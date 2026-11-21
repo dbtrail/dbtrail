@@ -343,6 +343,15 @@ func TestBusyCopy_aCatalogTheCopyIsTooBusyToList_3109(t *testing.T) {
 	got, msg = busyExtended(ctx, c, l, "SELECT n FROM t WHERE id = $1", []byte("1"))
 	step("extended, a cheap read", got, msg, busyOutcome{"42", "", RouteSource, ReasonCheapPlan}, true, n, r)
 
+	// What the screen vetoes whatever the columns' types still goes to the
+	// source with the list unread: a function the copy answers otherwise,
+	// a literal with a time zone its type does not hold.
+	for _, stmt := range []string{"SELECT now() FROM big", "SELECT count(*) FROM big WHERE n = 1 AND DATE '2026-03-02+02' IS NOT NULL"} {
+		n, r = len(src.ran()), l.runs.Load()
+		got, msg = busySimple(ctx, c, l, stmt)
+		step("a veto, "+stmt, got, msg, busyOutcome{"42", "", RouteSource, ReasonVeto}, true, n, r)
+	}
+
 	// Listed again: the copy answers the report, prepared or not.
 	cat.set(nil)
 	n, r = len(src.ran()), l.runs.Load()
@@ -353,6 +362,33 @@ func TestBusyCopy_aCatalogTheCopyIsTooBusyToList_3109(t *testing.T) {
 	}
 	got, msg = busyPrepared(ctx, c, l, "b")
 	step("prepared, listed", got, msg, busyOutcome{"7", "", RouteCopy, ReasonAnswersTheSame}, false, n, r)
+}
+
+// A session time zone the copy is asked about as the statement runs: a busy
+// copy there refuses the statement as busy, not as copy_refused for the
+// source (runFree).
+func TestZoneOnCopy_aBusyCopyIsBusy_3109(t *testing.T) {
+	loc, err := time.LoadLocation("Europe/Paris")
+	if err != nil {
+		t.Skip("no zone database here")
+	}
+	z := zoneSetting{name: "Europe/Paris", duck: "Europe/Paris", loc: loc}
+	for _, forward := range []bool{true, false} {
+		copyZonesAgreed.Range(func(k, _ any) bool { copyZonesAgreed.Delete(k); return true })
+		s := routeSession(forward)
+		s.bound.Run = func(context.Context, string, RunOptions) (sqlsandbox.Result, error) {
+			return sqlsandbox.Result{}, &sqlsandbox.BusyError{Waited: time.Second}
+		}
+		perr := s.zoneOnCopy(z, true)
+		switch {
+		case perr == nil || perr.code != "53000":
+			t.Errorf("forward=%v: %+v, want 53000", forward, perr)
+		case forward && (s.busyRefused != ReasonCopyWaitTimeout || !strings.Contains(perr.msg, "copy_wait_timeout")):
+			t.Errorf("forward: %+v, refused %q; want the busy refusal", perr, s.busyRefused)
+		case !forward && s.busyRefused != "":
+			t.Errorf("no forwarding account: refused %q, want the copy's error as before", s.busyRefused)
+		}
+	}
 }
 
 // The char(n) check before the copy runs a statement reads the catalog too:
