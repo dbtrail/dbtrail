@@ -99,8 +99,10 @@ func charCases() []charCase {
 		differs(`SELECT id FROM ` + x + ` WHERE c NOT IN ('ab') ORDER BY id`),
 		differs(`SELECT id FROM ` + x + ` WHERE c IS DISTINCT FROM 'ab' ORDER BY id`),
 		differs(`SELECT id FROM ` + x + ` WHERE c BETWEEN 'ab' AND 'ab' ORDER BY id`),
-		differs(`SELECT id, concat(c, '|') FROM ` + x + ` ORDER BY id`),
-		differs(`SELECT id, char_length(c), octet_length(c) FROM ` + x + ` ORDER BY id`),
+		differs(`SELECT id, char_length(c) FROM ` + x + ` ORDER BY id`),
+		// The copy has no octet_length of text: refused there, and the
+		// source's either way.
+		{`SELECT id, octet_length(c) FROM ` + x + ` ORDER BY id`, sqlcompare.NotOnCopy, false},
 		differs(`SELECT id, c::text || '|' FROM ` + x + ` ORDER BY id`),
 		differs(`SELECT id, CASE WHEN c = 'ab' THEN 1 ELSE 0 END FROM ` + x + ` ORDER BY id`),
 		differs(`SELECT id, CASE c WHEN 'ab' THEN 1 ELSE 0 END FROM ` + x + ` ORDER BY id`),
@@ -123,6 +125,8 @@ func charCases() []charCase {
 		differs(`SELECT id FROM ` + x + ` WHERE arr[1] = 'ab' ORDER BY id`),
 		// The same answer today, by the values these rows hold: sent anyway.
 		sent(`SELECT id FROM ` + x + ` WHERE c = 'ab   ' ORDER BY id`),
+		// concat() writes a char(n) with its blanks on PostgreSQL too.
+		sent(`SELECT id, concat(c, '|') FROM ` + x + ` ORDER BY id`),
 		sent(`SELECT id FROM ` + x + ` WHERE c LIKE 'ab%' ORDER BY id`),
 		sent(`SELECT id FROM ` + x + ` WHERE c IS NULL ORDER BY id`),
 		sent(`SELECT c, count(*) FROM ` + x + ` GROUP BY c`),
