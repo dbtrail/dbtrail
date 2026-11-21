@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,9 +13,11 @@ import (
 // afterwards.
 func setCaptureLockTimings(t *testing.T, poll, beat, limit time.Duration) {
 	t.Helper()
-	p, b, l := captureLockPoll, captureLockHeartbeat, captureLockUnconfirmedLimit
+	p, b, l, w := captureLockPoll, captureLockHeartbeat, captureLockUnconfirmedLimit, captureLockSlowWarnEvery
 	captureLockPoll, captureLockHeartbeat, captureLockUnconfirmedLimit = poll, beat, limit
-	t.Cleanup(func() { captureLockPoll, captureLockHeartbeat, captureLockUnconfirmedLimit = p, b, l })
+	t.Cleanup(func() {
+		captureLockPoll, captureLockHeartbeat, captureLockUnconfirmedLimit, captureLockSlowWarnEvery = p, b, l, w
+	})
 }
 
 // shortCaptureLockTimings makes the lock's waits and heartbeat fast enough to
@@ -28,7 +31,14 @@ func shortCaptureLockTimings(t *testing.T) {
 // check stands in for the question to the index.
 func heartbeatOnly(t *testing.T, check func(context.Context) error) *captureLock {
 	t.Helper()
-	l := newCaptureLock("test_lock", nil, nil)
+	return heartbeatTakenAt(t, time.Now(), check)
+}
+
+// heartbeatTakenAt is heartbeatOnly for a lock whose GET_LOCK was sent at
+// taken.
+func heartbeatTakenAt(t *testing.T, taken time.Time, check func(context.Context) error) *captureLock {
+	t.Helper()
+	l := newCaptureLock("test_lock", nil, nil, taken)
 	l.checkFn = check
 	go l.heartbeat()
 	t.Cleanup(l.Release)
@@ -61,9 +71,102 @@ func TestCaptureLockLimitEndsBeforeATakeoverWrites(t *testing.T) {
 		t.Errorf("limit = %s, want at most %s: older releases start writing %s after taking the lock over",
 			captureLockUnconfirmedLimit, captureLockOldestTakeoverDelay-time.Second, captureLockOldestTakeoverDelay)
 	}
+	// The documentation's figures come from these two: a dead connection
+	// noticed within about a second, one slow answer tolerated for the limit
+	// less one heartbeat (9 s). Changing either means rereading
+	// docs/console.md and docs/deployment.md.
+	if captureLockHeartbeat != time.Second {
+		t.Errorf("heartbeat = %s, want 1s", captureLockHeartbeat)
+	}
+	if captureLockUnconfirmedLimit != 10*time.Second {
+		t.Errorf("limit = %s, want 10s", captureLockUnconfirmedLimit)
+	}
 	// A limit no longer than the interval would call every quiet interval a loss.
 	if captureLockHeartbeat*2 > captureLockUnconfirmedLimit {
 		t.Errorf("heartbeat = %s, want at most half the limit (%s)", captureLockHeartbeat, captureLockUnconfirmedLimit)
+	}
+}
+
+// The first limit starts when the GET_LOCK was sent, not when the heartbeat
+// started: a lock that took a while to be granted has that much less before
+// its first confirmation is due.
+func TestCaptureLockFirstLimitStartsWhenTheLockWasAskedFor(t *testing.T) {
+	setCaptureLockTimings(t, time.Second, 20*time.Millisecond, 2*time.Second)
+	silent := func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	// Asked for 1.7 s ago: 300 ms of the limit are left, not 2 s.
+	l := heartbeatTakenAt(t, time.Now().Add(-1700*time.Millisecond), silent)
+	if !lostWithin(l, time.Second) {
+		t.Fatal("a lock asked for 1.7s ago with a 2s limit was not lost within 1s of silence: the limit started at the heartbeat, not at the GET_LOCK")
+	}
+	// A prompt answer moves the limit on like any other.
+	l = heartbeatTakenAt(t, time.Now().Add(-1700*time.Millisecond), func(context.Context) error { return nil })
+	if lostWithin(l, time.Second) {
+		t.Fatal("a lock asked for 1.7s ago was lost although its questions were answered")
+	}
+}
+
+// An index slow enough to matter leaves a line in the log while the lock is
+// kept, and a slow spell does not fill the log with it.
+func TestCaptureLockSlowAnswerWarnsOncePerInterval(t *testing.T) {
+	slowEveryFourth := func() func(context.Context) error {
+		var calls atomic.Int32
+		return func(context.Context) error {
+			if calls.Add(1)%4 == 0 {
+				time.Sleep(400 * time.Millisecond) // over half the 600ms limit
+			}
+			return nil
+		}
+	}
+	const line = "the index was slow to confirm the capture lock"
+	for _, c := range []struct {
+		name  string
+		every time.Duration
+		ok    func(n int) bool
+		want  string
+	}{
+		{"at most one a minute", time.Minute, func(n int) bool { return n == 1 }, "exactly 1"},
+		{"each one when the interval is zero", 0, func(n int) bool { return n >= 2 }, "at least 2"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			setCaptureLockTimings(t, time.Second, 20*time.Millisecond, 600*time.Millisecond)
+			captureLockSlowWarnEvery = c.every
+			logs := captureSlogFor(t)
+			l := heartbeatOnly(t, slowEveryFourth())
+			if lostWithin(l, 1800*time.Millisecond) {
+				t.Fatalf("Lost closed; log:\n%s", logs.String())
+			}
+			l.Release()
+			out := logs.String()
+			if n := strings.Count(out, line); !c.ok(n) {
+				t.Fatalf("%d slow-answer warnings, want %s; log:\n%s", n, c.want, out)
+			}
+			for _, field := range []string{"level=WARN", "answer_took=", "left_before_the_limit=", "limit=600ms"} {
+				if !strings.Contains(out, field) {
+					t.Errorf("the warning lacks %q; log:\n%s", field, out)
+				}
+			}
+		})
+	}
+}
+
+// Prompt answers leave nothing in the log.
+func TestCaptureLockPromptAnswersDoNotWarn(t *testing.T) {
+	setCaptureLockTimings(t, time.Second, 20*time.Millisecond, 600*time.Millisecond)
+	captureLockSlowWarnEvery = 0
+	logs := captureSlogFor(t)
+	l := heartbeatOnly(t, func(context.Context) error {
+		time.Sleep(100 * time.Millisecond) // five intervals, a sixth of the limit
+		return nil
+	})
+	if lostWithin(l, 800*time.Millisecond) {
+		t.Fatal("Lost closed")
+	}
+	l.Release()
+	if out := logs.String(); strings.Contains(out, "slow to confirm") || strings.Contains(out, "level=WARN") {
+		t.Fatalf("a held lock with answers under half the limit warned:\n%s", out)
 	}
 }
 
@@ -110,6 +213,7 @@ func TestCaptureLockHeartbeatSteadySlowAnswersAreNotALoss(t *testing.T) {
 func TestCaptureLockHeartbeatSilenceIsALossAtTheLimit(t *testing.T) {
 	setCaptureLockTimings(t, time.Second, 20*time.Millisecond, 400*time.Millisecond)
 	cut := make(chan struct{})
+	logs := captureSlogFor(t)
 	start := time.Now()
 	l := heartbeatOnly(t, func(ctx context.Context) error {
 		<-ctx.Done()
@@ -121,6 +225,14 @@ func TestCaptureLockHeartbeatSilenceIsALossAtTheLimit(t *testing.T) {
 	}
 	if !lostWithin(l, 2*time.Second) {
 		t.Fatal("the index never answered and Lost never closed")
+	}
+	// The reason says what was measured: since when, and how long the cut
+	// question had waited.
+	out := logs.String()
+	for _, part := range []string{"the last question the index answered was sent ", " ago, past the limit of 400ms", "the question cut had been waiting for its answer for "} {
+		if !strings.Contains(out, part) {
+			t.Errorf("the loss does not say %q; log:\n%s", part, out)
+		}
 	}
 	select {
 	case <-cut:
@@ -136,9 +248,10 @@ func TestCaptureLockHeartbeatSilenceIsALossAtTheLimit(t *testing.T) {
 	}
 }
 
-// A "yes" that arrives after the limit is too late: the holder already
-// stopped being sure, and a process taking over counts on that.
-func TestCaptureLockHeartbeatLateYesIsStillALoss(t *testing.T) {
+// The limit does not wait for a question in flight, even one that would
+// come back "yes" later: the holder stops when the limit runs out, and a
+// process taking over counts on that.
+func TestCaptureLockHeartbeatLosesAtTheLimitWithAQuestionInFlight(t *testing.T) {
 	setCaptureLockTimings(t, time.Second, 20*time.Millisecond, 300*time.Millisecond)
 	l := heartbeatOnly(t, func(context.Context) error {
 		time.Sleep(700 * time.Millisecond)
@@ -198,6 +311,7 @@ func TestCaptureLockReleaseDuringASlowQuestionIsNotALoss(t *testing.T) {
 	setCaptureLockTimings(t, time.Second, 20*time.Millisecond, 5*time.Second)
 	asked, cut := make(chan struct{}), make(chan struct{})
 	var calls atomic.Int32
+	logs := captureSlogFor(t)
 	l := heartbeatOnly(t, func(ctx context.Context) error {
 		if calls.Add(1) == 1 {
 			close(asked)
@@ -228,5 +342,8 @@ func TestCaptureLockReleaseDuringASlowQuestionIsNotALoss(t *testing.T) {
 	}
 	if !l.abandoned {
 		t.Error("abandoned = false after cutting a question: Release would ask a closed connection to free the lock")
+	}
+	if out := logs.String(); strings.Count(out, "the connection was closed without releasing the lock") != 1 || !strings.Contains(out, "level=INFO") {
+		t.Errorf("want one INFO line saying the lock was not released explicitly; log:\n%s", out)
 	}
 }

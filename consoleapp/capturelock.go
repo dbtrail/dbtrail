@@ -49,6 +49,9 @@ type captureLock struct {
 	stop     chan struct{}
 	done     chan struct{}
 	release  sync.Once
+	// taken is when the GET_LOCK that took the lock was sent: where the first
+	// captureLockUnconfirmedLimit starts.
+	taken time.Time
 	// abandoned: the heartbeat cut a check that had not answered, which
 	// closes the connection (see heartbeat). Written by the heartbeat before
 	// it closes done, read by Release after.
@@ -63,13 +66,20 @@ var (
 	captureLockPoll = 5 * time.Second
 	// captureLockHeartbeat is how often the holder asks whether it still
 	// owns the lock. One question is in flight at a time: the next is asked
-	// once the previous one has answered.
-	captureLockHeartbeat = 2 * time.Second
+	// once the previous one has answered. A second, so that a connection
+	// that died is noticed within about that, and so that one slow answer
+	// has nearly the whole limit to arrive.
+	captureLockHeartbeat = time.Second
 	// captureLockUnconfirmedLimit is how long the holder keeps writing
 	// without a confirmation, counted from the moment it SENT the last
 	// question that came back "yes" (the server answered that one later, so
 	// the lock was held no earlier than that). Past it the lock counts as
 	// lost, whatever the reason for the silence.
+	//
+	// Counting from the send means two answers in a row have to fit in it:
+	// the second question leaves when the first is answered. An index that
+	// takes more than half the limit for every answer still loses the lock;
+	// one slow answer among prompt ones has the limit less one heartbeat.
 	//
 	// It is the 10 seconds the lock has always allowed (a question every 5 s
 	// with 5 s to answer) and must not grow on its own: a process that takes
@@ -84,6 +94,9 @@ var (
 	// top of the limit: for the previous holder's timer to fire and its
 	// stream to stop.
 	captureLockTakeoverMargin = time.Second
+	// captureLockSlowWarnEvery is the least time between two warnings about
+	// a slow answer that kept the lock.
+	captureLockSlowWarnEvery = time.Minute
 )
 
 // captureLockOldestTakeoverDelay is the takeover delay of the releases that
@@ -133,6 +146,9 @@ func tryCaptureLock(ctx context.Context, dsn, name string) (*captureLock, error)
 	// NULL is an error inside GET_LOCK (out of memory, the thread killed):
 	// not held, and not "someone else has it" either.
 	var got sql.NullInt64
+	// Before it is sent: the server grants the lock later than this, so the
+	// heartbeat's first limit starts no later than the lock itself.
+	asked := time.Now()
 	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", name).Scan(&got); err != nil {
 		return fail(fmt.Errorf("acquire the capture lock %s: %w", name, err))
 	}
@@ -142,14 +158,14 @@ func tryCaptureLock(ctx context.Context, dsn, name string) (*captureLock, error)
 	if got.Int64 != 1 {
 		return fail(nil)
 	}
-	l := newCaptureLock(name, db, conn)
+	l := newCaptureLock(name, db, conn, asked)
 	l.checkFn = l.check
 	go l.heartbeat()
 	return l, nil
 }
 
-func newCaptureLock(name string, db *sql.DB, conn *sql.Conn) *captureLock {
-	return &captureLock{name: name, db: db, conn: conn,
+func newCaptureLock(name string, db *sql.DB, conn *sql.Conn, taken time.Time) *captureLock {
+	return &captureLock{name: name, db: db, conn: conn, taken: taken,
 		lost: make(chan struct{}), stop: make(chan struct{}), done: make(chan struct{})}
 }
 
@@ -217,20 +233,36 @@ func (l *captureLock) heartbeat() {
 		l.lostOnce.Do(func() { close(l.lost) })
 	}
 	// confirmed is when the last question answered "yes" was sent; to begin
-	// with, when the lock was taken.
-	confirmed := time.Now()
-	limit := time.NewTimer(captureLockUnconfirmedLimit)
+	// with, when the GET_LOCK that took the lock was.
+	confirmed := l.taken
+	limit := time.NewTimer(time.Until(confirmed.Add(captureLockUnconfirmedLimit)))
 	defer limit.Stop()
 	var (
-		pending chan error // nil while no question is in flight
-		sent    time.Time
+		pending  chan error // nil while no question is in flight
+		sent     time.Time
+		lastWarn time.Time
 	)
-	silent := func() error {
-		return fmt.Errorf("the index has not confirmed it for %s", captureLockUnconfirmedLimit)
+	silent := func(now time.Time) error {
+		inFlight := "no question was in flight"
+		if pending != nil {
+			inFlight = fmt.Sprintf("the question cut had been waiting for its answer for %s", now.Sub(sent).Round(time.Millisecond))
+		}
+		return fmt.Errorf("the last question the index answered was sent %s ago, past the limit of %s; %s",
+			now.Sub(confirmed).Round(time.Millisecond), captureLockUnconfirmedLimit, inFlight)
 	}
 	for {
 		select {
 		case <-l.stop:
+			// An answer that arrived and was not read yet: the question is
+			// over and nothing is cut, so Release can free the lock itself.
+			// One still unanswered cannot be told from a dead connection
+			// without waiting for the index, which a stop must not do: the
+			// deferred cancel cuts it and the connection closes.
+			select {
+			case <-pending:
+				pending = nil
+			default:
+			}
 			l.abandoned = pending != nil
 			return
 		case <-t.C:
@@ -242,23 +274,34 @@ func (l *captureLock) heartbeat() {
 			pending = answer
 			go func() { answer <- l.checkFn(ctx) }()
 		case err := <-pending:
-			pending = nil
+			now := time.Now()
 			if err != nil {
+				pending = nil
 				lose(err)
 				return
 			}
 			// The timer and this answer can both be ready, and a process
 			// that was not scheduled for a while reads them late: the clock
 			// decides, not which one select picked.
-			if captureLockAnswerTooLate(confirmed, time.Now()) {
-				lose(silent())
+			if captureLockAnswerTooLate(confirmed, now) {
+				err := silent(now)
+				pending = nil
+				lose(err)
 				return
+			}
+			pending = nil
+			if took := now.Sub(sent); took > captureLockUnconfirmedLimit/2 && now.Sub(lastWarn) >= captureLockSlowWarnEvery {
+				lastWarn = now
+				slog.Warn("the index was slow to confirm the capture lock; the lock is kept, and it is given up if two answers in a row do not fit in the limit",
+					"lock", l.name, "answer_took", took.Round(time.Millisecond),
+					"left_before_the_limit", confirmed.Add(captureLockUnconfirmedLimit).Sub(now).Round(time.Millisecond),
+					"limit", captureLockUnconfirmedLimit)
 			}
 			confirmed = sent
 			limit.Reset(time.Until(confirmed.Add(captureLockUnconfirmedLimit)))
 		case <-limit.C:
 			l.abandoned = pending != nil
-			lose(silent())
+			lose(silent(time.Now()))
 			return
 		}
 	}
@@ -292,20 +335,28 @@ func (l *captureLock) Release() {
 	l.release.Do(func() {
 		close(l.stop)
 		<-l.done
-		if l.conn == nil {
-			return // a unit test's lock, with no session behind it
-		}
 		// Best effort: closing the session frees the lock too, only later,
 		// when mysqld finishes tearing it down. Until then a restart in this
-		// process waits on its own lock for a poll or two, which is what the
-		// log line explains. Skipped when the heartbeat already cut the
-		// connection: there is no session left to ask.
-		if !l.abandoned {
+		// process waits on its own lock for a poll or two, and the waiter's
+		// log line says the lock is held by another session.
+		switch {
+		case l.abandoned:
+			// The heartbeat cut a question that had not answered, which
+			// closed the connection: there is no session left to ask. A
+			// loss already said so; a clean stop says it here.
+			if !chanClosed(l.lost) {
+				slog.Info("stopped while the index had not answered the capture lock's check: the connection was closed without releasing the lock, and the index frees it when it sees the connection close",
+					"lock", l.name)
+			}
+		case l.conn != nil:
 			ctx, cancel := context.WithTimeout(context.Background(), captureLockReleaseTimeout)
 			if _, err := l.conn.ExecContext(ctx, "DO RELEASE_LOCK(?)", l.name); err != nil {
 				slog.Warn("could not release the capture lock; it is freed when its connection closes", "lock", l.name, "error", err)
 			}
 			cancel()
+		}
+		if l.conn == nil {
+			return // a unit test's lock, with no session behind it
 		}
 		l.conn.Close()
 		l.db.Close()
