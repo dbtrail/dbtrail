@@ -72,8 +72,8 @@ func TestCopyScreen_zoneInALiteral(t *testing.T) {
 		`SELECT name FROM ` + c + ` WHERE signup = DATE '2026-01-15 23:30:00-05'`:                                                     zonedTypedVeto,
 		`SELECT name FROM ` + c + ` WHERE signup = DATE '2026-01-15+02'`:                                                              zonedTypedVeto,
 		`SELECT name FROM ` + c + ` WHERE signup = '2026-01-15 23:30:00-05'::date`:                                                    zonedTypedVeto,
-		`SELECT name FROM ` + c + ` WHERE signup = CAST('2026-01-15 23:30:00-05' AS date)`: zonedTypedVeto,
-		`SELECT name FROM ` + c + ` WHERE signup = CAST('2026-01-15+16' AS date)`: zonedTypedVeto,
+		`SELECT name FROM ` + c + ` WHERE signup = CAST('2026-01-15 23:30:00-05' AS date)`:                                            zonedTypedVeto,
+		`SELECT name FROM ` + c + ` WHERE signup = CAST('2026-01-15+16' AS date)`:                                                     zonedTypedVeto,
 		`SELECT id FROM ` + o + ` WHERE placed_at BETWEEN TIMESTAMP '2026-03-02 10:00:00' AND TIMESTAMP '2026-03-03 10:00:00+02'`:     zonedTypedVeto,
 		`SELECT id FROM ` + o + ` WHERE placed_at NOT BETWEEN TIMESTAMP '2026-03-02 10:00:00+02' AND TIMESTAMP '2026-03-03 10:00:00'`: zonedTypedVeto,
 		// A cast to a timestamp was the source's already, zone or none.
@@ -139,15 +139,15 @@ func TestCopyScreen_bothBoundsOfBetween(t *testing.T) {
 		`SELECT id FROM ` + o + ` WHERE $1 BETWEEN 1 AND 'x'`: text,
 		// The AND of a BETWEEN is not one inside a parenthesis or a CASE of
 		// its lower bound.
-		`SELECT id FROM ` + o + ` WHERE qty BETWEEN CASE WHEN id > 1 AND id < 5 THEN 1 ELSE 2 END AND note`:   text,
-		`SELECT CASE WHEN qty BETWEEN 1 END FROM ` + o:                                                        "AND was not found",
+		`SELECT id FROM ` + o + ` WHERE qty BETWEEN CASE WHEN id > 1 AND id < 5 THEN 1 ELSE 2 END AND note`: text,
+		`SELECT CASE WHEN qty BETWEEN 1 END FROM ` + o:                                                      "AND was not found",
 		// A name given with AS, or a column after a dot, is not CASE or END.
 		`SELECT id FROM ` + o + ` WHERE qty BETWEEN (SELECT min(qty) AS end FROM ` + o + ` WHERE id > 1 AND id < 5) AND note`: text,
-		`SELECT id FROM ` + o + ` o WHERE (qty BETWEEN (SELECT 1 AS case) AND note) AND o.id = 1`: text,
-		`SELECT id FROM ` + o + ` WHERE qty BETWEEN (CASE WHEN id > 1 AND id < 5 THEN 1 ELSE 2 END) AND note`: text,
-		`SELECT id FROM ` + o + ` WHERE qty BETWEEN SYMMETRIC 9 AND 2`:                                        "SYMMETRIC",
-		`SELECT id FROM ` + o + ` WHERE qty BETWEEN 1`:                                                        "AND was not found",
-		`SELECT id FROM ` + o + ` WHERE (qty BETWEEN 1) AND 2 = 2`:                                            "AND was not found",
+		`SELECT id FROM ` + o + ` o WHERE (qty BETWEEN (SELECT 1 AS case) AND note) AND o.id = 1`:                             text,
+		`SELECT id FROM ` + o + ` WHERE qty BETWEEN (CASE WHEN id > 1 AND id < 5 THEN 1 ELSE 2 END) AND note`:                 text,
+		`SELECT id FROM ` + o + ` WHERE qty BETWEEN SYMMETRIC 9 AND 2`:                                                        "SYMMETRIC",
+		`SELECT id FROM ` + o + ` WHERE qty BETWEEN 1`:                                                                        "AND was not found",
+		`SELECT id FROM ` + o + ` WHERE (qty BETWEEN 1) AND 2 = 2`:                                                            "AND was not found",
 	}
 	for q, why := range toSource {
 		if got := CopyScreen(q, routeTypes); !strings.Contains(got, why) {
