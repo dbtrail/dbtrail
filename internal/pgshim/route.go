@@ -668,6 +668,7 @@ func lexSQLSpans(q string) (toks []rtToken, spans [][2]int, why string) {
 				}
 				j++
 			}
+			j = i + operatorLen(q[i:j])
 			toks = append(toks, rtToken{rtOp, q[i:j]})
 			i = j
 		default:
@@ -678,6 +679,22 @@ func lexSQLSpans(q string) (toks []rtToken, spans [][2]int, why string) {
 		}
 	}
 	return toks, spans, ""
+}
+
+// operatorLen is how much of op, a run of operator characters, PostgreSQL's
+// scanner reads as one operator: one of several characters does not end in
+// + or -, unless it holds one of ~ ! @ # % ^ & | ` ?, so =- is = and then -
+// (a = -1 written a =-1), and !=- is one operator, which does not exist.
+// The copy's engine cuts them the same way (pgcompare zoneAndBetween).
+func operatorLen(op string) int {
+	n := len(op)
+	if n < 2 || op[n-1] != '+' && op[n-1] != '-' || strings.ContainsAny(op[:n-1], "~!@#%^&|`?") {
+		return n
+	}
+	for n > 1 && (op[n-1] == '+' || op[n-1] == '-') {
+		n--
+	}
+	return n
 }
 
 // isSelectLike reports whether a statement is a query: its first word is
@@ -848,11 +865,17 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 	for j := 0; j < len(in); j++ {
 		t := in[j]
 		if t.kind == rtWord && typedLiterals[t.text] && j+1 < len(in) && in[j+1].kind == rtString {
+			if zonedTyped(t.text, in[j+1].text) {
+				return zonedTypedVeto
+			}
 			toks = append(toks, rtToken{rtTyped, t.text})
 			j++
 			continue
 		}
 		if t.kind == rtString && j+2 < len(in) && in[j+1].kind == rtOp && in[j+1].text == "::" && in[j+2].kind == rtWord && typedLiterals[in[j+2].text] {
+			if zonedTyped(in[j+2].text, t.text) {
+				return zonedTypedVeto
+			}
 			t = rtToken{rtTyped, in[j+2].text}
 		}
 		toks = append(toks, t)
@@ -1109,16 +1132,59 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 		return false
 	}
 
+	// valueAt is the operand that starts at j read as a value: a qualified
+	// name (t.col, s.t.col) is its column, the names before it say nothing
+	// of the value. Only comparisons read it; every other check reads the
+	// token itself (x::pg_catalog.date is not a cast to date).
+	valueAt := func(j int) rtToken {
+		v := at(j)
+		for ; at(j).kind == rtWord && at(j+1).kind == rtOp && at(j+1).text == "." && (at(j+2).kind == rtWord || at(j+2).kind == rtQuoted); j += 2 {
+			v = at(j + 2)
+		}
+		return v
+	}
+	// zonedAgainst: a string that names a time zone, compared with a
+	// timestamp column.
+	zonedAgainst := func(col, lit rtToken) bool {
+		return timeCol(col) && lit.kind == rtString && zonedLiteral.MatchString(lit.text)
+	}
+	// betweenAnd finds the AND of the BETWEEN at i: the first one outside
+	// any parenthesis and any CASE ... END opened after it, since a lower
+	// bound holds no AND of its own outside those. -1 when the statement
+	// ends, or what the BETWEEN is in closes, before it.
+	betweenAnd := func(i int) int {
+		// keyword: the word at j is CASE or END itself, not a name given
+		// with AS or a column after a dot (x AS end, t.end).
+		keyword := func(j int, w string) bool {
+			if toks[j].kind != rtWord || toks[j].text != w {
+				return false
+			}
+			p := at(j - 1)
+			return !(p.kind == rtWord && p.text == "as") && !(p.kind == rtOp && p.text == ".")
+		}
+		depth := 0
+		for j := i + 1; j < len(toks); j++ {
+			t := toks[j]
+			switch {
+			case t.kind == rtOp && (t.text == "(" || t.text == "[") || keyword(j, "case"):
+				depth++
+			case t.kind == rtOp && (t.text == ")" || t.text == "]") || keyword(j, "end"):
+				if depth == 0 {
+					return -1
+				}
+				depth--
+			case t.kind == rtOp && t.text == ";" && depth == 0:
+				return -1
+			case t.kind == rtWord && t.text == "and" && depth == 0:
+				return j
+			}
+		}
+		return -1
+	}
+
 	for i, t := range toks {
 		next, prev := at(i+1), at(i-1)
-		// qnext is the operand after t read as a value: a qualified name
-		// (t.col, s.t.col) is its column, the names before it say nothing of
-		// the value. Only comparisons read it; every other check reads the
-		// token itself (x::pg_catalog.date is not a cast to date).
-		qnext := next
-		for j := i + 1; at(j).kind == rtWord && at(j+1).kind == rtOp && at(j+1).text == "." && (at(j+2).kind == rtWord || at(j+2).kind == rtQuoted); j += 2 {
-			qnext = at(j + 2)
-		}
+		qnext := valueAt(i + 1)
 		switch t.kind {
 		case rtQuoted:
 			if strings.ToLower(t.text) != t.text {
@@ -1164,9 +1230,8 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 						return "a text column compared with a number"
 					}
 					// A time zone in a string compared with a timestamp column.
-					if timeCol(prev) && next.kind == rtString && zonedLiteral.MatchString(next.text) ||
-						timeCol(next) && prev.kind == rtString && zonedLiteral.MatchString(prev.text) {
-						return "a timestamp compared with a string that names a time zone"
+					if zonedAgainst(prev, next) || zonedAgainst(next, prev) {
+						return zonedCompareVeto
 					}
 				}
 				if orderingOps[t.text] {
@@ -1200,8 +1265,21 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 					}
 				}
 			case t.text == "between":
-				if !typedBy(prev, qnext) && (operandText(prev) && !endsNeverText(i-1) || operandText(qnext) && !startsNeverText(i+1)) {
-					return "text compared with BETWEEN (the source compares it by its collation)"
+				// x BETWEEN a AND b is x >= a AND x <= b: each bound is
+				// judged as the lower one always was, against x.
+				andAt := betweenAnd(i)
+				if andAt < 0 {
+					return "a BETWEEN whose AND was not found"
+				}
+				for _, b := range []int{i + 1, andAt + 1} {
+					bound := valueAt(b)
+					if zonedAgainst(prev, bound) {
+						return zonedCompareVeto
+					}
+					untyped := (prev.kind == rtParam || prev.kind == rtString) && (bound.kind == rtParam || bound.kind == rtString)
+					if !typedBy(prev, bound) && (untyped || operandText(prev) && !endsNeverText(i-1) || operandText(bound) && !startsNeverText(b)) {
+						return "text compared with BETWEEN (the source compares it by its collation)"
+					}
 				}
 			case next.kind == rtOp && next.text == "(":
 				if parenWords[t.text] {
@@ -1218,6 +1296,10 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 					in := a[0]
 					if w := in[len(in)-2]; w.kind != rtWord || w.text != "as" || in[len(in)-1].kind != rtWord || in[len(in)-1].text != "date" {
 						return "a CAST to a type other than date"
+					}
+					// The same literal as DATE '...' and '...'::date.
+					if in[0].kind == rtString && zonedTyped("date", in[0].text) {
+						return zonedTypedVeto
 					}
 					break
 				}
@@ -1305,8 +1387,31 @@ var compareOps = map[string]bool{"=": true, "<>": true, "!=": true, "<": true, "
 var textMakers = map[string]bool{"concat": true, "string_agg": true, "substring": true, "trim": true}
 
 // zonedLiteral is a date and time written with a time zone: an offset, Z,
-// or a zone's name after the time.
-var zonedLiteral = regexp.MustCompile(`\d:\d\d(:\d\d(\.\d+)?)?\s*([+-]\d{1,2}(:?\d\d)?|[zZ]|[A-Za-z][A-Za-z_/+-]*)\s*$`)
+// or a zone's name after the time (Europe/Paris, PST8PDT, Etc/GMT+5).
+var zonedLiteral = regexp.MustCompile(`\d:\d\d(:\d\d(\.\d+)?)?\s*([+-]\d{1,2}(:?\d\d(:\d\d)?)?|[zZ]|[A-Za-z][A-Za-z0-9_/+-]*)\s*$`)
+
+// zonedDate is a date alone followed by a time zone (2026-03-02+02,
+// 2026-03-02 Z), which PostgreSQL reads as the date.
+var zonedDate = regexp.MustCompile(`^\s*\d+-\d{1,2}-\d{1,2}(\s*[+-]\d{1,2}(:?\d\d(:\d\d)?)?|\s+[A-Za-z][A-Za-z0-9_/+-]*)\s*$`)
+
+// zonedTyped reports whether a typed literal of a type that holds no time
+// zone (date, timestamp, time) is written with one. PostgreSQL 16 does not
+// read it (TIMESTAMP '2026-03-02 10:00:00+02' is 10:00, in any session time
+// zone). The copy's engine was measured doing the same with an offset glued
+// to the seconds, refusing most other spellings, and taking an offset
+// PostgreSQL refuses (+16): the literal is the source's (#3024). An interval
+// has no zone to drop: 1:30 hours is not one.
+func zonedTyped(typ, text string) bool {
+	if typ == "interval" {
+		return false
+	}
+	return zonedLiteral.MatchString(text) || zonedDate.MatchString(text)
+}
+
+const (
+	zonedTypedVeto   = "a date or time literal written with a time zone, which its type does not hold"
+	zonedCompareVeto = "a timestamp compared with a string that names a time zone"
+)
 
 // aliasStop are the words that end a select item or a FROM item: never an
 // alias.

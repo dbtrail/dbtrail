@@ -122,7 +122,7 @@ func TestIntegrationPGCompare(t *testing.T) {
 	}
 	t.Cleanup(func() { src.Close(context.Background()) })
 
-	want := append(expectations(), numericForward()...)
+	want := append(append(expectations(), numericForward()...), zoneAndBetween()...)
 	stmts := make([]string, len(want))
 	for i, e := range want {
 		stmts[i] = e.stmt

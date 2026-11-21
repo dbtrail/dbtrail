@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -608,8 +609,11 @@ func (s *session) resolveTimeTravel(q shim.TimeTravelQuery) (cols []string, rows
 	}
 	cells, cerr := imageCells(image, cols)
 	if cerr != nil {
-		// Residual unchanged-TOAST marker (#592) — refuse rather than serve
-		// the marker's JSON as a value.
+		// A marker that stands for a value the index does not hold (the
+		// unchanged-TOAST one, #592, or the not-captured one, #3027): refuse
+		// rather than serve the marker's JSON as a value.
+		s.logger.Error("pgshim: a row as of a moment holds a marker in place of a value; the read was refused",
+			"schema", q.Schema, "table", q.Table, "err", cerr)
 		return nil, nil, "", &pgErr{"XX000", cerr.Error()}
 	}
 	rows = [][][]byte{cells}
@@ -681,9 +685,17 @@ func imageCells(image map[string]any, cols []string) ([][]byte, error) {
 // textCell renders one image value as a PostgreSQL text-format cell (nil = SQL
 // NULL). The image is post-ApplyAt: numbers arrive as json.Number, strings/bytes
 // pass through, and a residual unchanged-TOAST marker is refused (#592) rather
-// than serialised. Byte values go on the wire verbatim (the conservative
-// all-text encoding), so a bytea/blob round-trips its exact bytes.
+// than serialised, as is the not-captured marker (#3027), which stands for a
+// column of an earlier row PostgreSQL never sent and which a row as of a
+// moment is never built from: one here is a defect, said as one. Byte values
+// go on the wire verbatim (the conservative all-text encoding), so a
+// bytea/blob round-trips its exact bytes.
 func textCell(col string, v any) ([]byte, error) {
+	if event.IsNotCapturedMarker(v) {
+		return nil, fmt.Errorf("column %s holds the not-captured marker in place of a value: the row's value at that moment "+
+			"was never captured (the table was not at REPLICA IDENTITY FULL when the row changed), and a row read as of a "+
+			"moment is never meant to be built from it; this is a defect in DBTrail, please report it", col)
+	}
 	if event.IsUnchangedToastMarker(v) {
 		return nil, event.UnresolvedToastError("", "", "", []string{col})
 	}
@@ -724,11 +736,48 @@ func textCell(col string, v any) ([]byte, error) {
 		}
 		return []byte("f"), nil
 	case time.Time:
-		return []byte(x.UTC().Format("2006-01-02 15:04:05")), nil
+		return timestampText(x), nil
 	default:
 		return []byte(fmt.Sprint(x)), nil
 	}
 }
+
+// timestampText writes a moment as PostgreSQL 16 writes a timestamp, in
+// UTC: the fraction of the second to the microsecond with its trailing
+// zeros dropped (03:04:05.12, 03:04:05 when it has none), a year before 1
+// as its number and BC (0044-03-15 12:00:00 BC), and the two ends the
+// copy's engine holds as its largest and smallest microsecond counts as
+// infinity and -infinity. Finer than a microsecond is rounded to one, as
+// PostgreSQL rounds what it is given. textCell is not told a column's type:
+// a date or a timestamp with time zone that reaches it as a time.Time is
+// written as a timestamp too (2026-01-02 00:00:00), as before.
+func timestampText(t time.Time) []byte {
+	switch {
+	case t.Equal(engineInfinity):
+		return []byte("infinity")
+	case t.Equal(engineMinusInfinity):
+		return []byte("-infinity")
+	}
+	t = t.UTC().Round(time.Microsecond)
+	year, era := t.Year(), ""
+	if year <= 0 {
+		// Year 0 of the calendar this counts in is 1 BC.
+		year, era = 1-year, " BC"
+	}
+	b := fmt.Appendf(nil, "%04d-%02d-%02d %02d:%02d:%02d", year, int(t.Month()), t.Day(), t.Hour(), t.Minute(), t.Second())
+	if us := t.Nanosecond() / 1000; us != 0 {
+		b = append(b, '.')
+		b = append(b, strings.TrimRight(fmt.Sprintf("%06d", us), "0")...)
+	}
+	return append(b, era...)
+}
+
+// engineInfinity and engineMinusInfinity are what the copy's engine hands
+// over for the timestamps infinity and -infinity.
+var (
+	engineInfinity      = time.UnixMicro(math.MaxInt64)
+	engineMinusInfinity = time.UnixMicro(-math.MaxInt64)
+)
 
 // --- wire writers ---------------------------------------------------------
 
