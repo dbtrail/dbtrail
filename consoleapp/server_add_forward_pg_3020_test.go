@@ -228,6 +228,7 @@ func newPGAddDaemon(t *testing.T, sourceURL string) (*pgAddDaemon, *ctlClient) {
 		// The server, as the real list has it.
 		rec := httptest.NewRecorder()
 		lr := httptest.NewRequest(http.MethodGet, "/api/servers", nil)
+		lr.Host = r.Host
 		lr.Header.Set("Authorization", r.Header.Get("Authorization"))
 		daemon.ServeHTTP(rec, lr)
 		var list struct {
