@@ -189,6 +189,8 @@ A disk can also fill later, while the dump is being converted to Parquet. A full
 
 **Before the first read, from the command line.** `bintrail doctor --source-dsn … --staging-dir <folder>` reads the same table sizes with the same query and compares them with the free space of that folder: a warning under half the data (what the web interface would refuse) and under the data plus the indexes (the dump may not fit), and "cannot tell" when a table is stored compressed, has no size reported, or when the user sees no tables at all (a missing privilege or a misspelled schema look the same as an empty database). It is advisory and never changes doctor's exit code, because it knows less than the check before a real read. It measures the folder **on the machine doctor runs on**, which is the working folder only when that is the DBTrail host and the same path. It sizes the tables `--schemas` selects, not what a server saved in the web interface reads. And it does not know where the snapshot is written, so the 1.8× case is stated as a condition and not graded. Without `--staging-dir`, doctor prints one line saying the check exists and runs before every full read.
 
+**What is not checked.** A dump you run yourself with `bintrail dump`. A PostgreSQL snapshot writes Parquet directly, with no dump in between, and has its own check: the next section.
+
 ## Disk for a PostgreSQL snapshot: the snapshot folder is the one that fills
 
 A snapshot of a PostgreSQL server has no dump. Each table is copied straight into a Parquet file in the server's **Local folder**, so the working folder is not involved and the snapshot folder is the only one that has to have the room.
@@ -213,7 +215,7 @@ A snapshot of a PostgreSQL server has no dump. Each table is copied straight int
 
 No fraction of the tables' size is a line every real snapshot stays above, so refusing by it would turn away snapshots that fit. The warning uses the highest ratio measured, rounded up: it comes early for ordinary data and was not late for any of these. For a MySQL or MariaDB server the same holds for the folder the Parquet goes to: a small one is a warning, never a refusal.
 
-**Tables the sizes say little about.** A table kept by a table access method other than PostgreSQL's own heap (a columnar or compressed store) can report a compressed size, and a snapshot is written from its rows. The check counts those tables and names the two largest, and when the free space covers the reported sizes its note opens with "Disk check cannot tell whether this snapshot fits" instead of saying there is room. The same goes for a table the server gave no size for.
+**Tables the sizes say little about.** Three kinds of table have rows the reported size does not cover: one kept by a table access method other than PostgreSQL's own heap (a columnar or compressed store), which can report a compressed size; one with child tables by inheritance (`INHERITS`, or a TimescaleDB hypertable), whose rows are read with it and stored elsewhere; and a foreign table among a partitioned table's partitions. The check counts those tables and names the two largest, and when the free space covers the reported sizes its note opens with "Disk check cannot tell whether this snapshot fits" instead of saying there is room. The same goes for a table the server gave no size for.
 
 **What you see.** The same places as for a MySQL full read: the snapshot's status, its run history and detail, the schedule card, and the message after a snapshot you started yourself. A refusal is recorded as a disk failure, so the schedule does not answer it with another full read into the same disk.
 
@@ -221,7 +223,6 @@ No fraction of the tables' size is a line every real snapshot stays above, so re
 
 **From the command line.** `bintrail-pg baseline` writes where `--output` says and does not run this check, as `bintrail baseline` does not for MySQL: the check belongs to the snapshots DBTrail takes for a server it manages. `bintrail-pg doctor` does not report it either: it does not know the snapshot folder, and may run on another machine.
 
-**What is not checked.** The size of a PostgreSQL full read is not checked: it writes Parquet directly, with no dump in between. Neither is a dump you run yourself with `bintrail dump`.
 
 **Why both are on disk at once.** A full read (the web interface's **Read database now**, or a scheduled full read) runs mydumper, which writes the **whole dump, uncompressed**, into the working folder. Only after the dump finishes is it converted to Parquet, and the dump is deleted when the run ends. So for a short while both are on disk at once:
 

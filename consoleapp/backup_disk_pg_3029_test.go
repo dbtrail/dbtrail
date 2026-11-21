@@ -19,6 +19,20 @@ import (
 // floor the snapshot updates keep, warns below the highest ratio measured,
 // and never refuses on a guess.
 
+// pgDiskCheckOff keeps a test that is not about the disk check from reaching
+// for a PostgreSQL over the network or reading the free space of the machine
+// it runs on: the sizes "could not be read" and the disk has room. A test
+// about the check installs its own afterwards.
+func pgDiskCheckOff(t *testing.T) {
+	t.Helper()
+	prevEst, prevDisk := pgCopyEstimateFn, diskSpaceFn
+	t.Cleanup(func() { pgCopyEstimateFn, diskSpaceFn = prevEst, prevDisk })
+	pgCopyEstimateFn = func(context.Context, string, string, event.Filters) (pgbaseline.CopyEstimate, error) {
+		return pgbaseline.CopyEstimate{}, errors.New("not read in this test")
+	}
+	diskSpaceFn = func(string) (uint64, uint64, error) { return 1 << 40, 1 << 41, nil }
+}
+
 func stubPGCopyEstimate(t *testing.T, est pgbaseline.CopyEstimate, err error) *[]string {
 	t.Helper()
 	var calls []string
@@ -82,10 +96,15 @@ func TestPGCopyDiskVerdict(t *testing.T) {
 	})
 	t.Run("below the floor: refused with the numbers", func(t *testing.T) {
 		check, note, err := verdict(t, 500<<20, est, nil)
-		want := "not enough free disk space for this snapshot: the snapshot was not started. The snapshot folder " + dir + " has 500.0 MiB free, " +
-			"and DBTrail keeps 1.0 GiB free there: below that no update of a snapshot is written either. " +
-			"The tables to copy take up about 10.0 GiB on the database server. Nothing was read from your database, and earlier snapshots are unchanged. " +
-			"Free space there, or give this server a Local folder on a bigger disk (Snapshots page, under Where and how often)."
+		want := "not enough free disk space for this snapshot: it was not started, and nothing was read from your database. The snapshot folder " + dir + " has 500.0 MiB free, " +
+			"and DBTrail keeps 1.0 GiB free there. The tables to copy take up about 10.0 GiB on the database server. " +
+			"Free space there, or give this server a Local folder on a bigger disk (Snapshots page, under Where and how often). " +
+			"Earlier snapshots are unchanged. With less than that free no update of a snapshot is written either."
+		// The web interface shows the first 300 characters of a failed
+		// snapshot's error: what happened and both numbers are inside them.
+		if cut := want[:min(len(want), 300)]; !strings.Contains(cut, "has 500.0 MiB free, and DBTrail keeps 1.0 GiB free there.") {
+			t.Errorf("the numbers are past what the failure card shows: %s", cut)
+		}
 		if err == nil || err.Error() != want || check != "" || note != "" {
 			t.Fatalf("check %q note %q\n got %v\nwant %s", check, note, err, want)
 		}
@@ -142,7 +161,7 @@ func TestPGCopyDiskVerdict(t *testing.T) {
 		check, note, err := verdict(t, 100*gib, part, nil)
 		want := "Disk check cannot tell whether this snapshot fits. By the sizes the server reports: the tables to copy take up about 10.0 GiB on the database server, " +
 			"and their snapshot at most about 13.0 GiB; 100.0 GiB free at " + dir + ". The source gave no size for 1 table(s), so the real need is higher." +
-			" 1 table is not stored as a PostgreSQL heap (ts.metrics): the size the server reports for it can be a compressed one, and a snapshot is written from its rows, so it can need more than the sizes say."
+			" The size the server reports does not cover the rows of 1 table (ts.metrics): it is not a plain PostgreSQL heap (another storage, child tables read with it, or a foreign partition), so a snapshot can need more than the sizes say."
 		if err != nil || check != dumpDiskUnchecked || note != want {
 			t.Errorf("check %q err %v\n got %s\nwant %s", check, err, note, want)
 		}
@@ -216,9 +235,9 @@ func TestExecutePG_checksTheDiskBeforeTheSnapshot_3029(t *testing.T) {
 	t.Run("below the floor: refused, and the snapshot is never started", func(t *testing.T) {
 		ran = 0
 		local := t.TempDir()
+		sup := pgSupervisor(t)
 		calls := stubPGCopyEstimate(t, est, nil)
 		diskByPath(t, map[string]uint64{local: 200 << 20})
-		sup := pgSupervisor(t)
 		req := pgFullReadRequest(local, "")
 		req.Schemas = []string{"shop"}
 		_, err := sup.executePG(req)
@@ -242,9 +261,9 @@ func TestExecutePG_checksTheDiskBeforeTheSnapshot_3029(t *testing.T) {
 	t.Run("low: the snapshot runs and its status carries the warning", func(t *testing.T) {
 		ran = 0
 		local := t.TempDir()
+		sup := pgSupervisor(t)
 		stubPGCopyEstimate(t, est, nil)
 		diskByPath(t, map[string]uint64{local: 12 * gib})
-		sup := pgSupervisor(t)
 		if _, err := sup.executePG(pgFullReadRequest(local, "")); err != nil {
 			t.Fatal(err)
 		}
@@ -256,9 +275,9 @@ func TestExecutePG_checksTheDiskBeforeTheSnapshot_3029(t *testing.T) {
 	t.Run("sizes that cannot be read: the snapshot runs and says the check did not", func(t *testing.T) {
 		ran = 0
 		local := t.TempDir()
+		sup := pgSupervisor(t)
 		stubPGCopyEstimate(t, pgbaseline.CopyEstimate{}, errors.New("no route to host"))
 		diskByPath(t, map[string]uint64{local: 50 * gib})
-		sup := pgSupervisor(t)
 		if _, err := sup.executePG(pgFullReadRequest(local, "")); err != nil {
 			t.Fatal(err)
 		}
@@ -268,8 +287,9 @@ func TestExecutePG_checksTheDiskBeforeTheSnapshot_3029(t *testing.T) {
 	})
 	t.Run("no local folder: refused for that, before any size is read", func(t *testing.T) {
 		ran = 0
+		sup := pgSupervisor(t)
 		calls := stubPGCopyEstimate(t, est, nil)
-		_, err := pgSupervisor(t).executePG(console.BaselineRequest{ServerID: "pg1", Flavor: console.FlavorPostgres,
+		_, err := sup.executePG(console.BaselineRequest{ServerID: "pg1", Flavor: console.FlavorPostgres,
 			SourceDSN: "postgres://u:p@h/appdb", Slot: "s", Publication: "p", S3: "s3://b/p"})
 		if err == nil || !strings.Contains(err.Error(), "has no local snapshot folder") || errors.Is(err, errFoldDiskFull) {
 			t.Fatalf("err = %v", err)
@@ -292,15 +312,15 @@ func TestPGSnapshotRun_recordsTheDiskRefusal_3029(t *testing.T) {
 		return pgbaseline.Stats{}, nil
 	}
 	local := t.TempDir()
+	sup := pgSupervisor(t)
 	stubPGCopyEstimate(t, pgbaseline.CopyEstimate{Bytes: int64(40 * gib), Tables: 12}, nil)
 	diskByPath(t, map[string]uint64{local: 300 << 20})
-	sup := pgSupervisor(t)
 	sup.run(pgFullReadRequest(local, ""))
 	st := sup.Status("pg1")
 	if st.State != "failed" || !st.DiskRefused {
 		t.Fatalf("status = %+v, want failed and a disk refusal", st)
 	}
-	for _, want := range []string{"has 300.0 MiB free", "DBTrail keeps 1.0 GiB free there", "take up about 40.0 GiB", "Nothing was read from your database"} {
+	for _, want := range []string{"has 300.0 MiB free", "DBTrail keeps 1.0 GiB free there", "take up about 40.0 GiB", "nothing was read from your database"} {
 		if !strings.Contains(st.LastError, want) {
 			t.Errorf("the status error lacks %q:\n%s", want, st.LastError)
 		}

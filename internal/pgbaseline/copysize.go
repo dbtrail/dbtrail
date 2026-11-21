@@ -48,10 +48,13 @@ type CopyEstimate struct {
 	// Unsized counts tables the server gave no size for (dropped while the
 	// query ran, or a part of them was). They add nothing to Bytes.
 	Unsized int
-	// OtherStorage counts tables kept by a table access method other than
-	// PostgreSQL's own heap (a columnar or compressed store). What the server
-	// reports for those can be a compressed size, which bounds nothing: the
-	// copy is written from the rows. OtherStorageTop names the largest.
+	// OtherStorage counts tables whose rows the reported size does not
+	// cover: kept by a table access method other than PostgreSQL's own heap
+	// (a columnar or compressed store, whose size can be a compressed one),
+	// with child tables by inheritance (the copy reads the children's rows
+	// with the parent's, and pg_table_size is the parent's alone), or with a
+	// foreign table among its partitions (no local storage). The sum bounds
+	// nothing for those. OtherStorageTop names the largest.
 	OtherStorage    int
 	OtherStorageTop []string
 }
@@ -69,7 +72,9 @@ const copySizeQuery = `
 	CROSS JOIN LATERAL (
 		SELECT COALESCE(sum(pg_table_size(l.relid)), 0)::bigint AS bytes,
 		       (count(*) FILTER (WHERE pg_table_size(l.relid) IS NULL))::int AS unsized,
-		       (count(*) FILTER (WHERE am.amname IS NOT NULL AND am.amname <> 'heap'))::int AS other
+		       (count(*) FILTER (WHERE (am.amname IS NOT NULL AND am.amname <> 'heap')
+		                            OR lc.relkind = 'f'
+		                            OR (c.relkind <> 'p' AND c.relhassubclass)))::int AS other
 		FROM (
 			SELECT p.relid::oid AS relid FROM pg_partition_tree(c.oid::regclass) p WHERE c.relkind = 'p' AND p.isleaf
 			UNION ALL
@@ -157,12 +162,12 @@ func CopyOtherStorageSentence(est CopyEstimate) string {
 	if more := est.OtherStorage - len(est.OtherStorageTop); more > 0 {
 		names += fmt.Sprintf(" and %d more", more)
 	}
+	const why = "it is not a plain PostgreSQL heap (another storage, child tables read with it, or a foreign partition), so a snapshot can need more than the sizes say."
 	if est.OtherStorage == 1 {
-		return fmt.Sprintf(" 1 table is not stored as a PostgreSQL heap (%s): the size the server reports for it can be a compressed one, "+
-			"and a snapshot is written from its rows, so it can need more than the sizes say.", names)
+		return fmt.Sprintf(" The size the server reports does not cover the rows of 1 table (%s): %s", names, why)
 	}
-	return fmt.Sprintf(" %d tables are not stored as a PostgreSQL heap (%s): the size the server reports for them can be a compressed one, "+
-		"and a snapshot is written from their rows, so it can need more than the sizes say.", est.OtherStorage, names)
+	return fmt.Sprintf(" The size the server reports does not cover the rows of %d tables (%s): each %s", est.OtherStorage, names,
+		strings.Replace(why, "it is not", "is not", 1))
 }
 
 // ReadCopyEstimate sizes the tables a snapshot taken now would copy: the

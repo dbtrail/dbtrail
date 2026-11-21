@@ -61,8 +61,8 @@ func TestIntegrationPGSnapshotChecksTheDisk_3029(t *testing.T) {
 		t.Fatalf("err = %v, want the disk refusal", err)
 	}
 	for _, want := range []string{
-		"the snapshot was not started. The snapshot folder " + local + " has 700.0 MiB free, and DBTrail keeps 1.0 GiB free there",
-		"The tables to copy take up about ", " on the database server. Nothing was read from your database",
+		"it was not started, and nothing was read from your database. The snapshot folder " + local + " has 700.0 MiB free, and DBTrail keeps 1.0 GiB free there.",
+		" The tables to copy take up about 3.", " on the database server. Free space there",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal lacks %q", want)

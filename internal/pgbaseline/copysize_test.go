@@ -44,9 +44,9 @@ func TestCopyOtherStorageSentence(t *testing.T) {
 	}{
 		{CopyEstimate{}, ""},
 		{CopyEstimate{OtherStorage: 1, OtherStorageTop: []string{"ts.metrics"}},
-			" 1 table is not stored as a PostgreSQL heap (ts.metrics): the size the server reports for it can be a compressed one, and a snapshot is written from its rows, so it can need more than the sizes say."},
+			" The size the server reports does not cover the rows of 1 table (ts.metrics): it is not a plain PostgreSQL heap (another storage, child tables read with it, or a foreign partition), so a snapshot can need more than the sizes say."},
 		{CopyEstimate{OtherStorage: 5, OtherStorageTop: []string{"ts.a", "ts.b"}},
-			" 5 tables are not stored as a PostgreSQL heap (ts.a, ts.b and 3 more): the size the server reports for them can be a compressed one, and a snapshot is written from their rows, so it can need more than the sizes say."},
+			" The size the server reports does not cover the rows of 5 tables (ts.a, ts.b and 3 more): each is not a plain PostgreSQL heap (another storage, child tables read with it, or a foreign partition), so a snapshot can need more than the sizes say."},
 	} {
 		if got := CopyOtherStorageSentence(c.est); got != c.want {
 			t.Errorf("%+v:\n got %q\nwant %q", c.est, got, c.want)

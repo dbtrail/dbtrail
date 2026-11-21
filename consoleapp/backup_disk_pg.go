@@ -90,8 +90,10 @@ func pgCopyDiskVerdict(localDir string, est pgbaseline.CopyEstimate, estErr erro
 			sized = fmt.Sprintf(" The tables to copy take up about %s on the database server.", humanSize(int64(need)))
 		}
 		freeS, floorS := sizePair(free, foldDiskMargin)
-		return "", "", fmt.Errorf("%w: the snapshot was not started. The snapshot folder %s has %s free, and DBTrail keeps %s free there: "+
-			"below that no update of a snapshot is written either.%s Nothing was read from your database, and earlier snapshots are unchanged. %s",
+		// What happened and both numbers come first: a screen that shows a
+		// failed snapshot cuts a long first line.
+		return "", "", fmt.Errorf("%w: it was not started, and nothing was read from your database. The snapshot folder %s has %s free, "+
+			"and DBTrail keeps %s free there.%s %s Earlier snapshots are unchanged. With less than that free no update of a snapshot is written either.",
 			errFoldDiskFull, localDir, freeS, floorS, sized, moveLocalFolderHint)
 	}
 	if estErr != nil {

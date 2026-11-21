@@ -121,6 +121,19 @@ func TestReadCopyEstimate_3029(t *testing.T) {
 			t.Errorf("estimate = %+v, want 0 bytes over 1 table, none unsized", got)
 		}
 	})
+	// The copy reads a parent's children with it (no ONLY), and the parent's
+	// own size holds none of their rows: no pass on that sum.
+	t.Run("a table with child tables by inheritance is not vouched for", func(t *testing.T) {
+		exec("CREATE TABLE " + s + ".parent (id int PRIMARY KEY, v text)")
+		exec("CREATE TABLE " + s + ".child () INHERITS (" + s + ".parent)")
+		exec("INSERT INTO " + s + ".child SELECT g, md5(g::text) FROM generate_series(1, 20000) g")
+		republish("FOR TABLE ONLY " + s + ".parent, " + s + ".orders")
+		got := read(event.Filters{})
+		if got.Tables != 2 || got.OtherStorage != 1 || len(got.OtherStorageTop) != 1 || got.OtherStorageTop[0] != s+".parent" {
+			t.Errorf("estimate = %+v, want 2 tables, the parent counted as not covered by its size", got)
+		}
+		exec("DROP TABLE " + s + ".child, " + s + ".parent")
+	})
 	t.Run("FOR ALL TABLES, narrowed to the schemas the snapshot copies", func(t *testing.T) {
 		republish("FOR ALL TABLES")
 		got := read(event.Filters{Schemas: map[string]bool{other: true}})
