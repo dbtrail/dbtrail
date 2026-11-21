@@ -62,23 +62,23 @@ func TestZonedTyped(t *testing.T) {
 func TestCopyScreen_zoneInALiteral(t *testing.T) {
 	const o, c = "pgcmp_orders", "pgcmp_customers"
 	toSource := map[string]string{
-		`SELECT id FROM ` + o + ` WHERE placed_at = TIMESTAMP '2026-03-02 10:00:00+02'`:                        zonedTypedVeto,
-		`SELECT id FROM ` + o + ` WHERE placed_at = timestamp '2026-03-02 10:00:00 Europe/Paris'`:              zonedTypedVeto,
-		`SELECT id FROM ` + o + ` WHERE placed_at >= TIMESTAMP '2026-03-02T10:00:00Z'`:                         zonedTypedVeto,
-		`SELECT id FROM ` + o + ` WHERE placed_at IN (TIMESTAMP '2026-03-02 10:00:00+02')`:                     zonedTypedVeto,
-		`SELECT TIMESTAMP '2026-03-02 10:00:00+02' AS t`:                                                       zonedTypedVeto,
-		`SELECT TIME '10:00:00+02' AS t`:                                                                       zonedTypedVeto,
-		`SELECT name FROM ` + c + ` WHERE signup = DATE '2026-01-15 23:30:00-05'`:                              zonedTypedVeto,
-		`SELECT name FROM ` + c + ` WHERE signup = DATE '2026-01-15+02'`:                                       zonedTypedVeto,
-		`SELECT name FROM ` + c + ` WHERE signup = '2026-01-15 23:30:00-05'::date`:                             zonedTypedVeto,
-		`SELECT id FROM ` + o + ` WHERE placed_at BETWEEN TIMESTAMP '2026-03-02 10:00:00' AND TIMESTAMP '2026-03-03 10:00:00+02'`: zonedTypedVeto,
+		`SELECT id FROM ` + o + ` WHERE placed_at = TIMESTAMP '2026-03-02 10:00:00+02'`:                                               zonedTypedVeto,
+		`SELECT id FROM ` + o + ` WHERE placed_at = timestamp '2026-03-02 10:00:00 Europe/Paris'`:                                     zonedTypedVeto,
+		`SELECT id FROM ` + o + ` WHERE placed_at >= TIMESTAMP '2026-03-02T10:00:00Z'`:                                                zonedTypedVeto,
+		`SELECT id FROM ` + o + ` WHERE placed_at IN (TIMESTAMP '2026-03-02 10:00:00+02')`:                                            zonedTypedVeto,
+		`SELECT TIMESTAMP '2026-03-02 10:00:00+02' AS t`:                                                                              zonedTypedVeto,
+		`SELECT TIME '10:00:00+02' AS t`:                                                                                              zonedTypedVeto,
+		`SELECT name FROM ` + c + ` WHERE signup = DATE '2026-01-15 23:30:00-05'`:                                                     zonedTypedVeto,
+		`SELECT name FROM ` + c + ` WHERE signup = DATE '2026-01-15+02'`:                                                              zonedTypedVeto,
+		`SELECT name FROM ` + c + ` WHERE signup = '2026-01-15 23:30:00-05'::date`:                                                    zonedTypedVeto,
+		`SELECT id FROM ` + o + ` WHERE placed_at BETWEEN TIMESTAMP '2026-03-02 10:00:00' AND TIMESTAMP '2026-03-03 10:00:00+02'`:     zonedTypedVeto,
 		`SELECT id FROM ` + o + ` WHERE placed_at NOT BETWEEN TIMESTAMP '2026-03-02 10:00:00+02' AND TIMESTAMP '2026-03-03 10:00:00'`: zonedTypedVeto,
 		// A cast to a timestamp was the source's already, zone or none.
-		`SELECT id FROM ` + o + ` WHERE placed_at = '2026-03-02 10:00:00+02'::timestamp`:       zonedTypedVeto,
-		`SELECT id FROM ` + o + ` WHERE placed_at = '2026-03-02 10:00:00'::timestamp`:          "cast",
+		`SELECT id FROM ` + o + ` WHERE placed_at = '2026-03-02 10:00:00+02'::timestamp`:         zonedTypedVeto,
+		`SELECT id FROM ` + o + ` WHERE placed_at = '2026-03-02 10:00:00'::timestamp`:            "cast",
 		`SELECT id FROM ` + o + ` WHERE placed_at = CAST('2026-03-02 10:00:00+02' AS timestamp)`: "CAST",
-		`SELECT id FROM ` + o + ` WHERE placed_at = '2026-03-02 10:00:00+02'`:                  zonedCompareVeto,
-		`SELECT id FROM ` + o + ` WHERE '2026-03-02 10:00:00+02' = placed_at`:                  zonedCompareVeto,
+		`SELECT id FROM ` + o + ` WHERE placed_at = '2026-03-02 10:00:00+02'`:                    zonedCompareVeto,
+		`SELECT id FROM ` + o + ` WHERE '2026-03-02 10:00:00+02' = placed_at`:                    zonedCompareVeto,
 	}
 	for q, why := range toSource {
 		if got := CopyScreen(q, routeTypes); !strings.Contains(got, why) {
@@ -104,13 +104,13 @@ func TestCopyScreen_bothBoundsOfBetween(t *testing.T) {
 	const text = "text compared with BETWEEN"
 	toSource := map[string]string{
 		// A zone in either bound, against a timestamp column.
-		`SELECT id FROM ` + o + ` WHERE placed_at BETWEEN '2026-03-02 10:00:00' AND '2026-03-03 10:00:00+02'`:          zonedCompareVeto,
-		`SELECT id FROM ` + o + ` WHERE placed_at BETWEEN '2026-03-02 10:00:00' AND '2026-03-03 10:00:00 Europe/Paris'`: zonedCompareVeto,
-		`SELECT id FROM ` + o + ` WHERE placed_at BETWEEN '2026-03-02 12:00:00+02' AND '2026-03-03 10:00:00'`:          zonedCompareVeto,
-		`SELECT id FROM ` + o + ` o WHERE o.placed_at BETWEEN '2026-03-02 10:00:00' AND '2026-03-03T10:00:00Z'`:        zonedCompareVeto,
-		`SELECT id FROM ` + o + ` WHERE qty BETWEEN 1 AND 5 AND placed_at BETWEEN '2026-03-02' AND '2026-03-03 10:00:00+02'`: zonedCompareVeto,
+		`SELECT id FROM ` + o + ` WHERE placed_at BETWEEN '2026-03-02 10:00:00' AND '2026-03-03 10:00:00+02'`:                             zonedCompareVeto,
+		`SELECT id FROM ` + o + ` WHERE placed_at BETWEEN '2026-03-02 10:00:00' AND '2026-03-03 10:00:00 Europe/Paris'`:                   zonedCompareVeto,
+		`SELECT id FROM ` + o + ` WHERE placed_at BETWEEN '2026-03-02 12:00:00+02' AND '2026-03-03 10:00:00'`:                             zonedCompareVeto,
+		`SELECT id FROM ` + o + ` o WHERE o.placed_at BETWEEN '2026-03-02 10:00:00' AND '2026-03-03T10:00:00Z'`:                           zonedCompareVeto,
+		`SELECT id FROM ` + o + ` WHERE qty BETWEEN 1 AND 5 AND placed_at BETWEEN '2026-03-02' AND '2026-03-03 10:00:00+02'`:              zonedCompareVeto,
 		`SELECT id FROM ` + o + ` WHERE (placed_at BETWEEN '2026-03-02 10:00:00' AND '2026-03-03 10:00:00+02') AND qty BETWEEN 1 AND 100`: zonedCompareVeto,
-		`SELECT id FROM ` + o + ` WHERE (qty BETWEEN 1 AND 5) = (placed_at BETWEEN '2026-03-02' AND '2026-03-03 10:00:00+02')`: zonedCompareVeto,
+		`SELECT id FROM ` + o + ` WHERE (qty BETWEEN 1 AND 5) = (placed_at BETWEEN '2026-03-02' AND '2026-03-03 10:00:00+02')`:            zonedCompareVeto,
 		// With NOT the column is not the word before BETWEEN: a string in
 		// either bound is the source's.
 		`SELECT id FROM ` + o + ` WHERE placed_at NOT BETWEEN '2026-01-01 00:00:00' AND '2026-03-03 10:00:00+02'`: text,
@@ -119,20 +119,20 @@ func TestCopyScreen_bothBoundsOfBetween(t *testing.T) {
 		`SELECT id FROM ` + o + ` WHERE seen_at BETWEEN '2026-03-02 10:00:00+00' AND '2026-03-03 12:00:00+02'`: text,
 		`SELECT id FROM ` + o + ` WHERE seen_at BETWEEN '2026-03-02 10:00:00' AND '2026-03-03 12:00:00+02'`:    text,
 		// Text in the upper bound.
-		`SELECT id FROM ` + o + ` WHERE qty BETWEEN 1 AND note`:              text,
-		`SELECT id FROM ` + o + ` WHERE 5 BETWEEN 1 AND note`:                text,
-		`SELECT id FROM ` + o + ` o WHERE 5 BETWEEN 1 AND o.note`:            text,
-		`SELECT name FROM ` + c + ` WHERE $1 BETWEEN $2 AND name`:            text,
-		`SELECT name FROM ` + c + ` WHERE $1 BETWEEN 'a' AND name`:           text,
-		`SELECT name FROM ` + c + ` WHERE $1 BETWEEN name AND $2`:            text,
-		`SELECT name FROM ` + c + ` WHERE 'b' BETWEEN 'a' AND name`:          text,
-		`SELECT name FROM ` + c + ` WHERE name BETWEEN 'a' AND 'c'`:          text,
-		`SELECT name FROM ` + c + ` WHERE city BETWEEN name AND 'z'`:         text,
-		`SELECT name FROM ` + c + ` WHERE name NOT BETWEEN 'a' AND 'c'`:      text,
+		`SELECT id FROM ` + o + ` WHERE qty BETWEEN 1 AND note`:         text,
+		`SELECT id FROM ` + o + ` WHERE 5 BETWEEN 1 AND note`:           text,
+		`SELECT id FROM ` + o + ` o WHERE 5 BETWEEN 1 AND o.note`:       text,
+		`SELECT name FROM ` + c + ` WHERE $1 BETWEEN $2 AND name`:       text,
+		`SELECT name FROM ` + c + ` WHERE $1 BETWEEN 'a' AND name`:      text,
+		`SELECT name FROM ` + c + ` WHERE $1 BETWEEN name AND $2`:       text,
+		`SELECT name FROM ` + c + ` WHERE 'b' BETWEEN 'a' AND name`:     text,
+		`SELECT name FROM ` + c + ` WHERE name BETWEEN 'a' AND 'c'`:     text,
+		`SELECT name FROM ` + c + ` WHERE city BETWEEN name AND 'z'`:    text,
+		`SELECT name FROM ` + c + ` WHERE name NOT BETWEEN 'a' AND 'c'`: text,
 		// Nothing gives two parameters, or a parameter and a string, a type.
-		`SELECT id FROM ` + o + ` WHERE $1 BETWEEN $2 AND $3`:  text,
-		`SELECT id FROM ` + o + ` WHERE $1 BETWEEN 1 AND $2`:   text,
-		`SELECT id FROM ` + o + ` WHERE $1 BETWEEN 1 AND 'x'`:  text,
+		`SELECT id FROM ` + o + ` WHERE $1 BETWEEN $2 AND $3`:          text,
+		`SELECT id FROM ` + o + ` WHERE $1 BETWEEN 1 AND $2`:           text,
+		`SELECT id FROM ` + o + ` WHERE $1 BETWEEN 1 AND 'x'`:          text,
 		`SELECT id FROM ` + o + ` WHERE qty BETWEEN SYMMETRIC 9 AND 2`: "SYMMETRIC",
 		`SELECT id FROM ` + o + ` WHERE qty BETWEEN 1`:                 "AND was not found",
 		`SELECT id FROM ` + o + ` WHERE (qty BETWEEN 1) AND 2 = 2`:     "AND was not found",
@@ -214,7 +214,9 @@ func TestOperatorLen(t *testing.T) {
 // --- #3025: the fraction of a second ----------------------------------------
 
 func TestTimestampText(t *testing.T) {
-	at := func(y int, mo time.Month, d, h, mi, s, ns int) time.Time { return time.Date(y, mo, d, h, mi, s, ns, time.UTC) }
+	at := func(y int, mo time.Month, d, h, mi, s, ns int) time.Time {
+		return time.Date(y, mo, d, h, mi, s, ns, time.UTC)
+	}
 	for _, tt := range []struct {
 		name string
 		in   time.Time
