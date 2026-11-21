@@ -54,16 +54,16 @@ func TestPortOnForNewServer_nothingSavedTurnsItOnWithRoutingAndAPassword(t *test
 	}
 }
 
-// A setting that exists is the operator's: a port turned off stays off, and
-// Engine Routing saved off stays off, however many servers are added.
+// A choice that was made is the operator's: a port turned off stays off, and
+// one turned on with Engine Routing off keeps it off, however many servers
+// are added. (Engine Routing saved alone, on a port never turned on, chooses
+// nothing about the port: port_on_after_other_saves_test.go.)
 func TestPortOnForNewServer_aSavedSettingIsLeftAsItIs(t *testing.T) {
 	for _, tc := range []struct {
 		name, body  string
 		on, routing bool
 	}{
 		{"turned off", `{"enabled":false}`, false, false},
-		{"routing saved off, port never on", `{"routing":false}`, false, false},
-		{"routing saved on, port never on", `{"routing":true}`, false, true},
 		{"on with routing off", `{"enabled":true,"routing":false}`, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

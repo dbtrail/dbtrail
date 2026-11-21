@@ -26,7 +26,8 @@ in *how the client connects*:
 
 1. **The MySQL port of `bintrail-console`: one port for every monitored
    server (multi-source).** If you already run `bintrail-console watch`, the port
-   turns on when the first server is added; otherwise turn it on in the web
+   turns on when the first server is added, unless it was turned off before;
+   otherwise turn it on in the web
    interface (**Connect a SQL client**) or with `dbtrail port on`. It serves
    `_flashback` / `_snapshot` / `_diff` for *every* server in the
    web interface, routed by the connection username. No separate `bintrail shim`
@@ -251,6 +252,9 @@ curl -X PUT -H "Authorization: Bearer $CONSOLE_TOKEN" -H 'Content-Type: applicat
   `GET /api/flashback`.
 - **From the web interface:** the MySQL clients page saves and removes
   it under *A proxy in front*, while the port is on.
+- **Saved before the first server:** saving it does not turn the port on or
+  off, so the port still turns on when the first server is added, and the
+  monitor login is kept.
 - **Not with an address set at startup.** When the port's address is set
   where DBTrail is started, the monitor login is not available: the routes
   answer `409` and the port accepts no monitor login.

@@ -33,6 +33,8 @@ const cases = {
   turnedOn: res({ enabled: true, turned_on: true, routing_on: true, host: "", port: "3309", password: "bfp_abc123" }),
   turnedOnOtherAddress: res({ enabled: true, turned_on: true, routing_on: true, host: "10.0.0.5", port: "3310", password: "bfp_abc123" }),
   turnedOnNoPassword: res({ enabled: true, turned_on: true, routing_on: true, port: "3309" }),
+  turnedOnPasswordKept: res({ enabled: true, turned_on: true, routing_on: true, port: "3309", has_password: true }),
+  turnedOnRoutingOff: res({ enabled: true, turned_on: true, routing_on: false, port: "3309", password: "bfp_x", has_password: true }),
   turnedOnNotAnswering: res({ enabled: true, turned_on: true, routing_on: true, port: "3309", password: "bfp_x", error: "address already in use" }),
   unsafeName: res({ enabled: true, turned_on: true, routing_on: true, port: "3309", password: "bfp_x" }, "my shop; rm"),
   expandedName: res({ enabled: true, turned_on: true, routing_on: true, port: "3309", password: "bfp_x" }, "a{b,c}$(id)"),
@@ -98,6 +100,11 @@ console.log(JSON.stringify(out));
 	has("turnedOnOtherAddress", "mysql -h 10.0.0.5 -P 3310 -u shop -p")
 	has("turnedOnNoPassword", "No password came with the answer.")
 	hasNot("turnedOnNoPassword", "shown only now")
+	has("turnedOnPasswordKept", "The MySQL port is on now, with Engine Routing on.",
+		"Its password is the one made before this server was added, which is not shown again. If it was not kept, make a new one on the MySQL clients page.")
+	hasNot("turnedOnPasswordKept", "shown only now", "No password came")
+	has("turnedOnRoutingOff", "The MySQL port is on now, with Engine Routing off, as it was saved.", "bfp_x")
+	hasNot("turnedOnRoutingOff", "Engine Routing on")
 	has("turnedOnNotAnswering", "bfp_x", "It is not answering: address already in use")
 	has("unsafeName", "-u <server name> -p")
 	hasNot("unsafeName", "-u my shop")

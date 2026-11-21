@@ -69,6 +69,17 @@ type FlashbackFile struct {
 	// older binary carries them in Extra.
 	MonitorUser     string `yaml:"monitor_user,omitempty"`
 	MonitorPassword string `yaml:"monitor_password,omitempty"`
+	// PortNotChosen and RoutingNotChosen say that nobody has chosen yet
+	// whether the port is on or off, or whether Engine Routing is: the file
+	// was made by a save about something else (the monitor login, a password
+	// made ahead, Engine Routing for PortNotChosen). Adding the first server
+	// then still turns the port on, and the first turn-on still starts with
+	// Engine Routing on (#2686); see portChosen and routingChosen, which are
+	// how they are read. Written only as true: a file without them, every
+	// file from before they existed included, is a choice that was made.
+	// Added without a version bump: an older binary carries them in Extra.
+	PortNotChosen    bool `yaml:"port_not_chosen,omitempty"`
+	RoutingNotChosen bool `yaml:"routing_not_chosen,omitempty"`
 	// Extra preserves unknown top-level fields a newer binary wrote, across
 	// this binary's load and save.
 	Extra map[string]any `yaml:",inline"`
@@ -79,12 +90,30 @@ type FlashbackFile struct {
 // ReadOnly reports a file written by a newer bintrail.
 func (f *FlashbackFile) ReadOnly() bool { return f != nil && f.readOnly }
 
+// portChosen reports whether somebody chose that the port is on or off. Off
+// with PortNotChosen is the one state that is nobody's choice, and only while
+// the port has no address: every turn-on saves one, so an address under the
+// mark means a binary from before the mark turned the port on and then off,
+// carrying the mark along without reading it. That is a choice, and the port
+// stays off.
+func (f *FlashbackFile) portChosen() bool {
+	return !f.PortNotChosen || f.Enabled || f.Listen != ""
+}
+
+// routingChosen is portChosen for Engine Routing: off with RoutingNotChosen,
+// on a port that was never turned on, is nobody's choice.
+func (f *FlashbackFile) routingChosen() bool {
+	return !f.RoutingNotChosen || f.Routing || f.Enabled || f.Listen != ""
+}
+
 // LoadFlashbackFile reads the saved setting. A missing file is the port never
-// having been set up here: an empty setting and no error.
+// having been set up here: an empty setting, in which nothing was chosen, and
+// no error. A save that starts from it and chooses nothing writes that down
+// with the rest (PortNotChosen, RoutingNotChosen).
 func LoadFlashbackFile(path string) (*FlashbackFile, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return &FlashbackFile{Version: flashbackFileVersion}, nil
+		return &FlashbackFile{Version: flashbackFileVersion, PortNotChosen: true, RoutingNotChosen: true}, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read MySQL port settings %s: %w", path, err)

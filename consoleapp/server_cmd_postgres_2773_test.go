@@ -194,6 +194,8 @@ func TestPrintNewServerPortPG(t *testing.T) {
 			[]string{"sslmode=require\"\n\nUntil \"shop\" has a forwarding user, the copy answers its statements alone, and a statement it cannot answer gets an error:\n  bintrail-console server forward-user shop -u <user> -p\n\n"}, []string{"shown only now", "3309"}},
 		{"turned on and no password in the answer", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on}, TurnedOn: true}, false,
 			[]string{"is on now", "port new-password"}, []string{"shown only now", "forward"}},
+		{"turned on, the password made before the server is kept", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on, HasPassword: true}, TurnedOn: true}, false,
+			[]string{"is on now", "Its password is the one made before this server was added, which is not shown again."}, []string{"shown only now", "No password came"}},
 		{"turned on, and no forwarding user named", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on}, TurnedOn: true}, true,
 			[]string{"is on now", "ready.\nUntil \"shop\" has a forwarding user, the copy answers its statements alone, and a statement it cannot answer gets an error:\n  bintrail-console server forward-user shop -u <user> -p\n\n"}, nil},
 		{"not turned on", &ctlNewServerPort{ctlPort: ctlPort{Enabled: &off}, NotTurnedOn: "DBTrail already had servers."}, true,
