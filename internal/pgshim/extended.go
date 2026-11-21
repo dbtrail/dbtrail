@@ -567,6 +567,12 @@ func (s *session) describeWith(st *preparedStatement, untyped string) (cols []sq
 		return nil, perr, nil
 	}
 	body := strings.TrimRight(text, " \t\r\n;")
+	// The statement itself, not the subquery it is described in: one that
+	// uses a char(n) column where the copy counts its padding is not the
+	// copy's (#3068), and is not handed to it to be described either.
+	if veto := s.paddedVeto(RewriteForCopy(body)); veto != "" {
+		return nil, nil, s.paddedError(veto)
+	}
 	// On lines of their own: a statement that ends in a -- comment must not
 	// comment out the closing parenthesis.
 	cols, err = s.columnsOf("SELECT * FROM (\n" + body + "\n) AS dbtrail_describe LIMIT 0")

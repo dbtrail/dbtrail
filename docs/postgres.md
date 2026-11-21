@@ -1093,7 +1093,10 @@ listener, its own workers, its own memory.
   ([the forwarding user](#transactions-on-the-source-the-forwarding-user)).
   With neither (the answer no, `--no-forward`, or a script that said nothing)
   the copy answers every statement, nothing is sent to your PostgreSQL, and a
-  statement the copy cannot answer gets an error, until one is set
+  statement the copy cannot answer gets an error, as does one it would answer
+  with other rows than PostgreSQL (a `char(n)` column
+  [compared, measured or concatenated](#which-side-answers-a-statement-on-the-postgresql-port),
+  refused with `0A000`), until one is set
   (`bintrail-console server forward-user <server> --capture-account`, or
   `-u <user> -p` for a user of its own, or the server's Forwarding user in the
   web interface).
@@ -1636,6 +1639,50 @@ The source answers:
   `CASE` that answers only numbers, or a number column renamed is not text;
   anything else may be, and goes to the source when it is sorted or compared
   by order.
+- **A `char(n)` column used where its trailing blanks count.** PostgreSQL
+  pads a `char(n)` value with blanks (`'ab'` in a `char(5)` is `'ab   '`),
+  ignores them when it compares, and drops them when the value becomes text
+  (`length`, `||`, a comparison with a `text` column, a `UNION` with one).
+  The copy holds the value as text with its blanks, and counts them: `WHERE
+  code = 'ab'` finds three rows on PostgreSQL and none on the copy,
+  `length(code)` is 2 there and 5 here. The port reads each column's type on
+  the source from the snapshot, and the source answers every statement that
+  names a `char(n)` column anywhere but in one place: as a whole item of the
+  select list of a statement that is one `SELECT` and nothing else, no
+  subquery, `WITH`, `UNION`, `INTERSECT` or `EXCEPT` (`SELECT id, code FROM t
+  WHERE id = 7`, with or without the table's name before it and an alias
+  after it). There both sides write the same padded value, and nothing reads
+  it again under another name: the alias written a second time, a `NATURAL
+  JOIN`, the table's name used as a value (`count(DISTINCT t)`), `TABLE t`
+  inside a larger statement and a list that renames the columns (`t AS
+  a(i, x)`) go to the source as well. So a comparison (`=`, `<>`, `<`, `BETWEEN`,
+  `IN`, `LIKE`, `IS DISTINCT FROM`, `IS NULL`), a join's condition or
+  `USING`, `GROUP BY`, `ORDER BY`, a function, `||`, a cast, a `CASE` or an
+  aggregate of such a column goes to the source, and so does a `*` that
+  stands for it anywhere but as a whole item of that one select list
+  (`SELECT * FROM t WHERE id = 7` stays on the copy; `SELECT count(*) FROM
+  (SELECT * FROM t) s` does not). The rule is by where the column stands,
+  not by what it would give: `WHERE code IS NULL` answers the same on both
+  sides and goes to the source all the same. Only the tables the statement
+  reads count, so a table without a `char(n)` column is answered as before,
+  a column of the same name included; when the port cannot tell which tables
+  a statement reads (a function in `FROM`, `LATERAL`, a `WITH` that is not
+  at the start of the statement, a table the copy does not hold), every
+  table counts. Two kinds of
+  column are treated more strictly, because two values PostgreSQL finds
+  equal can be two values on the copy: a `bpchar` without a length, which
+  keeps the blanks each value was written with, and every text column of a
+  table whose snapshot was taken before DBTrail recorded column types (the
+  next snapshot records them). Beside one of those, `DISTINCT` and `GROUP
+  BY` go to the source too. An array of `char(n)` is treated as a `char(n)`.
+  Not told apart: a **domain over `char(n)`**. The snapshot records the
+  domain's name, not what it is made of, so the port reads such a column as
+  it reads an enum, and the copy still compares its padding. The type is
+  the one the last snapshot recorded: a column changed from `text` to
+  `char(n)` on the source is treated as `char(n)` from the next snapshot on.
+  When the copy's list of columns cannot be read at all (a copy with more
+  columns than one statement returns on this port), no statement that reads
+  a table is answered by the copy, and the log says so once a minute.
 - **A session `TimeZone` other than UTC**, which the harness has not measured.
 - **What the copy cannot run, before the client is told anything**: a table
   the copy does not hold, a statement the copy refuses (a reserved word of its
@@ -1820,7 +1867,11 @@ the rules are applied by the copy's views, and a statement run on the source
 reads past them, whatever the forwarding user's grants (a view there runs with
 its owner's rights, as a `SECURITY DEFINER` function does). Such a server is
 answered by the copy alone, as without a forwarding user; a rule saved while a
-block is open on the source fails that block. `/status` says so for the server
+block is open on the source fails that block. A statement that uses a
+`char(n)` column where its trailing blanks count has no source to go to
+there, on either kind of server, and is refused (`0A000`, with the column's
+name) rather than answered with other rows: select the column and compare it
+in the client, or give the server a forwarding user. `/status` says so for the server
 (`forwarding_off`), and the log once.
 
 A prepared statement keeps the side it was given once its columns were
@@ -2324,7 +2375,11 @@ Three things still answer differently from PostgreSQL, with no error:
 - Text sorts by bytes. PostgreSQL sorts by the collation the database was
   created with, which for anything but `C` orders letters differently.
 - `char(n)` compares with its padding, where PostgreSQL ignores trailing
-  blanks.
+  blanks. On the PostgreSQL port such a statement is not answered by the
+  copy: it goes to the source, or is refused where nothing is sent there
+  ([which side answers](#which-side-answers-a-statement-on-the-postgresql-port)).
+  In the SQL card, the `sql` tool and a views file it is still the copy's
+  answer.
 
 A numeric with no precision prints with all 18 decimals (`12345.678` as
 `12345.678000000000000000`); it compares, sorts and sums as the same number.
