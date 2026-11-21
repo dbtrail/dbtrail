@@ -115,12 +115,14 @@ func TestIntegrationPGRouterCaptureAccount(t *testing.T) {
 		t.Logf("%s: %s", tc.name, got)
 	}
 
-	t.Run("search_path moved to the schema that is not captured", func(t *testing.T) {
+	t.Run("search_path toward a schema that is not captured", func(t *testing.T) {
 		c := pgClient(t, ctx, env.portDSN(), nil)
-		if got := one(ctx, c, "SET search_path = pgcap_secret"); got != "SET" {
-			t.Fatalf("SET search_path: %s", got)
+		// The port itself keeps a session on the copy's schemas: a schema
+		// the copy does not hold is refused, so vip does not resolve there.
+		if got, want := one(ctx, c, "SET search_path = pgcap_secret"), `error 3F000 schema "pgcap_secret" does not exist on the copy`; got != want {
+			t.Fatalf("SET search_path: %s, want %s", got, want)
 		}
-		if got, want := inBlock(c, "SELECT card FROM vip"), refused+"this statement reads a table the copy does not hold; nothing was sent to the source"; got != want {
+		if got, want := inBlock(c, "SELECT card FROM vip"), refused+"the source did not confirm that the names in it are plain tables and that nothing of a user's runs in it; nothing was sent to the source"; got != want {
 			t.Errorf("got %s\nwant %s", got, want)
 		}
 		got := one(ctx, c, "SET search_path = pg_catalog")
