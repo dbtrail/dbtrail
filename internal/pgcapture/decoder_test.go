@@ -336,8 +336,8 @@ func TestDecode_RowOutsideTransactionFailsLoud(t *testing.T) {
 
 func TestDecode_PKColumnDriftSkipsTheTable(t *testing.T) {
 	// The catalog reports a PK column absent from the relation's in-band columns:
-	// capture is behind, and the key was moved to a column added after these
-	// changes were written. It used to end the stream (for every table, and again
+	// capture is behind, and since these changes were written a key column was
+	// renamed, or the key was moved to a column added later. It used to end the stream (for every table, and again
 	// at every restart). A key cannot be built, so the TABLE is skipped under a
 	// reason of its own and the others go on; described again with the column, it
 	// is captured.

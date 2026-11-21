@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pglogrepl"
 
@@ -419,10 +420,11 @@ func TestDecode_FullRootOverPartitions_EachRowByWhatItHolds(t *testing.T) {
 	cols := []string{"id", "v", "big"}
 	mustDecode(t, d, relMsgRI(1, "public", "parted", 'f', nil, cols...))
 	mustDecode(t, d, relMsgRI(2, "public", "plain", 'f', nil, cols...))
-	// Asked for a relation at FULL only: below FULL the description says it.
+	// Asked whatever the identity of the description: a partition can leave
+	// the primary key out under a root at DEFAULT too.
 	mustDecode(t, d, relMsgRI(3, "public", "below", 'd', []string{"id"}, cols...))
-	if !slices.Equal(asked, []uint32{1, 2}) {
-		t.Errorf("the catalog was asked for %v, want the two relations at FULL", asked)
+	if !slices.Equal(asked, []uint32{1, 2, 3}) {
+		t.Errorf("the catalog was asked for %v, want every relation described", asked)
 	}
 	if n := strings.Count(buf.String(), "partitioned table with partitions without undo"); n != 1 {
 		t.Errorf("want one warning for the root with a partition below FULL, got %d:\n%s", n, buf.String())
@@ -498,19 +500,257 @@ func TestDecode_FullRootOverPartitions_EachRowByWhatItHolds(t *testing.T) {
 	assertPartialBefore(t, ev, cols, map[string]string{"id": "1"})
 
 	// The catalog has no row for the relation (dropped since), or could not
-	// be read: not known, so each old row by what it holds, and capture goes on.
+	// be read: NOT KNOWN. A partition with an identity wider than the key may
+	// be under it, and a key-only row of one holds a value outside the key, so
+	// nothing can be told from what a row holds: EVERY old row is stored with
+	// its key only, the one that looks whole too. Capture goes on.
+	looksWhole := func(oid uint32, id string) *pglogrepl.DeleteMessage {
+		return &pglogrepl.DeleteMessage{RelationID: oid, OldTupleType: pglogrepl.DeleteMessageTupleTypeOld, OldTuple: tuple(textCol(id), textCol("x"), nullCol())}
+	}
 	for _, oid := range []uint32{5, 6} {
 		buf.Reset()
 		mustDecode(t, d, relMsgRI(oid, "public", "unknown", 'f', nil, cols...))
 		ev, _ = mustDecode(t, d, keyOnly(oid, "1"))
 		assertPartialBefore(t, ev, cols, map[string]string{"id": "1"})
-		ev, _ = mustDecode(t, d, &pglogrepl.DeleteMessage{RelationID: oid,
-			OldTupleType: pglogrepl.DeleteMessageTupleTypeOld, OldTuple: tuple(textCol("2"), textCol("x"), textCol("BIG"))})
-		if !whole(ev) {
-			t.Errorf("oid %d: a row with values outside the key is whole, got %v", oid, ev.RowBefore)
+		ev, _ = mustDecode(t, d, looksWhole(oid, "2"))
+		assertPartialBefore(t, ev, cols, map[string]string{"id": "2"})
+		ev, _ = mustDecode(t, d, &pglogrepl.UpdateMessage{RelationID: oid,
+			OldTupleType: pglogrepl.UpdateMessageTupleTypeOld, OldTuple: tuple(textCol("3"), textCol("x"), nullCol()),
+			NewTuple: tuple(textCol("3"), textCol("y"), toastCol())})
+		assertPartialBefore(t, ev, cols, map[string]string{"id": "3"})
+		if !event.IsUnchangedToastMarker(ev.RowAfter["big"]) {
+			t.Errorf("oid %d: after[big] = %#v: a value that was not sent must not be taken, as NULL, from an old row that is not known to be whole", oid, ev.RowAfter["big"])
 		}
-		if failed := oid == 6; failed != strings.Contains(buf.String(), "could not read from the catalog whether the table is partitioned") {
+		if failed := oid == 6; failed != strings.Contains(buf.String(), "could not read the table's partitions from the catalog") {
 			t.Errorf("oid %d: the warning for a failed read must be given for it and only for it:\n%s", oid, buf.String())
+		}
+		if gone := oid == 5; gone != strings.Contains(buf.String(), "the catalog no longer holds the table") {
+			t.Errorf("oid %d: the warning for a table that is gone must be given for it and only for it:\n%s", oid, buf.String())
+		}
+	}
+	// Described again with the catalog answering, the same relation is judged
+	// by the answer: row by row under partitions the shape can tell apart,
+	// whole when it is not partitioned.
+	catalog[5] = pgcapture.Partitions{Known: true, Partitioned: true, BelowFull: 1}
+	mustDecode(t, d, relMsgRI(5, "public", "unknown", 'f', nil, cols...))
+	ev, _ = mustDecode(t, d, looksWhole(5, "4"))
+	if len(event.NotCapturedColumns(ev.RowBefore)) != 0 || ev.RowBefore["v"] != "x" {
+		t.Errorf("after the catalog answered, a row with a value outside the key is whole, got %v", ev.RowBefore)
+	}
+	ev, _ = mustDecode(t, d, keyOnly(5, "5"))
+	assertPartialBefore(t, ev, cols, map[string]string{"id": "5"})
+}
+
+// The read of the partitions fails (or times out) for a table that has a
+// partition whose identity index is wider than the primary key. Until the
+// catalog answers, a key-only row of that partition, which holds a value
+// outside the key, must not be stored as a whole row with NULL in the columns
+// PostgreSQL did not send. The read is tried again after a while, without
+// waiting for PostgreSQL to describe the table again.
+func TestDecode_PartitionsNotKnown_KeyOnlyUntilTheCatalogAnswers(t *testing.T) {
+	cols := []string{"id", "u", "v"}
+	// As PostgreSQL sends it from the partition whose identity is (id, u),
+	// under a root at FULL: labeled 'O', v not sent.
+	wideKeyOnly := func(id string) *pglogrepl.DeleteMessage {
+		return &pglogrepl.DeleteMessage{RelationID: 1, OldTupleType: pglogrepl.DeleteMessageTupleTypeOld, OldTuple: tuple(textCol(id), textCol("7"), nullCol())}
+	}
+	wholeRow := func(id string) *pglogrepl.DeleteMessage {
+		return &pglogrepl.DeleteMessage{RelationID: 1, OldTupleType: pglogrepl.DeleteMessageTupleTypeOld, OldTuple: tuple(textCol(id), textCol("7"), textCol("x"))}
+	}
+	for _, ri := range []uint8{'f', 'd'} {
+		t.Run("root at "+string(rune(ri)), func(t *testing.T) {
+			var buf bytes.Buffer
+			fail := true
+			answer := pgcapture.Partitions{Known: true, Partitioned: true, BelowFull: 1, Wide: 1}
+			asked := 0
+			d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{},
+				slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})),
+				pgcapture.WithPartitionsResolver(func(uint32, string, string) (pgcapture.Partitions, error) {
+					asked++
+					if fail {
+						return pgcapture.Partitions{}, errBoom
+					}
+					return answer, nil
+				}))
+			now := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
+			pgcapture.SetClockForTest(d, func() time.Time { return now })
+			rel := func() *pglogrepl.RelationMessage { return relMsgRI(1, "public", "parted", ri, []string{"id"}, cols...) }
+			label := func(m *pglogrepl.DeleteMessage) *pglogrepl.DeleteMessage {
+				if ri != 'f' {
+					m.OldTupleType = pglogrepl.DeleteMessageTupleTypeKey
+				}
+				return m
+			}
+			if _, emit := mustDecode(t, d, rel()); !emit {
+				t.Fatal("a failed read of the partitions must not skip the table")
+			}
+			mustDecode(t, d, beginMsg())
+			ev, _ := mustDecode(t, d, label(wideKeyOnly("1")))
+			assertPartialBefore(t, ev, cols, map[string]string{"id": "1"})
+			ev, _ = mustDecode(t, d, label(wholeRow("2")))
+			assertPartialBefore(t, ev, cols, map[string]string{"id": "2"})
+			if !strings.Contains(buf.String(), "could not read the table's partitions from the catalog") {
+				t.Errorf("the failed read must be said:\n%s", buf.String())
+			}
+			t.Logf("log of the failed read:\n%s", buf.String())
+
+			// Not asked again at every change.
+			if asked != 1 {
+				t.Errorf("the catalog was asked %d times, want once until the retry is due", asked)
+			}
+			// Due, and it fails again: still key-only, and tried again later.
+			now = now.Add(pgcapture.PartitionsRetryAfter)
+			ev, _ = mustDecode(t, d, label(wideKeyOnly("3")))
+			assertPartialBefore(t, ev, cols, map[string]string{"id": "3"})
+			if asked != 2 {
+				t.Errorf("the catalog was asked %d times, want a second time once the retry was due", asked)
+			}
+			// Due, and the catalog answers: a partition with a wider identity
+			// is there, so every old row stays key-only, now for that reason.
+			fail = false
+			now = now.Add(pgcapture.PartitionsRetryAfter)
+			ev, _ = mustDecode(t, d, label(wideKeyOnly("4")))
+			assertPartialBefore(t, ev, cols, map[string]string{"id": "4"})
+			ev, _ = mustDecode(t, d, label(wholeRow("5")))
+			assertPartialBefore(t, ev, cols, map[string]string{"id": "5"})
+			now = now.Add(10 * pgcapture.PartitionsRetryAfter)
+			mustDecode(t, d, label(wholeRow("6")))
+			if asked != 3 {
+				t.Errorf("the catalog was asked %d times, want no more once it answered", asked)
+			}
+
+			// PostgreSQL describes the table again after the partition was put
+			// at FULL: judged by the new answer.
+			answer = pgcapture.Partitions{Known: true, Partitioned: true}
+			mustDecode(t, d, rel())
+			ev, _ = mustDecode(t, d, label(wholeRow("7")))
+			if ri == 'f' {
+				if len(event.NotCapturedColumns(ev.RowBefore)) != 0 || ev.RowBefore["v"] != "x" {
+					t.Errorf("after the catalog answered with every partition at FULL, a whole row is whole, got %v", ev.RowBefore)
+				}
+			} else {
+				assertPartialBefore(t, ev, cols, map[string]string{"id": "7"})
+			}
+		})
+	}
+}
+
+// A retry that finds a partition whose identity leaves the primary key out
+// skips the table from there on, as the description would have.
+func TestDecode_PartitionsNotKnown_RetryCanSkipTheTable(t *testing.T) {
+	skips := parser.NewSkipCounters(slog.New(slog.DiscardHandler))
+	fail := true
+	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil, pgcapture.WithSkipCounters(skips),
+		pgcapture.WithPartitionsResolver(func(uint32, string, string) (pgcapture.Partitions, error) {
+			if fail {
+				return pgcapture.Partitions{}, errBoom
+			}
+			return pgcapture.Partitions{Known: true, Partitioned: true, BelowFull: 1, MissesKey: 1}, nil
+		}))
+	now := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
+	pgcapture.SetClockForTest(d, func() time.Time { return now })
+	upd := &pglogrepl.UpdateMessage{RelationID: 1, NewTuple: tuple(textCol("2"), textCol("7"), textCol("x"))}
+	ins := &pglogrepl.InsertMessage{RelationID: 1, Tuple: tuple(textCol("9"), textCol("7"), textCol("x"))}
+	if got := decodeAll(t, d, relMsgRI(1, "public", "parted", 'd', []string{"id"}, "id", "u", "v"), beginMsg(), upd, commitMsg()); len(got) != 1 {
+		t.Fatalf("while the partitions are not known the table is captured, got %v", got)
+	}
+	fail = false
+	now = now.Add(pgcapture.PartitionsRetryAfter)
+	if got := decodeAll(t, d, beginMsg(), ins, upd, commitMsg()); len(got) != 0 {
+		t.Fatalf("once the catalog shows a partition without the key the table must be skipped, got %v", got)
+	}
+	st := skipLedger(t, skips)[pgcapture.SkipReplicaIdentityIndexWithoutPrimaryKey]
+	if st.Count != 2 || !slices.Equal(st.Tables, []string{"public.parted"}) {
+		t.Errorf("ledger entry %+v", st)
+	}
+}
+
+// A partitioned root with NO primary key, at FULL, over a partition that has a
+// key of its own and is at DEFAULT. The root's key is empty, so the partition's
+// key-only row holds a value "outside the key" (its own id) and looks whole.
+// Every old row of such a table is stored key-only; never NULL in the columns
+// PostgreSQL did not send.
+func TestDecode_RootWithoutKeyOverPartitionsBelowFull_KeyOnly(t *testing.T) {
+	cols := []string{"id", "v", "big"}
+	for _, tc := range []struct {
+		name  string
+		parts pgcapture.Partitions
+	}{
+		// What the catalog read answers for it (a partition's identity column
+		// that is not in the root's key).
+		{"as the catalog answers", pgcapture.Partitions{Known: true, Partitioned: true, BelowFull: 1, Wide: 1}},
+		// And without that count: a root with no key cannot tell a key-only
+		// row by its shape whatever else is known.
+		{"by the root having no key alone", pgcapture.Partitions{Known: true, Partitioned: true, BelowFull: 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := pgcapture.NewDecoder(pkResolver(), event.Filters{}, nil,
+				pgcapture.WithPartitionsResolver(func(uint32, string, string) (pgcapture.Partitions, error) { return tc.parts, nil }))
+			mustDecode(t, d, relMsgRI(1, "public", "nokey", 'f', nil, cols...))
+			mustDecode(t, d, beginMsg())
+			ev, _ := mustDecode(t, d, &pglogrepl.DeleteMessage{RelationID: 1,
+				OldTupleType: pglogrepl.DeleteMessageTupleTypeOld, OldTuple: tuple(textCol("1"), nullCol(), nullCol())})
+			assertPartialBefore(t, ev, cols, map[string]string{})
+			ev, _ = mustDecode(t, d, &pglogrepl.UpdateMessage{RelationID: 1,
+				OldTupleType: pglogrepl.UpdateMessageTupleTypeOld, OldTuple: tuple(textCol("1"), nullCol(), nullCol()),
+				NewTuple: tuple(textCol("2"), textCol("b"), toastCol())})
+			assertPartialBefore(t, ev, cols, map[string]string{})
+			if !event.IsUnchangedToastMarker(ev.RowAfter["big"]) {
+				t.Errorf("after[big] = %#v, want the unchanged-TOAST marker, never the NULL of a key-only old row", ev.RowAfter["big"])
+			}
+			// The loss, stated: a row from a partition at FULL under the same
+			// root is stored key-only too.
+			ev, _ = mustDecode(t, d, &pglogrepl.DeleteMessage{RelationID: 1,
+				OldTupleType: pglogrepl.DeleteMessageTupleTypeOld, OldTuple: tuple(textCol("7"), textCol("x"), textCol("BIG"))})
+			assertPartialBefore(t, ev, cols, map[string]string{})
+		})
+	}
+	// With every partition at FULL the same root keeps its whole rows.
+	d := pgcapture.NewDecoder(pkResolver(), event.Filters{}, nil,
+		pgcapture.WithPartitionsResolver(func(uint32, string, string) (pgcapture.Partitions, error) {
+			return pgcapture.Partitions{Known: true, Partitioned: true}, nil
+		}))
+	mustDecode(t, d, relMsgRI(1, "public", "nokey", 'f', nil, cols...))
+	mustDecode(t, d, beginMsg())
+	ev, _ := mustDecode(t, d, &pglogrepl.DeleteMessage{RelationID: 1,
+		OldTupleType: pglogrepl.DeleteMessageTupleTypeOld, OldTuple: tuple(textCol("7"), textCol("x"), textCol("BIG"))})
+	if len(event.NotCapturedColumns(ev.RowBefore)) != 0 || ev.RowBefore["big"] != "BIG" {
+		t.Errorf("a root without a key over partitions all at FULL: a whole row is whole, got %v", ev.RowBefore)
+	}
+}
+
+// A table at FULL that is NOT partitioned, the catalog answering: its old row
+// is whole, whatever it holds, exactly as before partitions were looked at. It
+// never takes the row-by-row path nor the key-only one.
+func TestDecode_PlainTableAtFull_OldRowAlwaysWhole(t *testing.T) {
+	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil,
+		pgcapture.WithPartitionsResolver(func(uint32, string, string) (pgcapture.Partitions, error) {
+			return pgcapture.Partitions{Known: true}, nil
+		}))
+	now := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
+	pgcapture.SetClockForTest(d, func() time.Time { now = now.Add(time.Hour); return now })
+	mustDecode(t, d, relMsgRI(1, "public", "plain", 'f', nil, "id", "v", "big"))
+	mustDecode(t, d, beginMsg())
+	for _, old := range []*pglogrepl.TupleData{
+		tuple(textCol("1"), textCol("x"), textCol("BIG")),
+		tuple(textCol("1"), nullCol(), textCol("BIG")),
+		tuple(textCol("1"), nullCol(), nullCol()), // a row of NULLs is a row of NULLs
+	} {
+		ev, _ := mustDecode(t, d, &pglogrepl.UpdateMessage{RelationID: 1,
+			OldTupleType: pglogrepl.UpdateMessageTupleTypeOld, OldTuple: old,
+			NewTuple: tuple(textCol("1"), textCol("y"), toastCol())})
+		if cols := event.NotCapturedColumns(ev.RowBefore); len(cols) != 0 {
+			t.Fatalf("a plain table at FULL: the old row must be whole, not captured: %v", cols)
+		}
+		wantBig := any(nil)
+		if old.Columns[2].DataType == pglogrepl.TupleDataTypeText {
+			wantBig = "BIG"
+		}
+		if ev.RowAfter["big"] != wantBig || ev.RowBefore["big"] != wantBig {
+			t.Errorf("big: before=%#v after=%#v, want %#v taken from the whole old row", ev.RowBefore["big"], ev.RowAfter["big"], wantBig)
+		}
+		if err := event.CheckUnresolvedToast(ev.Schema, ev.Table, ev.PKValues, stored(t, ev.RowBefore), stored(t, ev.RowAfter)); err != nil {
+			t.Errorf("that change can be undone, got %v", err)
 		}
 	}
 }
@@ -520,27 +760,38 @@ func TestDecode_FullRootOverPartitions_EachRowByWhatItHolds(t *testing.T) {
 // there arrives with no earlier row, so the table is skipped like any table
 // with such an identity.
 func TestDecode_PartitionIdentityWithoutPrimaryKey_TableSkipped(t *testing.T) {
-	skips := parser.NewSkipCounters(slog.New(slog.DiscardHandler))
-	catalog := pgcapture.Partitions{Known: true, Partitioned: true, BelowFull: 1, MissesKey: 1}
-	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil, pgcapture.WithSkipCounters(skips),
-		pgcapture.WithPartitionsResolver(func(uint32, string, string) (pgcapture.Partitions, error) { return catalog, nil }))
-	rel := func() *pglogrepl.RelationMessage { return relMsgRI(1, "public", "parted", 'f', nil, "id", "u", "v") }
-	upd := &pglogrepl.UpdateMessage{RelationID: 1, NewTuple: tuple(textCol("2"), textCol("7"), textCol("x"))}
-	if _, emit := mustDecode(t, d, rel()); emit {
-		t.Fatal("a skipped relation emits no description")
-	}
-	if got := decodeAll(t, d, beginMsg(), upd, commitMsg()); len(got) != 0 {
-		t.Fatalf("the table must be skipped, got %v", got)
-	}
-	st := skipLedger(t, skips)[pgcapture.SkipReplicaIdentityIndexWithoutPrimaryKey]
-	t.Logf("ledger detail: %s", st.LastDetail)
-	if st.Count != 1 || !slices.Equal(st.Tables, []string{"public.parted"}) || !strings.Contains(st.LastDetail, "ALTER TABLE <partition> REPLICA IDENTITY DEFAULT") {
-		t.Errorf("ledger entry %+v", st)
-	}
-	// The partition's identity is put back: described again, the table flows.
-	catalog = pgcapture.Partitions{Known: true, Partitioned: true, BelowFull: 1}
-	if got := decodeAll(t, d, rel(), beginMsg(), upd, commitMsg()); len(got) != 1 {
-		t.Fatalf("after the fix the table must flow, got %v", got)
+	// Whatever the identity of the root: under a root at DEFAULT (or USING
+	// INDEX) that UPDATE arrives with no earlier row too, and stored from the
+	// new row it would leave the old row alive in the copy for good.
+	for _, ri := range []uint8{'f', 'd', 'i'} {
+		t.Run("root at "+string(rune(ri)), func(t *testing.T) {
+			skips := parser.NewSkipCounters(slog.New(slog.DiscardHandler))
+			catalog := pgcapture.Partitions{Known: true, Partitioned: true, BelowFull: 1, MissesKey: 1}
+			d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil, pgcapture.WithSkipCounters(skips),
+				pgcapture.WithPartitionsResolver(func(uint32, string, string) (pgcapture.Partitions, error) { return catalog, nil }))
+			rel := func() *pglogrepl.RelationMessage {
+				return relMsgRI(1, "public", "parted", ri, []string{"id"}, "id", "u", "v")
+			}
+			// UPDATE ... SET id = 2 WHERE id = 1 made in that partition: its
+			// identity (u) did not change, so PostgreSQL sends no old row.
+			upd := &pglogrepl.UpdateMessage{RelationID: 1, NewTuple: tuple(textCol("2"), textCol("7"), textCol("x"))}
+			if _, emit := mustDecode(t, d, rel()); emit {
+				t.Fatal("a skipped relation emits no description")
+			}
+			if got := decodeAll(t, d, beginMsg(), upd, commitMsg()); len(got) != 0 {
+				t.Fatalf("the table must be skipped (nothing stored under the new key), got %v", got)
+			}
+			st := skipLedger(t, skips)[pgcapture.SkipReplicaIdentityIndexWithoutPrimaryKey]
+			t.Logf("ledger detail: %s", st.LastDetail)
+			if st.Count != 1 || !slices.Equal(st.Tables, []string{"public.parted"}) || !strings.Contains(st.LastDetail, "ALTER TABLE <partition> REPLICA IDENTITY DEFAULT") {
+				t.Errorf("ledger entry %+v", st)
+			}
+			// The partition's identity is put back: described again, the table flows.
+			catalog = pgcapture.Partitions{Known: true, Partitioned: true, BelowFull: 1}
+			if got := decodeAll(t, d, rel(), beginMsg(), upd, commitMsg()); len(got) != 1 {
+				t.Fatalf("after the fix the table must flow, got %v", got)
+			}
+		})
 	}
 }
 

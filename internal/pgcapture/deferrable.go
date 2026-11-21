@@ -34,9 +34,13 @@ import (
 //     only to say it once in the log. It no longer refuses the start: that kept
 //     every table uncaptured over one, at every automatic restart.
 //
-// CheckDeferrableKeys is the refusing form, for a caller that reports
-// (`doctor` fails on such a table, so a server is not added or started with
-// one).
+// CheckDeferrableKeys is the refusing form, for a caller that reports: the
+// doctor. The two do not contradict each other. Capture never refuses to
+// start over a deferrable key; it skips that table. The doctor's check does
+// fail on one, and `server add` and the web interface's Start button run the
+// doctor first, so they do not add or start the server until the key is
+// fixed or the table is out of the publication. A capture that is already
+// running, or that restarts by itself, goes on and skips the table.
 //
 // A primary key cannot be made deferrable in place: ALTER TABLE ... ALTER
 // CONSTRAINT works on foreign keys only (PostgreSQL 16 answers 42809, "is not

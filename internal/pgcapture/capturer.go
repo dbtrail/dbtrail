@@ -292,9 +292,9 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 		return queryDeferrableKey(qctx, queryConn, relationID)
 	}
 	// What the catalog says of a relation's partitions, asked at every
-	// description of a relation at FULL; same conn + bounding. A failed or
-	// timed-out read does not stop the stream (the decoder then judges each
-	// old row by what it holds).
+	// description of a relation; same conn + bounding. A failed or timed-out
+	// read does not stop the stream (the decoder then stores every old row of
+	// the relation with its key only, and asks again after a while).
 	partitions := func(relationID uint32, schema, table string) (Partitions, error) {
 		qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()

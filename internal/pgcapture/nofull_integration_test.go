@@ -596,24 +596,33 @@ func TestCapturer_BelowFull_Partitioned_Integration(t *testing.T) {
 }
 
 // A partition with a replica identity of its own (USING INDEX), under a root
-// at FULL published in its stead. Capture cannot see which partition a change
-// was made in; it reads the catalog.
+// published in its stead, the root at FULL, at DEFAULT and at USING INDEX.
+// Capture cannot see which partition a change was made in; it reads the
+// catalog, whatever the root's identity.
 //   - The index leaves the primary key out: an UPDATE of the primary key made
 //     there arrives with no earlier row at all, so the table is skipped, as a
-//     table with such an identity is, and the doctor's list names the partition.
+//     table with such an identity is, and the doctor's list names the
+//     partition. Under a root below FULL that change, stored from its new row,
+//     would be filed under the NEW key and leave the old row in the copy for
+//     good; capture, the health lists and the doctor's read must agree that
+//     the table is not captured.
 //   - The index holds the primary key and another column: a key-only row then
 //     carries a value outside the key and looks whole, so every earlier row of
 //     the table is stored with its key only.
 func TestCapturer_PartitionOwnIdentity_Integration(t *testing.T) {
 	baseDSN := testutil.SkipIfNoPostgres(t)
 	ctx := context.Background()
-	for _, tc := range []struct {
-		name, index string
-		skipped     bool
-	}{
-		{"index without the primary key", "(u, id2)", true},
-		{"index wider than the primary key", "(id, u)", false},
-	} {
+	type tcase struct {
+		name, index, root string
+		skipped           bool
+	}
+	var cases []tcase
+	for _, root := range []string{"FULL", "DEFAULT", "USING INDEX nf_pid_pkey"} {
+		cases = append(cases,
+			tcase{"root at " + root + ", index without the primary key", "(u, id2)", root, true},
+			tcase{"root at " + root + ", index wider than the primary key", "(id, id2, u)", root, false})
+	}
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			const slot = "bintrail_nofull_partid_it"
 			const pub = "bintrail_nofull_partid_pub"
@@ -639,9 +648,9 @@ func TestCapturer_PartitionOwnIdentity_Integration(t *testing.T) {
 			// id2 is the partition key too, so a unique index may leave id out.
 			mustExec("CREATE TABLE nf_pid (id int, id2 int NOT NULL, u int NOT NULL, v text, PRIMARY KEY (id, id2)) PARTITION BY RANGE (id2)")
 			mustExec("CREATE TABLE nf_pid_1 PARTITION OF nf_pid FOR VALUES FROM (0) TO (1000)")
-			mustExec("CREATE UNIQUE INDEX nf_pid_1_uk ON nf_pid_1 " + strings.Replace(tc.index, "(id, u)", "(id, id2, u)", 1))
+			mustExec("CREATE UNIQUE INDEX nf_pid_1_uk ON nf_pid_1 " + tc.index)
 			mustExec("ALTER TABLE nf_pid_1 REPLICA IDENTITY USING INDEX nf_pid_1_uk")
-			mustExec("ALTER TABLE nf_pid REPLICA IDENTITY FULL")
+			mustExec("ALTER TABLE nf_pid REPLICA IDENTITY " + tc.root)
 			mustExec("CREATE TABLE nf_pid_end (id int PRIMARY KEY)")
 			mustExec("ALTER TABLE nf_pid_end REPLICA IDENTITY FULL")
 			mustExec("CREATE PUBLICATION " + pub + " FOR TABLE nf_pid, nf_pid_end WITH (publish_via_partition_root = true)")
@@ -657,6 +666,12 @@ func TestCapturer_PartitionOwnIdentity_Integration(t *testing.T) {
 			if !slices.Equal(ids[0].PartitionsMissKey, wantMiss) || ids[0].Captured() == tc.skipped {
 				t.Errorf("the catalog read: %+v, want partitions without the key %v", ids[0], wantMiss)
 			}
+			// The health panel's two lists, from the same read.
+			undo, not := pgcapture.HealthTableLists(ids, nil, event.Filters{})
+			t.Logf("health lists: without undo %q, not captured %q", undo, not)
+			if tc.skipped != (len(not) == 1 && strings.HasPrefix(not[0], "public.nf_pid ")) || tc.skipped == (len(undo) == 1) {
+				t.Errorf("health lists: without undo %q, not captured %q; skipped=%v", undo, not, tc.skipped)
+			}
 
 			r := startNofull(t, ctx, setup, baseDSN, slot, pub)
 			mustExec("INSERT INTO nf_pid VALUES (1, 1, 10, 'a')")
@@ -668,8 +683,13 @@ func TestCapturer_PartitionOwnIdentity_Integration(t *testing.T) {
 			got := of(evs, "nf_pid")
 			const reason = pgcapture.SkipReplicaIdentityIndexWithoutPrimaryKey
 			if tc.skipped {
-				if len(got) != 0 || r.skips.Count(reason) != 3 {
-					t.Fatalf("the table must be skipped: %d events, %d skips under %q\nlog:\n%s", len(got), r.skips.Count(reason), reason, r.logText())
+				// What capture says must be what the health lists say: nothing
+				// of the table is stored, least of all under the new key.
+				if len(got) != 0 || r.skips.Count(reason) != 3 || r.skips.Total() != 3 {
+					for _, ev := range got {
+						t.Logf("stored: %v pk=%q before=%v after=%v", ev.EventType, ev.PKValues, ev.RowBefore, ev.RowAfter)
+					}
+					t.Fatalf("the table must be skipped: %d events, %d skips under %q of %d\nlog:\n%s", len(got), r.skips.Count(reason), reason, r.skips.Total(), r.logText())
 				}
 				assertLedgerNames(t, r.skips, reason, "public.nf_pid")
 				return
@@ -684,6 +704,168 @@ func TestCapturer_PartitionOwnIdentity_Integration(t *testing.T) {
 			}
 			assertPartialBefore(t, got[2], cols, map[string]string{"id": "2", "id2": "1"})
 		})
+	}
+}
+
+// A partitioned root with NO primary key, at FULL, published in the stead of
+// its partitions: one has a primary key of its own and is at DEFAULT, the
+// other is at FULL. PostgreSQL labels the old row of the first as a whole row
+// and it holds that partition's key alone; the root has no key to tell it by,
+// so every earlier row of the table is stored with its key only (here: no
+// column at all, the root's key being empty), and NULL is never stored for a
+// value PostgreSQL did not send. The price is the undo of the partition at
+// FULL.
+func TestCapturer_RootWithoutKey_PartitionWithOwnKey_Integration(t *testing.T) {
+	baseDSN := testutil.SkipIfNoPostgres(t)
+	ctx := context.Background()
+	const slot = "bintrail_nofull_nokey_it"
+	const pub = "bintrail_nofull_nokey_pub"
+	setup, err := pgx.Connect(ctx, baseDSN)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { setup.Close(context.Background()) })
+	cleanup := func() {
+		bg := context.Background()
+		_, _ = setup.Exec(bg, "DROP PUBLICATION IF EXISTS "+pub)
+		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS nf_nokey, nf_nokey_end")
+		_, _ = setup.Exec(bg, "SELECT pg_drop_replication_slot($1) WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)", slot)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	mustExec := func(q string) {
+		t.Helper()
+		if _, err := setup.Exec(ctx, q); err != nil {
+			t.Fatalf("exec %q: %v", q, err)
+		}
+	}
+	const bigVal = "(SELECT string_agg(md5(i::text), '') FROM generate_series(1, 100) i)"
+	mustExec("CREATE TABLE nf_nokey (id int NOT NULL, v text, big text) PARTITION BY RANGE (id)")
+	mustExec("CREATE TABLE nf_nokey_1 PARTITION OF nf_nokey FOR VALUES FROM (0) TO (1000)")
+	mustExec("ALTER TABLE nf_nokey_1 ADD PRIMARY KEY (id)") // its own key, at DEFAULT
+	mustExec("CREATE TABLE nf_nokey_2 PARTITION OF nf_nokey FOR VALUES FROM (1000) TO (2000)")
+	mustExec("ALTER TABLE nf_nokey_2 REPLICA IDENTITY FULL")
+	for _, part := range []string{"nf_nokey_1", "nf_nokey_2"} {
+		mustExec("ALTER TABLE " + part + " ALTER COLUMN big SET STORAGE EXTERNAL")
+	}
+	mustExec("ALTER TABLE nf_nokey REPLICA IDENTITY FULL") // the root only
+	mustExec("CREATE TABLE nf_nokey_end (id int PRIMARY KEY)")
+	mustExec("CREATE PUBLICATION " + pub + " FOR TABLE nf_nokey, nf_nokey_end WITH (publish_via_partition_root = true)")
+
+	r := startNofull(t, ctx, setup, baseDSN, slot, pub)
+	for _, id := range []string{"1", "1001"} { // one row in each partition
+		mustExec("INSERT INTO nf_nokey VALUES (" + id + ", 'a', " + bigVal + ")")
+		mustExec("UPDATE nf_nokey SET v = 'b' WHERE id = " + id)
+		mustExec("UPDATE nf_nokey SET id = id + 1 WHERE id = " + id)
+		mustExec("DELETE FROM nf_nokey WHERE id = " + id + " + 1")
+	}
+	mustExec("INSERT INTO nf_nokey_end VALUES (1)")
+	evs := r.until(func(ev event.Event) bool { return ev.Table == "nf_nokey_end" })
+	r.stop()
+	t.Logf("capture log:\n%s", r.logText())
+
+	got := of(evs, "nf_nokey")
+	if rowKinds(got) != "IUUDIUUD" || r.skips.Total() != 0 {
+		t.Fatalf("events %q (want IUUDIUUD), skips %d", rowKinds(got), r.skips.Total())
+	}
+	cols := []string{"id", "v", "big"}
+	for i, ev := range got {
+		if ev.EventType == event.EventInsert {
+			continue
+		}
+		for c, v := range ev.RowBefore {
+			if v == nil {
+				t.Errorf("change %d (%v): before[%s] is NULL: a value PostgreSQL did not send was stored as NULL", i, ev.EventType, c)
+			}
+		}
+		assertPartialBefore(t, ev, cols, map[string]string{})
+		if ev.PKValues != "" {
+			t.Errorf("change %d: pk_values %q, want none (the table as published has no primary key)", i, ev.PKValues)
+		}
+		if ev.EventType == event.EventUpdate && !event.IsUnchangedToastMarker(ev.RowAfter["big"]) {
+			t.Errorf("change %d: after[big] = %T, want the unchanged-TOAST marker", i, ev.RowAfter["big"])
+		}
+	}
+	if !strings.Contains(r.logText(), "every_change_stored_with_its_key_only=true") {
+		t.Errorf("the log must say every change of the table is stored with its key only")
+	}
+}
+
+// No regression: a partitioned root at FULL with a primary key, every
+// partition at FULL, published through the root. Every earlier row is whole,
+// an unsent large value is taken from it, and each change can be undone.
+func TestCapturer_PartitionedAllAtFull_WholeAndUndoable_Integration(t *testing.T) {
+	baseDSN := testutil.SkipIfNoPostgres(t)
+	ctx := context.Background()
+	const slot = "bintrail_nofull_allfull_it"
+	const pub = "bintrail_nofull_allfull_pub"
+	setup, err := pgx.Connect(ctx, baseDSN)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { setup.Close(context.Background()) })
+	cleanup := func() {
+		bg := context.Background()
+		_, _ = setup.Exec(bg, "DROP PUBLICATION IF EXISTS "+pub)
+		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS nf_allfull, nf_allfull_end")
+		_, _ = setup.Exec(bg, "SELECT pg_drop_replication_slot($1) WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)", slot)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	mustExec := func(q string) {
+		t.Helper()
+		if _, err := setup.Exec(ctx, q); err != nil {
+			t.Fatalf("exec %q: %v", q, err)
+		}
+	}
+	const bigVal = "(SELECT string_agg(md5(i::text), '') FROM generate_series(1, 100) i)"
+	var big string
+	if err := setup.QueryRow(ctx, "SELECT "+bigVal).Scan(&big); err != nil {
+		t.Fatal(err)
+	}
+	mustExec("CREATE TABLE nf_allfull (id int PRIMARY KEY, v text, big text) PARTITION BY RANGE (id)")
+	mustExec("CREATE TABLE nf_allfull_1 PARTITION OF nf_allfull FOR VALUES FROM (0) TO (1000)")
+	mustExec("CREATE TABLE nf_allfull_2 PARTITION OF nf_allfull FOR VALUES FROM (1000) TO (2000)")
+	for _, tb := range []string{"nf_allfull", "nf_allfull_1", "nf_allfull_2"} {
+		mustExec("ALTER TABLE " + tb + " REPLICA IDENTITY FULL")
+	}
+	for _, part := range []string{"nf_allfull_1", "nf_allfull_2"} {
+		mustExec("ALTER TABLE " + part + " ALTER COLUMN big SET STORAGE EXTERNAL")
+	}
+	mustExec("CREATE TABLE nf_allfull_end (id int PRIMARY KEY)")
+	mustExec("ALTER TABLE nf_allfull_end REPLICA IDENTITY FULL")
+	mustExec("CREATE PUBLICATION " + pub + " FOR TABLE nf_allfull, nf_allfull_end WITH (publish_via_partition_root = true)")
+
+	r := startNofull(t, ctx, setup, baseDSN, slot, pub)
+	for _, id := range []string{"1", "1001"} {
+		mustExec("INSERT INTO nf_allfull VALUES (" + id + ", 'a', " + bigVal + ")")
+		mustExec("UPDATE nf_allfull SET v = 'b' WHERE id = " + id)
+		mustExec("UPDATE nf_allfull SET id = id + 1 WHERE id = " + id)
+		mustExec("DELETE FROM nf_allfull WHERE id = " + id + " + 1")
+	}
+	mustExec("INSERT INTO nf_allfull_end VALUES (1)")
+	evs := r.until(func(ev event.Event) bool { return ev.Table == "nf_allfull_end" })
+	r.stop()
+	got := of(evs, "nf_allfull")
+	if rowKinds(got) != "IUUDIUUD" || r.skips.Total() != 0 {
+		t.Fatalf("events %q (want IUUDIUUD), skips %d\nlog:\n%s", rowKinds(got), r.skips.Total(), r.logText())
+	}
+	for i, ev := range got {
+		if ev.EventType == event.EventInsert {
+			continue
+		}
+		if cols := event.NotCapturedColumns(ev.RowBefore); len(cols) > 0 || ev.RowBefore["big"] != big || ev.RowBefore["v"] == nil {
+			t.Errorf("change %d: the earlier row must be whole; not captured %v, big real=%v, v=%v", i, cols, ev.RowBefore["big"] == big, ev.RowBefore["v"])
+		}
+		if ev.RowAfter != nil && ev.RowAfter["big"] != big {
+			t.Errorf("change %d: after[big] = %T, want the value taken from the whole earlier row", i, ev.RowAfter["big"])
+		}
+		if err := event.CheckUnresolvedToast(ev.Schema, ev.Table, ev.PKValues, stored(t, ev.RowBefore), stored(t, ev.RowAfter)); err != nil {
+			t.Errorf("change %d: it can be undone, got %v", i, err)
+		}
+	}
+	if logs := r.logText(); strings.Contains(logs, "without undo") || strings.Contains(logs, "key only") {
+		t.Errorf("nothing is to be said of a table whose partitions are all at FULL:\n%s", logs)
 	}
 }
 

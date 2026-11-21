@@ -55,10 +55,14 @@ capture as degraded under one of these reasons:
   primary_key_deferrable
       the table's primary key is DEFERRABLE; checked when capture starts and
       each time PostgreSQL describes a table, and never a reason to refuse the
-      start
+      start: capture skips that table. 'doctor' does fail on it, and
+      'server add' and the web interface's Start run 'doctor' first, so they
+      do not add or start the server until the key is fixed
   primary_key_not_in_description
-      capture is behind, and the primary key was moved to a column added after
-      the changes it is reading were written; nothing to run
+      capture is behind, and since the changes it is reading were written a
+      primary-key column was renamed, or the key was moved to another column.
+      No statement brings them back: they are missing from the copy until the
+      table's next full read, and from history for good
   replica_identity_key_not_sent
       one change (not a table) arrived without a value for a primary-key
       column; PostgreSQL is not known to send one

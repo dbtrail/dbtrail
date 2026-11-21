@@ -527,9 +527,11 @@ func pgRowLink(leaves, needs pgRowState) string {
 		// such a table only:
 		//   - that the row a change started from is the row the change
 		//     before it left, which is what showed a deferrable key
-		//     (pgKeyTxn). Capture refuses a table with one when it starts
-		//     (pgcapture.CheckDeferrableKeys), not one made so while it
-		//     runs;
+		//     (pgKeyTxn). Capture skips a table with one, each time
+		//     PostgreSQL describes it (pgcapture.Decoder.cacheRelation),
+		//     so its changes do not reach a fold; it never refuses to
+		//     start over one. What it reads is the catalog as it is when
+		//     it reads a change, not as it was when the change was made;
 		//   - a transaction delivered a second time whose changes of the
 		//     key are all UPDATEs is not seen as one: its first change
 		//     links like any other. The whole delivery ends in the same
