@@ -320,6 +320,17 @@ func TestPGPairGuard(t *testing.T) {
 			t.Fatalf("the table with a delta: %v, %v; want the refusal\n%s", got, err, sqlText)
 		}
 	}
+	// A view that follows later snapshots reads the pair through patterns,
+	// as a MySQL table's following view reads its chain: no refusal.
+	reads := func(t *testing.T, sqlText string) {
+		t.Helper()
+		if got, err := rowsOf(t, sqlText, "items"); err != nil || !reflect.DeepEqual(got, []string{"5=five"}) {
+			t.Fatalf("the table with no delta: %v, %v\n%s", got, err, sqlText)
+		}
+		if got, err := rowsOf(t, sqlText, "orders"); err != nil || !reflect.DeepEqual(got, []string{"1=ONE", "2=two"}) {
+			t.Fatalf("the table with a delta: %v, %v; want it through its pair\n%s", got, err, sqlText)
+		}
+	}
 	// fixture: orders has a pair, items has none, the snapshot is marked.
 	fixture := func(t *testing.T) (root, orders, items string) {
 		t.Helper()
@@ -341,12 +352,12 @@ func TestPGPairGuard(t *testing.T) {
 		through := func(table string) BaselineTable {
 			return pgPairTable(filepath.Join(root, baseline.CurrentLinkName, "public", table+".parquet"), table)
 		}
-		check(t, pgPairGenerate(root, FollowPointer, through("orders"), through("items")))
+		reads(t, pgPairGenerate(root, FollowPointer, through("orders"), through("items")))
 	})
 
 	t.Run("following the newest snapshot", func(t *testing.T) {
 		root, orders, items := fixture(t)
-		check(t, pgPairGenerate(root, FollowNewest, pgPairTable(orders, "orders"), pgPairTable(items, "items")))
+		reads(t, pgPairGenerate(root, FollowNewest, pgPairTable(orders, "orders"), pgPairTable(items, "items")))
 	})
 
 	t.Run("relative paths, read from the folder they are for", func(t *testing.T) {
@@ -364,8 +375,9 @@ func TestPGPairGuard(t *testing.T) {
 
 	// A view pinned to a snapshot in S3 names exact keys and lists nothing:
 	// it is written as before, with no guard. One that follows over S3
-	// already lists, and carries the guard, with the file named as it was.
-	t.Run("in S3: pinned is left as it was, following is guarded", func(t *testing.T) {
+	// reads the chain through patterns, built against the session's
+	// variable from the file's place in the snapshot.
+	t.Run("in S3: pinned is left as it was, following reads the chain", func(t *testing.T) {
 		s3 := pgPairTable("s3://bucket/"+stamp+"/public/orders.parquet", "orders")
 		if body, ok := pgPairStateBody(Input{}, s3); ok {
 			t.Fatalf("a pinned view of a file in S3 was given a body: %s", body)
@@ -375,7 +387,7 @@ func TestPGPairGuard(t *testing.T) {
 			t.Fatalf("a pinned view of a file in S3 lists the store:\n%s", pinned)
 		}
 		body, ok := pgPairStateBody(Input{Follow: FollowNewest, BaselineSource: "s3://bucket"}, s3)
-		if !ok || !strings.Contains(body, "public/orders.[0-9][0-9][0-9][0-9][0-9][0-9].pgnew") {
+		if !ok || !strings.Contains(body, "public/orders.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[tw]") || strings.Contains(body, "error(") && strings.Contains(body, "delta beside its file") {
 			t.Fatalf("a following view of a file in S3: %q, %v", body, ok)
 		}
 	})
