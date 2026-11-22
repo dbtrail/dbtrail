@@ -581,6 +581,60 @@ func TestIntegrationPGRouterForward(t *testing.T) {
 		_ = tx.Rollback(ctx)
 	})
 
+	// #3046: the connection to the source is kept between a client's
+	// statements, and what one statement leaves in its session does not
+	// reach the next: a function of the client's can do what the screen
+	// refuses by name.
+	t.Run("what a statement leaves on a kept connection does not reach the next", func(t *testing.T) {
+		const other = "pgfwd_other_role"
+		for _, st := range []string{
+			"DROP FUNCTION IF EXISTS pgfwd_leave()",
+			"DROP ROLE IF EXISTS " + other,
+			"CREATE ROLE " + other,
+			"GRANT " + other + " TO " + pgFwdRole,
+			`CREATE FUNCTION pgfwd_leave() RETURNS text LANGUAGE plpgsql AS $f$ BEGIN
+				PERFORM set_config('statement_timeout', '1234', false);
+				PERFORM set_config('search_path', 'pg_temp', false);
+				PERFORM set_config('role', '` + other + `', false);
+				PERFORM pg_advisory_lock(30460);
+				RETURN 'left'; END $f$`,
+			"GRANT EXECUTE ON FUNCTION pgfwd_leave() TO " + pgFwdRole,
+		} {
+			if got := one(ctx, source, st); strings.HasPrefix(got, "error") {
+				t.Fatalf("%s: %s", st, got)
+			}
+		}
+		t.Cleanup(func() {
+			for _, st := range []string{"DROP FUNCTION IF EXISTS pgfwd_leave()", "REVOKE " + other + " FROM " + pgFwdRole, "DROP ROLE IF EXISTS " + other} {
+				one(context.Background(), source, st)
+			}
+		})
+		c := pgClient(t, ctx, env.portDSN(), nil)
+		defer c.Close(ctx)
+		if got := one(ctx, c, "SELECT public.pgfwd_leave()"); got != "left" {
+			t.Fatalf("the function: %q", got)
+		}
+		pid := one(ctx, c, "SELECT pg_backend_pid()")
+		for what, stmt := range map[string]string{
+			pgFwdRole:  "SELECT current_user::text FROM (SELECT now()) x",
+			"0":        "SELECT current_setting('statement_timeout') FROM (SELECT now()) x",
+			"on":       "SELECT current_setting('default_transaction_read_only') FROM (SELECT now()) x",
+		} {
+			if got := one(ctx, c, stmt); got != what {
+				t.Errorf("%s: %q, want %q", stmt, got, what)
+			}
+		}
+		if got := one(ctx, c, "SELECT current_setting('search_path') FROM (SELECT now()) x"); strings.Contains(got, "pg_temp") {
+			t.Errorf("the search_path the function set is still there: %q", got)
+		}
+		if got := one(ctx, source, "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objid = 30460"); got != "0" {
+			t.Errorf("the advisory lock outlived its statement: %s", got)
+		}
+		if again := one(ctx, c, "SELECT pg_backend_pid()"); again != pid {
+			t.Errorf("the connection was not kept: backend %s, then %s", pid, again)
+		}
+	})
+
 	t.Run("at most the port's connections to the sources", func(t *testing.T) {
 		a := pgClient(t, ctx, env.portDSN(), nil)
 		b := pgClient(t, ctx, env.portDSN(), nil)
@@ -611,8 +665,19 @@ func TestIntegrationPGRouterForward(t *testing.T) {
 		one(ctx, b, "BEGIN")
 		one(ctx, a, "ROLLBACK")
 		one(ctx, b, "ROLLBACK")
-		pgTestWait(t, "the connections to the source to close once no block is open", 10*time.Second, func() (bool, string) {
-			n := one(ctx, source, "SELECT count(*) FROM pg_stat_activity WHERE usename = '"+pgFwdRole+"' AND pid <> pg_backend_pid()")
+		// Kept for their clients between statements (#3046), never more than
+		// the port's limit, and ended when the clients leave.
+		held := func() string {
+			return one(ctx, source, "SELECT count(*) FROM pg_stat_activity WHERE usename = '"+pgFwdRole+"' AND pid <> pg_backend_pid()")
+		}
+		if n := held(); n != "1" && n != "2" {
+			t.Errorf("connections to the source kept between statements: %s, want at most the port's 2", n)
+		}
+		for _, cl := range []*pgconn.PgConn{a, b, c} {
+			cl.Close(ctx)
+		}
+		pgTestWait(t, "the connections to the source to close once their clients left", 10*time.Second, func() (bool, string) {
+			n := held()
 			return n == "0", n
 		})
 	})

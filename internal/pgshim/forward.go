@@ -2,6 +2,7 @@ package pgshim
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -78,6 +80,15 @@ type Forward struct {
 	// there rather than to the source, by the source's plan (route_cost.go);
 	// nil for DefaultCostPolicy.
 	Cost *CostPolicy
+	// Park, when set, keeps the client's connection to the source open
+	// between its statements, as the MySQL port keeps its own (#3046): it
+	// is offered to the port's pool with reclaim, which the pool calls, from
+	// any goroutine, when another client waits for a connection and none is
+	// free; reclaim ends the connection and gives its slot back. unpark
+	// takes it back for the client's next statement, and reports false when
+	// it was reclaimed first. Nil: the connection is ended after every
+	// answer, as before.
+	Park func(reclaim func()) (unpark func() bool)
 }
 
 // barred is why nothing may be sent to the source now, "" when it may.
@@ -155,6 +166,16 @@ type upstream struct {
 	// cancelled is set while a cancel request was sent for the statement
 	// running.
 	cancelled atomic.Bool
+	// unpark, when set, is the connection kept idle between the client's
+	// statements (parkIdleSource): calling it takes it back from the
+	// port's pool, and reports whether it was still this client's. parkedAt
+	// is when it was kept; kept is set once it was taken back for a later
+	// statement (loseSource).
+	unpark   func() bool
+	parkedAt time.Time
+	kept     bool
+	// needsReset is set from claimSource until resetKeptSource.
+	needsReset bool
 }
 
 // forwarding reports whether this connection can send statements to its
@@ -305,17 +326,154 @@ func (s *session) openSource(dsn string) (*upstream, *pgErr) {
 
 // closeSource ends the connection to the source and gives its slot back.
 func (s *session) closeSource() {
+	s.claimSource()
 	up := s.up
 	if up == nil {
 		return
 	}
 	s.up = nil
+	up.terminate()
+}
+
+// terminate ends the connection and gives its slot back. It touches nothing
+// of the session's: the port's pool calls it from another goroutine for a
+// parked connection (parkIdleSource).
+func (up *upstream) terminate() {
 	up.fe.Send(&pgproto3.Terminate{})
 	_ = up.conn.SetWriteDeadline(time.Now().Add(time.Second))
 	_ = up.fe.Flush()
 	_ = up.conn.Close()
 	up.release()
 }
+
+// parkIdleSource keeps the connection to the source open past the answer
+// just given when nothing of the client's lives there, for the client's
+// next statement (#3046): the MySQL port keeps its connection to the source
+// for the client's whole life, and opening one costs a login and the
+// settings each time, several times the statement a key lookup is. Unlike
+// MySQL's it is not held from other clients: the port's pool takes it back
+// (Forward.Park) when another client waits for a connection and none is
+// free. Without a pool that can, it is ended (releaseIdleSource). Called
+// before every ReadyForQuery; claimSource takes it back on the client's next
+// message, before anything can be sent on it.
+func (s *session) parkIdleSource() {
+	up := s.up
+	if up == nil || up.unpark != nil || up.inTx || up.inCycle || len(up.portals) > 0 || up.tx != 'I' {
+		return
+	}
+	if up.unsafe || s.bound == nil || s.bound.Forward == nil || s.bound.Forward.Park == nil {
+		s.closeSource()
+		return
+	}
+	up.unpark, up.parkedAt = s.bound.Forward.Park(up.terminate), time.Now()
+}
+
+// sourceKeepIdle is how long a connection kept between statements may stay
+// idle and still be used: under the idle timeout of the NATs and load
+// balancers a connection can cross (4 minutes and more, and AWS NAT gateways
+// 350 s), which drop an idle connection without a word, so that one is not
+// used after such a drop. A variable so a test can shorten it.
+var sourceKeepIdle = 60 * time.Second
+
+// claimSource takes back a parked connection to the source (parkIdleSource)
+// before anything of the client's next message is done: what the pool
+// reclaimed meanwhile, or the source ended while it was idle, is dropped,
+// and the next statement that needs the source opens one again, as it did
+// before connections were kept. Nothing of the client's lived on it.
+func (s *session) claimSource() {
+	up := s.up
+	if up == nil || up.unpark == nil {
+		return
+	}
+	unpark := up.unpark
+	up.unpark = nil
+	if !unpark() {
+		// Ended by the pool, on its own goroutine: not touched here.
+		s.up = nil
+		return
+	}
+	if time.Since(up.parkedAt) > sourceKeepIdle {
+		s.up = nil
+		up.terminate()
+		return
+	}
+	up.kept = true
+	if why := up.idleEnded(); why != "" {
+		s.logger.Debug("pgshim: the connection to the source kept between statements was ended while idle; another is opened", "why", why)
+		s.up = nil
+		up.terminate()
+		return
+	}
+	up.needsReset = true
+}
+
+// resetKeptSource puts a connection taken back (claimSource) in the state
+// of one just opened, before any statement runs on it. Each statement used
+// to get a new session; what one leaves behind must not reach the next: the
+// screen refuses set_config by name, but a function of the client's can call
+// it (a role, a search_path, a timeout), hold an advisory lock, or a cursor
+// WITH HOLD can stay open. DISCARD ALL is what connection pools run for this;
+// its reset values are the ones the port logged in with, the read-only guard
+// among them. A connection it fails on is ended, and the next statement that
+// needs the source opens another. Nothing is sent to a source the host bars
+// now: route drops the connection.
+func (s *session) resetKeptSource() {
+	up := s.up
+	if up == nil || !up.needsReset {
+		return
+	}
+	up.needsReset = false
+	if s.bound.Forward.barred() != "" {
+		return
+	}
+	_, perr, lost := s.internal(up, "DISCARD ALL")
+	if lost != nil || perr != nil || up.unsafe || up.tx != 'I' {
+		s.logger.Warn("pgshim: a connection to the source kept between statements could not be reset; another is opened")
+		s.up = nil
+		up.terminate()
+		return
+	}
+	// Gone with the session's state: given again when next needed.
+	up.sent = nil
+	clear(up.stmts)
+}
+
+// idleEnded says why a connection kept idle can no longer be used, "" when
+// it can: an idle PostgreSQL connection sends nothing, so anything to read
+// (a FATAL for idle_session_timeout, a closed socket) means it is over. The
+// socket is looked at without waiting and without taking anything from it
+// (peekIdle); where that cannot be done, a read waits up to a millisecond.
+func (up *upstream) idleEnded() string {
+	c := up.conn
+	if t, ok := c.(*tls.Conn); ok {
+		c = t.NetConn()
+	}
+	if sc, ok := c.(syscall.Conn); ok {
+		if why, ok := peekIdle(sc); ok {
+			return why
+		}
+	}
+	if err := up.conn.SetReadDeadline(time.Now().Add(time.Millisecond)); err != nil {
+		return err.Error()
+	}
+	var b [1]byte
+	n, err := up.conn.Read(b[:])
+	_ = up.conn.SetReadDeadline(time.Time{})
+	var ne net.Error
+	switch {
+	case n > 0:
+		return idleSentSomething
+	case errors.As(err, &ne) && ne.Timeout():
+		return ""
+	case err != nil:
+		return err.Error()
+	}
+	return "the connection read nothing and no error"
+}
+
+// idleSentSomething is why a kept connection the source wrote to while it
+// was idle is not used.
+const idleSentSomething = "the source sent something while the connection was idle"
 
 // markSourceRead notes that the source just sent the client a row or a
 // statement's end: from now on the copy may not answer this connection with
@@ -380,13 +538,21 @@ func (s *session) loseSource(why string) {
 		return
 	}
 	pinned := s.up.inTx
+	// A connection kept between statements (parkIdleSource) on which nothing
+	// of the client's lives now is not the client's session: it was taken
+	// back for this statement only, and a new one is as good, as it was
+	// when each statement opened its own (#3046). The session is not ended
+	// for it.
+	kept := s.up.kept && !s.up.inTx && !s.up.inCycle && len(s.up.portals) == 0
 	if len(s.src.pending) > 0 {
 		// What the source sent on it will never be confirmed.
 		s.src.markAll()
 	}
 	s.logger.Warn("pgshim: the connection to the source is closed", "reason", why)
 	s.closeSource()
-	s.upLost = why
+	if !kept {
+		s.upLost = why
+	}
 	s.savepoints = nil
 	if pinned && s.txStatus() == 'T' {
 		s.markFailed()
