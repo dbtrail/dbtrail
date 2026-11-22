@@ -3,6 +3,7 @@ package pgshim
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"maps"
 	"testing"
 	"time"
@@ -94,5 +95,30 @@ func TestCostSides_bounded(t *testing.T) {
 	nilSides.note("x", RouteCopy)
 	if nilSides.last("x") != "" {
 		t.Error("nil remembers")
+	}
+}
+
+// A prepared statement's plan without values keeps a side of its own, and a
+// statement read only in part keeps none.
+func TestBandedToCopy_3045_keys(t *testing.T) {
+	sides := &CostSides{}
+	s := &session{bound: &Binding{Forward: &Forward{Sides: sides}}, logger: slog.New(slog.DiscardHandler)}
+	pol := DefaultCostPolicy()
+	const q = "SELECT n FROM near WHERE k = 1"
+	if got, _ := s.bandedToCopy(pol, pgPlan{cost: 48000}, q, false); got {
+		t.Fatal("under the threshold went to the copy")
+	}
+	// The same text, prepared: its own side, decided afresh.
+	if got, _ := s.bandedToCopy(pol, pgPlan{cost: 52000}, q, true); !got {
+		t.Error("a prepared statement's plan was held by the simple query's side")
+	}
+	if got, _ := s.bandedToCopy(pol, pgPlan{cost: 52000}, q, false); got {
+		t.Error("the simple query lost its side to the prepared statement's")
+	}
+	before := len(sides.sides)
+	unread := "SELECT n FROM near WHERE k = 'never closed"
+	s.bandedToCopy(pol, pgPlan{cost: 48000}, unread, false)
+	if len(sides.sides) != before {
+		t.Error("a statement read only in part was remembered")
 	}
 }

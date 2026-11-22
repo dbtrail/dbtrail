@@ -316,7 +316,7 @@ func (s *session) routeByCostPlan(text string, generic bool) (d routeDecision, k
 		s.logger.Warn("pgshim: the source's plan could not be read; the statement goes to the source", "err", err)
 		return failed, true, nil, nil
 	}
-	toCopy, why := s.bandedToCopy(pol, pl, text)
+	toCopy, why := s.bandedToCopy(pol, pl, text, generic)
 	if !toCopy {
 		s.logger.Debug("pgshim: sent to the source", "reason", ReasonCheapPlan, "plan", why)
 		return routeDecision{RouteSource, ReasonCheapPlan}, true, nil, &pl
@@ -424,15 +424,23 @@ var bandWords = fmt.Sprintf("%d %%", costSideBand)
 
 // bandedToCopy is the plan's verdict for text on this connection's server,
 // kept within the band by the side the shape last went to, and remembered.
-func (s *session) bandedToCopy(pol CostPolicy, pl pgPlan, text string) (bool, string) {
+//
+// A prepared statement's plan, asked without its values (generic), is kept
+// apart from the same text's with values: the two costs can be far apart. A
+// statement read only in part (its shape ends with "…") is not remembered:
+// two statements can share that shape.
+func (s *session) bandedToCopy(pol CostPolicy, pl pgPlan, text string, generic bool) (bool, string) {
 	var sides *CostSides
 	if s.bound != nil && s.bound.Forward != nil {
 		sides = s.bound.Forward.Sides
 	}
-	if sides == nil {
+	if sides == nil || strings.HasSuffix(Fingerprint(text), "…") {
 		return pol.toCopy(pl)
 	}
 	key := s.costVerdictKey(text)
+	if generic {
+		key += "\x00generic"
+	}
 	last := sides.last(key)
 	toCopy, why := pol.toCopyBanded(pl, last)
 	side := RouteSource
