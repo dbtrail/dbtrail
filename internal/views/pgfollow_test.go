@@ -129,7 +129,9 @@ type pgFollowCase struct {
 //     again, key 9 inserted, keys 3 and 10 never touched;
 //   - public."or*ders" has a chain of its own, and a name that, taken as a
 //     pattern, would match the files of orders;
-//   - public."orders.eu" (a dot in the name) and sales.orders (the same name
+//   - public."items.eu" (a dot in the name, and a name that starts with
+//     items' and a dot: items is then kept to its file alone, behind the
+//     guard, which reads fine with no pair) and sales.orders (the same name
 //     in another schema) each have their own.
 func pgFollowFixture(t *testing.T) (root string, cases []pgFollowCase) {
 	t.Helper()
@@ -147,7 +149,7 @@ func pgFollowFixture(t *testing.T) (root string, cases []pgFollowCase) {
 	star := writePGFollowBase(t, root, "public", "or*ders", [2]string{"1", "star"}, [2]string{"4", "four"})
 	writePGFollowLink(t, star, 0, map[string]string{"1": "STAR", "4": ""})
 
-	eu := writePGFollowBase(t, root, "public", "orders.eu", [2]string{"1", "eu"})
+	eu := writePGFollowBase(t, root, "public", "items.eu", [2]string{"1", "eu"})
 	writePGFollowLink(t, eu, 0, map[string]string{"1": "EU"})
 
 	sales := writePGFollowBase(t, root, "sales", "orders", [2]string{"1", "sale"}, [2]string{"2", "deal"})
@@ -164,7 +166,7 @@ func pgFollowFixture(t *testing.T) (root string, cases []pgFollowCase) {
 		{"public", "single", []string{"1=ONE", "2=two"}},
 		{"public", "orders", []string{"1=eins", "2=back", "3=three", "9=nine", "10=ten"}},
 		{"public", "or*ders", []string{"1=STAR"}},
-		{"public", "orders.eu", []string{"1=EU"}},
+		{"public", "items.eu", []string{"1=EU"}},
 		{"sales", "orders", []string{"1=sale", "2=DEAL"}},
 	}
 }
@@ -300,5 +302,71 @@ func TestPGFollowStateView_s3(t *testing.T) {
 	body := pgFollowStateBody(Input{Follow: FollowNewest, BaselineSource: "s3://bucket"}, tbl)
 	if strings.Contains(body, "glob(") || !strings.Contains(body, filesVar) {
 		t.Fatalf("a following view over S3 that lists once asks the store itself: %s", body)
+	}
+}
+
+// The two tables a following view keeps off the chain's patterns, as the
+// MySQL views keep theirs (chainReady): one with a column a pair reserves,
+// which never gets a pair and whose file the chain's reads would not bind
+// over, and one with a sibling named "<table>.<six digits>", whose file the
+// patterns would take for the table's first .pgdead. Each reads its file
+// alone behind the guard: the first answers, the second refuses once a pair
+// is beside it, naming why, instead of answering wrong.
+func TestPGFollowStateView_keptToTheFile(t *testing.T) {
+	for _, follow := range []FollowMode{FollowPointer, FollowNewest} {
+		t.Run(fmt.Sprint(follow), func(t *testing.T) {
+			root := t.TempDir()
+			snap := filepath.Join(root, pgFollowStamp)
+			dir := snap
+			if follow == FollowPointer {
+				dir = filepath.Join(root, baseline.CurrentLinkName)
+			}
+			// A column named filename: written with the writer, no pair.
+			res := filepath.Join(snap, "public", "logs.parquet")
+			if err := os.MkdirAll(filepath.Dir(res), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			w, err := baseline.NewWriter(res, []baseline.Column{{Name: "id", RawText: true}, {Name: "filename", RawText: true}},
+				baseline.WriterConfig{Compression: "none"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := w.WriteRow([]string{"1", "a.log"}, []bool{false, false}); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Close(); err != nil {
+				t.Fatal(err)
+			}
+			logs := BaselineTable{Schema: "public", Table: "logs", Path: filepath.Join(dir, "public", "logs.parquet"), Rel: "public/logs.parquet",
+				PGRelation: &baseline.PGRelation{OID: 16600, Columns: []baseline.PGColumn{
+					{Name: "id", TypeOID: 25, TypeMod: -1, Type: "text", Ordinal: 1},
+					{Name: "filename", TypeOID: 25, TypeMod: -1, Type: "text", Ordinal: 2},
+				}, PrimaryKey: []string{"id"}}}
+
+			orders := writePGFollowBase(t, root, "public", "orders", [2]string{"1", "one"})
+			writePGFollowLink(t, orders, 0, map[string]string{"1": "ONE"})
+			writePGFollowBase(t, root, "public", "orders.000000", [2]string{"8", "sibling"})
+			if err := os.WriteFile(filepath.Join(snap, baseline.SuccessMarker), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(pgFollowStamp, filepath.Join(root, baseline.CurrentLinkName)); err != nil {
+				t.Fatal(err)
+			}
+			text := pgPairGenerate(root, follow, logs,
+				pgFollowTable(filepath.Join(dir, "public", "orders.parquet"), "public", "orders"),
+				pgFollowTable(filepath.Join(dir, "public", "orders.000000.parquet"), "public", "orders.000000"))
+			db := execViews(t, text)
+			var got string
+			if err := db.QueryRow(`SELECT id || '=' || filename FROM public.logs`).Scan(&got); err != nil || got != "1=a.log" {
+				t.Fatalf("a table with a column named filename: %q, %v\n%s", got, err, text)
+			}
+			if got, err := pgFollowRows(t, db, "public", "orders.000000"); err != nil || !reflect.DeepEqual(got, []string{"8=sibling"}) {
+				t.Fatalf("the sibling: %v, %v\n%s", got, err, text)
+			}
+			_, err = pgFollowRows(t, db, "public", "orders")
+			if err == nil || !strings.Contains(err.Error(), "PostgreSQL table delta beside its file") || !strings.Contains(err.Error(), "orders.000000") {
+				t.Fatalf("a table with a sibling named like its chain: %v; want the refusal naming the sibling\n%s", err, text)
+			}
+		})
 	}
 }

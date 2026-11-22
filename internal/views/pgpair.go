@@ -71,6 +71,9 @@ func pgPairStateBody(in Input, t BaselineTable) (body string, ok bool) {
 	knownPG := len(t.PGCasts) > 0 || t.PGRelation != nil
 	if in.Follow.follows() {
 		if knownPG {
+			if why := pgFollowAloneReason(in, t); why != "" {
+				return pgFollowGuardedBody(in, t, why), true
+			}
 			return pgFollowStateBody(in, t), true
 		}
 		return "", false

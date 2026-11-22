@@ -27,8 +27,8 @@ import (
 // a pattern admits the base, every link of the chain (one or many, as Paths
 // names them), and nothing else a snapshot holds beside them: not the other
 // half of a pair, not a MySQL delta file (".posdel", ".upserts"), not a file
-// still being written (IsTemp: it ends in random letters after ".tmp-"; one
-// that happens to end in the right letter is dropped by the name filter).
+// still being written (IsTemp: its name ends in the random digits
+// os.CreateTemp puts after ".tmp-", which the last class does not take).
 func FollowGlobs(basePath string) (dead, rows string) {
 	head := literal(strings.TrimSuffix(basePath, baseSuffix)) + "."
 	for _, c := range "parque" {
@@ -86,8 +86,13 @@ func followNameFilter(basePath, suffix string) string {
 // The .pgdead read does not use union_by_name, as the MySQL one does not: it
 // takes its columns from the first file in name order, and a link's digits
 // sort before the base's "parquet", so that is a .pgdead whenever the chain
-// has one. The residual is the same as MySQL's: a sibling table literally
-// named "<table>.000000" (any name of six digits) sorts first.
+// has one. A sibling table named "<table>.<six digits>" or "<table>.parque..."
+// is matched by the patterns too: its columns join the .pgnew read, and one
+// named "<table>.000000" sorts before the chain's first .pgdead, so the dead
+// rows would read as none, without an error. A caller must not use this SQL
+// for a table with such a sibling, as the MySQL views keep a table with one
+// off theirs (chainReady); the residual is the same as MySQL's, a sibling
+// created after the views were written.
 //
 // Like the MySQL following views, it does not check at read time that the
 // chain is whole: what the patterns find is what is read.
