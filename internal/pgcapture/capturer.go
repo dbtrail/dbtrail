@@ -86,6 +86,11 @@ type Config struct {
 	// persists it with its checkpoints. nil records nothing (the changes are
 	// still dropped, with the warning).
 	Skips *parser.SkipCounters
+
+	// captureBelowFull turns off the decoder's gate on tables below REPLICA
+	// IDENTITY FULL (Decoder.captureBelowFull). Unexported: only this
+	// package's tests set it (export_test.go).
+	captureBelowFull bool
 }
 
 // Capturer decodes a PostgreSQL logical-replication stream into event.Event. It
@@ -212,35 +217,21 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 			c.logger.Warn("pgcapture: " + DeferrableKeysProblem(kept) + " Until then the changes of " + thisOrThese(len(kept)) + " are NOT captured (each one is counted as skipped in capture health); the other tables are captured normally")
 		}
 	}
-	// A table below REPLICA IDENTITY FULL is captured: PostgreSQL sends at most
-	// the key of the row an UPDATE or a DELETE changed, and only undo needs the
-	// rest. Said here once, at start, for the tables already in the
-	// publication; the decoder says it again for each description of the table
-	// it receives, and is where a table whose identity leaves the primary key
-	// out is skipped.
+	// A table below REPLICA IDENTITY FULL is not captured (the decoder's gate,
+	// requireFull): said here once, at start, for the tables already in the
+	// publication; the decoder says it again for each description of such a
+	// table it receives, and is where its changes are dropped and counted.
 	belowFull, err := validateReplicaIdentity(startupCtx, queryConn, c.cfg.Publication, c.cfg.Filters)
 	if err != nil {
 		return err
 	}
-	withoutUndo, missesKey, noIdentity := SplitTableIdentities(belowFull)
-	names := func(ts []TableIdentity) string {
-		out := make([]string, len(ts))
-		for i, t := range ts {
-			out[i] = t.Name()
+	if len(belowFull) > 0 {
+		names := make([]string, len(belowFull))
+		for i, t := range belowFull {
+			names[i] = t.Name()
 		}
-		return strings.Join(out, ", ")
-	}
-	if len(withoutUndo) > 0 {
-		c.logger.Warn("pgcapture: "+countTables(len(withoutUndo))+" without undo: not at REPLICA IDENTITY FULL. Their changes are captured and everything else works on them; undo refuses their UPDATE and DELETE. To make a table's later changes undoable run ALTER TABLE <t> REPLICA IDENTITY FULL (the table then writes more WAL)",
-			"tables", names(withoutUndo))
-	}
-	if len(missesKey) > 0 {
-		c.logger.Warn("pgcapture: "+countTables(len(missesKey))+" whose replica identity does not hold the primary key; their changes are NOT captured (each one is counted as skipped in capture health) until it does, the other tables are captured normally. Run ALTER TABLE <t> REPLICA IDENTITY FULL (or DEFAULT, when the identity is an index that leaves the key out)",
-			"tables", names(missesKey))
-	}
-	if len(noIdentity) > 0 {
-		c.logger.Warn("pgcapture: "+countTables(len(noIdentity))+" with no replica identity (NOTHING, or DEFAULT without a primary key): PostgreSQL itself refuses UPDATE and DELETE on them while they are published, so only their INSERT and TRUNCATE are captured. Give each a primary key, or run ALTER TABLE <t> REPLICA IDENTITY FULL",
-			"tables", names(noIdentity))
+		c.logger.Warn("pgcapture: "+countTables(len(belowFull))+" not at REPLICA IDENTITY FULL (a partitioned table counts when any of its partitions is not); their changes are NOT captured (each one is counted as skipped in capture health) until each is, the other tables are captured normally. Run ALTER TABLE <t> REPLICA IDENTITY FULL on each table, and on each partition of a partitioned one; `bintrail-pg doctor` prints the statements. On PostgreSQL 18 run the doctor first: a generated column the publication does not publish makes PostgreSQL refuse UPDATE and DELETE on a table at FULL",
+			"tables", strings.Join(names, ", "))
 	}
 
 	// Non-fatal capture-coverage warnings (#555 UNLOGGED, #556 FK cascade child): tables
@@ -348,6 +339,9 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 	}
 	opts := []DecoderOption{WithAttrResolver(attrResolver), WithSkipCounters(c.cfg.Skips),
 		WithDeferrableResolver(deferrable), WithPartitionsResolver(partitions)}
+	if c.cfg.captureBelowFull {
+		opts = append(opts, withCaptureBelowFull())
+	}
 	stampsClose := func() {}
 	defer func() { stampsClose() }()
 	if c.cfg.LastChange != nil && c.cfg.LoadKnownShapes != nil {

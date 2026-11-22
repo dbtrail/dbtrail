@@ -152,7 +152,7 @@ console.log(JSON.stringify({
 	want := []string{
 		"p: PostgreSQL source needs wal_level=logical, a role with the REPLICATION attribute, and a publication you create; copy and run on the source:",
 		"pre: CREATE PUBLICATION bintrail_pub FOR ALL TABLES;",
-		"p: REPLICA IDENTITY FULL is optional, only for undo: without it a table is recorded and everything else works, but its UPDATE and DELETE cannot be undone. To make a table's later changes undoable (the table then writes more WAL):",
+		"p: REPLICA IDENTITY FULL is required on every table you capture, and on each partition of a partitioned one: a table that is not at FULL is not captured, and the server is not added while one is. Copy and run on the source for each (the table then writes more WAL):",
 		"pre: ALTER TABLE your_table REPLICA IDENTITY FULL;",
 	}
 	for _, w := range want {

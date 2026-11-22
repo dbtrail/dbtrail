@@ -99,10 +99,10 @@ func BuildPGReport(ctx context.Context, cfg PGDoctorConfig) *doctor.Report {
 	}
 	addTruncateCheck(ctx, r, conn, cfg.Publication)
 
-	addReplicaIdentityChecks(ctx, r, conn, cfg.Publication)
+	addReplicaIdentityChecks(ctx, r, conn, cfg.Publication, filters)
 
 	addReadAccessCheck(ctx, r, conn, cfg.Publication, filters)
-	addGeneratedColumnsCheck(ctx, r, conn, cfg.Publication)
+	addGeneratedColumnsCheck(ctx, r, conn, cfg.Publication, filters)
 	addDeferrableKeysCheck(ctx, r, conn, cfg.Publication)
 	addUnloggedCheck(ctx, r, conn, cfg.Publication, filters)
 	addCascadeCoverageCheck(ctx, r, conn, cfg.Publication)
@@ -355,8 +355,12 @@ const generatedColumnsCheck = "Generated columns (PostgreSQL 18)"
 // or deleting rows (pgcapture.CheckGeneratedColumns). A failure, not a
 // warning: it is damage on the source, and it is there whether or not capture
 // ever starts. Passes on PostgreSQL 17 and older, which have no such rule.
-func addGeneratedColumnsCheck(ctx context.Context, r *doctor.Report, conn *pgx.Conn, publication string) {
-	found, err := pgcapture.QueryUnpublishedGenerated(ctx, conn, publication)
+//
+// Only of the tables the server captures (filters), as the replica-identity
+// checks: a table it does not capture does not keep it from being added.
+func addGeneratedColumnsCheck(ctx context.Context, r *doctor.Report, conn *pgx.Conn, publication string, filters event.Filters) {
+	all, err := pgcapture.QueryUnpublishedGenerated(ctx, conn, publication)
+	found := generatedInScope(all, filters)
 	switch {
 	case err != nil:
 		r.Add(doctor.CheckResult{Name: generatedColumnsCheck, Status: doctor.StatusWarn, Detail: "could not check: " + err.Error()})
@@ -370,6 +374,18 @@ func addGeneratedColumnsCheck(ctx context.Context, r *doctor.Report, conn *pgx.C
 	default:
 		r.Add(doctor.CheckResult{Name: generatedColumnsCheck, Status: doctor.StatusPass})
 	}
+}
+
+// generatedInScope keeps the generated columns of the tables filters accepts.
+// Pure.
+func generatedInScope(all []pgcapture.UnpublishedGenerated, filters event.Filters) []pgcapture.UnpublishedGenerated {
+	var out []pgcapture.UnpublishedGenerated
+	for _, g := range all {
+		if filters.Matches(g.Schema, g.Table) {
+			out = append(out, g)
+		}
+	}
+	return out
 }
 
 // deferrableKeysCheck is the name of the check below.

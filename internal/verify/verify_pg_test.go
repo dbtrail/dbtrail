@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
 // TestPGCoverageVerdict pins the pure coverage grid for a PostgreSQL source —
@@ -79,6 +80,11 @@ func TestGapLostInWindow(t *testing.T) {
 		{"loss before the window (pre-baseline)", sql.NullTime{Valid: true, Time: windowStart.Add(-time.Hour)}, false},
 		{"loss exactly at window start", sql.NullTime{Valid: true, Time: windowStart}, true},
 		{"loss inside the window", sql.NullTime{Valid: true, Time: windowStart.Add(time.Hour)}, true},
+		// The loss is stamped by the daemon's clock and the window starts by
+		// the PostgreSQL server's: a daemon 2 minutes behind stamps a loss
+		// made after the snapshot as 2 minutes before it.
+		{"loss stamped before the start by a daemon clock behind", sql.NullTime{Valid: true, Time: windowStart.Add(-2 * time.Minute)}, true},
+		{"loss well before the margin", sql.NullTime{Valid: true, Time: windowStart.Add(-reconstruct.PGSkipClockMargin - time.Second)}, false},
 	}
 	for _, tc := range cases {
 		if got := gapLostInWindow(tc.gap, windowStart); got != tc.want {

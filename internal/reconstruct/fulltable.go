@@ -458,6 +458,10 @@ type TableReport struct {
 	// consumer that renders "reused" as a disk saving must count THIS, not
 	// CarriedForward, or it confirms a saving the daemon log denies.
 	CarriedByLink bool
+	// NotCovered, set with CarriedForward on a PostgreSQL table capture
+	// dropped changes of since its rows were read (pgskips.go), says why the
+	// table was published as it was instead of brought up to date.
+	NotCovered string
 
 	// TableDelta is true when the table was published as its previous file
 	// plus a chain of deltas beside it instead of being rewritten (#1638,

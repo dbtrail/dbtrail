@@ -559,6 +559,8 @@ func (k *keptSources) parked() int {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return len(k.idle)
+	// notCaptured, when set, is Binding.NotCaptured.
+	notCaptured func(context.Context) ([]TableNotCaptured, error)
 }
 
 func (l *costLogin) run(_ context.Context, st string, _ RunOptions) (sqlsandbox.Result, error) {
@@ -627,6 +629,7 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 	if l.wait != nil {
 		b.CopyWait = l.wait
 	}
+	b.NotCaptured = l.notCaptured
 	return b, nil
 }
 

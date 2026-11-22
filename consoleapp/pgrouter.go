@@ -1059,6 +1059,25 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			}
 			return age
 		}
+		// A table whose capture dropped its changes is read from its
+		// snapshot alone, which no later change reaches: the source answers
+		// a statement that reads one (table_not_captured), where the
+		// connection can send it there.
+		bound.NotCaptured = func(ctx context.Context) ([]pgshim.TableNotCaptured, error) {
+			if timeout > 0 {
+				// An index that hangs must not hold the statement: past
+				// it, the error sends the statement to the source.
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, timeout)
+				defer cancel()
+			}
+			lost, err := copySQL.PGTablesNotCaptured(ctx)
+			out := make([]pgshim.TableNotCaptured, len(lost))
+			for i, t := range lost {
+				out[i] = pgshim.TableNotCaptured{Schema: t.Schema, Name: t.Table, Why: t.Why, SnapshotRead: t.SnapshotRead}
+			}
+			return out, err
+		}
 		// The copy waits for the source's position on a connection the
 		// source answered, then answers (#2985).
 		bound.CopyWait = func(ctx context.Context, lsn uint64) (pgshim.CopyWaitOutcome, string) {

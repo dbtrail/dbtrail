@@ -213,9 +213,43 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 		return nil, "", err
 	}
 	afterDestructiveDDLCheck()
-	capGap, err := CheckCaptureGapStatus(ctx, db, schema, table, since, cfg.At, cfg.AllowGaps)
+	// A lost slot is stamped by the capture daemon's clock, since by the
+	// PostgreSQL server's, and the loss records no WAL position: a loss up to
+	// PGSkipClockMargin before since counts as inside the window.
+	capGap, err := CheckCaptureGapStatus(ctx, db, schema, table, since.Add(-PGSkipClockMargin), cfg.At, cfg.AllowGaps)
 	if err != nil {
 		return nil, "", err
+	}
+	// Changes of the table capture dropped since its rows were read
+	// (pgskips.go): checked before the table can be folded, which would lay
+	// the changes the index has over its file and stamp the result as
+	// current. The table is published as the file it is, footer and all, so
+	// every reader that asks PGSkippedSince of that footer still finds it not
+	// covered, and the other tables of the snapshot are brought up to date.
+	if why, err := PGNotCovered(ctx, db, schema, table, bmeta); err != nil {
+		return nil, "", err
+	} else if why != "" {
+		switch {
+		case cfg.AllowGaps:
+			slog.Warn("the table is rebuilt from the index although capture dropped some of its changes; they are missing from the result",
+				"schema", schema, "table", table, "reason", why)
+		case carryForwardEligible(cfg.CarryForwardUnchanged, cfg.OutputFormat, p.baselinePath, 0, nil) && bmeta.PGDeltaSince != "":
+			linked, delta, cerr := pgCarryForward(ctx, p.baselinePath, cfg.snapshotDir, schema, table)
+			if cerr != nil {
+				return nil, "", fmt.Errorf("carry %s.%s forward as its last read left it: %w", schema, table, cerr)
+			}
+			rep.PG, rep.CarriedForward, rep.CarriedByLink = true, true, linked
+			rep.NotCovered = why
+			rep.Files = append([]string{filepath.Join(schema, table+".parquet")}, delta...)
+			rep.Duration = time.Since(start)
+			slog.Warn("table published as its last read left it, not brought up to date: capture dropped some of its changes since; statements on it are not answered from the copy where they can go to the source, and its next full read brings it up to date",
+				"schema", schema, "table", table, "linked", linked, "reason", why)
+			return rep, "", nil
+		default:
+			// Nowhere to publish it as it is (a snapshot read from S3, a
+			// format other than Parquet, carrying off): the update is refused.
+			return nil, "", pgSkippedError(why)
+		}
 	}
 
 	fetchOpts := query.Options{

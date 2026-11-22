@@ -49,13 +49,22 @@ type nofullRun struct {
 	logMu  *syncWriter
 }
 
+// startNofull starts a Capturer with the gate on tables below REPLICA
+// IDENTITY FULL turned off (pgcapture.CaptureBelowFull): the tests of this
+// file test the code that stores an earlier row in part, which no table
+// reaches while the gate is on. startCapture(..., true) runs the gate.
 func startNofull(t *testing.T, ctx context.Context, setup *pgx.Conn, baseDSN, slot, pub string) *nofullRun {
+	t.Helper()
+	return startCapture(t, ctx, setup, baseDSN, slot, pub, false)
+}
+
+func startCapture(t *testing.T, ctx context.Context, setup *pgx.Conn, baseDSN, slot, pub string, gate bool) *nofullRun {
 	t.Helper()
 	r := &nofullRun{t: t, skips: parser.NewSkipCounters(nil), logs: &bytes.Buffer{}}
 	r.logMu = &syncWriter{w: r.logs}
 	runCtx, cancel := context.WithCancel(ctx)
 	r.cancel = cancel
-	cap := pgcapture.New(pgcapture.Config{
+	cfg := pgcapture.Config{
 		ReplDSN:         replDSN(baseDSN),
 		QueryDSN:        baseDSN,
 		SlotName:        slot,
@@ -63,7 +72,11 @@ func startNofull(t *testing.T, ctx context.Context, setup *pgx.Conn, baseDSN, sl
 		Skips:           r.skips,
 		StandbyInterval: 200 * time.Millisecond,
 		Logger:          slog.New(slog.NewTextHandler(r.logMu, &slog.HandlerOptions{Level: slog.LevelWarn})),
-	})
+	}
+	if !gate {
+		cfg = pgcapture.CaptureBelowFull(cfg)
+	}
+	cap := pgcapture.New(cfg)
 	r.events = make(chan event.Event, 4096)
 	r.runErr = make(chan error, 1)
 	go func() { r.runErr <- cap.Run(runCtx, r.events) }()
@@ -250,18 +263,20 @@ func TestCapturer_BelowFull_Integration(t *testing.T) {
 		t.Errorf("QueryTableIdentities = %v\nwant %v (nf_full is at FULL and not listed)", gotIDs, wantIDs)
 	}
 
-	// What the health panel lists: as "without undo" the tables that are
-	// captured, and as not captured the two whose identity leaves the key out.
-	// A table outside the capture's scope is in neither.
+	// What the health panel lists (production, whatever the gate of this
+	// test's capture): every table below FULL as not captured, each with why,
+	// and none as "without undo". A table outside the capture's scope is in
+	// neither.
 	listed, notCaptured := pgcapture.HealthTableLists(ids, nil, event.Filters{})
-	wantListed := []string{"public.NF Quoted (relreplident=d)", "public.nf_bigkey (relreplident=d)", "public.nf_def (relreplident=d)",
-		"public.nf_idx (relreplident=i)", "public.nf_idxonly (relreplident=i)", "public.nf_nopk (relreplident=d)", "public.nf_nothing (relreplident=n)"}
-	wantNot := []string{"public.nf_idxnopk (replica identity without the primary key)", "public.nf_pkinclude (replica identity without the primary key)"}
+	wantListed := []string{}
+	wantNot := []string{"public.NF Quoted (not at REPLICA IDENTITY FULL)", "public.nf_bigkey (not at REPLICA IDENTITY FULL)", "public.nf_def (not at REPLICA IDENTITY FULL)",
+		"public.nf_idx (not at REPLICA IDENTITY FULL)", "public.nf_idxnopk (replica identity without the primary key)", "public.nf_idxonly (not at REPLICA IDENTITY FULL)",
+		"public.nf_nopk (not at REPLICA IDENTITY FULL)", "public.nf_nothing (not at REPLICA IDENTITY FULL)", "public.nf_pkinclude (replica identity without the primary key)"}
 	if !slices.Equal(listed, wantListed) || !slices.Equal(notCaptured, wantNot) {
 		t.Errorf("health lists:\nwithout undo %q\nwant         %q\nnot captured %q\nwant         %q", listed, wantListed, notCaptured, wantNot)
 	}
 	scoped, scopedNot := pgcapture.HealthTableLists(ids, nil, event.Filters{Tables: map[string]bool{"public.nf_def": true}})
-	if !slices.Equal(scoped, []string{"public.nf_def (relreplident=d)"}) || len(scopedNot) != 0 {
+	if len(scoped) != 0 || !slices.Equal(scopedNot, []string{"public.nf_def (not at REPLICA IDENTITY FULL)"}) {
 		t.Errorf("with the capture limited to nf_def: without undo %q, not captured %q", scoped, scopedNot)
 	}
 
@@ -439,9 +454,10 @@ func TestCapturer_BelowFull_Integration(t *testing.T) {
 	logs := r.logText()
 	t.Logf("capture log:\n%s", logs)
 	for _, want := range []string{
-		"5 tables without undo",
-		"2 tables whose replica identity does not hold the primary key",
-		"2 tables with no replica identity",
+		// The startup warning is the production one (the gate is off for
+		// this test's capture only): every table below FULL, not captured.
+		"9 tables not at REPLICA IDENTITY FULL",
+		"their changes are NOT captured",
 		"table without undo",
 		"has no replica identity",
 		"replica identity does not hold its primary key",
@@ -669,7 +685,7 @@ func TestCapturer_PartitionOwnIdentity_Integration(t *testing.T) {
 			// The health panel's two lists, from the same read.
 			undo, not := pgcapture.HealthTableLists(ids, nil, event.Filters{})
 			t.Logf("health lists: without undo %q, not captured %q", undo, not)
-			if tc.skipped != (len(not) == 1 && strings.HasPrefix(not[0], "public.nf_pid ")) || tc.skipped == (len(undo) == 1) {
+			if len(undo) != 0 || len(not) != 1 || !strings.HasPrefix(not[0], "public.nf_pid ") {
 				t.Errorf("health lists: without undo %q, not captured %q; skipped=%v", undo, not, tc.skipped)
 			}
 
@@ -1071,7 +1087,7 @@ func TestCapturer_DeferrableKeyAtStart_TableSkippedOthersCaptured(t *testing.T) 
 		t.Fatal(err)
 	}
 	undo, not := pgcapture.HealthTableLists(ids, keys, event.Filters{})
-	if !slices.Equal(undo, []string{"public.defstart_a (relreplident=d)"}) || !slices.Equal(not, []string{"public.defstart_t (primary key DEFERRABLE)"}) {
+	if len(undo) != 0 || !slices.Equal(not, []string{"public.defstart_a (not at REPLICA IDENTITY FULL)", "public.defstart_t (primary key DEFERRABLE)"}) {
 		t.Errorf("health lists: without undo %q, not captured %q", undo, not)
 	}
 
