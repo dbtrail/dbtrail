@@ -55,8 +55,8 @@ func TestIntegrationPGResumeRemovesWhatWasIndexedPastThePosition(t *testing.T) {
 				t.Fatalf("CreateIndexTables: %v", err)
 			}
 			leftAt(t, db, 0x100, 1)
-			reached := leftAt(t, db, 0x200, 2)
-			leftAt(t, db, 0x200, 3) // the same transaction, at the position: stays
+			leftAt(t, db, 0x200, 2)
+			reached := leftAt(t, db, 0x200, 3) // the same transaction, at the position: stays
 			// Past the position: a whole transaction committed and not
 			// saved, and part of one still arriving.
 			leftAt(t, db, 0x300, 4)
@@ -67,15 +67,18 @@ func TestIntegrationPGResumeRemovesWhatWasIndexedPastThePosition(t *testing.T) {
 			}
 			saved(t, db, 0x200, reached)
 
-			n, err := deleteEventsPastCheckpointPG(ctx, db, 0x200)
+			n, floor, err := deleteEventsPastCheckpointPG(ctx, db, 0x200)
 			if err != nil || n != 3 {
 				t.Fatalf("removed %d rows, %v; want the 3 past 200", n, err)
 			}
 			if got := lsnsLeft(t, db); got != "100:1 200:2 200:3 " {
 				t.Fatalf("the index holds %q; want the three rows at or before the position", got)
 			}
+			if want := uint64(max(reached, 0)); floor != want {
+				t.Fatalf("returned event %d; want %d, the one the save recorded", floor, want)
+			}
 			// Again: nothing is past the position now.
-			if n, err := deleteEventsPastCheckpointPG(ctx, db, 0x200); err != nil || n != 0 {
+			if n, _, err := deleteEventsPastCheckpointPG(ctx, db, 0x200); err != nil || n != 0 {
 				t.Fatalf("a second pass removed %d rows, %v", n, err)
 			}
 		})
@@ -87,7 +90,7 @@ func TestIntegrationPGResumeRemovesWhatWasIndexedPastThePosition(t *testing.T) {
 			t.Fatalf("CreateIndexTables: %v", err)
 		}
 		leftAt(t, db, 0x300, 4)
-		if n, err := deleteEventsPastCheckpointPG(ctx, db, 0); err != nil || n != 0 {
+		if n, _, err := deleteEventsPastCheckpointPG(ctx, db, 0); err != nil || n != 0 {
 			t.Fatalf("removed %d rows, %v", n, err)
 		}
 	})
@@ -104,10 +107,32 @@ func TestIntegrationPGResumeRemovesWhatWasIndexedPastThePosition(t *testing.T) {
 		leftAt(t, db, 0x200, 2)
 		reached := leftAt(t, db, 0x300, 3)
 		saved(t, db, 0x300, reached)
-		if n, err := deleteEventsPastCheckpointPG(ctx, db, 0x100); err != nil || n != 2 {
-			t.Fatalf("removed %d rows, %v; want the 2 past 100", n, err)
+		if n, floor, err := deleteEventsPastCheckpointPG(ctx, db, 0x100); err != nil || n != 2 || floor != 0 {
+			t.Fatalf("removed %d rows (event %d), %v; want the 2 past 100 and no event: the save is of another position", n, floor, err)
 		}
 		if got := lsnsLeft(t, db); got != "100:1 " {
+			t.Fatalf("the index holds %q", got)
+		}
+	})
+
+	// Rows AT the position written after the event its save recorded: a
+	// part of that transaction indexed again (a table taken since) by a run
+	// that stopped before its commit. They go; the rows the save covered stay.
+	t.Run("rows at the position past the recorded event", func(t *testing.T) {
+		db, _ := testutil.CreateTestDB(t)
+		if err := indexer.CreateIndexTables(ctx, db, 4, false, nil); err != nil {
+			t.Fatalf("CreateIndexTables: %v", err)
+		}
+		leftAt(t, db, 0x100, 1)
+		reached := leftAt(t, db, 0x200, 2)
+		leftAt(t, db, 0x200, 3) // written again after the save
+		leftAt(t, db, 0x300, 4)
+		saved(t, db, 0x200, reached)
+		n, floor, err := deleteEventsPastCheckpointPG(ctx, db, 0x200)
+		if err != nil || n != 2 || floor != uint64(reached) {
+			t.Fatalf("removed %d rows (event %d), %v; want 2 and event %d", n, floor, err, reached)
+		}
+		if got := lsnsLeft(t, db); got != "100:1 200:2 " {
 			t.Fatalf("the index holds %q", got)
 		}
 	})

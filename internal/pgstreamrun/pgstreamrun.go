@@ -171,6 +171,28 @@ type pgStreamState struct {
 	// durable and may be saved again before this run commits anything (a
 	// flag LSN on a first run is not).
 	resumed bool
+	// resendLSN is, on a resumed run until the first commit arrives, the
+	// saved position this run started from: the commit LSN of the last
+	// transaction the index holds whole (a position is saved only after the
+	// rows of every transaction up to it are committed to the index).
+	// PostgreSQL sends that transaction again: a resumed slot decodes every
+	// transaction whose commit record starts at or after the requested
+	// start (SnapBuildXactNeedsSkip skips only commits before it), and the
+	// position is that commit's own start. Its rows and TRUNCATE markers
+	// that the index holds are not indexed a second time; those of a table
+	// capture did not take then (the filter widened since) are indexed now
+	// (resendHeldRow). 0 otherwise, and 0 when the index records no event
+	// for the position (resendFloor): it then gets the duplicate, as before,
+	// rather than risk a drop. A slot that is already past the position does
+	// not send it again; the first commit then is a later one, and clears
+	// this before anything was dropped.
+	resendLSN uint64
+	// resendFloor is the event the save of resendLSN recorded
+	// (pg_checkpoint_event_id), computed with that transaction whole in the
+	// index: what the index holds of it is at or below this event, and the
+	// rows of it above were written again after (a partial re-delivery, which
+	// the start removes: deleteEventsPastCheckpointPG).
+	resendFloor uint64
 	// sentThrough is the newest walsender position (EventSentThrough, #2746)
 	// below which every commit is in the index; saved with each checkpoint
 	// in pg_sent_through_lsn. 0 until this run has received one.
@@ -292,9 +314,15 @@ func One(ctx context.Context, cfg Config) error {
 	// to arrive again (deleteEventsPastCheckpointPG). Before the capturer
 	// exists: nothing new is indexed while this runs.
 	if saved != nil {
-		n, err := deleteEventsPastCheckpointPG(ctx, indexDB, startLSN)
+		n, floor, err := deleteEventsPastCheckpointPG(ctx, indexDB, startLSN)
 		if err != nil {
 			return err
+		}
+		if floor != 0 {
+			state.resendLSN, state.resendFloor = startLSN, floor
+		} else {
+			logger.Info("pgstreamrun: the index records no event for the saved position, so the transaction there, which the source sends again, is indexed again too",
+				"resume_lsn", pglogrepl.LSN(startLSN).String())
 		}
 		if n > 0 {
 			logger.Info("pgstreamrun: removed the changes indexed past the saved position; the source sends them again from there",
@@ -657,7 +685,9 @@ var checkpointSoonest = 150 * time.Millisecond
 // uncommitted in an index transaction until its commit (#2391), and the checkpoint
 // stays at the last commit, so a crash resumes at a transaction boundary and
 // PostgreSQL re-delivers the in-flight tail; only a transaction split past the
-// caps can leave part of itself in the index to be delivered again. This is the #491 invariant. The order at every checkpoint is
+// caps can leave part of itself in the index to be delivered again. PostgreSQL
+// also sends again the transaction AT the saved commit LSN, which the index holds
+// whole; its rows are dropped on arrival (pgStreamState.resendLSN). This is the #491 invariant. The order at every checkpoint is
 // flush → saveCheckpointPG → AckCommitted: PostgreSQL WAL is released only after the
 // rows are durably indexed AND the checkpoint is durably persisted.
 func streamLoopPG(
@@ -816,6 +846,12 @@ func streamLoopPG(
 	if state.resumed {
 		lastCommitLSN = state.lsn
 	}
+	// resentDropped counts the rows and TRUNCATE markers of the transaction
+	// at the saved position that arrived again and were not indexed
+	// (pgStreamState.resendLSN); resendHeld says, per "schema.table", whether
+	// the index holds that table's part of it (resendHeldRow).
+	var resentDropped int64
+	resendHeld := map[string]bool{}
 	// snapshotByTable maps "schema.table" → the snapshot_id of that table's most
 	// recent EventRelation (#533). Per-TABLE, not a single scalar: pgoutput sends a
 	// RelationMessage once per relation per session, so a second table's snapshot
@@ -1034,6 +1070,23 @@ func streamLoopPG(
 			}
 			switch ev.EventType {
 			case event.EventCommit:
+				// The first commit of a resumed run ends the transaction
+				// PostgreSQL may send again (pgStreamState.resendLSN).
+				if state.resendLSN != 0 {
+					switch {
+					case resentDropped == 0:
+					case ev.EndPos == state.resendLSN:
+						logger.Info("pgstreamrun: the source sent again the transaction at the saved position, which the index already holds; it is not indexed twice",
+							"commit_lsn", pglogrepl.LSN(ev.EndPos).String(), "changes_not_indexed_again", resentDropped)
+					default:
+						// Cannot happen with proto_version 1 (no interleaved
+						// transactions): changes at the saved position were
+						// dropped, and the commit that followed is another one.
+						logger.Warn("pgstreamrun: changes at the saved position were not indexed again, but the transaction that ended next is not the one at the saved position",
+							"saved_lsn", pglogrepl.LSN(state.resendLSN).String(), "commit_lsn", pglogrepl.LSN(ev.EndPos).String(), "changes_not_indexed_again", resentDropped)
+					}
+					state.resendLSN = 0
+				}
 				// The boundary: record the commit LSN; its rows are already in the
 				// writer (pgoutput delivers them before the commit).
 				lastCommitLSN = ev.EndPos
@@ -1056,6 +1109,17 @@ func streamLoopPG(
 				// cursor) and does NOT force a flush of the in-flight batch. A crash
 				// before the next checkpoint re-delivers the TRUNCATE and re-records a
 				// benign duplicate marker.
+				//
+				// A TRUNCATE of the transaction at the saved position that the
+				// index already records is not recorded again
+				// (pgStreamState.resendLSN). An inferred change has its own check
+				// just below.
+				if state.resendLSN != 0 && ev.EndPos == state.resendLSN && !strings.HasPrefix(ev.DDLQuery, event.InferredDDLPrefix) {
+					if resendHeldMarker(ctx, indexDB, ev, logger) {
+						resentDropped++
+						continue
+					}
+				}
 				if dup, err := inferredSeen.recorded(indexDB, ev); err != nil {
 					return fmt.Errorf("pgstreamrun: check for an already recorded %s on %s.%s: %w", ev.DDLType, ev.Schema, ev.Table, err)
 				} else if dup {
@@ -1094,6 +1158,21 @@ func streamLoopPG(
 			case event.EventGTID:
 				// PostgreSQL does not emit a leading GTID marker; ignore defensively.
 			default:
+				// A row of the transaction at the saved position, sent again,
+				// of a table whose part of it the index holds
+				// (pgStreamState.resendLSN).
+				if state.resendLSN != 0 && ev.StartPos == state.resendLSN {
+					key := ev.Schema + "." + ev.Table
+					held, seen := resendHeld[key]
+					if !seen {
+						held = resendHeldRow(ctx, indexDB, ev, state.resendFloor, logger)
+						resendHeld[key] = held
+					}
+					if held {
+						resentDropped++
+						continue
+					}
+				}
 				state.metrics.received(ev.Timestamp, time.Now())
 				ev.SchemaVersion = snapshotByTable[ev.Schema+"."+ev.Table]
 				if err := w.Add(ev); err != nil {
@@ -1102,6 +1181,84 @@ func streamLoopPG(
 			}
 		}
 	}
+}
+
+// resendCheckTimeout bounds each of resendHeldRow's and resendHeldMarker's
+// reads: a read that does not answer in time indexes the change again
+// (a duplicate) instead of stopping capture. A variable so a test can
+// shorten it.
+var resendCheckTimeout = 10 * time.Second
+
+// resendHeldRow reports whether the index holds ev, a row of the
+// transaction at the saved position that PostgreSQL sent again: a row of
+// the same table and key at the same commit LSN, at or below floor (the
+// event the save of that position recorded with the transaction whole in
+// the index). The answer is the table's: the index holds a transaction's
+// rows whole for every table capture took when it was indexed, and none of
+// a table it did not take (one added to --tables or --schemas since, or
+// whose rows were rotated away), whose rows must be indexed now.
+//
+// That rests on what capture takes being decided for a whole table, never
+// for part of one (--tables and --schemas name tables and schemas, matched
+// exactly), so one row of a table at this position answers for all of them.
+// Names are compared exactly too (BINARY): the index's collation folds case,
+// and PostgreSQL's "Foo" and foo are two tables, so "Foo" held must not
+// answer for foo.
+//
+// The read goes through the key's index, bounded to the commit's second
+// (event_timestamp is the commit time cut to the second), so a key changed
+// millions of times is not read through its whole history. A read that
+// fails or does not answer within resendCheckTimeout says false, with a
+// warning: the row is indexed a second time, never dropped, and capture
+// goes on.
+func resendHeldRow(ctx context.Context, db *sql.DB, ev event.Event, floor uint64, logger *slog.Logger) bool {
+	rctx, cancel := context.WithTimeout(ctx, resendCheckTimeout)
+	defer cancel()
+	at := ev.Timestamp.Truncate(time.Second)
+	var one int
+	err := db.QueryRowContext(rctx, `SELECT 1 FROM binlog_events FORCE INDEX (idx_pk_hash)
+		WHERE schema_name = ? AND table_name = ? AND pk_hash = SHA2(?, 256)
+		  AND event_timestamp BETWEEN ? AND ?
+		  AND BINARY schema_name = ? AND BINARY table_name = ?
+		  AND pk_values = ? AND start_pos = ? AND event_id <= ? LIMIT 1`,
+		ev.Schema, ev.Table, ev.PKValues, at.Add(-time.Second), at.Add(time.Second),
+		ev.Schema, ev.Table, ev.PKValues, ev.StartPos, floor).Scan(&one)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false
+	case err != nil:
+		if ctx.Err() == nil {
+			logger.Warn("pgstreamrun: could not read whether the index holds this table's part of the transaction at the saved position; it is indexed again, so it may be in the index twice",
+				"schema", ev.Schema, "table", ev.Table, "commit_lsn", pglogrepl.LSN(ev.StartPos).String(), "error", err)
+		}
+		return false
+	}
+	return true
+}
+
+// resendHeldMarker reports whether schema_changes already records ev, a
+// TRUNCATE marker of the transaction at the saved position that PostgreSQL
+// sent again (resendHeldRow says why it is asked, not assumed). A read that
+// fails says false, with a warning: the marker is recorded again.
+func resendHeldMarker(ctx context.Context, db *sql.DB, ev event.Event, logger *slog.Logger) bool {
+	rctx, cancel := context.WithTimeout(ctx, resendCheckTimeout)
+	defer cancel()
+	var one int
+	err := db.QueryRowContext(rctx, `SELECT 1 FROM schema_changes
+		WHERE schema_name = ? AND table_name = ? AND BINARY schema_name = ? AND BINARY table_name = ?
+		  AND binlog_pos = ? AND ddl_type = ? LIMIT 1`,
+		ev.Schema, ev.Table, ev.Schema, ev.Table, ev.EndPos, string(ev.DDLType)).Scan(&one)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false
+	case err != nil:
+		if ctx.Err() == nil {
+			logger.Warn("pgstreamrun: could not read whether the index records this TRUNCATE of the transaction at the saved position; it is recorded again",
+				"schema", ev.Schema, "table", ev.Table, "commit_lsn", pglogrepl.LSN(ev.EndPos).String(), "error", err)
+		}
+		return false
+	}
+	return true
 }
 
 // loadStreamStatePG loads the single-row checkpoint (id=1) for a PostgreSQL source.
@@ -1155,8 +1312,16 @@ func loadStreamStatePG(db *sql.DB) (*pgStreamState, error) {
 // row was in the index twice, for every reader, for good.
 //
 // Every row of a PostgreSQL transaction carries its commit LSN as its
-// position, so "past lsn" is exactly what arrives again. lsn 0 (no position
-// to resume from) removes nothing.
+// position. PostgreSQL sends again every transaction whose commit is at or
+// past lsn: the ones past it are removed here, and the one at it, which the
+// index holds whole (the position is saved only after its rows are
+// committed), stays and is not indexed a second time when it arrives
+// (pgStreamState.resendLSN). Removing it here instead would lose it for good
+// when the slot is already past the position (PostgreSQL then does not send
+// it again), and until it arrived again would leave the saved position, read
+// meanwhile by the console in the same process, naming a transaction the
+// index does not hold. lsn 0 (no position to resume from)
+// removes nothing.
 //
 // The index has no key on the position. The event the saved position
 // reached (stream_state.pg_checkpoint_event_id, #2756) bounds the rows from
@@ -1164,25 +1329,39 @@ func loadStreamStatePG(db *sql.DB) (*pgStreamState, error) {
 // never selects: the position stays the filter, so a bound that is too low
 // only reads more rows. With none recorded (an index from before it was) the
 // whole table is read, once, at this start.
-func deleteEventsPastCheckpointPG(ctx context.Context, db *sql.DB, lsn uint64) (int64, error) {
+//
+// When the position saved IS lsn and that save recorded its event, the
+// rows AT lsn above that event are removed too, and the event is returned
+// (atFloor, else 0). That save ran with the transaction at lsn whole in the
+// index, so its rows there are at or below the event; rows of it above were
+// written again since, by a run that took a table the earlier one did not
+// and stopped before that transaction's commit (a part made visible past the
+// writer's caps, kept by a stop). Left, they would make the next start
+// believe the table's part is held (resendHeldRow) and drop the rest of it.
+func deleteEventsPastCheckpointPG(ctx context.Context, db *sql.DB, lsn uint64) (removed int64, atFloor uint64, err error) {
 	if lsn == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
-	var floor sql.NullInt64
-	err := db.QueryRowContext(ctx, `SELECT IF(binlog_position <= ?, pg_checkpoint_event_id, NULL)
-		FROM stream_state WHERE id = 1 AND flavor = ?`, lsn, pgFlavor).Scan(&floor)
+	var saved, floor sql.NullInt64
+	err = db.QueryRowContext(ctx, `SELECT binlog_position, IF(binlog_position <= ?, pg_checkpoint_event_id, NULL)
+		FROM stream_state WHERE id = 1 AND flavor = ?`, lsn, pgFlavor).Scan(&saved, &floor)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return 0, fmt.Errorf("pgstreamrun: read the event the saved position reached: %w", err)
+		return 0, 0, fmt.Errorf("pgstreamrun: read the event the saved position reached: %w", err)
 	}
 	where, args := `start_pos > ?`, []any{lsn}
 	if floor.Valid && floor.Int64 > 0 {
-		where, args = `event_id > ? AND start_pos > ?`, []any{floor.Int64, lsn}
+		op := ">"
+		if saved.Valid && uint64(saved.Int64) == lsn {
+			op, atFloor = ">=", uint64(floor.Int64)
+		}
+		where, args = `event_id > ? AND start_pos `+op+` ?`, []any{floor.Int64, lsn}
 	}
 	res, err := db.ExecContext(ctx, `DELETE FROM binlog_events WHERE `+where, args...)
 	if err != nil {
-		return 0, fmt.Errorf("pgstreamrun: remove the changes indexed past %s: %w", pglogrepl.LSN(lsn), err)
+		return 0, 0, fmt.Errorf("pgstreamrun: remove the changes indexed past %s: %w", pglogrepl.LSN(lsn), err)
 	}
-	return res.RowsAffected()
+	removed, err = res.RowsAffected()
+	return removed, atFloor, err
 }
 
 // loadCaptureSkipsPG reads the persisted capture-skip counters (the PostgreSQL
@@ -1442,8 +1621,10 @@ func lastIndexedChange(indexDB *sql.DB) func(schema, table string, beforeLSN uin
 // One transaction can change one table twice the same way (two ALTERs), so
 // existence is not enough: the n-th such change of a transaction is a resend
 // only when the index already holds more than n-1 of them. A resend emits
-// them in the same order. Other DDL markers are not checked (a TRUNCATE
-// recorded twice stays a benign duplicate, as before).
+// them in the same order. Other DDL markers are not checked here: a
+// TRUNCATE of the transaction at the saved position is not recorded again
+// (resendHeldMarker), and one past it, recorded before a crash and sent again,
+// stays a benign duplicate, as before.
 type inferredCounter struct{ emitted map[string]int }
 
 func (c *inferredCounter) reset() { c.emitted = nil }
