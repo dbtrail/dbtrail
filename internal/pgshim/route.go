@@ -278,6 +278,7 @@ func (s *session) copyFallback(err error, perr *pgErr) string {
 		return ""
 	}
 	var behind *sqlsandbox.BehindSourceError
+	var changed *sqlsandbox.MayHaveChangedError
 	var stopped *stoppedErr
 	switch {
 	case errors.As(err, &stopped), errors.Is(err, errCanceledByUser), errors.Is(err, errStatementTimeout):
@@ -287,6 +288,11 @@ func (s *session) copyFallback(err error, perr *pgErr) string {
 			return ReasonCopyAgeUnknown
 		}
 		return ReasonCopyBehindSource
+	case errors.As(err, &changed):
+		// The copy's recent changes were not ready for a statement that had
+		// to have them (RunOptions.NeedTails, #3086): the moment's, as the
+		// answer it would have given and copyOlderThanSource held back.
+		return ReasonCopyTooOld
 	case busyReason(err) != "":
 		// Not a fallback: the statement is refused (copyFailed).
 		return busyReason(err)
@@ -441,7 +447,7 @@ func busyOnCopy(d routeDecision) bool { return d.side == RouteCopy && isBusyReas
 // of the copy held, and the statement goes to MySQL as copy_too_old), with
 // the source's answer as the earlier one.
 func (s *session) copyOlderThanSource(waited, apart bool) string {
-	if apart || !s.src.any() || s.bound == nil || s.bound.RunAge == nil || !s.canFallBack() {
+	if !s.holdsBackCopy(apart) {
 		return ""
 	}
 	a := s.bound.RunAge()
@@ -454,6 +460,16 @@ func (s *session) copyOlderThanSource(waited, apart bool) string {
 		return "the copy read a table from its snapshot alone, which can be older than what the source answered this connection before"
 	}
 	return "the copy did not wait for what the source answered this connection before"
+}
+
+// holdsBackCopy reports whether copyOlderThanSource decides on the copy's
+// answer to a statement (apart as it is given there): only then is an
+// answer read from a snapshot alone held back, and only then is the copy
+// told before it runs that it must have the recent changes
+// (RunOptions.NeedTails, #3086). One condition for both, so the copy is never
+// refused a statement whose answer would have been given.
+func (s *session) holdsBackCopy(apart bool) bool {
+	return !apart && s.src.any() && s.bound != nil && s.bound.RunAge != nil && s.canFallBack()
 }
 
 // positionWarnEvery is how often a connection that cannot learn the source's

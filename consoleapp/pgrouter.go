@@ -1050,7 +1050,7 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 				schema = pgPortSchema
 			}
 			sess := sqlsandbox.Session{PostgresRules: true, PostgresNames: true, TimeZone: opts.TimeZone}
-			res, err := copySQL.Run(ctx, statement, schema, sess)
+			res, err := copySQL.Run(pgRunContext(ctx, opts), statement, schema, sess)
 			if err == nil && !opts.Probe {
 				// How old what it read was, for /status (#2756), kept once
 				// the port says the client got it (bound.Routed).
@@ -1073,6 +1073,17 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		}
 		return bound, nil
 	}
+}
+
+// pgRunContext is the context a statement of the port runs on the copy
+// under: one whose answer the port gives only with its tables' recent
+// changes (opts.NeedTails) is refused before it runs when they are not ready
+// (console.WithPGNeedTails, #3086).
+func pgRunContext(ctx context.Context, opts pgshim.RunOptions) context.Context {
+	if opts.NeedTails {
+		return console.WithPGNeedTails(ctx)
+	}
+	return ctx
 }
 
 // pgHiddenBarred is why nothing is sent to the source of a server that hides

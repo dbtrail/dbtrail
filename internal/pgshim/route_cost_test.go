@@ -475,11 +475,25 @@ type costLogin struct {
 	// of 7 when it is not nil; catalogErr the same for its catalog.
 	copyErr    func(st string) error
 	catalogErr func() error
+	// tailsPending is a copy whose tables' recent changes are not ready: a
+	// statement asked to have them (RunOptions.NeedTails) is refused before
+	// it runs, as the host's copy refuses it (#3086); any other runs from
+	// the snapshot. needTails records what each statement asked.
+	tailsPending atomic.Bool
+	needTails    []bool
+	// barred, when set, is the server's Forward.Barred.
+	barred func() string
 	// notCaptured, when set, is Binding.NotCaptured.
 	notCaptured func(context.Context) ([]TableNotCaptured, error)
 }
 
-func (l *costLogin) run(_ context.Context, st string, _ RunOptions) (sqlsandbox.Result, error) {
+func (l *costLogin) run(_ context.Context, st string, opts RunOptions) (sqlsandbox.Result, error) {
+	l.mu.Lock()
+	l.needTails = append(l.needTails, opts.NeedTails)
+	l.mu.Unlock()
+	if opts.NeedTails && l.tailsPending.Load() {
+		return sqlsandbox.Result{}, &sqlsandbox.MayHaveChangedError{Reason: "fresh mode: the newest captured changes of public.t are not ready yet"}
+	}
 	l.runs.Add(1)
 	if l.copyErr != nil {
 		if err := l.copyErr(st); err != nil {
@@ -502,7 +516,7 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 		l.notes = append(l.notes, n)
 	}}
 	if l.src != nil {
-		b.Forward = &Forward{DSN: l.src.dsn(), Limit: 4, Cost: l.cost, Acquire: func(ctx context.Context) (func(), bool) {
+		b.Forward = &Forward{DSN: l.src.dsn(), Limit: 4, Cost: l.cost, Barred: l.barred, Acquire: func(ctx context.Context) (func(), bool) {
 			if l.refuse {
 				return nil, false
 			}
@@ -544,6 +558,13 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 	}
 	b.NotCaptured = l.notCaptured
 	return b, nil
+}
+
+// lastNeedTails is what the copy's last statement asked of its tails.
+func (l *costLogin) lastNeedTails() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.needTails) > 0 && l.needTails[len(l.needTails)-1]
 }
 
 func (l *costLogin) last() RouteNote {
