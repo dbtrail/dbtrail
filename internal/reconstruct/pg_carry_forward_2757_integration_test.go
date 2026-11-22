@@ -45,6 +45,10 @@ func (f *pgFixture) sameFile(a, b string) bool {
 // carried file's floor, and the snapshot's readers are said to start where
 // the carried file's footer says.
 func TestReconstructTables_PGCarryForwardUnchanged(t *testing.T) {
+	// The carry of a table that did not change, and a table that did written
+	// in full: with deltas on (the default) the change of the third update
+	// would be a pair beside the file (pg_pair_chain_3082_integration_test).
+	reconstruct.SetPGTableDeltas(t, false)
 	ctx := context.Background()
 	f := newPGFixture(t)
 	root := t.TempDir()

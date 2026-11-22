@@ -16,6 +16,10 @@ import (
 // file as it is; once capture is past the position, or the run holds every
 // change below it, the changes are laid over the file as always.
 func TestReconstructTables_PGUpdateWaitsForCaptureToPassAFullRead(t *testing.T) {
+	// What the hold publishes, read from the table file: past the read the
+	// changes are written into it in full, which with deltas on (the default)
+	// would be a pair beside it instead.
+	reconstruct.SetPGTableDeltas(t, false)
 	// Row 1 changed at 0x600 ("first") and at 0x700 ("second"); the full
 	// read opened at 0x800, so its file holds "second". Its floor is 0x500.
 	setup := func(t *testing.T, since string) (*pgFixture, string, time.Time) {
