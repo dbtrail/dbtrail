@@ -34,12 +34,21 @@ func TestIntegrationPGNeedTailsRefusesBeforeRunning_3086(t *testing.T) {
 	r.s.tailCapturesHook = func(string) (func(string, string) bool, bool) {
 		return func(string, string) bool { return true }, true
 	}
-	// The tails never get ready in time: the wait is spent after the
-	// published views were read, so each table is still pending past it.
-	var hold atomic.Bool
-	r.s.tailsFreshHook = func(step string) {
-		if step == "published" && hold.Load() {
-			time.Sleep(freshTailsWait + 200*time.Millisecond)
+	// The tails never get ready in time: the index's events are locked
+	// while the statement runs, so its table's tail is still being built
+	// when fresh mode's wait ends, as a large table's is.
+	lock := func(t *testing.T) func() {
+		t.Helper()
+		c, err := r.db.Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.ExecContext(context.Background(), "LOCK TABLES binlog_events WRITE"); err != nil {
+			t.Fatal(err)
+		}
+		return func() {
+			_, _ = c.ExecContext(context.Background(), "UNLOCK TABLES")
+			_ = c.Close()
 		}
 	}
 	// views_for runs before the statement: counted to show where it stopped.
@@ -62,8 +71,8 @@ func TestIntegrationPGNeedTailsRefusesBeforeRunning_3086(t *testing.T) {
 			tbl := r.table(nil)
 			r.change(tbl.Table, event.EventUpdate, "1", "paid", "binlog.000008", 100, time.Now().UTC().Add(-time.Hour).Truncate(time.Second))
 			stmt := "SELECT CAST(id AS VARCHAR) || '=' || status FROM shop." + tbl.Table + " ORDER BY id"
-			hold.Store(true)
-			defer hold.Store(false)
+			unlock := lock(t)
+			defer unlock()
 			before := viewsFor.Load()
 			res, err := q.Run(tc.ctx(context.Background()), stmt, "", tc.sess)
 			if viewsFor.Load() == before {
