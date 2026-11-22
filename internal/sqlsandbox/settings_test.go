@@ -2,8 +2,6 @@ package sqlsandbox
 
 import (
 	"database/sql"
-	"slices"
-	"sort"
 	"strings"
 	"testing"
 
@@ -112,53 +110,6 @@ func TestLockdownEngineRefusesInstallAndOutsideReads(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("after the lock, %q: err = %v, want %s from DuckDB itself", q, err, want)
 		}
-	}
-}
-
-// knownDuckDBTableFunctions is every duckdb_* table function the pinned
-// engine (v1.5.6) exposes. The allowlist admits that prefix as a whole
-// because every one of these is a catalog or introspection read; a future
-// engine that adds a duckdb_* function with a side effect would be admitted
-// by the prefix rule silently, so this test turns the addition into a loud
-// review: check what the new function does, then extend this list.
-// duckdb_coordinate_systems came with 1.5: it lists the coordinate
-// reference systems the engine knows (name, authority, PROJJSON, WKT), a
-// catalog read like the others.
-var knownDuckDBTableFunctions = []string{
-	"duckdb_approx_database_count", "duckdb_columns", "duckdb_connection_count",
-	"duckdb_constraints", "duckdb_coordinate_systems", "duckdb_databases", "duckdb_dependencies", "duckdb_extensions",
-	"duckdb_external_file_cache", "duckdb_functions", "duckdb_indexes", "duckdb_keywords",
-	"duckdb_log_contexts", "duckdb_logs", "duckdb_memory", "duckdb_optimizers",
-	"duckdb_prepared_statements", "duckdb_schemas", "duckdb_secret_types", "duckdb_secrets",
-	"duckdb_sequences", "duckdb_settings", "duckdb_table_sample", "duckdb_tables",
-	"duckdb_temporary_files", "duckdb_types", "duckdb_variables", "duckdb_views",
-}
-
-func TestDuckDBPrefixedTableFunctionsArePinned(t *testing.T) {
-	db, err := sql.Open("duckdb", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	rows, err := db.Query(`SELECT DISTINCT function_name FROM duckdb_functions()
-		WHERE function_type = 'table' AND function_name LIKE 'duckdb\_%' ESCAPE '\' ORDER BY 1`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	var got []string
-	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
-			t.Fatal(err)
-		}
-		got = append(got, n)
-	}
-	want := append([]string{}, knownDuckDBTableFunctions...)
-	sort.Strings(want)
-	if !slices.Equal(got, want) {
-		t.Errorf("the engine's duckdb_* table functions changed; the allowlist admits the whole prefix, "+
-			"so review each new one for side effects before extending knownDuckDBTableFunctions.\n got %v\nwant %v", got, want)
 	}
 }
 

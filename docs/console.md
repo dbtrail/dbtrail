@@ -1859,6 +1859,13 @@ The limits, so a query can never hurt capture:
   `duckdb_tables()`), or that names a table the copy does not have, gets
   every table, so the list is complete and a misspelled name is still
   answered with the closest real one.
+- The engine's catalog functions that list schemas, tables and columns
+  (`duckdb_tables()`, `duckdb_columns()`, `duckdb_schemas()`,
+  `duckdb_views()` and the like) answer; those that show the engine's own
+  settings, secrets, extensions, caches, temporary files, variables or logs
+  (`duckdb_settings()`, `pg_settings`, `getvariable()`, `SHOW VARIABLES`,
+  `current_setting()` of a setting that holds a path, ...) are refused, and
+  an error never names a folder of the host: the folder reads `<hidden>`.
 - On a MySQL or MariaDB server, text ignores case as MySQL's default
   collation does (`'Paid' = 'paid'`
   is true, `GROUP BY` and `SELECT DISTINCT` fold case), and NULLs sort first

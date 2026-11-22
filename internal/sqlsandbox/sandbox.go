@@ -1722,9 +1722,14 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 	}
 	// finish hands a spooled result over with its file open (openSpool),
 	// which from then on is the caller's to close.
+	// A refusal or an engine error is the one text a client reads from the
+	// engine: the host's folders are taken out of it here (#3096).
 	finish := func(res Result, err error) (Result, error) {
-		if err != nil || !res.spooled {
-			return res, err
+		if err != nil {
+			return res, hideHostPathsInError(err, r.hostRoots(job, spill, spoolDir))
+		}
+		if !res.spooled {
+			return res, nil
 		}
 		if spoolDir == "" {
 			return Result{}, &WorkerError{Err: errors.New("the worker wrote its result to a file it was given no folder for")}
