@@ -45,7 +45,7 @@ func TestPGTailCaptureLoss_droppedChanges(t *testing.T) {
 		{name: "the same name in another case is another table", skips: ledger(read.Add(time.Minute), false, "public.Orders")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			why := pgTailCaptureLoss(state(tc.skips), read, "public", "orders")
+			why := pgTailCaptureLoss(state(tc.skips), 0, read, "public", "orders")
 			if (why != "") != tc.refused {
 				t.Fatalf("pgTailCaptureLoss = %q, want refused=%v", why, tc.refused)
 			}
@@ -58,7 +58,28 @@ func TestPGTailCaptureLoss_droppedChanges(t *testing.T) {
 	// A slot loss still refuses whatever the ledger says.
 	st := state(sql.NullString{})
 	st.GapLostAt = sql.NullTime{Time: read.Add(time.Minute), Valid: true}
-	if pgTailCaptureLoss(st, read, "public", "orders") == "" {
+	if pgTailCaptureLoss(st, 0, read, "public", "orders") == "" {
 		t.Error("a lost slot after the source read must refuse")
+	}
+}
+
+// The snapshot's read time is the source's clock (pgbaseline reads it with
+// the server's now()) and a drop's time is the daemon's (parser.SkipCounters).
+// With the daemon's clock 2 minutes behind the source, a drop committed
+// AFTER the snapshot's LSN is dated before its read time: by the clocks it
+// would look covered by the snapshot. The ledger also records the drop's
+// commit LSN, and that says it came after: refused.
+func TestPGTailCaptureLoss_daemonClockBehindTheSource(t *testing.T) {
+	t.Skip("passes once pgLedgerSkipped calls reconstruct.PGSkippedSince (#3189), which compares WAL positions; until then the rule compares the two clocks")
+	read := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	const snapshotLSN = 0x16B374D848
+	doc, err := json.Marshal(map[string]any{"replica_identity_not_full": map[string]any{
+		"count": 1, "last_at": read.Add(-2 * time.Minute), "last_pos": snapshotLSN + 4096, "tables": []string{"public.orders"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &status.StreamStateInfo{Mode: "gtid", GapColumnsPresent: true, CaptureSkips: sql.NullString{String: string(doc), Valid: true}}
+	if why := pgTailCaptureLoss(st, snapshotLSN, read, "public", "orders"); why == "" {
+		t.Error("a drop after the snapshot's LSN, dated before its read by a clock 2 minutes behind, must refuse")
 	}
 }

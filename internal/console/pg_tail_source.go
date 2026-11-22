@@ -225,6 +225,10 @@ func (x *pgTailSource) Holds(ctx context.Context, m tailMark) (bool, error) {
 // the floor committed before, or why the table has no tail.
 type pgCut struct {
 	refusal string
+	// gap: the refusal is a snapshot (or the table delta beside it)
+	// published over a known loss of captured changes: a loss of capture,
+	// for the PostgreSQL port (pgNotCapturedOf).
+	gap     bool
 	md      baseline.DumpMetadata
 	floor   uint64
 	from    *query.BinlogPos
@@ -255,7 +259,9 @@ func (x *pgTailSource) cut(t views.BaselineTable) pgCut {
 		return refuse("the snapshot of %s does not say it was read at one moment of the source", name)
 	}
 	if md.CaptureGap != "" {
-		return refuse("the snapshot of %s was published over a known loss of captured changes", name)
+		c := refuse("the snapshot of %s was published over a known loss of captured changes", name)
+		c.gap = true
+		return c
 	}
 	since, from, proven, err := reconstruct.PGDeltaWindow(md, at)
 	switch {
@@ -272,9 +278,11 @@ func (x *pgTailSource) cut(t views.BaselineTable) pgCut {
 	// with every update, was built again from nothing at each one (the same
 	// floor is not a later cut, so the old tail could not stand for it), and
 	// statements were answered without it meanwhile.
-	pair, why := x.pairCut(t, name, md, at)
+	pair, why, gap := x.pairCut(t, name, md, at)
 	if why != "" {
-		return refuse("%s", why)
+		c := refuse("%s", why)
+		c.gap = gap
+		return c
 	}
 	if pair != nil {
 		return pgCut{md: md, floor: pair.floor, from: pair.from, since: pair.since}
@@ -287,36 +295,38 @@ func (x *pgTailSource) cut(t views.BaselineTable) pgCut {
 // .pgnew file, which is the footer a table file written by the same update
 // would carry. Whatever keeps it from being read is a refusal, never the
 // file's floor instead: a tail from there is the one this replaces.
-func (x *pgTailSource) pairCut(t views.BaselineTable, name string, file baseline.DumpMetadata, at time.Time) (*pgCut, string) {
+//
+// gap: the refusal is the delta's being published over a known loss.
+func (x *pgTailSource) pairCut(t views.BaselineTable, name string, file baseline.DumpMetadata, at time.Time) (_ *pgCut, refusal string, gap bool) {
 	dead, rows, err := pgdelta.Paths(t.Path, 0)
 	if err != nil {
-		return nil, ""
+		return nil, "", false
 	}
 	_, deadErr := os.Lstat(dead)
 	_, rowsErr := os.Lstat(rows)
 	if errors.Is(deadErr, os.ErrNotExist) && errors.Is(rowsErr, os.ErrNotExist) {
-		return nil, ""
+		return nil, "", false
 	}
 	if deadErr != nil || rowsErr != nil {
-		return nil, fmt.Sprintf("the table delta beside the copy of %s is not whole, or cannot be asked about", name)
+		return nil, fmt.Sprintf("the table delta beside the copy of %s is not whole, or cannot be asked about", name), false
 	}
 	md, err := x.s.copyCuts.footer(rows)
 	if err != nil {
-		return nil, fmt.Sprintf("the table delta beside the copy of %s could not be read: %v", name, err)
+		return nil, fmt.Sprintf("the table delta beside the copy of %s could not be read: %v", name, err), false
 	}
 	if md.CaptureGap != "" {
-		return nil, fmt.Sprintf("the table delta beside the copy of %s was published over a known loss of captured changes", name)
+		return nil, fmt.Sprintf("the table delta beside the copy of %s was published over a known loss of captured changes", name), true
 	}
 	since, from, proven, err := reconstruct.PGDeltaWindow(md, at)
 	switch {
 	case err != nil:
-		return nil, fmt.Sprintf("the table delta beside the copy of %s: %v", name, err)
+		return nil, fmt.Sprintf("the table delta beside the copy of %s: %v", name, err), false
 	case from == nil || !proven || md.LSN == 0:
-		return nil, fmt.Sprintf("the table delta beside the copy of %s does not record an LSN to continue from", name)
+		return nil, fmt.Sprintf("the table delta beside the copy of %s does not record an LSN to continue from", name), false
 	case md.LSN < file.LSN:
-		return nil, fmt.Sprintf("the table delta beside the copy of %s ends before its file was written", name)
+		return nil, fmt.Sprintf("the table delta beside the copy of %s ends before its file was written", name), false
 	}
-	return &pgCut{floor: md.LSN, from: from, since: since}, ""
+	return &pgCut{floor: md.LSN, from: from, since: since}, "", false
 }
 
 // Cut is where Fill starts t's window, as the keeper orders it. A PostgreSQL
@@ -884,7 +894,7 @@ func (x *pgTailSource) shapesFrom(ctx context.Context, snapshotID int64, from ui
 // pgTailBroken is one table's answer to Broken, "" when its tail can go on.
 func pgTailBroken(ctx context.Context, db *sql.DB, t views.BaselineTable, c pgCut, st *status.StreamStateInfo, shapes []metadata.PGShape) (string, error) {
 	name := t.Schema + "." + t.Table
-	if why := pgTailCaptureLoss(st, baseline.SourceReadOf(c.md).At, t.Schema, t.Table); why != "" {
+	if why := pgTailCaptureLoss(st, c.md.LSN, baseline.SourceReadOf(c.md).At, t.Schema, t.Table); why != "" {
 		return why, nil
 	}
 	rel, ok, err := baseline.ParsePGRelation(c.md.PGRelation)
@@ -947,7 +957,11 @@ func sameStringSet(a, b []string) bool {
 // A NULL ledger is no drop: PostgreSQL captures from before the ledger never
 // wrote one, and they stopped instead of dropping. One that is there and does
 // not parse refuses.
-func pgTailCaptureLoss(st *status.StreamStateInfo, sourceRead time.Time, schema, table string) string {
+//
+// readLSN is the snapshot's own LSN (its footer's), for the ledger's rule
+// (pgLedgerSkipped). The snapshot's read time is the SOURCE's clock and a
+// drop's time the daemon's, so they are not compared here.
+func pgTailCaptureLoss(st *status.StreamStateInfo, readLSN uint64, sourceRead time.Time, schema, table string) string {
 	switch {
 	case st == nil:
 		return "the capture's state is not recorded in the index"
@@ -958,6 +972,19 @@ func pgTailCaptureLoss(st *status.StreamStateInfo, sourceRead time.Time, schema,
 	case st.GapLostAt.Valid && !st.GapLostAt.Time.Before(sourceRead):
 		return "capture lost events since the snapshot's rows were read from the source"
 	}
+	return pgLedgerSkipped(st, readLSN, sourceRead, schema, table)
+}
+
+// pgLedgerSkipped is the ledger's part of pgTailCaptureLoss: why capture's
+// record of dropped changes says the table may have lost changes since its
+// snapshot was read, "" when it does not.
+//
+// The one call site of that rule for the copy. It is to call
+// reconstruct.PGSkippedSince (#3189), the rule the snapshot update applies,
+// once that is exported; until then it is the rule as it was, which compares
+// the snapshot's read time (the source's clock) with a drop's (the daemon's).
+func pgLedgerSkipped(st *status.StreamStateInfo, readLSN uint64, sourceRead time.Time, schema, table string) string {
+	_ = readLSN
 	if !st.CaptureSkips.Valid || strings.TrimSpace(st.CaptureSkips.String) == "" {
 		return ""
 	}

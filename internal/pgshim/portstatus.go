@@ -104,6 +104,7 @@ var reasonMeans = map[string]string{
 	ReasonCheapPlan:         "the statement is cheap on the source, by its plan there, and the copy has no index",
 	ReasonExplainFailed:     "the source's plan for the statement could not be had, so the source answers it",
 	ReasonCopyTooOld:        "the copy could not show it had caught up with what the source already answered this connection about a table the statement reads",
+	ReasonTableNotCaptured:  "the statement reads a table whose capture lost or dropped changes since its snapshot, so the copy holds old rows of it",
 	ReasonSourceUnreachable: "the source could not be asked for the statement's plan, so the copy answered as it does without one",
 }
 

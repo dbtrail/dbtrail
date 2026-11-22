@@ -2065,6 +2065,7 @@ The reasons, with the MySQL port's names where they mean the same:
 | source | `copy_refused` | the copy could not run it |
 | source | `copy_columns_differ` | a column the copy writes otherwise (a `numeric` without precision) |
 | source | `copy_behind_source`, `copy_age_unknown` | the server's lag limit |
+| source | `table_not_captured` | in fresh mode, a table whose capture lost or dropped changes since its snapshot was read (a table capture skips, a capture ledger that does not say which tables or cannot be read, a lost slot): the copy holds that table as of its snapshot only. Without a forwarding user, or on a server that hides tables, the copy answers it from that snapshot, as before |
 | refused | `read_only` | not a read |
 | refused | `copy_queue_full` | for the copy, whose workers were all taken and the line for one full: refused with `53000`, not sent to the source; run it again |
 | refused | `copy_wait_timeout` | for the copy, it waited for a worker as long as `--max-wait` lets it: refused with `53000`, not sent to the source; run it again |

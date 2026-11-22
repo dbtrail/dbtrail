@@ -1,0 +1,152 @@
+package console
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/go-sql-driver/mysql"
+
+	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/status"
+	"github.com/dbtrail/dbtrail/internal/views"
+)
+
+// PGTableNotCaptured is a table of a PostgreSQL server's copy whose capture
+// lost or dropped changes since its snapshot's rows were read from the
+// source (PGTablesNotCaptured).
+type PGTableNotCaptured struct {
+	Schema, Table, Why string
+	// SnapshotRead is when its snapshot's rows were read from the source
+	// (the source's clock), for the notice of a connection that cannot send
+	// the statement there; zero when not known.
+	SnapshotRead time.Time
+}
+
+// PGTablesNotCaptured lists the tables of this connection's copy whose tail
+// is refused for a loss of capture (pgTailCaptureLoss): changes the capture
+// dropped (a table below REPLICA IDENTITY FULL, a deferrable key), a ledger
+// of drops that does not say which tables, or cuts its list short, a ledger
+// that cannot be read, a slot lost since the snapshot's rows were read. Such
+// a table is read from its snapshot alone, which no later change reaches: the
+// PostgreSQL port sends a statement that reads one to the source
+// (pgshim.Binding.NotCaptured).
+//
+// A snapshot, or the table delta beside it, published over a known loss of
+// captured changes is listed too: its rows are known to miss changes.
+//
+// Only where the server's statements read tails (fresh mode): in fast mode
+// every table is read from its snapshot alone, by the operator's choice.
+// A table whose tail is refused for another reason (its snapshot does not
+// record a position, or when its rows were read; a MySQL delta beside it) is
+// not listed: it is not a loss of capture.
+//
+// The ledger is read strictly: status.LoadStreamState reads it best effort,
+// and an error there would read as no drop. When the capture's state cannot
+// be read, every table is listed.
+func (q *SQLOnCopy) PGTablesNotCaptured(ctx context.Context) ([]PGTableNotCaptured, error) {
+	if q == nil || q.s == nil || q.b == nil || q.b.db == nil || !q.s.pgTailsFor(q.id, q.b) || !q.s.tailsOnFor(q.id) {
+		return nil, nil
+	}
+	in, err := q.s.buildViewsInput(ctx, q.b, viewsRequest{PinSnapshot: true, OmitEvents: true, StateOnly: true, ForStatement: true, LocalCopy: true, ApplyHidden: true})
+	if err != nil {
+		return nil, fmt.Errorf("list the copy's tables: %w", err)
+	}
+	if len(in.Baselines) == 0 {
+		return nil, nil
+	}
+	st, unreadable := pgCaptureLossState(ctx, q.b.db)
+	src := newPGTailSource(q.s, q.b)
+	return pgNotCapturedOf(in.Baselines, src.cut, st, unreadable), nil
+}
+
+// pgNotCapturedOf is PGTablesNotCaptured over tables, with each one's cut
+// read by cutOf and the capture's state st; unreadable, when not "", is why
+// that state could not be read, and lists every table.
+func pgNotCapturedOf(tables []views.BaselineTable, cutOf func(views.BaselineTable) pgCut, st *status.StreamStateInfo, unreadable string) []PGTableNotCaptured {
+	var out []PGTableNotCaptured
+	for _, t := range tables {
+		if unreadable != "" {
+			out = append(out, PGTableNotCaptured{Schema: t.Schema, Table: t.Table, Why: unreadable})
+			continue
+		}
+		c := cutOf(t)
+		if c.gap {
+			// Published over a known loss: its rows are known to miss
+			// changes, a loss of capture whatever the ledger says.
+			out = append(out, PGTableNotCaptured{Schema: t.Schema, Table: t.Table, Why: c.refusal})
+			continue
+		}
+		if c.refusal != "" {
+			continue // no tail for another reason: not a loss of capture
+		}
+		read := baseline.SourceReadOf(c.md).At
+		if read.IsZero() {
+			continue // when its rows were read is not recorded: not a loss either
+		}
+		if why := pgTailCaptureLoss(st, c.md.LSN, read, t.Schema, t.Table); why != "" {
+			out = append(out, PGTableNotCaptured{Schema: t.Schema, Table: t.Table, Why: why, SnapshotRead: read})
+		}
+	}
+	return out
+}
+
+// pgCaptureLossState is the capture's state with its ledger of dropped
+// changes read strictly, or why it could not be read. A ledger column the
+// index does not have yet is no ledger, as LoadStreamState reads it.
+func pgCaptureLossState(ctx context.Context, db *sql.DB) (*status.StreamStateInfo, string) {
+	st, err := status.LoadStreamState(ctx, db)
+	if err != nil {
+		// The error's own text (an address, an account of the index) is the
+		// log's: the reason reaches a client of the port.
+		pgWarnLossStateUnread(err)
+		return nil, "the capture's state could not be read from the index (DBTrail's log has the details)"
+	}
+	if st == nil || !st.GapColumnsPresent {
+		// pgTailCaptureLoss refuses both itself.
+		return st, ""
+	}
+	var skips sql.NullString
+	err = db.QueryRowContext(ctx, "SELECT capture_skips FROM stream_state WHERE id = 1").Scan(&skips)
+	var my *mysql.MySQLError
+	switch {
+	case err == nil:
+		st.CaptureSkips = skips
+	case errors.As(err, &my) && my.Number == 1054, errors.Is(err, sql.ErrNoRows):
+		// No ledger column (an index from before it), or the row went
+		// between the two reads: as LoadStreamState has it.
+	default:
+		pgWarnLossStateUnread(err)
+		return nil, "the capture's record of dropped changes could not be read from the index (DBTrail's log has the details)"
+	}
+	return st, ""
+}
+
+// pgLossStateWarned is when pgWarnLossStateUnread last said so at warn
+// level, for the process.
+var pgLossStateWarned struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+// pgWarnLossStateUnread logs that the capture's state could not be read for
+// the PostgreSQL port: at warn level at most once a minute, at debug level
+// in between, since it is asked before every statement for the copy.
+func pgWarnLossStateUnread(err error) {
+	pgLossStateWarned.mu.Lock()
+	due := time.Since(pgLossStateWarned.at) >= time.Minute
+	if due {
+		pgLossStateWarned.at = time.Now()
+	}
+	pgLossStateWarned.mu.Unlock()
+	const msg = "console: the capture's state could not be read; the PostgreSQL port takes every table of the copy as not kept whole"
+	if due {
+		slog.Warn(msg+" (said once a minute)", "error", err)
+		return
+	}
+	slog.Debug(msg, "error", err)
+}
