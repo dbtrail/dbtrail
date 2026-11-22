@@ -137,6 +137,18 @@ func FindBaseline(ctx context.Context, source, schema, table string, at time.Tim
 	// Only ever earlier: a chain start cannot be after the directory that holds
 	// it, and a footer claiming otherwise is ignored rather than trusted.
 	start, derr := deltaChainStart(ctx, path)
+	if derr == nil && start.IsZero() {
+		// The same rule for a PostgreSQL table file with its own table delta
+		// beside it (#2757, #3082): the file was carried forward from the
+		// snapshot that read its rows, and the chain beside it starts there.
+		// For a MySQL or MariaDB file this looks for two names and returns the
+		// zero time.
+		pgStart, perr := pgChainStartOf(ctx, path)
+		if perr != nil {
+			return "", time.Time{}, StaleWarning{}, fmt.Errorf("%s.%s: %w", schema, table, perr)
+		}
+		start = pgStart
+	}
 	if derr != nil {
 		// The delta is there and cannot say where its chain began (half a
 		// pair, an unreadable footer). The delta is optional; the bound is
