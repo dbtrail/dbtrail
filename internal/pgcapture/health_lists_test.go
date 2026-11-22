@@ -7,9 +7,10 @@ import (
 	"github.com/dbtrail/dbtrail/internal/event"
 )
 
-// What the health panel is given: the tables captured without undo, and the
-// ones not captured. A table is in one list only, and a table outside the
-// capture's scope is in neither.
+// What the health panel is given: every table below REPLICA IDENTITY FULL in
+// the capture's scope is in the list of tables not captured, each with why,
+// and the list of tables without undo (what 0.138.0 captured) stays empty. A
+// table outside the capture's scope is in neither.
 func TestHealthTableLists(t *testing.T) {
 	ids := []TableIdentity{
 		{Schema: "public", Table: "orders", Identity: "d"},
@@ -27,11 +28,13 @@ func TestHealthTableLists(t *testing.T) {
 		{Schema: "other", Table: "out_too", Constraint: "k"},
 	}
 	undo, not := HealthTableLists(ids, deferrable, event.Filters{Schemas: map[string]bool{"public": true}})
-	wantUndo := []string{"public.events (relreplident=f, 1 partition(s) not FULL)", "public.orders (relreplident=d)"}
+	wantUndo := []string{}
 	wantNot := []string{
 		"public.accounts (replica identity without the primary key)",
+		"public.events (1 partition(s) not at REPLICA IDENTITY FULL)",
 		"public.ledger (primary key DEFERRABLE)",
 		"public.logs (1 partition(s) with a replica identity without the primary key)",
+		"public.orders (not at REPLICA IDENTITY FULL)",
 		"public.queue (primary key DEFERRABLE)",
 	}
 	if !slices.Equal(undo, wantUndo) || !slices.Equal(not, wantNot) {

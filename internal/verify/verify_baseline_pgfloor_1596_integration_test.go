@@ -82,7 +82,30 @@ func TestVerifyBaselinePair_PGRacedTruncate(t *testing.T) {
 	}
 }
 
+// A table whose capture dropped changes since the older snapshot's rows were
+// read (a table not at REPLICA IDENTITY FULL): the replay would miss them, so
+// the pair is not compared, and says why and what to run.
+func TestVerifyBaselinePair_PGNotCovered(t *testing.T) {
+	got := verifyPGPairWith(t, false, `{"replica_identity_not_full":{"count":1,"last_at":"2026-11-21T12:00:00Z","last_pos":1536,"tables":["public.orders"]}}`)
+	t.Logf("%s: %s", got.Status, got.Detail)
+	if got.Status != StatusInconclusive || !strings.Contains(got.Detail, "capture dropped changes of public.orders") ||
+		!strings.Contains(got.Detail, "REPLICA IDENTITY FULL") {
+		t.Fatalf("status = %q (%s); want not compared, with the reason", got.Status, got.Detail)
+	}
+	// A drop below the older snapshot's floor is in its rows: compared.
+	if got := verifyPGPairWith(t, false, `{"replica_identity_not_full":{"count":1,"last_at":"2026-11-21T12:00:00Z","last_pos":1024,"tables":["public.orders"]}}`); got.Status != StatusMatch {
+		t.Fatalf("a drop below the floor: status = %q (%s); want match", got.Status, got.Detail)
+	}
+}
+
 func verifyPGPair(t *testing.T, truncate bool) TableResult {
+	t.Helper()
+	return verifyPGPairWith(t, truncate, "")
+}
+
+// verifyPGPairWith is verifyPGPair with the capture's ledger of dropped
+// changes set to ledger ("" = no capture state).
+func verifyPGPairWith(t *testing.T, truncate bool, ledger string) TableResult {
 	t.Helper()
 	db, dbName := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, db)
@@ -90,6 +113,9 @@ func verifyPGPair(t *testing.T, truncate bool) TableResult {
 		t.Fatalf("EnsureSchema: %v", err)
 	}
 	const schema = "public"
+	if ledger != "" {
+		testutil.MustExec(t, db, "INSERT INTO stream_state (id, mode, flavor, last_checkpoint, server_id, capture_skips) VALUES (1, 'gtid', 'postgres', NOW(), 1, ?)", ledger)
+	}
 	if _, err := metadata.WritePGSnapshot(context.Background(), db, &metadata.PGRelationSchema{OID: 16600, Schema: schema, Table: "orders",
 		Columns: []metadata.PGRelationColumn{{Name: "id", Ordinal: 1, IsPK: true, TypeOID: 23, TypeMod: -1}, {Name: "status", Ordinal: 2, TypeOID: 25, TypeMod: -1}}}); err != nil {
 		t.Fatal(err)

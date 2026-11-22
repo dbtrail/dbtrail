@@ -38,17 +38,22 @@ Prerequisites on the source (validated at startup, fails loud otherwise):
   - wal_level = logical
   - a PUBLICATION covering the tables you want indexed (--publication)
 
-REPLICA IDENTITY FULL is optional, and needed only for undo. A table without it
-is captured and everything else works on it (history, the copy, snapshots);
-PostgreSQL sends only the key of the row an UPDATE or a DELETE changed, so
-'recover' refuses those changes. The log names each such table as "without
-undo" with the ALTER TABLE that makes its later changes undoable (the table then
-writes more WAL).
+Every replicated table must also be at REPLICA IDENTITY FULL, and so must each
+partition of a partitioned table (so the WAL carries the whole earlier row of an
+UPDATE and a DELETE). On PostgreSQL 18, run 'doctor' before putting a table with
+a generated column at FULL: one that the publication does not publish makes
+PostgreSQL refuse the application's UPDATE and DELETE on it.
 
 Some tables are NOT captured, while the others keep flowing. Their changes are
 skipped, the log names the table with the statement to run, and 'status' reports
 capture as degraded under one of these reasons:
 
+  replica_identity_not_full
+      the table, or one of its partitions, is not at REPLICA IDENTITY FULL
+      (DEFAULT, USING INDEX or NOTHING); its INSERTs are skipped too. 'doctor'
+      fails on it, so 'server add' and the web interface's Start do not add or
+      start the server until it is fixed; a capture already running skips the
+      table alone
   replica_identity_index_without_primary_key
       the table's replica identity (or that of one of its partitions) is an
       index that leaves a primary-key column out

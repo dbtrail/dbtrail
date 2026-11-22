@@ -232,8 +232,10 @@ func TestDecode_NullVsEmptyVsToastMarker(t *testing.T) {
 	// RI-DEFAULT-style UPDATE with no old tuple (key unchanged) → before-image is
 	// nil, so a 'u' cannot be resolved and falls back to the structural marker
 	// (the never-drop floor for the out-of-support case). Exercises three distinct
-	// stored forms: nil (NULL), "" (empty string), and the marker.
-	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil)
+	// stored forms: nil (NULL), "" (empty string), and the marker. Such an
+	// UPDATE is dropped by the gate on tables below REPLICA IDENTITY FULL
+	// (decoder_require_full_test.go); this pins the code behind it.
+	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil, pgcapture.WithCaptureBelowFull())
 	mustDecode(t, d, relMsg(1, "public", "t", "id", "a", "b", "c"))
 	mustDecode(t, d, beginMsg())
 
@@ -267,7 +269,9 @@ func TestDecode_NullVsEmptyVsToastMarker(t *testing.T) {
 // changes the marker's shape (say, adds a second key): without it the matcher
 // would go silently blind — every read-side guard green while detecting nothing.
 func TestDecode_ToastMarkerMatchedByReadSideGuard(t *testing.T) {
-	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil)
+	// The gate is off: an UPDATE with no old tuple is dropped by it, and this
+	// pins the marker the code behind it emits.
+	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil, pgcapture.WithCaptureBelowFull())
 	mustDecode(t, d, relMsg(1, "public", "t", "id", "body"))
 	mustDecode(t, d, beginMsg())
 
@@ -345,8 +349,15 @@ func TestDecode_PKColumnDriftSkipsTheTable(t *testing.T) {
 		t.Run(string(rune(ri)), func(t *testing.T) {
 			var buf bytes.Buffer
 			skips := parser.NewSkipCounters(slog.New(slog.DiscardHandler))
+			opts := []pgcapture.DecoderOption{pgcapture.WithSkipCounters(skips)}
+			if ri != 'f' {
+				// The drift is found before the identity: with the gate on
+				// the table at DEFAULT stays skipped after the fix, under
+				// replica_identity_not_full.
+				opts = append(opts, pgcapture.WithCaptureBelowFull())
+			}
 			d := pgcapture.NewDecoder(pkResolver("ghost"), event.Filters{},
-				slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})), pgcapture.WithSkipCounters(skips))
+				slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})), opts...)
 			old := relMsg(1, "public", "t", "id", "v")
 			old.ReplicaIdentity = ri
 			old.Columns[0].Flags = 1
@@ -380,12 +391,11 @@ func TestDecode_PKColumnDriftSkipsTheTable(t *testing.T) {
 	}
 }
 
-func TestDecode_NonFullReplicaIdentityRelationIsCaptured(t *testing.T) {
+func TestDecode_NonFullReplicaIdentityRelationIsSkipped(t *testing.T) {
 	// A relation that arrives NOT at REPLICA IDENTITY FULL (a table added to a
-	// publication after startup, say) is cached and described like any other: its
-	// rows are captured, the earlier row of an UPDATE or DELETE in part. The rest
-	// of this behavior is pinned in decoder_nofull_test.go; what is still skipped,
-	// in decoder_skip_ri_test.go.
+	// publication after startup, say) does not fail the stream: it is skipped,
+	// with no description emitted. The rest of the gate is pinned in
+	// decoder_require_full_test.go.
 	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil)
 	rel := relMsg(1, "public", "t", "id", "v")
 	rel.ReplicaIdentity = 'd' // default, not FULL
@@ -394,8 +404,8 @@ func TestDecode_NonFullReplicaIdentityRelationIsCaptured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a relation not at REPLICA IDENTITY FULL must not fail the stream: %v", err)
 	}
-	if !emit || ev.EventType != event.EventRelation || ev.Table != "t" {
-		t.Errorf("a relation below FULL must emit its EventRelation, got emit=%v %+v", emit, ev)
+	if emit {
+		t.Errorf("a relation below FULL is skipped and emits no description, got %+v", ev)
 	}
 }
 
@@ -851,7 +861,7 @@ func TestDecode_TimescaleChunk_WarnsOnce(t *testing.T) {
 
 // TestDecode_TimescaleChunk_WarnsWhenNotFull locks that the TimescaleDB signal (#559)
 // is given for a chunk relation that is NOT at REPLICA IDENTITY FULL too, beside the
-// warning that the chunk's changes cannot be undone.
+// warning that the chunk is not captured.
 func TestDecode_TimescaleChunk_WarnsWhenNotFull(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
@@ -866,7 +876,7 @@ func TestDecode_TimescaleChunk_WarnsWhenNotFull(t *testing.T) {
 	if !strings.Contains(buf.String(), "TimescaleDB hypertable chunk detected") {
 		t.Fatalf("the TimescaleDB warning must fire for a non-FULL chunk too, got:\n%s", buf.String())
 	}
-	if !strings.Contains(buf.String(), "table without undo") || !strings.Contains(buf.String(), "REPLICA IDENTITY FULL") {
+	if !strings.Contains(buf.String(), "table is not at REPLICA IDENTITY FULL; its changes are NOT captured") {
 		t.Fatalf("the replica-identity warning must fire for a non-FULL chunk, got:\n%s", buf.String())
 	}
 }

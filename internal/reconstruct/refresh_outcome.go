@@ -18,6 +18,11 @@ const (
 	// from another numbering since the snapshot (#2160); a full snapshot fixes it.
 	RefreshVerdictRefusedRenumbered = "refused-renumbered"
 	RefreshVerdictSkipped           = "skipped"
+	// RefreshVerdictNotCovered: a PostgreSQL table capture dropped changes
+	// of since its rows were read, published as the last update left it
+	// (the same file, its footer and all) and not brought up to date
+	// (pgskips.go). It did not stop the run.
+	RefreshVerdictNotCovered = "not-covered"
 )
 
 // RefreshOutcome is one table's verdict in a refresh run.
@@ -58,6 +63,7 @@ func RefreshOutcomes(tables []string, reports []*TableReport, failures []TableFa
 	// most wants to see here: which tables are actually costing them a full
 	// rewrite each cycle.
 	unchanged := make(map[string]bool, len(reports))
+	notCovered := make(map[string]string, len(reports))
 	// With --table-deltas (#1638) "refreshed" alone would say the opposite of
 	// what happened for most tables: the file was NOT rewritten. The verdict
 	// stays "refreshed" (the table is current), and the detail says how.
@@ -69,6 +75,9 @@ func RefreshOutcomes(tables []string, reports []*TableReport, failures []TableFa
 		k := r.Schema + "." + r.Table
 		done[k] = true
 		unchanged[k] = r.CarriedForward
+		if r.NotCovered != "" {
+			notCovered[k] = r.NotCovered
+		}
 		switch {
 		case r.TableDelta && !r.DeltaPairWritten:
 			deltaDetail[k] = fmt.Sprintf("no events in the window; the previous file and its %d delta pairs were kept as they are (last pair %d)",
@@ -96,6 +105,8 @@ func RefreshOutcomes(tables []string, reports []*TableReport, failures []TableFa
 			out = append(out, RefreshOutcome{t, RefreshVerdictRefusedDDL, err.Error()})
 		case bad:
 			out = append(out, RefreshOutcome{t, RefreshVerdictRefused, err.Error()})
+		case done[t] && notCovered[t] != "":
+			out = append(out, RefreshOutcome{t, RefreshVerdictNotCovered, "published as the last update left it, not brought up to date: " + notCovered[t]})
 		case done[t] && unchanged[t]:
 			out = append(out, RefreshOutcome{t, RefreshVerdictUnchanged, "no events in the window; the previous file was published as-is"})
 		case done[t]:

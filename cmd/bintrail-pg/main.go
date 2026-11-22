@@ -53,8 +53,8 @@ provides the same query and recovery capabilities as the core bintrail binary.
 The index is self-contained — recovery does not depend on the PostgreSQL WAL or
 the replication slot still existing.
 
-REPLICA IDENTITY FULL on a replicated table is optional: without it the table
-is captured and everything works except undo of its UPDATE and DELETE. See
+Capture requires REPLICA IDENTITY FULL on every replicated table: a table that
+is not at FULL is not captured, and the other tables are. See
 'bintrail-pg stream --help'.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		observe.Setup(os.Stderr, logFormat, logLevel)

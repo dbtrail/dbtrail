@@ -243,6 +243,15 @@ func VerifyTablePG(ctx context.Context, cfg PGLiveConfig, schema, table string) 
 	if err != nil {
 		return res, fmt.Errorf("read baseline metadata %s.%s: %w", schema, table, err)
 	}
+	// Changes of the table the capture dropped since the baseline (a table
+	// not at REPLICA IDENTITY FULL): the comparison would report the
+	// capture's loss as a difference in the data. Not checked, and why.
+	if why, err := reconstruct.PGNotCovered(ctx, cfg.IndexDB, schema, table, bmeta); err != nil {
+		return res, fmt.Errorf("%s.%s: %w", schema, table, err)
+	} else if why != "" {
+		return inconclusive(res, withNote(why+"; the reconstruction would miss those changes, so the table is not compared. "+
+			"Fix the table on the source (for a table that is not at REPLICA IDENTITY FULL: ALTER TABLE ... REPLICA IDENTITY FULL), then take a full read of it", unpinnedNote)), nil
+	}
 	deltaSince, deltaFrom, deltaProven, err := reconstruct.PGDeltaWindow(bmeta, snapshotTime)
 	if err != nil {
 		return res, fmt.Errorf("%s.%s: %w", schema, table, err)
@@ -626,8 +635,14 @@ func stuckSentKey(sent uint64) string { return "sent " + formatLSN(sent) }
 // gapLostInWindow reports whether a stamped permanent loss falls inside the
 // comparison window (at-or-after its start). Pure — see indexCoversPG for why
 // a pre-window loss must not degrade the verdict.
+//
+// The loss is stamped by the capture daemon's clock and the window starts at
+// a snapshot dated by the PostgreSQL server's, and the loss records no WAL
+// position: a loss up to reconstruct.PGSkipClockMargin before the start
+// counts as inside, so a daemon clock behind the server's cannot make a loss
+// after the snapshot look older than it.
 func gapLostInWindow(gapLostAt sql.NullTime, windowStart time.Time) bool {
-	return gapLostAt.Valid && !gapLostAt.Time.Before(windowStart)
+	return gapLostAt.Valid && !gapLostAt.Time.Before(windowStart.Add(-reconstruct.PGSkipClockMargin))
 }
 
 // pgCoverageVerdict is the pure coverage decision for a PostgreSQL source —

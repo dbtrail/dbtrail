@@ -477,6 +477,8 @@ type costLogin struct {
 	catalogErr func() error
 	// sides, when set, is the server's Forward.Sides.
 	sides *CostSides
+	// notCaptured, when set, is Binding.NotCaptured.
+	notCaptured func(context.Context) ([]TableNotCaptured, error)
 }
 
 func (l *costLogin) run(_ context.Context, st string, _ RunOptions) (sqlsandbox.Result, error) {
@@ -542,6 +544,7 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 	if l.wait != nil {
 		b.CopyWait = l.wait
 	}
+	b.NotCaptured = l.notCaptured
 	return b, nil
 }
 
