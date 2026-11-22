@@ -237,9 +237,11 @@ func TestIntegrationPGRouterTableNotCapturedGoesToTheSource(t *testing.T) {
 	}
 }
 
-// A capture that cannot save its state (here a trigger of the index refuses
-// every write to stream_state) keeps its ledger of drops in memory only. A
-// snapshot just read on a quiet source is answered by the copy, as before;
+// Capture saves its state as soon as replication starts, so a quiet source
+// right after a full read is answered by the copy. A capture that cannot
+// save its state (here a trigger of the index refuses every write to
+// stream_state, and the row is removed) keeps its ledger of drops in memory
+// only. A snapshot just read is still answered by the copy;
 // once it is older than the bound, the PostgreSQL port takes such a capture
 // for one that cannot save, and the source answers the table with its
 // current rows. Fast mode, where nothing else would hold the copy back.
@@ -304,23 +306,6 @@ func TestIntegrationPGRouterNoCaptureStateGoesToTheSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// From here capture cannot save: every write to its state is refused,
-	// and the row it may have saved is gone.
-	idx, err := sql.Open("mysql", e.DSN)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = idx.Close() })
-	for _, s := range []string{
-		"CREATE TRIGGER pgnostate_no_insert BEFORE INSERT ON stream_state FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'refused by the test'",
-		"CREATE TRIGGER pgnostate_no_update BEFORE UPDATE ON stream_state FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'refused by the test'",
-		"DELETE FROM stream_state",
-	} {
-		if _, err := idx.ExecContext(ctx, s); err != nil {
-			t.Fatalf("%s: %v", s, err)
-		}
-	}
-
 	f.savePortFile(t, true, "tok")
 	srv, runner, err := newPGRouterConsole(f.settings(""), console.SQLPool{Workers: 2, Threads: 2})
 	if err != nil {
@@ -346,6 +331,36 @@ func TestIntegrationPGRouterNoCaptureStateGoesToTheSource(t *testing.T) {
 	reasonCount := func(reason string) uint64 { return routes.doc("").Servers[e.ID].Reasons[reason] }
 	read := "SELECT counter FROM " + table + " WHERE id = 1"
 
+	// Healthy capture on a quiet source: it saved its state as soon as
+	// replication started (an empty record of drops), and the copy answers.
+	idx, err := sql.Open("mysql", e.DSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = idx.Close() })
+	var skips sql.NullString
+	if err := idx.QueryRowContext(ctx, "SELECT capture_skips FROM stream_state WHERE id = 1").Scan(&skips); err != nil {
+		t.Fatalf("capture's state after replication started: %v", err)
+	}
+	if got := oneOn(read); got != "10" {
+		t.Fatalf("a quiet source, capture healthy: %q, want the copy's 10", got)
+	}
+	if n := reasonCount(pgshim.ReasonAnswersTheSame); n != 1 {
+		t.Errorf("answered by the copy %d times, want 1", n)
+	}
+
+	// From here capture cannot save: every write to its state is refused,
+	// and the row it may have saved is gone.
+	for _, s := range []string{
+		"CREATE TRIGGER pgnostate_no_insert BEFORE INSERT ON stream_state FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'refused by the test'",
+		"CREATE TRIGGER pgnostate_no_update BEFORE UPDATE ON stream_state FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'refused by the test'",
+		"DELETE FROM stream_state",
+	} {
+		if _, err := idx.ExecContext(ctx, s); err != nil {
+			t.Fatalf("%s: %v", s, err)
+		}
+	}
+
 	// Within the bound: the copy, as for a capture that has not saved yet.
 	if got := oneOn(read); got != "10" {
 		t.Fatalf("a snapshot just read, no state saved yet: %q, want the copy's 10", got)
@@ -353,8 +368,8 @@ func TestIntegrationPGRouterNoCaptureStateGoesToTheSource(t *testing.T) {
 	if time.Since(snapshotAt) >= time.Minute {
 		t.Fatalf("the young read came %s after the snapshot, past the bound: the test is too slow to show it", time.Since(snapshotAt))
 	}
-	if n := reasonCount(pgshim.ReasonAnswersTheSame); n != 1 {
-		t.Errorf("answered by the copy %d times, want 1", n)
+	if n := reasonCount(pgshim.ReasonAnswersTheSame); n != 2 {
+		t.Errorf("answered by the copy %d times, want 2", n)
 	}
 
 	// Past the bound: the source, with the change capture could not save.
