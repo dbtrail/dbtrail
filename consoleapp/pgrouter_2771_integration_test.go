@@ -611,8 +611,19 @@ func TestIntegrationPGRouterForward(t *testing.T) {
 		one(ctx, b, "BEGIN")
 		one(ctx, a, "ROLLBACK")
 		one(ctx, b, "ROLLBACK")
-		pgTestWait(t, "the connections to the source to close once no block is open", 10*time.Second, func() (bool, string) {
-			n := one(ctx, source, "SELECT count(*) FROM pg_stat_activity WHERE usename = '"+pgFwdRole+"' AND pid <> pg_backend_pid()")
+		// Kept for their clients between statements (#3046), never more than
+		// the port's limit, and ended when the clients leave.
+		held := func() string {
+			return one(ctx, source, "SELECT count(*) FROM pg_stat_activity WHERE usename = '"+pgFwdRole+"' AND pid <> pg_backend_pid()")
+		}
+		if n := held(); n != "1" && n != "2" {
+			t.Errorf("connections to the source kept between statements: %s, want at most the port's 2", n)
+		}
+		for _, cl := range []*pgconn.PgConn{a, b, c} {
+			cl.Close(ctx)
+		}
+		pgTestWait(t, "the connections to the source to close once their clients left", 10*time.Second, func() (bool, string) {
+			n := held()
 			return n == "0", n
 		})
 	})
