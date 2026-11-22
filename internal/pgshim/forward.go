@@ -168,8 +168,12 @@ type upstream struct {
 	cancelled atomic.Bool
 	// unpark, when set, is the connection kept idle between the client's
 	// statements (parkIdleSource): calling it takes it back from the
-	// port's pool, and reports whether it was still this client's.
-	unpark func() bool
+	// port's pool, and reports whether it was still this client's. parkedAt
+	// is when it was kept; kept is set once it was taken back for a later
+	// statement (loseSource).
+	unpark   func() bool
+	parkedAt time.Time
+	kept     bool
 }
 
 // forwarding reports whether this connection can send statements to its
@@ -359,8 +363,15 @@ func (s *session) parkIdleSource() {
 		s.closeSource()
 		return
 	}
-	up.unpark = s.bound.Forward.Park(up.terminate)
+	up.unpark, up.parkedAt = s.bound.Forward.Park(up.terminate), time.Now()
 }
+
+// sourceKeepIdle is how long a connection kept between statements may stay
+// idle and still be used: under the idle timeout of the NATs and load
+// balancers a connection can cross (4 minutes and more, and AWS NAT gateways
+// 350 s), which drop an idle connection without a word, so that one is not
+// used after such a drop. A variable so a test can shorten it.
+var sourceKeepIdle = 60 * time.Second
 
 // claimSource takes back a parked connection to the source (parkIdleSource)
 // before anything of the client's next message is done: what the pool
@@ -379,6 +390,12 @@ func (s *session) claimSource() {
 		s.up = nil
 		return
 	}
+	if time.Since(up.parkedAt) > sourceKeepIdle {
+		s.up = nil
+		up.terminate()
+		return
+	}
+	up.kept = true
 	if why := up.idleEnded(); why != "" {
 		s.logger.Debug("pgshim: the connection to the source kept between statements was ended while idle; another is opened", "why", why)
 		s.up = nil
@@ -486,13 +503,21 @@ func (s *session) loseSource(why string) {
 		return
 	}
 	pinned := s.up.inTx
+	// A connection kept between statements (parkIdleSource) on which nothing
+	// of the client's lives now is not the client's session: it was taken
+	// back for this statement only, and a new one is as good, as it was
+	// when each statement opened its own (#3046). The session is not ended
+	// for it.
+	kept := s.up.kept && !s.up.inTx && !s.up.inCycle && len(s.up.portals) == 0
 	if len(s.src.pending) > 0 {
 		// What the source sent on it will never be confirmed.
 		s.src.markAll()
 	}
 	s.logger.Warn("pgshim: the connection to the source is closed", "reason", why)
 	s.closeSource()
-	s.upLost = why
+	if !kept {
+		s.upLost = why
+	}
 	s.savepoints = nil
 	if pinned && s.txStatus() == 'T' {
 		s.markFailed()

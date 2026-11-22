@@ -208,3 +208,60 @@ func waitUntilTest(t *testing.T, what string, ok func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// A rule saved while the client keeps a connection, then removed: the kept
+// connection is ended, and the session reaches the source again afterwards
+// (a lost connection of the client's own would end that).
+func TestKeepSource_3046_barredThenAllowedAgain(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	src := startFakeSource(t, costPlans)
+	var mu sync.Mutex
+	why := ""
+	l := &costLogin{src: src, keep: &keptSources{}, barred: func() string { mu.Lock(); defer mu.Unlock(); return why }}
+	c := costPortConn(t, ctx, l)
+	if got := costSimple(ctx, c, l, keepLookup); got != keepAnswer {
+		t.Fatal(got)
+	}
+	mu.Lock()
+	why = "hidden rules"
+	mu.Unlock()
+	if got := costSimple(ctx, c, l, keepLookup); got.side != RouteCopy {
+		t.Fatalf("barred: %+v", got)
+	}
+	mu.Lock()
+	why = ""
+	mu.Unlock()
+	if got := costSimple(ctx, c, l, keepLookup); got != keepAnswer {
+		t.Errorf("allowed again: %+v, want the source's answer", got)
+	}
+}
+
+// A connection kept idle longer than sourceKeepIdle is not used: another is
+// opened.
+func TestKeepSource_3046_keptTooLong(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	defer func(d time.Duration) { sourceKeepIdle = d }(sourceKeepIdle)
+	sourceKeepIdle = 50 * time.Millisecond
+	l := &costLogin{src: startFakeSource(t, costPlans), keep: &keptSources{}}
+	c := costPortConn(t, ctx, l)
+	for range 2 {
+		if got := costSimple(ctx, c, l, keepLookup); got != keepAnswer {
+			t.Fatal(got)
+		}
+	}
+	if n := l.opened.Load(); n != 1 {
+		t.Fatalf("back to back: opened %d, want 1", n)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := costSimple(ctx, c, l, keepLookup); got != keepAnswer {
+		t.Fatal(got)
+	}
+	if n := l.opened.Load(); n != 2 {
+		t.Errorf("after the keep ran out: opened %d, want 2", n)
+	}
+	if n := l.held.Load(); n != 1 {
+		t.Errorf("%d held, want 1", n)
+	}
+}
