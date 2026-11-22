@@ -428,6 +428,16 @@ func MarkTableDeltaFiles(dir string, names []string) (map[string]*TableDeltaChai
 // because "could not look" read as "no delta" would silently hand the caller a
 // stale state or a fetch window that starts too late.
 func ListTableDelta(ctx context.Context, basePath string) (*TableDeltaChain, error) {
+	chain, _, err := ListTableDeltaNames(ctx, basePath)
+	return chain, err
+}
+
+// ListTableDeltaNames is ListTableDelta that also returns the names the
+// listing saw beside the base (every file whose name starts with the
+// table's), nil when the listing itself failed. A caller that has another
+// question about the same names (whether a PostgreSQL table delta is there)
+// asks it of these instead of listing again.
+func ListTableDeltaNames(ctx context.Context, basePath string) (*TableDeltaChain, []string, error) {
 	var dir string
 	var names []string
 	var err error
@@ -440,13 +450,17 @@ func ListTableDelta(ctx context.Context, basePath string) (*TableDeltaChain, err
 		names, err = localSiblingNames(dir)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("look for a table delta beside %s: %w", basePath, err)
+		return nil, nil, fmt.Errorf("look for a table delta beside %s: %w", basePath, err)
+	}
+	if names == nil {
+		names = []string{}
 	}
 	// The name after the last "/", and nothing else: a backslash is a legal
 	// character of a file name where this runs, and cutting there too gave a
 	// table named `a\orders` the chain of "orders" and hid its own (#2243).
 	stem := strings.TrimSuffix(basePath[strings.LastIndexByte(basePath, '/')+1:], ".parquet")
-	return TableDeltaChainIn(dir, names, stem)
+	chain, err := TableDeltaChainIn(dir, names, stem)
+	return chain, names, err
 }
 
 // TableDeltaChainIn is ListTableDelta over a listing already in hand: the

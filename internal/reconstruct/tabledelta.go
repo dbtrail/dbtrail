@@ -277,8 +277,18 @@ func deltaChainStart(ctx context.Context, basePath string) (time.Time, error) {
 // is a kept answer too ("no delta").
 var s3ChainStarts sync.Map
 
+// listTableDeltaNames is baseline.ListTableDeltaNames, a seam: a test counts
+// the listings a lookup makes.
+var listTableDeltaNames = baseline.ListTableDeltaNames
+
 func readDeltaChainStart(ctx context.Context, basePath string) (time.Time, error) {
-	chain, err := baseline.ListTableDelta(ctx, basePath)
+	chain, names, err := listTableDeltaNames(ctx, basePath)
+	if names != nil && strings.HasPrefix(basePath, "s3://") {
+		// The listing is of every name that starts with the table's, which
+		// is where a PostgreSQL table delta's pair 0 would be: noted, so
+		// FindBaseline asks the store nothing more about it (pgChainStart).
+		notePGPair0(basePath, names)
+	}
 	if err != nil || chain == nil {
 		return time.Time{}, err
 	}
