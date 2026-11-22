@@ -110,7 +110,7 @@ func TestReconstructTables_PGPairStepTimesAndOneKeyPass(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(prevLog) })
 
-	update := func(at time.Time) (passes uint64) {
+	update := func(at time.Time, pairs int) (passes uint64) {
 		t.Helper()
 		before := pgdelta.KeyNullPasses()
 		if _, _, _, err := f.run(root, pgRun{at: at, carry: true, chainFloor: f.base}); err != nil {
@@ -121,8 +121,8 @@ func TestReconstructTables_PGPairStepTimesAndOneKeyPass(t *testing.T) {
 		if want := source(); !sameRows(got, want) {
 			t.Fatalf("after the update at %s the snapshot holds %v, and the source %v", at.Format("15:04"), got, want)
 		}
-		if left := f.pairFiles(root, at); len(left) != 2 {
-			t.Fatalf("the update at %s left delta files %v, want one pair", at.Format("15:04"), left)
+		if left := f.pairFiles(root, at); len(left) != 2*pairs {
+			t.Fatalf("the update at %s left delta files %v, want %d pairs", at.Format("15:04"), left, pairs)
 		}
 		if !f.sameFile(f.tableFile(root, taken), f.tableFile(root, at)) {
 			t.Fatalf("the update at %s did not carry the full read's file", at.Format("15:04"))
@@ -135,7 +135,7 @@ func TestReconstructTables_PGPairStepTimesAndOneKeyPass(t *testing.T) {
 	change(0x720, 14*time.Minute, 1, "40", s("forty"))
 	f.checkpoint(0x720)
 	at1 := f.at(20 * time.Minute)
-	if n := update(at1); n != 1 {
+	if n := update(at1, 1); n != 1 {
 		t.Fatalf("the first update read the file's key columns for a NULL %d times, want once", n)
 	}
 
@@ -145,7 +145,7 @@ func TestReconstructTables_PGPairStepTimesAndOneKeyPass(t *testing.T) {
 	change(0x830, 35*time.Minute, 2, "5", s("five"))
 	f.checkpoint(0x830)
 	at2 := f.at(40 * time.Minute)
-	if n := update(at2); n != 0 {
+	if n := update(at2, 2); n != 0 {
 		t.Fatalf("the second update read the same file's key columns for a NULL %d times, want none", n)
 	}
 
@@ -161,7 +161,7 @@ func TestReconstructTables_PGPairStepTimesAndOneKeyPass(t *testing.T) {
 			fields[m[1]] = n
 		}
 		var sum int64
-		for _, k := range []string{"fetch_ms", "fold_ms", "positions_ms", "prev_dead_ms", "pair_write_ms"} {
+		for _, k := range []string{"fetch_ms", "fold_ms", "positions_ms", "pair_write_ms", "carry_ms"} {
 			v, ok := fields[k]
 			if !ok || v < 0 {
 				t.Fatalf("the line has no %s: %s", k, line)

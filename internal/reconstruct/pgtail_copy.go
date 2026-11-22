@@ -270,6 +270,21 @@ func PGCutCheck(basePath string) error {
 	return nil
 }
 
+// PGCutLastPair is the .pgnew file of the last pair of the chain beside the
+// table file at basePath, whose footer records where the chain's window
+// ends: the cut changes are laid over the file and its chain from (#3082).
+// "" for a table with no delta. A chain that is not whole is an error, never
+// an earlier pair's cut: from there the changes the later pairs hold would
+// be laid over them again, and a pair missing from the middle would read as
+// the table without it.
+func PGCutLastPair(basePath string) (string, error) {
+	_, rows, err := pgCutChain(basePath)
+	if err != nil || len(rows) == 0 {
+		return "", err
+	}
+	return rows[len(rows)-1], nil
+}
+
 // pgCutChain is the files of the table delta beside the table file at
 // basePath, one entry per pair in the chain's order, none for a table with
 // no delta. A chain that is not whole is an error: what the table holds

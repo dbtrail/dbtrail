@@ -62,8 +62,9 @@ type pgTableInput struct {
 //     it, and the fold would bring its rows back. By time only: the anchor is
 //     an LSN.
 //   - No MySQL table delta. A table that changed can be published as its
-//     previous file and a pair of PostgreSQL's own beside it (pgPairEligible,
-//     writePGPair), on unless PGTableDeltaEnv turns it off. A table with no change is carried
+//     previous file and a chain of pairs of PostgreSQL's own beside it, one
+//     per update (pgPairEligible, writePGPair, #3082), on unless
+//     PGTableDeltaEnv turns it off. A table with no change is carried
 //     forward only when its footer records its own time bound
 //     (pgCarryForwardEligible, #2757):
 //     a carried file keeps the previous floor and bound, and a bound the
@@ -72,14 +73,14 @@ type pgTableInput struct {
 //   - The window-empty skip is pgFoldBounds.empty, never
 //     windowEmptyByPosition: a window whose end equals its start holds the
 //     whole transaction at that LSN.
-//   - With a pair beside the previous file (pgPrevPairOf), the window is
-//     read from where that pair's ended, not from the file's floor: the
-//     pair holds every change before that, and the new one is written from
-//     it and the window (writePGPair). Every check below is then of that
-//     window: the update that wrote the pair made them of the one before.
-//     When such a run cannot end in a pair, or in the file and its pair
-//     carried as they are, nothing has been written and the table is done
-//     again from the file's floor, as it was before pairs were continued.
+//   - With a chain beside the previous file (pgPrevPairOf), the window is
+//     read from where its last pair's ended, not from the file's floor: the
+//     chain holds every change before that, and the new pair, holding the
+//     window alone, is published after it (writePGPair). Every check below
+//     is then of that window: the updates that wrote the chain made them of
+//     the ones before. When such a run cannot end in a pair, or in the file
+//     and its chain carried as they are, nothing has been written and the
+//     table is done again from the file's floor, which starts a new chain.
 func reconstructPGTable(ctx context.Context, cfg FullTableConfig, p pgTableInput, rep *TableReport, start time.Time) (*TableReport, error) {
 	if rel, err := checkPGFoldable(p.schema, p.table, p.bmeta); err == nil {
 		cols := make([]string, len(rel.Columns))

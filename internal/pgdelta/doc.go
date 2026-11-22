@@ -19,5 +19,6 @@
 // (StateSQL).
 //
 // This package writes and reads the files. It decides nothing about when a
-// pair is written or a chain ends, and nothing calls it yet.
+// pair is written or a chain ends: a snapshot update writes one pair per
+// window it publishes this way (internal/reconstruct, pgpair.go).
 package pgdelta

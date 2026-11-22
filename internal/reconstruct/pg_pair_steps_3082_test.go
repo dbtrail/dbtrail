@@ -7,7 +7,7 @@ import (
 
 // pgStepFields is every step field a pair line carries, the end of a pair's
 // with fold_pair_ms.
-var pgStepFields = []string{"fetch_ms", "fold_ms", "positions_ms", "prev_dead_ms", "pair_write_ms"}
+var pgStepFields = []string{"fetch_ms", "fold_ms", "positions_ms", "pair_write_ms", "carry_ms"}
 
 // checkPGStepFields fails t unless fields (a log line's, as numbers) holds
 // every step and total_ms, and the steps add up to no more than the total.
@@ -38,7 +38,7 @@ func TestPGPairStepsAttrs(t *testing.T) {
 	s := pgPairSteps{
 		start: time.Now().Add(-10 * time.Second),
 		fetch: 1500 * time.Millisecond, fold: 700 * time.Millisecond,
-		positions: 2 * time.Second, prevDead: 30 * time.Millisecond,
+		positions: 2 * time.Second, carry: 30 * time.Millisecond,
 		pairWrite: 3 * time.Second, foldPair: 900 * time.Millisecond,
 	}
 	for _, ending := range []bool{false, true} {

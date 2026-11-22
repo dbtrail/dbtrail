@@ -244,6 +244,12 @@ func (r *pgTailRig) update(table, id, from, to string, lsn uint64, d time.Durati
 // footer as an update records it; edit changes that footer.
 func (r *pgTailRig) pair(tbl views.BaselineTable, changes map[string]string, cut uint64, edit func(md map[string]string)) {
 	r.t.Helper()
+	r.pairAt(tbl, 0, changes, cut, edit)
+}
+
+// pairAt is pair for pair seq of the chain, written after pair seq-1 (#3082).
+func (r *pgTailRig) pairAt(tbl views.BaselineTable, seq int, changes map[string]string, cut uint64, edit func(md map[string]string)) {
+	r.t.Helper()
 	stamp := r.at.Format(time.RFC3339)
 	md := map[string]string{
 		baseline.MetaKeySnapshotTimestamp: stamp,
@@ -268,8 +274,12 @@ func (r *pgTailRig) pair(tbl views.BaselineTable, changes map[string]string, cut
 	if err != nil {
 		r.t.Fatal(err)
 	}
+	prevRun := ""
+	if seq > 0 {
+		prevRun = fmt.Sprintf("run-%d", seq-1)
+	}
 	_, _, _, err = pgdelta.WritePair(pgdelta.PairInput{
-		BasePath: tbl.Path, Seq: 0, Base: "base-of-" + tbl.Table, Run: "run-0",
+		BasePath: tbl.Path, Seq: seq, Base: "base-of-" + tbl.Table, Run: fmt.Sprintf("run-%d", seq), PrevRun: prevRun,
 		Columns: []string{"id", "status"}, KeyColumns: []string{"id"}, Positions: at, Metadata: md,
 		Changes: func(yield func(pgdelta.Change) error) error {
 			for _, k := range keys {
@@ -724,6 +734,47 @@ func TestIntegrationPGTailSource(t *testing.T) {
 		// read as the file has them. (The view reads the delta between.)
 		if got, want := r.state(ctx, tbl), []string{"1=one", "2=two", "3=three"}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("state %v, want %v: the tail holds changes the delta already holds, or misses the one after it", got, want)
+		}
+	})
+
+	// #3082: one pair per update, each after the one before. The view reads
+	// the file and every pair; the tail starts at the LAST pair's cut.
+	t.Run("a chain of table deltas beside the file: the tail starts at the last pair's cut", func(t *testing.T) {
+		tbl := r.table(nil, [2]string{"1", "one"}, [2]string{"2", "two"})
+		r.change(tbl.Table, event.EventUpdate, "1", "ONE", 0x8e0, 24*time.Minute)
+		r.pairAt(tbl, 0, map[string]string{"1": "ONE"}, 0x8e1, nil)
+		// The next update's pair: row 2 gone, row 1 changed again.
+		r.change(tbl.Table, event.EventDelete, "2", "two", 0x8f0, 24*time.Minute)
+		r.change(tbl.Table, event.EventUpdate, "1", "ONCE MORE", 0x8f8, 24*time.Minute)
+		r.pairAt(tbl, 1, map[string]string{"1": "ONCE MORE", "2": ""}, 0x8f9, nil)
+		r.change(tbl.Table, event.EventInsert, "3", "three", 0x900, 24*time.Minute)
+		r.checkpoint(0x900)
+		// The tail holds the change after the last pair's cut alone: from
+		// pair 0's cut it would hold rows 1 and 2 as pair 1 leaves them too.
+		if got, want := r.state(ctx, tbl), []string{"1=one", "2=two", "3=three"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("state %v, want %v: the tail does not start at the last pair's cut", got, want)
+		}
+	})
+
+	t.Run("a chain of table deltas with a pair missing in the middle: no tail", func(t *testing.T) {
+		tbl := r.table(nil, [2]string{"1", "one"})
+		for seq, cut := range []uint64{0x8e1, 0x8e9, 0x8f1} {
+			r.change(tbl.Table, event.EventUpdate, "1", fmt.Sprintf("v%d", seq), cut-1, 24*time.Minute)
+			r.pairAt(tbl, seq, map[string]string{"1": fmt.Sprintf("v%d", seq)}, cut, nil)
+		}
+		dead, rows, err := pgdelta.Paths(tbl.Path, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range []string{dead, rows} {
+			if err := os.Remove(f); err != nil {
+				t.Fatal(err)
+			}
+		}
+		r.change(tbl.Table, event.EventUpdate, "1", "paid", 0x900, 24*time.Minute)
+		r.checkpoint(0x900)
+		if got := r.state(ctx, tbl); !reflect.DeepEqual(got, noTail) {
+			t.Fatalf("state %v, want no tail", got)
 		}
 	})
 

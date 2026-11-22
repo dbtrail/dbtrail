@@ -81,18 +81,23 @@ func TestPGPairEligible(t *testing.T) {
 func TestRemovePGPair(t *testing.T) {
 	dir := t.TempDir()
 	dst := filepath.Join(dir, "orders.parquet")
-	dead, rows, err := pgdelta.Paths(dst, 0)
+	dead, rows, err := pgdelta.Paths(dst, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	other := filepath.Join(dir, "items.000000.pgnew")
-	for _, f := range []string{dead, rows, other, dst} {
+	// The pair before it, carried into the folder, is not this pair's.
+	before, _, err := pgdelta.Paths(dst, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(dir, "items.000002.pgnew")
+	for _, f := range []string{dead, rows, other, dst, before} {
 		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	removePGPair(dst)
-	for f, want := range map[string]bool{dead: false, rows: false, other: true, dst: true} {
+	removePGPair(dst, 2)
+	for f, want := range map[string]bool{dead: false, rows: false, other: true, dst: true, before: true} {
 		if _, err := os.Stat(f); (err == nil) != want {
 			t.Errorf("%s: there %v, want %v", filepath.Base(f), err == nil, want)
 		}
