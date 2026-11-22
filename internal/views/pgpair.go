@@ -41,13 +41,18 @@ import (
 // folder that cannot be listed) gives a view that refuses when it is read:
 // the table cannot be said, and the file alone would say it wrong.
 //
-// Where the folder cannot be looked at from here, a table known to be a
-// PostgreSQL one reads its file alone behind a guard: when the view is read,
-// the engine is asked whether a delta sits beside the file, and the view
-// refuses if one does (pgPairGuardedBody). That is for a view that follows
-// later snapshots, which already asks the store for the files beside the
-// table's at every read, and for one with relative paths whose file is not
-// here (the views of a folder that is moved).
+// A view that follows later snapshots (the `current` pointer, or the newest
+// snapshot of an S3 root) cannot list the folder it will read, which changes
+// with every update: it reads the table's file and every pair beside it
+// through patterns, as a following view of a MySQL table reads its chain
+// (pgFollowStateBody), so it is right with no pair, one, or a chain of them.
+//
+// Where the folder cannot be looked at from here, a pinned view of a table
+// known to be a PostgreSQL one reads its file alone behind a guard: when the
+// view is read, the engine is asked whether a delta sits beside the file, and
+// the view refuses if one does (pgPairGuardedBody). That is for a view with
+// relative paths whose file is not here (the views of a folder that is
+// moved).
 //
 // A view pinned to a snapshot in S3 names its files by their exact keys and
 // lists nothing, and a guard would make every read list the store, which a
@@ -66,7 +71,7 @@ func pgPairStateBody(in Input, t BaselineTable) (body string, ok bool) {
 	knownPG := len(t.PGCasts) > 0 || t.PGRelation != nil
 	if in.Follow.follows() {
 		if knownPG {
-			return pgPairGuardedBody(in, t), true
+			return pgFollowStateBody(in, t), true
 		}
 		return "", false
 	}
@@ -79,7 +84,7 @@ func pgPairStateBody(in Input, t BaselineTable) (body string, ok bool) {
 			// Nothing was looked at. A relative path whose file is not
 			// here is for another folder.
 			if knownPG && !filepath.IsAbs(t.Path) {
-				return pgPairGuardedBody(in, t), true
+				return pgPairGuardedBody(t), true
 			}
 			return "", false
 		}
@@ -359,35 +364,24 @@ func pgPairRefusal(t BaselineTable, why string) string {
 		"LEFT JOIN read_parquet(%s) AS bintrail_t ON bintrail_r.bintrail_refused", sqlString(msg), file, file)
 }
 
-// pgPairGuardedBody is a PostgreSQL table's file read alone, as
-// writeStateBody would write it for the view's mode, behind a guard that
-// refuses when the engine finds a table delta beside the file: the body for
-// a view whose folder could not be looked at when it was written. A table's
-// tail is not laid over it: a tail is given only to a pinned view of a local
-// file, which never comes here.
+// pgPairGuardedBody is a PostgreSQL table's file read alone, behind a guard
+// that refuses when the engine finds a table delta beside the file: the body
+// for a pinned view whose folder could not be looked at when it was written
+// (relative paths whose file is not here). A table's tail is not laid over
+// it: a tail is given only to a pinned view of a local file, which never
+// comes here.
 //
 // The guard is a filter over the file's rows, as the one a following view of
 // a MySQL table carries (deltaAppearedGuard): over a file that holds no row
 // it is never run.
-func pgPairGuardedBody(in Input, t BaselineTable) string {
+func pgPairGuardedBody(t BaselineTable) string {
 	msg := fmt.Sprintf("bintrail views: %s.%s has a PostgreSQL table delta beside its file, and this view reads the file alone "+
-		"(it follows later snapshots, or names its files by a relative path), so it would show the table as it was "+
+		"(it names its files by a relative path), so it would show the table as it was "+
 		"when it was last written in full. Read the table through DBTrail (the SQL page, the PostgreSQL port), "+
-		"or generate the views pinned to a snapshot in a local folder", t.Schema, t.Table)
-	guard := func(pattern string) string {
-		return fmt.Sprintf("\n  WHERE CASE WHEN (SELECT count(*) FROM glob(%s)) > 0 THEN error(%s) ELSE true END", pattern, sqlString(msg))
-	}
-	var read string
-	if in.Follow == FollowNewest {
-		// The file is named beside the session's variable, as
-		// writeNewestStateBody names it.
-		newest := in.sessionName(newestVar)
-		file := fmt.Sprintf("CASE WHEN getvariable('%s') IS NULL\n    THEN error(%s)\n    ELSE getvariable('%s') || %s END",
-			newest, sqlString(newestVarUnsetMsg), newest, sqlString(fileGlob(t.Rel)))
-		read = "read_parquet(" + file + ")" + guard(fmt.Sprintf("getvariable('%s') || %s", newest, sqlString(pgdelta.AnyNewGlob(t.Rel))))
-	} else {
-		read = "read_parquet(" + sqlString(fileGlob(t.Path)) + ")" + guard(sqlString(pgdelta.AnyNewGlob(t.Path)))
-	}
+		"or generate the views again from the snapshot's own folder", t.Schema, t.Table)
+	read := "read_parquet(" + sqlString(fileGlob(t.Path)) + ")" +
+		fmt.Sprintf("\n  WHERE CASE WHEN (SELECT count(*) FROM glob(%s)) > 0 THEN error(%s) ELSE true END",
+			sqlString(pgdelta.AnyNewGlob(t.Path)), sqlString(msg))
 	if list := selectList(t); list != "" {
 		return "SELECT " + list + "\n  FROM " + read
 	}
