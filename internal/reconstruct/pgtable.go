@@ -217,6 +217,13 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 	if err != nil {
 		return nil, "", err
 	}
+	// Changes of the table capture dropped (pgskips.go): checked before the
+	// table can be carried forward or folded, both of which would say it is
+	// current. A file that does not say when its rows were read from the
+	// source is refused over any drop that may cover it.
+	if err := checkPGSkipped(ctx, db, schema, table, baseline.SourceReadOf(bmeta).At, cfg.AllowGaps); err != nil {
+		return nil, "", err
+	}
 
 	fetchOpts := query.Options{
 		Schema: schema, Table: table,

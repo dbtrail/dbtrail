@@ -20,9 +20,9 @@ func TestGeneratedColumnsProblem(t *testing.T) {
 		{name: "a stored column", found: []UnpublishedGenerated{stored},
 			has: []string{"1 table", `ALTER TABLE "public"."orders" REPLICA IDENTITY DEFAULT;`,
 				`ALTER PUBLICATION "pub" SET (publish_generated_columns = stored);`, `public.orders.total (publication "pub")`},
-			lacks: []string{"VIRTUAL", "DROP TABLE"}},
+			lacks: []string{"VIRTUAL", "DROP TABLE", "without undo"}},
 		{name: "a virtual column", found: []UnpublishedGenerated{virtual},
-			has: []string{`ALTER TABLE "public"."items" REPLICA IDENTITY DEFAULT;`, "VIRTUAL", "cannot be at REPLICA IDENTITY FULL while it is published", "captured, without undo",
+			has: []string{`ALTER TABLE "public"."items" REPLICA IDENTITY DEFAULT;`, "VIRTUAL", "cannot be at REPLICA IDENTITY FULL while it is published", "DBTrail cannot capture it while it has that column", "(not captured)",
 				`ALTER PUBLICATION "pub" DROP TABLE "public"."items";`, "FOR ALL TABLES"},
 			lacks: []string{"publish_generated_columns"}},
 		{name: "a virtual column of a table in two publications", found: []UnpublishedGenerated{

@@ -89,6 +89,12 @@ type Decoder struct {
 	// partsFailures counts the failed reads in a row, for a warning given at
 	// the first and then every partitionsWarnEvery-th.
 	partsFailures int
+
+	// captureBelowFull turns off the gate that keeps every table below
+	// REPLICA IDENTITY FULL out of capture (requireFull). Nothing outside
+	// this package's tests sets it: they keep testing the code that stores an
+	// earlier row in part, which no table reaches while the gate is on.
+	captureBelowFull bool
 }
 
 // partitionsRetryAfter is how long after a failed read of a relation's
@@ -108,12 +114,15 @@ const keyNotSentWarnEvery = 1000
 // stream_state.capture_skips). Stable strings: `status` shows them verbatim, and
 // renaming one would split its history.
 const (
-	// SkipReplicaIdentityNotFull is the reason earlier versions recorded for
-	// every change of a table that was not at REPLICA IDENTITY FULL, which they
-	// dropped. Such a table is captured now (its earlier rows in part), so
-	// nothing records this reason any more. It stays for the entries an index
-	// already holds: those changes are still missing, and the readers of the
-	// ledger still send their tables to a full read.
+	// SkipReplicaIdentityNotFull is recorded for a change of a table that is
+	// not at REPLICA IDENTITY FULL: a table at DEFAULT, USING INDEX or
+	// NOTHING, a partitioned table one of whose partitions is not at FULL,
+	// and, should one arrive, a change of a table described at FULL whose
+	// earlier row PostgreSQL sent with its key only or not at all
+	// (requireFull). The table's changes are dropped until it is described
+	// at FULL again, and the readers of the ledger send its copy to a full
+	// read. Version 0.138.0 captured such tables, with their earlier rows in
+	// part; versions before it dropped them under this same reason.
 	SkipReplicaIdentityNotFull = "replica_identity_not_full"
 
 	// SkipReplicaIdentityIndexWithoutPrimaryKey is recorded for a change of a
@@ -164,6 +173,12 @@ func WithPartitionsResolver(r PartitionsResolver) DecoderOption {
 // that do not exercise it leave it out.
 func WithDeferrableResolver(r DeferrableResolver) DecoderOption {
 	return func(d *Decoder) { d.deferrable = r }
+}
+
+// withCaptureBelowFull turns the requireFull gate off (Decoder.captureBelowFull),
+// for this package's tests of the code below it.
+func withCaptureBelowFull() DecoderOption {
+	return func(d *Decoder) { d.captureBelowFull = true }
 }
 
 // WithSkipCounters wires the capture-skip ledger the decoder records into. The
@@ -544,6 +559,25 @@ func (d *Decoder) cacheRelation(m *pglogrepl.RelationMessage) error {
 		}
 	}
 
+	// THE GATE (requireFull): a table below REPLICA IDENTITY FULL is not
+	// captured. Its changes are dropped and counted, the other tables keep
+	// flowing, and the next description of the table at FULL (PostgreSQL
+	// sends one before the first change after the ALTER) captures it again,
+	// with no restart.
+	if m.ReplicaIdentity != 'f' && !d.captureBelowFull {
+		fix := replicaIdentityFix(m.Namespace, m.RelationName)
+		d.skipRelation(m, SkipReplicaIdentityNotFull,
+			fmt.Sprintf("replica identity %s; DBTrail captures a table only at REPLICA IDENTITY FULL; fix: %s",
+				replicaIdentityName(m.ReplicaIdentity), fix))
+		if inScope {
+			d.logger.Warn(notFullWarning,
+				"table", m.Namespace+"."+m.RelationName,
+				"replica_identity", replicaIdentityName(m.ReplicaIdentity),
+				"fix", fix)
+		}
+		return nil
+	}
+
 	// A description at FULL flags every column, which says nothing about what
 	// a key-only tuple would hold. One can still arrive, labeled as a whole
 	// row: a partition below FULL under a root at FULL (PartitionsResolver).
@@ -577,6 +611,8 @@ func (d *Decoder) cacheRelation(m *pglogrepl.RelationMessage) error {
 	if rel.skipped {
 		return nil
 	}
+	// Below FULL from here on only with the gate off (captureBelowFull, this
+	// package's tests): the code that stores an earlier row in part.
 	if m.ReplicaIdentity != 'f' && inScope {
 		if !hasIdentity && rel.partitioned {
 			// PostgreSQL checks the identity in the PARTITION a statement
@@ -680,7 +716,7 @@ func (d *Decoder) judgePartitions(rel *relationInfo) {
 		rel.byShape = full
 		return
 	case parts.MissesKey > 0:
-		detail := fmt.Sprintf("%d partition(s) of the table have a replica identity of their own (USING INDEX) that does not hold the primary key; fix: ALTER TABLE <partition> REPLICA IDENTITY DEFAULT (or FULL) on each (`bintrail-pg doctor` lists them)", parts.MissesKey)
+		detail := fmt.Sprintf("%d partition(s) of the table have a replica identity of their own (USING INDEX) that does not hold the primary key; fix: ALTER TABLE <partition> REPLICA IDENTITY FULL on each (`bintrail-pg doctor` lists them)", parts.MissesKey)
 		*rel = relationInfo{
 			oid:             rel.oid,
 			schema:          rel.schema,
@@ -702,7 +738,7 @@ func (d *Decoder) judgePartitions(rel *relationInfo) {
 			d.recordSkip(rel, SkipReplicaIdentityIndexWithoutPrimaryKey, detail+"; "+stretch)
 		}
 		if inScope {
-			d.logger.Warn("pgcapture: a partition of the table has a replica identity of its own that does not hold the primary key; the table's changes are NOT captured (each one is counted as skipped in capture health) until it does, the other tables keep flowing. PostgreSQL would send no earlier row for an UPDATE of the primary key made in that partition. Run ALTER TABLE <partition> REPLICA IDENTITY DEFAULT (or FULL) on each such partition; `bintrail-pg doctor` lists them",
+			d.logger.Warn("pgcapture: a partition of the table has a replica identity of its own that does not hold the primary key; the table's changes are NOT captured (each one is counted as skipped in capture health) until it does, the other tables keep flowing. PostgreSQL would send no earlier row for an UPDATE of the primary key made in that partition. Run ALTER TABLE <partition> REPLICA IDENTITY FULL on each such partition; `bintrail-pg doctor` lists them",
 				"table", name,
 				"partitions", parts.MissesKey,
 				"stored_before_the_catalog_answered", stretch)
@@ -730,7 +766,37 @@ func (d *Decoder) judgePartitions(rel *relationInfo) {
 		return
 	}
 	rel.byShape = true
+	if parts.BelowFull > 0 && !d.captureBelowFull {
+		// The gate (requireFull), for each partition: REPLICA IDENTITY is
+		// set per partition, and the earlier row of a change is what its
+		// partition logs.
+		detail := fmt.Sprintf("%d partition(s) of the table are not at REPLICA IDENTITY FULL; DBTrail captures a table only when it and each of its partitions are; fix: ALTER TABLE <partition> REPLICA IDENTITY FULL on each (`bintrail-pg doctor` lists them)", parts.BelowFull)
+		*rel = relationInfo{
+			oid:             rel.oid,
+			schema:          rel.schema,
+			table:           rel.table,
+			replicaIdentity: rel.replicaIdentity,
+			skipped:         true,
+			skipReason:      SkipReplicaIdentityNotFull,
+			skipDetail:      detail,
+		}
+		if unsureStored > 0 && d.filters.Matches(rel.schema, rel.table) {
+			// The catalog did not answer when the table was described, and
+			// its changes were stored meanwhile, some with their earlier row
+			// in part: one ledger entry for that stretch sends the table's
+			// copy to a full read, as for the MissesKey case above.
+			d.recordSkip(rel, SkipReplicaIdentityNotFull, detail+"; "+fmt.Sprintf(
+				"%d change(s) of the table were stored from %s on, while the catalog could not be read", unsureStored, pglogrepl.LSN(unsureFrom)))
+		}
+		if d.filters.Matches(rel.schema, rel.table) {
+			d.logger.Warn("pgcapture: partitioned table with partitions that are not at REPLICA IDENTITY FULL; the table's changes are NOT captured (each one is counted as skipped in capture health) until every partition is, the other tables keep flowing. REPLICA IDENTITY is set per partition, and ALTER TABLE on the parent does not reach them. Run ALTER TABLE <partition> REPLICA IDENTITY FULL on each; `bintrail-pg doctor` lists them. Capture of the table starts by itself once PostgreSQL describes it again with every partition at FULL (it does before the first change made after the ALTER in the partition the change is in, and at the latest when capture restarts); the changes skipped before it are missing from the copy until the table's next full read, and from history for good",
+				"table", name,
+				"partitions_not_at_full", parts.BelowFull)
+		}
+		return
+	}
 	if parts.BelowFull > 0 && d.filters.Matches(rel.schema, rel.table) {
+		// Reached only with the gate off (captureBelowFull), above.
 		d.logger.Warn("pgcapture: partitioned table with partitions without undo: it is published through its root, which is at REPLICA IDENTITY FULL, and some of its partitions are not (REPLICA IDENTITY is set per partition; ALTER TABLE on the parent does not reach them). The changes of every partition are captured and everything else works on them; undo refuses the UPDATE and DELETE made in a partition that is not at FULL. Run ALTER TABLE <partition> REPLICA IDENTITY FULL on each to make its later changes undoable",
 			"table", name,
 			"partitions_not_at_full", parts.BelowFull)
@@ -758,15 +824,10 @@ func replicaIdentityFix(schema, table string) string {
 }
 
 // identityWithoutKeyFix is what to run on a table whose replica identity leaves
-// a primary-key column out: the whole row, or, when the identity is an index,
-// back to the primary key. (A table already at DEFAULT is here when its
-// primary key has a column the identity does not send: FULL is its way out.)
+// a primary-key column out: the whole row. REPLICA IDENTITY DEFAULT would send
+// the key, but a table below FULL is not captured either (requireFull).
 func identityWithoutKeyFix(schema, table string, identity uint8) string {
-	name := pgx.Identifier{schema, table}.Sanitize()
-	if identity != 'i' {
-		return "ALTER TABLE " + name + " REPLICA IDENTITY FULL"
-	}
-	return "ALTER TABLE " + name + " REPLICA IDENTITY DEFAULT (or ALTER TABLE " + name + " REPLICA IDENTITY FULL, which also makes its changes undoable)"
+	return replicaIdentityFix(schema, table)
 }
 
 // deferrableKeyFix is what to run on a table whose primary key is deferrable.
@@ -906,6 +967,9 @@ func (d *Decoder) decodeUpdate(m *pglogrepl.UpdateMessage) (event.Event, bool, e
 	}
 	// With no old tuple the earlier row was not sent at all: REPLICA IDENTITY
 	// FULL always sends it whole.
+	if d.dropBelowFull(rel, m.OldTuple == nil || earlierRowIsPartial(rel, m.OldTupleType)) {
+		return event.Event{}, false, nil
+	}
 	if m.OldTuple == nil || earlierRowIsPartial(rel, m.OldTupleType) || holdsEmpty(rel, m.OldTuple) {
 		return d.decodePartialUpdate(rel, m)
 	}
@@ -1018,6 +1082,9 @@ func (d *Decoder) decodeDelete(m *pglogrepl.DeleteMessage) (event.Event, bool, e
 	if m.OldTuple == nil {
 		return event.Event{}, false, fmt.Errorf("pgcapture: DELETE on %s.%s carries no before-image (no replica identity?) — cannot index an un-reversible delete", rel.schema, rel.table)
 	}
+	if d.dropBelowFull(rel, earlierRowIsPartial(rel, m.OldTupleType)) {
+		return event.Event{}, false, nil
+	}
 	if earlierRowIsPartial(rel, m.OldTupleType) || holdsEmpty(rel, m.OldTuple) {
 		// Below REPLICA IDENTITY FULL: the key of the deleted row and nothing
 		// else. Enough to delete it from the copy and to show it in history;
@@ -1037,6 +1104,40 @@ func (d *Decoder) decodeDelete(m *pglogrepl.DeleteMessage) (event.Event, bool, e
 	}
 	return d.rowEvent(rel, event.EventDelete, before, nil), true, nil
 }
+
+// dropBelowFull is the gate (requireFull) for one change of a relation that
+// is captured: partial says PostgreSQL sent its earlier row with the key only
+// ('K') or not at all, which REPLICA IDENTITY FULL never does. Such a change
+// is dropped and recorded under SkipReplicaIdentityNotFull, never stored in
+// part; it reports whether it dropped it. The description of a table below
+// FULL already skips it (cacheRelation, judgePartitions), so this is reached
+// only by a change the description did not foresee.
+//
+// An earlier row labelled whole that holds an empty column, of a partitioned
+// table at FULL or one the catalog did not answer for (holdsEmpty), is not
+// dropped: it cannot be told from a row that really holds a NULL, and is
+// stored with its key only, as before.
+func (d *Decoder) dropBelowFull(rel *relationInfo, partial bool) bool {
+	if !partial || d.captureBelowFull {
+		return false
+	}
+	fix := replicaIdentityFix(rel.schema, rel.table)
+	d.recordSkip(rel, SkipReplicaIdentityNotFull,
+		fmt.Sprintf("PostgreSQL sent the earlier row of a change with its key only or not at all, which it does only below REPLICA IDENTITY FULL; DBTrail captures a table only at FULL; fix: %s", fix))
+	rel.notFullDropped++
+	if rel.notFullDropped%keyNotSentWarnEvery == 1 {
+		d.logger.Warn("pgcapture: a change arrived with its earlier row in part (key only, or none), as PostgreSQL sends it only for a table below REPLICA IDENTITY FULL; it is NOT captured (counted as skipped in capture health), the stream goes on. This warning is given for the first such change of a table and then every thousandth",
+			"table", rel.schema+"."+rel.table,
+			"commit_lsn", d.txn.commitLSN.String(),
+			"such_changes_of_the_table", rel.notFullDropped,
+			"fix", fix)
+	}
+	return true
+}
+
+// notFullWarning is what the log says each time PostgreSQL describes a table
+// that is not at REPLICA IDENTITY FULL.
+const notFullWarning = "pgcapture: table is not at REPLICA IDENTITY FULL; its changes are NOT captured (each one is counted as skipped in capture health) until it is, the other tables keep flowing. Run the statement in fix: capture of the table starts by itself at its next change, with no restart; the changes skipped before it are missing from the copy until the table's next full read, and from history for good. On PostgreSQL 18 run `bintrail-pg doctor` first: with a generated column that the publication does not publish, PostgreSQL refuses UPDATE and DELETE on a table at FULL"
 
 // partialBefore builds the before-image of a change whose earlier row
 // PostgreSQL sent in part, from t: the 'K' old tuple, or, for an UPDATE with

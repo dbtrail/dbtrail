@@ -78,6 +78,9 @@ type relationInfo struct {
 	// keyNotSent counts the changes of the relation dropped under
 	// SkipReplicaIdentityKeyNotSent, to space their warning.
 	keyNotSent int
+	// notFullDropped counts the changes of the relation dropped by
+	// Decoder.dropBelowFull, to space their warning.
+	notFullDropped int
 
 	// skipped marks a relation whose row changes are dropped and recorded in the
 	// capture-skip ledger instead of indexed, under skipReason with skipDetail:

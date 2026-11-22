@@ -19,7 +19,7 @@ PostgreSQL is not supported.
 ordinary logical-replication **client** using PostgreSQL's built-in `pgoutput`
 plugin. It does **not** install an output plugin, a `CREATE EXTENSION`, an
 event trigger, or any other server-side component. You create one publication
-(and, if you want undo, set `REPLICA IDENTITY FULL`); bintrail reads — it never
+(and sets `REPLICA IDENTITY FULL` on the tables to capture); bintrail reads — it never
 writes to your source.
 
 ---
@@ -28,12 +28,12 @@ writes to your source.
 
 | On the PostgreSQL source | Required? | Notes |
 |---|---|---|
-| **PostgreSQL 15+** | Yes (declared) | 15/16/17/18 tested in CI. 13 and 14 may work but are past end of life, best-effort only. On 18, a table with a `VIRTUAL` generated column cannot be at `REPLICA IDENTITY FULL` (it is captured without undo), and a table with a `STORED` one needs `publish_generated_columns = stored` on the publication to be ([why](#3-replica-identity-full-optional-needed-only-for-undo)). |
+| **PostgreSQL 15+** | Yes (declared) | 15/16/17/18 tested in CI. 13 and 14 may work but are past end of life, best-effort only. On 18, a table with a `VIRTUAL` generated column cannot be at `REPLICA IDENTITY FULL`, so it cannot be captured, and a table with a `STORED` one needs `publish_generated_columns = stored` on the publication to be ([why](#3-set-replica-identity-full-on-every-captured-table)). |
 | **`wal_level = logical`** | **Yes** | Server-wide; needs a **restart**. Validated at startup — bintrail-pg refuses to start otherwise. |
 | **A role with `REPLICATION`** | **Yes** | Used for the replication stream and to create the slot. |
-| **`REPLICA IDENTITY FULL`** on a captured table | **No. Only for undo** | A table without it is captured and everything works on it except undo of its `UPDATE` and `DELETE`. `doctor` warns and prints the statement ([details](#3-replica-identity-full-optional-needed-only-for-undo)). |
+| **`REPLICA IDENTITY FULL`** on every captured table, and on each partition of a partitioned one | **Yes** | A table that is not at `FULL` is not captured, while the other tables are. `doctor` fails on it with the statement to run, and a server is not added or started until it is fixed ([details](#3-set-replica-identity-full-on-every-captured-table)). |
 | **A replica identity that holds the primary key** | **Yes** | True of every table left at PostgreSQL's default. A table set to `REPLICA IDENTITY USING INDEX` on an index that leaves a primary-key column out is not captured: `doctor` fails on it with the statement to run, and a server is not added or started until it is fixed. A capture that is already running skips that table while the other tables go on. |
-| **Primary keys that are not `DEFERRABLE`** | **Yes** | The copy is kept by key, and a deferrable key lets two rows share one inside a transaction. `doctor` fails on a table with one (a server is not added or started with it). Capture itself never refuses to start over one: when it starts and each time PostgreSQL describes a table, it skips that table and captures the others. `server add` and the web interface's Start run `doctor` first, which is why they wait for the key to be fixed. See [the limit](#3-replica-identity-full-optional-needed-only-for-undo). |
+| **Primary keys that are not `DEFERRABLE`** | **Yes** | The copy is kept by key, and a deferrable key lets two rows share one inside a transaction. `doctor` fails on a table with one (a server is not added or started with it). Capture itself never refuses to start over one: when it starts and each time PostgreSQL describes a table, it skips that table and captures the others. `server add` and the web interface's Start run `doctor` first, which is why they wait for the key to be fixed. See [the limit](#3-set-replica-identity-full-on-every-captured-table). |
 | **A `PUBLICATION`** covering those tables | **Yes — you create it** | bintrail-pg validates it exists and covers your tables; it does **not** create it. |
 | **A replication slot** | No — created for you | bintrail-pg creates the logical slot on first run and reuses it on restart. |
 | `max_replication_slots` ≥ 1, `max_wal_senders` ≥ 1 | Yes | Defaults (10) are usually fine. A slot consumes one of each. |
@@ -72,7 +72,7 @@ setup](#postgresql-side-setup) below first, then:
    preflight as `bintrail-pg doctor` — `wal_level`, publication coverage,
    replica identity, slot health — and surfaces any failure as a
    remediation card; a table that is not at `REPLICA IDENTITY FULL` is a
-   warning and does not stop the server from being added). Capture resumes
+   failure, and the server is not added until it is fixed). Capture resumes
    automatically on restart.
 
 From a terminal, the same thing is one command (the publication is the one
@@ -249,102 +249,127 @@ password copied from this page.
   (`GRANT rds_replication TO dbtrail;` on RDS/Aurora). See
   [Managed PostgreSQL](#managed-postgresql) below.
 
-### 3. `REPLICA IDENTITY FULL`: optional, needed only for undo
+### 3. Set `REPLICA IDENTITY FULL` on every captured table
 
 By default PostgreSQL puts only the **primary-key** columns of the earlier row
-in the WAL for an `UPDATE` or a `DELETE` (`REPLICA IDENTITY DEFAULT`). DBTrail
-captures such a table as it is. `REPLICA IDENTITY FULL` makes PostgreSQL log the
-whole earlier row, and one thing needs that: **undo**.
-
-| On a captured table | Without `FULL` | With `FULL` |
-|---|---|---|
-| History of its changes (`query`, the web interface) | Yes. The earlier row of an `UPDATE` or a `DELETE` shows its key; its other columns read `(not captured: REPLICA IDENTITY not FULL)`, and which columns an `UPDATE` changed reads `unknown`. | Yes, with whole rows |
-| The copy, the SQL it answers on the PostgreSQL port, snapshots and their scheduled updates | Yes | Yes |
-| Undo of an `INSERT` (`recover`, `recover-cascade`, the web interface) | Yes | Yes |
-| Undo of an `UPDATE` or a `DELETE` | **No.** Refused, with the table and the statement to run | Yes |
-| One row as it was at a moment (`AS OF` of one row, `_flashback`, `_snapshot`, `reconstruct`) | Yes, with one exception (below) | Yes |
-| `verify` | Not covered (below) | Yes |
-
-To make a table's changes undoable:
+in the WAL for an `UPDATE` or a `DELETE` (`REPLICA IDENTITY DEFAULT`).
+`REPLICA IDENTITY FULL` makes it log the whole earlier row, including a large
+value stored out of line that the `UPDATE` did not touch. **DBTrail captures a
+table only at `REPLICA IDENTITY FULL`.**
 
 ```sql
-ALTER TABLE public.orders REPLICA IDENTITY FULL;
+ALTER TABLE public.orders    REPLICA IDENTITY FULL;
+ALTER TABLE public.customers REPLICA IDENTITY FULL;
+-- repeat for every table you want to capture
 ```
 
-It takes effect for changes made **after** it, not for earlier ones, and it
-costs WAL: the table then logs the whole earlier row for every `UPDATE` and
-`DELETE`. A window that holds changes from before the statement is still
-refused by undo; a window that starts after it is not. For a partitioned
-table, `REPLICA IDENTITY` is set **per partition**: the statement on the parent
-does not reach its partitions, and each partition needs it. `doctor` lists
-them.
+It costs WAL: the table then logs the whole earlier row for every `UPDATE` and
+`DELETE`. `FULL` needs no primary key. For a partitioned table,
+`REPLICA IDENTITY` is set **per partition**: the statement on the parent does
+not reach its partitions, and the parent and each partition need it. `doctor`
+lists them.
 
-A partitioned table published through its parent
+A table that is not at `FULL` (at `DEFAULT`, `USING INDEX` or `NOTHING`, or a
+partitioned table with a partition that is not) does **not** stop capture,
+because one such table would otherwise stop every other table with it.
+Instead:
+
+- **Its changes are not captured**, its `INSERT`s included. They are dropped,
+  never stored with part of the earlier row, and each one is counted.
+- **The other tables keep being captured** normally.
+- **`doctor` fails** on it, under **REPLICA IDENTITY FULL**, with one
+  `ALTER TABLE` per table and partition (the first twenty, with a count of the
+  rest). `server add` and the web interface's Start run `doctor` first, so a
+  server is not added or started while one such table is in the publication.
+  A capture that is already running, or that the daemon resumes when it
+  restarts, goes on and skips the table alone.
+- **The log says so**, once when capture starts and once each time PostgreSQL
+  describes the table, with the exact statement to run, for example:
+
+  ```
+  level=WARN msg="pgcapture: table is not at REPLICA IDENTITY FULL; its changes are NOT captured (each one is counted as skipped in capture health) until it is, the other tables keep flowing. Run the statement in fix: capture of the table starts by itself at its next change, with no restart; the changes skipped before it are missing from the copy until the table's next full read, and from history for good. On PostgreSQL 18 run `bintrail-pg doctor` first: with a generated column that the publication does not publish, PostgreSQL refuses UPDATE and DELETE on a table at FULL" table=public.rf_def replica_identity="'d' (default: primary key only)" fix="ALTER TABLE \"public\".\"rf_def\" REPLICA IDENTITY FULL"
+  ```
+
+- **`status` shows capture as DEGRADED** under the reason
+  `replica_identity_not_full` and names the table. The count is kept across
+  restarts.
+- **The web interface's Status page** lists the table in red, among the
+  tables `NOT captured`.
+- **After you run the `ALTER TABLE`**, PostgreSQL describes the table again
+  before its next change, and capture of it resumes by itself, with no
+  restart. For a partitioned table that happens once PostgreSQL describes it
+  with every partition at `FULL` (before the first change made after the
+  statement in the partition the change is in, and at the latest when capture
+  restarts). Changes made before the `ALTER` stay missing: PostgreSQL re-sends
+  them exactly as they were written, so they are skipped again on every
+  re-read. The table's next full read brings its copy up to date; its history
+  of that stretch stays missing, so nothing in it can be queried or undone.
+- **A table put back at `DEFAULT` while capture runs** is skipped from its
+  next change on, the same way, and resumes when it is at `FULL` again.
+- **Its copy is not brought up to date from the index.** Fresh mode leaves the
+  table out, and statements on it read the copy as of its last snapshot (a
+  server's lag limit, `max_behind_source_seconds`, sends them to the source
+  when that is too old). A scheduled update of the server's snapshot is
+  refused, for all its tables, once capture has dropped a change of the table
+  since its rows were read from the source: the schedule's status names the
+  table (`refused-gap`), and no snapshot built from the index presents its old
+  rows as current. A full read brings the copy up to date. So while such a
+  table is in the publication and written to, the server's snapshot is updated
+  by full reads only: fix the table.
+
+> This is the direct counterpart of the MySQL/MariaDB `binlog_row_image = FULL`
+> requirement.
+
+**Upgrading from 0.138.0.** Version 0.138.0 captured a table that was not at
+`FULL`, with the earlier row of each `UPDATE` and `DELETE` holding the key
+only. From this version on such a table is not captured, and `doctor` fails on
+it. What that means for a server that has one:
+
+- The capture keeps running after the upgrade and takes the other tables. The
+  table's changes from the upgrade on are skipped and counted, and `status`
+  shows capture as DEGRADED under `replica_identity_not_full`.
+- What 0.138.0 recorded of the table stays in its history, and undo still
+  refuses its `UPDATE`s and `DELETE`s (`cannot undo a change in ... because the
+  table was not at REPLICA IDENTITY FULL when the change was captured`).
+  `verify` stops on those changes too; that does not mean the data is wrong.
+- Its copy is not brought up to date from the index any more (see the list
+  above): fresh mode leaves the table out, and the next scheduled update of
+  the snapshot is refused for it.
+- To capture it again, run the `ALTER TABLE` that `doctor` prints, then a full
+  read of the table, so its copy holds the changes skipped in between.
+- A server that is stopped cannot be started from the web interface while
+  `doctor` fails on such a table: fix the table first, or take it out of the
+  publication.
+
+**A partitioned table published through its parent**
 (`publish_via_partition_root`) is described to capture as the parent, and
 PostgreSQL labels the earlier row of each change by the parent's setting,
-whatever the partition the change was made in logged. With the parent at
-`FULL`, capture reads each earlier row by what it holds. One partition below
-`FULL` does not cost the others their undo.
+whatever the partition the change was made in logged. When PostgreSQL
+describes the table, capture reads from the catalog whether it is partitioned
+and the identity of each partition, and captures the table only when the
+parent and every partition are at `FULL`. The read takes no lock on any
+partition, so a `VACUUM FULL` or a rewriting `ALTER` of one does not hold
+capture up. Two things follow from reading today's catalog:
 
-The rule: in a partitioned table, an earlier row labelled whole is stored whole
-only when **none of its columns arrives empty**. A row that holds an empty
-column is stored as key-only. The reason is what PostgreSQL sends: a key-only
-row holds a value in the columns of the identity it was logged under and
-nothing in any other column, whatever that identity was when the change was
-made. So capture does not need the catalog to tell the two apart, and a
-partition put at `FULL` later, an identity index dropped, or a primary key made
-narrower, before capture read the change, makes no difference. What follows
-from that:
+- An earlier row labelled whole is stored whole only when **none of its
+  columns arrives empty**; one that holds an empty column is stored with its
+  key only, and undo refuses that change. The reason: a change made in a
+  partition before it was put at `FULL`, and read by a capture that was behind,
+  arrives labelled whole and holding its key alone. **The cost**: a row of a
+  partitioned table that really holds a NULL in some column is stored that way
+  too, though its partition is at `FULL`. Nothing wrong is stored: NULL is
+  never written where PostgreSQL did not send a value. A table that is **not**
+  partitioned is not affected: its earlier rows are whole, NULLs included.
+- A change whose earlier row arrives with its key only, or with none (an
+  `UPDATE` made in such a partition before it was put at `FULL`), is skipped
+  and counted under `replica_identity_not_full`, as for a table below `FULL`.
 
-- A row from a partition at `FULL` that holds a value in every column is whole
-  and can be undone.
-- A row from a partition that is not at `FULL` (at `DEFAULT`, or with an
-  identity index of its own, wider than the primary key or not) is stored as
-  key-only, and undo refuses it.
-- **The cost**: a row of a partitioned table that really holds a NULL in some
-  column looks like a key-only row, so it is stored as key-only too and undo
-  refuses that change, though its partition is at `FULL`. Nothing wrong is
-  stored: NULL is never written where PostgreSQL did not send a value. A table
-  that is **not** partitioned and is at `FULL` is not affected: its earlier
-  rows are whole, NULLs included.
-- A parent with no primary key is read the same way. Its changes are stored
-  with no key (as for any table without a primary key).
-- A partition with a replica identity of its own that leaves the primary key
-  **out**: the whole table is skipped, as a table with such an identity is
-  (below), whatever the parent's own setting (`FULL`, `DEFAULT` or
-  `USING INDEX`), and `doctor` names the partition.
-- A parent at `REPLICA IDENTITY NOTHING` (or whose identity index is gone) over
-  partitions that have a key: PostgreSQL checks the identity in each partition,
-  so it accepts `UPDATE` and `DELETE` there, and sends the primary key of the
-  row. Capture stores those changes under the primary key, without undo.
-- Capture reads from the catalog, when PostgreSQL describes the table, only
-  what the rows cannot show: whether the table is partitioned, and whether a
-  partition leaves the primary key out. The read takes no lock on any
-  partition, so a `VACUUM FULL` or a rewriting `ALTER` of one does not hold
-  capture up. If the read fails or times out, or the table has been dropped
-  since, capture goes on and reads that table's earlier rows as it reads a
-  partitioned table's. After a failed read it does not ask for any table's
-  partitions for a minute (one attempt a minute for all tables, each of three
-  seconds at most), and the log says so once, with the cause.
-- **What is left.** A partition whose identity left the primary key out when a
-  change was made, and no longer does (or was dropped) when capture reads that
-  change, is not seen: capture reads old changes with today's catalog. An
-  `UPDATE` of the primary key made there arrives with no earlier row, so it is
-  stored under the row's **new** key, and the row under its old key stays in
-  the copy until the table's next full read. The same can happen while the
-  catalog cannot be read; if it then answers that such a partition exists, the
-  table is skipped from there on and capture health records the changes stored
-  meanwhile, which sends the table to a full read. Fix such a partition's
-  identity only once capture has caught up, or run a full read of the table
-  after it. The same goes for a partitioned table whose primary key was moved
-  to other columns while capture was behind: a change of the new key's column
-  made under the old key is stored under the new one.
-- A partitioned table whose root is at `REPLICA IDENTITY NOTHING` is captured
-  under its primary key once the catalog has said the table is partitioned.
-  While that read fails, its `UPDATE` and `DELETE` are skipped and counted
-  (`replica_identity_key_not_sent`), as for a table with no identity: they are
-  missing from the history, and the table's next full read brings the copy up
-  to date.
+If the catalog read fails or times out, capture goes on and reads that table's
+earlier rows as above; after a failed read it does not ask for any table's
+partitions for a minute (one attempt a minute for all tables, each of three
+seconds at most), and the log says so once, with the cause. If the catalog
+then answers that a partition is not at `FULL`, the table is skipped from
+there on.
 
 > **PostgreSQL 18 and generated columns: read this before you set `REPLICA IDENTITY FULL` or create the publication.**
 > On PostgreSQL 18, a table that is at `REPLICA IDENTITY FULL`, belongs to a
@@ -363,128 +388,50 @@ from that:
 > WHERE a.attgenerated <> '' AND a.attnum > 0 AND NOT a.attisdropped AND c.relkind IN ('r', 'p');
 > ```
 >
-> - **`STORED`**: create the publication with
->   `WITH (publish_generated_columns = stored)` (step 4), and the table works.
->   For a publication that exists:
+> - **`STORED`**: make the publication publish it first, then set `FULL`.
+>   Create the publication with `WITH (publish_generated_columns = stored)`
+>   (step 4), or, for one that exists:
 >   `ALTER PUBLICATION bintrail_pub SET (publish_generated_columns = stored);`
 > - **`VIRTUAL`** (new in 18, and what `GENERATED ALWAYS AS (...)` creates there
 >   when neither word is given): PostgreSQL cannot publish it, so that table
->   cannot be at `REPLICA IDENTITY FULL` while it is published. Leave it at
->   `REPLICA IDENTITY DEFAULT` (it is captured, without undo), or out of the
->   publication. A `FOR ALL TABLES` publication cannot leave
->   a table out: list the tables instead.
+>   cannot be at `REPLICA IDENTITY FULL` while it is published, and **DBTrail
+>   cannot capture it** while it has that column. Do not set `FULL` on it. Take
+>   it out of the publication (a `FOR ALL TABLES` publication cannot leave a
+>   table out: list the tables instead), or replace the column with a `STORED`
+>   generated one and publish it.
 > - A table that belongs to **another** publication as well is refused if that
 >   one does not publish the column, whatever DBTrail's publication does.
 > - **If your application is already refused**, this lets it write again at
->   once: `ALTER TABLE public.orders REPLICA IDENTITY DEFAULT;`
+>   once: `ALTER TABLE public.orders REPLICA IDENTITY DEFAULT;` (DBTrail then
+>   does not capture the table).
 >
 > `bintrail-pg doctor`, the web interface's checks when a server is added, and
 > the capture when it starts all look for this and stop with the statements to
-> run. PostgreSQL 17 and older have no such rule.
+> run. For a table that is not at `FULL` yet, `doctor` prints the publication
+> statement before the `ALTER TABLE` for a `STORED` column, and no `ALTER
+> TABLE` at all for a `VIRTUAL` one. PostgreSQL 17 and older have no such rule.
 
-**What undo says.** `recover` over a window that holds an `UPDATE` or a
-`DELETE` of a table that was not at `FULL` writes nothing and stops with, for
-example:
+**A table with no replica identity at all** (`REPLICA IDENTITY NOTHING`, or
+`DEFAULT` with no usable primary key): PostgreSQL itself refuses `UPDATE` and
+`DELETE` on it while it is in a publication, with `cannot update table "..."
+because it does not have a replica identity and publishes updates`. DBTrail
+does not capture its `INSERT`s either. Set `REPLICA IDENTITY FULL`, which needs
+no primary key.
 
-```
-cannot undo a change in public.orders (pk=2): the earlier value of column(s) note, status was not captured, because the table was not at REPLICA IDENTITY FULL when the change was captured (PostgreSQL sent at most the row's key). Undo needs the whole earlier row. Run ALTER TABLE "public"."orders" REPLICA IDENTITY FULL on the source to make later changes undoable; it takes effect for changes made after it, not for this one
-```
-
-A window of `INSERT`s alone is undone as usual.
-
-**A large value an `UPDATE` did not touch.** PostgreSQL does not send a value
-stored out of line (a long `text`, `bytea` or `json`) that an `UPDATE` left as
-it was. With `FULL` the value is in the earlier row. Without it DBTrail records
-that the value was not sent, never a NULL in its place:
-
-- A **snapshot update** takes the value from the row's earlier change, or from
-  the row in the table's previous snapshot file, so the copy holds it. When a
-  change moves a row to another key and leaves such a value untouched, the
-  table is read in full from the source instead.
-- A read of **one row at a moment** (`AS OF` of one row on either port,
-  `_flashback`, `_snapshot`, `reconstruct` of one row) does not carry it. When
-  a change the read goes through left such a value untouched, the read answers
-  with an error that names the column, not with data. Such a read can run over
-  hours whose changes are missing, where a carried value could stay wrong for
-  good.
-- In **fresh mode**, the table is kept current like any other, and the value
-  is read from the copy (#3049). When nothing holds it, that table is left out
-  of fresh mode until the next snapshot: statements on it read the copy as of
-  its snapshot. Nothing wrong is stored.
-
-  That read costs more as the table grows, because it goes through the key
-  columns of the table's whole file. Measured on one host with 4 CPUs and 16
-  GB (PostgreSQL 17, 200 changes a second to random rows, none of them
-  touching a 2,100-character value stored out of line):
-
-  | Rows in the table | At `FULL` | Not at `FULL` |
-  |---|---|---|
-  | 2 million (a 3.8 GB copy) | 1.3 s behind the source (median) | 2.8 s behind, and the server's other tables with it |
-  | 6 million (an 11.5 GB copy) | not measured | No fresh mode while the table is written to: statements read the copy as of its last snapshot, 6 to 13 minutes old in that run |
-  | 20 million (a 39 GB copy) | 2.5 s behind, with one stretch of minutes while the host was saturated | No fresh mode while the table is written to: 21 to 31 minutes old in that run |
-
-  On that host the line fell between 2 and 6 million rows of that width. So a
-  table of some size that needs fresh mode should be at `REPLICA IDENTITY FULL`.
-  A table left without fresh mode still answers with correct rows, as of its
-  snapshot, and does not hold the other tables back. One run, one host: these
-  are not limits to plan with.
-
-**`verify` does not cover a table that is not at `FULL`.** On such a table,
-`verify` of a PostgreSQL server (live, and between two snapshots) fails when it
-meets a change captured with its key only, or one that left a large value
-untouched: it stops with a `cannot undo a change ...` message or with a
-`capture invariant violated` one. Neither says the data is wrong. `verify
---check recover` reports those changes as not checkable and the table as
-`unproven` ([verify](verify.md)).
-
-**What `doctor` and capture say.** `bintrail-pg doctor`, and the check the web
-interface and `server add` run, report tables that are not at `FULL` under
-**REPLICA IDENTITY FULL** as a **warning**: the server is added and started,
-and `doctor` exits 0. The warning lists the tables and one `ALTER TABLE` per
-table (the first twenty, with a count of the rest). When capture starts it
-logs once how many tables are without undo, and again for each table as
-PostgreSQL describes it:
-
-```
-pgcapture: 2 tables without undo: not at REPLICA IDENTITY FULL. Their changes are captured and everything else works on them; undo refuses their UPDATE and DELETE. To make a table's later changes undoable run ALTER TABLE <t> REPLICA IDENTITY FULL (the table then writes more WAL)
-```
-
-The web interface's Status page shows the count in amber, as
-`N tables without undo`. The tables that are not captured (below) are listed
-apart, in red. `status` does not report capture as degraded for
-these tables.
-
-**A table with no replica identity at all** (`REPLICA IDENTITY NOTHING`, or no
-usable primary key) is a PostgreSQL matter before it is a DBTrail one:
-PostgreSQL itself refuses `UPDATE` and `DELETE` on it while it is in a
-publication, with `cannot update table "..." because it does not have a
-replica identity and publishes updates`. Its `INSERT`s and `TRUNCATE`s are
-captured. The warning names such tables apart. Give the table a primary key, or
-set `REPLICA IDENTITY FULL`. A partitioned table published through its
-parent is the exception: PostgreSQL checks the identity of the partition a
-statement changes, not the parent's, so `UPDATE` and `DELETE` made in a
-partition that has a key are accepted and captured, without undo.
-
-#### Tables that are not captured
+#### Other tables that are not captured
 
 Capture checks each table as PostgreSQL describes it: when it starts, for a
 table added to the publication later, and after a change of the table's
-definition. These are **skipped**, while every other table keeps being
-captured:
+definition. These are **skipped** too, each under a reason of its own, while
+every other table keeps being captured:
 
 - **A replica identity that leaves a primary-key column out**
   (`replica_identity_index_without_primary_key`): in practice
   `REPLICA IDENTITY USING INDEX` on a unique index that does not include the
-  primary key, on the table or on one of its partitions. For an `UPDATE` of the
-  primary key PostgreSQL then sends no earlier row at all, and for a `DELETE`
-  an earlier row without the primary key, so a change could not be matched to
-  the row it changed. `doctor` reports it under **Replica identity holds the
-  primary key** as a **failure** (a server is not added or started while it
-  fails), with the statement to run (`ALTER TABLE ... REPLICA IDENTITY
-  DEFAULT`, or `FULL`). `USING INDEX` on an index that includes the primary key
-  is captured like `DEFAULT`. A table at `DEFAULT` whose primary key was
-  declared with `INCLUDE` columns is in this group too, and `FULL` is its way
-  out.
+  primary key, on the table or on one of its partitions. Such a table is below
+  `FULL`, so it fails the **REPLICA IDENTITY FULL** check as well; `doctor` also
+  reports it under **Replica identity holds the primary key** as a failure.
+  The statement is the same in both: `ALTER TABLE ... REPLICA IDENTITY FULL`.
 - **A primary key declared `DEFERRABLE`** (`primary_key_deferrable`). `doctor`
   reports it under **Primary keys are not deferrable** as a failure. A capture
   that starts with such a table says so once and skips it; it does not refuse
@@ -501,31 +448,16 @@ captured:
   key was changed; the ones skipped before it are missing from the copy until
   the table's next full read, and from the history for good.
 
-One more reason counts single changes, not a table:
-`replica_identity_key_not_sent` is recorded for a change of a table below
-`FULL` whose earlier row came without a value for a primary-key column.
-PostgreSQL is not known to send one. Should one arrive, that change is skipped
-and counted, and the table goes on being captured.
+For each of them, as for a table below `FULL`: the changes are dropped and
+counted, the log says so with the statement to run, `status` shows capture as
+DEGRADED under the reason, the Status page lists the table in red, and after
+the fix capture of the table resumes by itself; the changes skipped before it
+are never recorded.
 
-For a skipped table:
-
-- **Its changes are not captured.** They are dropped and each one is counted.
-- **The log says so**, once each time PostgreSQL describes the table, with the
-  statement to run.
-- **`status` shows capture as DEGRADED** under the reason, and names the
-  table. The count is kept across restarts, like the MySQL path's skip counts.
-- **The web interface's Status page** lists the tables that are not captured
-  in red, as `N tables NOT captured`.
-- **After you run the statement**, PostgreSQL describes the table again and
-  capture of it resumes by itself, with no restart. The changes skipped before
-  it are never recorded. The next full copy of the table brings its rows up to
-  date; the history of that stretch stays missing, so nothing in it can be
-  queried or undone.
-
-An index written by a version before this one may hold skips under the reason
-`replica_identity_not_full`: those versions skipped every table that was not at
-`FULL`. Those changes stay missing, and the count stays in `status`. Nothing
-records that reason any more.
+An index written by version 0.138.0 may hold skips under
+`replica_identity_key_not_sent`: a change of a table below `FULL` whose earlier
+row came without a value for a primary-key column. PostgreSQL is not known to
+send one, and a table below `FULL` is not captured any more.
 
 **The limit of the deferrable-key check.** A primary key cannot be made
 deferrable in place (PostgreSQL refuses `ALTER TABLE ... ALTER CONSTRAINT` on a
@@ -591,9 +523,8 @@ CREATE PUBLICATION bintrail_pub FOR ALL TABLES;
 ```
 
 To add a table later: `ALTER PUBLICATION bintrail_pub ADD TABLE public.items;`.
-If you want its changes undoable from the first one, set
-`ALTER TABLE public.items REPLICA IDENTITY FULL;` before adding it (see step
-3).
+Set `ALTER TABLE public.items REPLICA IDENTITY FULL;` before adding it: a
+table that is not at `FULL` is not captured (see step 3).
 
 ### 5. The replication slot — created for you
 
@@ -623,10 +554,9 @@ bintrail-pg doctor --query-dsn "$PG" --slot bintrail_shop --publication bintrail
   retaining. The status progresses `reserved` (PASS) → `extended` / `unreserved`
   (**WARN** — retaining WAL and approaching the limit; doctor still exits 0) →
   `lost` (a loud **FAIL** with the re-baseline recovery path).
-- **REPLICA IDENTITY FULL** → WARN for each published table that is not at
-  `FULL` (and for a partitioned one with a partition that is not): captured,
-  without undo of its `UPDATE` and `DELETE`. Doctor still exits 0. See
-  [step 3](#3-replica-identity-full-optional-needed-only-for-undo).
+- **REPLICA IDENTITY FULL** → FAIL for each published table that is not at
+  `FULL` (and for a partitioned one with a partition that is not): capture
+  skips it. See [step 3](#3-set-replica-identity-full-on-every-captured-table).
 - **Replica identity holds the primary key** → FAIL for a table whose replica
   identity leaves a primary-key column out: capture skips it.
 - **Publication publishes TRUNCATE** → WARN if the publication leaves
@@ -652,8 +582,8 @@ bintrail-pg doctor --query-dsn "$PG" --slot bintrail_shop --publication bintrail
 - **FK cascade-child coverage** → WARN if a published table has a foreign-key
   `ON DELETE CASCADE` / `SET NULL` **child** that is *not* in the publication. A
   delete on the parent would rewrite that child, and the rewrite would not be
-  captured — add the child to the publication (and set its `REPLICA IDENTITY
-  FULL` if the cascade is to be undoable).
+  captured — add the child to the publication, at `REPLICA IDENTITY FULL` like
+  every captured table.
 
 These coverage checks are also emitted as warnings by `bintrail-pg stream` at
 startup, so capture is never silently incomplete even if you skip `doctor`.
@@ -721,7 +651,7 @@ bintrail-pg stream \
 ```
 
 That command: validates `wal_level` and the publication, and warns about any
-table not at `REPLICA IDENTITY FULL` (captured, without undo); creates the slot `bintrail_shop` if absent; bootstraps
+table not at `REPLICA IDENTITY FULL` (not captured; the other tables are); creates the slot `bintrail_shop` if absent; bootstraps
 the index tables if needed; then streams every row change into `binlog_events`.
 Send `SIGINT`/`SIGTERM` for a graceful shutdown (it flushes the batch and writes
 a final checkpoint).
@@ -869,12 +799,12 @@ bintrail-pg status  --index-dsn '…'
 (The core `bintrail` binary works against the same index too — the read plane is
 identical across binaries.)
 
-**What's recoverable:** every INSERT, and the UPDATE/DELETE row changes of a
-table that was at `REPLICA IDENTITY FULL` when they were made, with full
-before/after images. Under `REPLICA IDENTITY FULL`, unchanged out-of-line TOAST
-values are present in the before-image, so a reversal of a large-column row is
-correct. An UPDATE or a DELETE of a table that was not at `FULL` is refused
-([step 3](#3-replica-identity-full-optional-needed-only-for-undo)). FK `ON DELETE CASCADE` / `SET NULL` cascades are visible in the stream
+**What's recoverable:** every captured row change, with full before/after
+images: DBTrail captures a table only at `REPLICA IDENTITY FULL`. Under it,
+unchanged out-of-line TOAST values are present in the before-image, so a
+reversal of a large-column row is correct. An UPDATE or a DELETE that version
+0.138.0 recorded for a table that was not at `FULL` is refused
+([step 3](#3-set-replica-identity-full-on-every-captured-table)). FK `ON DELETE CASCADE` / `SET NULL` cascades are visible in the stream
 (PostgreSQL performs them as ordinary row changes), so `recover` undoes them
 directly.
 
@@ -2530,9 +2460,8 @@ user.
   as hex-EWKB, which embeds the SRID and round-trips losslessly back into
   PostgreSQL — proven empirically by `TestOne_PGExtensionTypeRoundTripMatrix`
   against the `postgis/postgis` image in CI. The target just needs PostGIS
-  installed. (`REPLICA IDENTITY FULL` is for undo, as for any table; large
-  geometries are TOASTed, so without it an UPDATE that leaves one untouched
-  does not carry it: see step 3.)
+  installed. (`REPLICA IDENTITY FULL` is required, as for any table: see
+  step 3.)
 - **pgvector is round-trip tested.** `vector` columns stream as their bracketed
   text form (`[0.5,-1.25,3.75]`) and round-trip byte-for-byte — same test,
   against the `pgvector/pgvector` image in CI. The target needs the extension
@@ -2808,8 +2737,8 @@ out of the box (it already holds `rds_replication`), and both flavors default
 bound as you would for any production source.
 
 In all cases bintrail-pg connects as a **client** — there is nothing to install
-on the managed instance beyond the publication (and `REPLICA IDENTITY FULL`
-where you want undo), which are plain SQL.
+on the managed instance beyond the publication and `REPLICA IDENTITY FULL` on
+the tables to capture, which are plain SQL.
 
 ---
 
@@ -2824,9 +2753,9 @@ where you want undo), which are plain SQL.
 | `wal_level is "replica", must be 'logical'` | Set `wal_level = logical` and **restart** the server (a reload is not enough). |
 | `publication "…" does not exist — create it` | Create the publication first (step 4) — bintrail-pg never creates it. |
 | `publication "…" does not cover requested table(s) […]` | Your `--schemas`/`--tables` include tables not in the publication; `ALTER PUBLICATION … ADD TABLE …` (or widen the publication). |
-| `N table(s) without undo: not at REPLICA IDENTITY FULL` (a warning) | Nothing is wrong: the tables are captured. To be able to undo their `UPDATE` and `DELETE`, run `ALTER TABLE <t> REPLICA IDENTITY FULL` for them (step 3). |
-| `cannot undo a change in … was not captured, because the table was not at REPLICA IDENTITY FULL` | The window holds an `UPDATE` or a `DELETE` made while the table was not at `FULL`. It cannot be undone. Set `FULL` for later changes (step 3). |
-| `table's replica identity does not hold its primary key; its changes are NOT captured` | `ALTER TABLE <t> REPLICA IDENTITY DEFAULT` (or `FULL`); capture of the table resumes by itself (step 3). |
+| `table is not at REPLICA IDENTITY FULL; its changes are NOT captured` | `ALTER TABLE <t> REPLICA IDENTITY FULL` (each partition too, for a partitioned table); capture of the table resumes by itself, and its next full read brings the copy up to date (step 3). On PostgreSQL 18, read the generated-columns note in step 3 first. |
+| `cannot undo a change in … was not captured, because the table was not at REPLICA IDENTITY FULL` | The window holds an `UPDATE` or a `DELETE` that version 0.138.0 recorded while the table was not at `FULL`. It cannot be undone (step 3). |
+| `table's replica identity does not hold its primary key; its changes are NOT captured` | `ALTER TABLE <t> REPLICA IDENTITY FULL`; capture of the table resumes by itself (step 3). |
 | `table has a primary key declared DEFERRABLE; its changes are NOT captured` | Make the key not deferrable (`ALTER TABLE <t> DROP CONSTRAINT <key>, ADD PRIMARY KEY (...)`), or take the table out of the publication (step 3). |
 | `publication "…" applies a row filter or column list to table(s) […]` | A PG15+ `WHERE (...)` row filter or column list makes pgoutput emit only a subset of changes (silent data loss). Recreate the publication — or `ALTER PUBLICATION … SET TABLE …` re-listing the tables — without `WHERE (...)` / column lists. |
 | `publication "…" does not publish […] — those changes would be silently lost` | The publication was created with a narrowed `publish` option (e.g. `WITH (publish = 'insert')`). Run `ALTER PUBLICATION … SET (publish = 'insert, update, delete, truncate')` (it keeps the publication's tables and other options), or recreate it leaving `publish` unset (the default publishes all operations). |

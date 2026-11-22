@@ -17,12 +17,12 @@ import (
 	"github.com/dbtrail/dbtrail/internal/pgcapture"
 )
 
-// A table that was not at REPLICA IDENTITY FULL used to be skipped whole: its
-// changes dropped and recorded in the capture-skip ledger under
-// replica_identity_not_full, while every other table kept flowing. Such a table
-// is captured now (decoder_nofull_test.go). What is still skipped, the same way
-// and each under a reason of its own, is pinned here: a replica identity that
-// does not hold the primary key, and a primary key declared DEFERRABLE.
+// The tables capture skips whole, their changes dropped and recorded in the
+// capture-skip ledger while every other table keeps flowing, each under a
+// reason of its own: a table not at REPLICA IDENTITY FULL
+// (replica_identity_not_full, decoder_require_full_test.go), a replica
+// identity that does not hold the primary key, and a primary key declared
+// DEFERRABLE.
 
 // skipLedger decodes the counters' persisted document.
 func skipLedger(t *testing.T, c *parser.SkipCounters) map[string]parser.SkipStat {
@@ -70,8 +70,9 @@ func idxNoPK() *pglogrepl.RelationMessage {
 	return relMsgRI(2, "public", "b", 'i', []string{"u"}, "id", "u", "v")
 }
 
-// The earlier gate, inverted: tables at DEFAULT and NOTHING, which it skipped,
-// are captured; what is left skipped is the identity without the primary key.
+// An identity without the primary key is skipped under a reason of its own,
+// checked before the table is found below FULL; a table at DEFAULT beside it
+// is skipped as below FULL; a table at FULL flows.
 func TestDecode_IdentityWithoutPrimaryKey_RowsSkippedOthersFlow(t *testing.T) {
 	skips := parser.NewSkipCounters(slog.New(slog.DiscardHandler))
 	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil, pgcapture.WithSkipCounters(skips))
@@ -94,7 +95,7 @@ func TestDecode_IdentityWithoutPrimaryKey_RowsSkippedOthersFlow(t *testing.T) {
 		// A FULL table's unchanged-TOAST path still resolves from its before-image.
 		&pglogrepl.UpdateMessage{RelationID: 1, OldTupleType: pglogrepl.UpdateMessageTupleTypeOld,
 			OldTuple: tuple(textCol("1"), textCol("before")), NewTuple: tuple(textCol("1"), toastCol())},
-		// A table at DEFAULT is captured.
+		// A table at DEFAULT is not captured either.
 		&pglogrepl.InsertMessage{RelationID: 3, Tuple: tuple(textCol("5"), textCol("c"))},
 		&pglogrepl.DeleteMessage{RelationID: 3, OldTupleType: pglogrepl.DeleteMessageTupleTypeKey, OldTuple: tuple(textCol("5"), nullCol())},
 		&pglogrepl.InsertMessage{RelationID: 1, Tuple: tuple(textCol("2"), textCol("after"))},
@@ -103,12 +104,10 @@ func TestDecode_IdentityWithoutPrimaryKey_RowsSkippedOthersFlow(t *testing.T) {
 	want := []string{
 		fmt.Sprintf("a:%d:1", event.EventInsert),
 		fmt.Sprintf("a:%d:1", event.EventUpdate),
-		fmt.Sprintf("c:%d:5", event.EventInsert),
-		fmt.Sprintf("c:%d:5", event.EventDelete),
 		fmt.Sprintf("a:%d:2", event.EventInsert),
 	}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
-		t.Fatalf("emitted rows %v, want %v (a's and c's rows, none of b's)", got, want)
+		t.Fatalf("emitted rows %v, want %v (a's rows, none of b's or c's)", got, want)
 	}
 
 	led := skipLedger(t, skips)
@@ -123,16 +122,20 @@ func TestDecode_IdentityWithoutPrimaryKey_RowsSkippedOthersFlow(t *testing.T) {
 		t.Errorf("attribution %s:%d, want the transaction's commit LSN %s:%d", st.LastFile, st.LastPos, txnLSN, uint64(txnLSN))
 	}
 	t.Logf("ledger detail: %s", st.LastDetail)
-	for _, want := range []string{"'i'", "primary-key column(s) id", `ALTER TABLE "public"."b" REPLICA IDENTITY DEFAULT`, `ALTER TABLE "public"."b" REPLICA IDENTITY FULL`} {
+	for _, want := range []string{"'i'", "primary-key column(s) id", `ALTER TABLE "public"."b" REPLICA IDENTITY FULL`} {
 		if !strings.Contains(st.LastDetail, want) {
 			t.Errorf("detail %q lacks %q", st.LastDetail, want)
 		}
 	}
-	if len(led) != 1 {
-		t.Errorf("ledger has other reasons: %+v", led)
+	if strings.Contains(st.LastDetail, "REPLICA IDENTITY DEFAULT") {
+		t.Errorf("DEFAULT is no way out, the table would still not be captured: %q", st.LastDetail)
 	}
-	if _, old := led[pgcapture.SkipReplicaIdentityNotFull]; old {
-		t.Errorf("the old reason %q must not be recorded for a new change", pgcapture.SkipReplicaIdentityNotFull)
+	nf := led[pgcapture.SkipReplicaIdentityNotFull]
+	if nf.Count != 2 || !slices.Equal(nf.Tables, []string{"public.c"}) {
+		t.Errorf("want c's insert and delete under %q, got %+v", pgcapture.SkipReplicaIdentityNotFull, nf)
+	}
+	if len(led) != 2 {
+		t.Errorf("ledger has other reasons: %+v", led)
 	}
 }
 
@@ -169,7 +172,7 @@ func TestDecode_IdentityWithoutPrimaryKey_WarnsOncePerRelationMessage(t *testing
 	if n := strings.Count(buf.String(), needle); n != 1 {
 		t.Fatalf("want ONE warning for one RelationMessage and five skipped rows, got %d:\n%s", n, buf.String())
 	}
-	if !strings.Contains(buf.String(), `ALTER TABLE \"public\".\"b\" REPLICA IDENTITY DEFAULT`) {
+	if !strings.Contains(buf.String(), `ALTER TABLE \"public\".\"b\" REPLICA IDENTITY FULL`) {
 		t.Errorf("the warning must carry the exact fix, got:\n%s", buf.String())
 	}
 	if skips.Count(pgcapture.SkipReplicaIdentityIndexWithoutPrimaryKey) != 5 {
@@ -193,7 +196,7 @@ func TestDecode_IdentityWithoutPrimaryKey_QuotesTheFix(t *testing.T) {
 	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &line); err != nil {
 		t.Fatalf("decode warning %q: %v", buf.String(), err)
 	}
-	if got, want := line["fix"], `ALTER TABLE "Sales"."Order ""Items""" REPLICA IDENTITY DEFAULT (or ALTER TABLE "Sales"."Order ""Items""" REPLICA IDENTITY FULL, which also makes its changes undoable)`; got != want {
+	if got, want := line["fix"], `ALTER TABLE "Sales"."Order ""Items""" REPLICA IDENTITY FULL`; got != want {
 		t.Errorf("fix = %v, want %s", got, want)
 	}
 	if got := line["table"]; got != `Sales.Order "Items"` {
@@ -215,16 +218,17 @@ func TestDecode_IdentityWithoutPrimaryKey_FixedMidStreamResumes(t *testing.T) {
 		t.Fatalf("rows of b before the fix must be dropped, got %v", got)
 	}
 
-	// After ALTER TABLE b REPLICA IDENTITY DEFAULT, PostgreSQL describes b again
-	// with the primary key as its identity.
-	ev, emit := mustDecode(t, d, relMsgRI(2, "public", "b", 'd', []string{"id"}, "id", "u", "v"))
+	// After ALTER TABLE b REPLICA IDENTITY FULL, PostgreSQL describes b again
+	// at FULL (DEFAULT would hold the key, and still not be captured).
+	ev, emit := mustDecode(t, d, relMsgRI(2, "public", "b", 'f', nil, "id", "u", "v"))
 	if !emit || ev.EventType != event.EventRelation || ev.Table != "b" {
 		t.Fatalf("a description that holds the key must cache and emit the relation normally, got emit=%v %+v", emit, ev)
 	}
 	got = decodeAll(t, d,
 		beginMsg(),
 		&pglogrepl.InsertMessage{RelationID: 2, Tuple: tuple(textCol("2"), textCol("1"), textCol("y"))},
-		&pglogrepl.UpdateMessage{RelationID: 2, NewTuple: tuple(textCol("2"), textCol("1"), toastCol())},
+		&pglogrepl.UpdateMessage{RelationID: 2, OldTupleType: pglogrepl.UpdateMessageTupleTypeOld,
+			OldTuple: tuple(textCol("2"), textCol("1"), textCol("y")), NewTuple: tuple(textCol("2"), textCol("1"), toastCol())},
 		commitMsg(),
 	)
 	want := []string{fmt.Sprintf("b:%d:2", event.EventInsert), fmt.Sprintf("b:%d:2", event.EventUpdate)}
