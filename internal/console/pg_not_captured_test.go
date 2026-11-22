@@ -76,7 +76,9 @@ func TestPGNotCapturedOf(t *testing.T) {
 		{"a ledger that does not parse", state(sql.NullString{String: "{", Valid: true}), "", cutAt(read), "public.orders public.items"},
 		{"a ledger that cannot be read", nil, "the capture's record of dropped changes could not be read", cutAt(read), "public.orders public.items"},
 		{"a slot lost after the snapshot read", lostSlot, "", cutAt(read), "public.orders public.items"},
-		{"no state of the capture in the index", nil, "", cutAt(read), "public.orders public.items"},
+		// Capture has saved no state yet (a full read of a source with no
+		// write since): no loss and no drop on record.
+		{"no state of the capture in the index yet", nil, "", cutAt(read), ""},
 		{"a tail refused for another reason, no drop: not a loss", state(sql.NullString{}), "",
 			func(views.BaselineTable) pgCut {
 				return pgCut{refusal: "the snapshot of x does not say it was read at one moment of the source", md: baseline.DumpMetadata{LastDumpAt: read, LSN: 50}, footer: true}

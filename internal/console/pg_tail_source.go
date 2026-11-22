@@ -982,7 +982,10 @@ func sameStringSet(a, b []string) bool {
 // wrote one, and they stopped instead of dropping. One that is there and does
 // not parse refuses.
 func pgTailCaptureLoss(st *status.StreamStateInfo, readLSN uint64, sourceRead time.Time, schema, table string) string {
-	if st != nil && st.GapColumnsPresent && sourceRead.IsZero() && readLSN == 0 {
+	switch {
+	case st == nil:
+		return "the capture's state is not recorded in the index"
+	case st.GapColumnsPresent && sourceRead.IsZero() && readLSN == 0:
 		return "the snapshot does not say when its rows were read from the source, nor the position they reach"
 	}
 	return pgCaptureLossOf(st, readLSN, sourceRead, schema, table)
@@ -999,10 +1002,15 @@ func pgTailCaptureLoss(st *status.StreamStateInfo, readLSN uint64, sourceRead ti
 // time is the source server's: compared with reconstruct.PGSkipClockMargin,
 // so a daemon behind the source by less does not date the loss before the
 // read.
+//
+// No capture state at all (st nil: capture has not saved one yet, as right
+// after a full read of a source with no write since) records no loss and no
+// drop: not a loss of capture. A tail refuses it all the same
+// (pgTailCaptureLoss), as it refuses whatever it cannot place.
 func pgCaptureLossOf(st *status.StreamStateInfo, readLSN uint64, sourceRead time.Time, schema, table string) string {
 	switch {
 	case st == nil:
-		return "the capture's state is not recorded in the index"
+		return ""
 	case !st.GapColumnsPresent:
 		return "the capture's record of lost events is not readable"
 	case st.GapLostAt.Valid && !st.GapLostAt.Time.Before(sourceRead.Add(-reconstruct.PGSkipClockMargin)):
