@@ -305,6 +305,15 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 			return wireResult{Error: &wireError{Kind: errQuery, Message: err.Error()}}
 		}
 	}
+	// A settings name qualified with a schema of the copy is the copy's
+	// only if that schema has it, which is known now that the views are in
+	// (#3096); the others were refused with the parse.
+	switch reason, err := copyOwnSettingsName(ctx, conn, settingsCatalogRefs(stmt)); {
+	case err != nil:
+		return sessionErr("%v", err)
+	case reason != "":
+		return wireResult{Error: &wireError{Kind: errRefused, Message: reason}}
+	}
 	// The port's USE, before the lock like every other SET. A schema the
 	// views did not create (a default seeded from the source DSN, a typo in
 	// -D) is NOT applied: SET search_path refuses it, and refusing every
@@ -750,7 +759,13 @@ func lockdownStatements(copyDirs []string, spill spillSpec) []string {
 // allowedTableFunctions are the table functions a statement may call, at any
 // depth: readers of files (DuckDB's own allowed_directories decides WHICH
 // files), Parquet metadata, generators, JSON walkers, and the read-only
-// pragma_* views. duckdb_* catalog functions are allowed by prefix below.
+// pragma_* views, and the engine's catalog functions a client lists schemas,
+// tables and columns with. Each is listed by name: a function a new engine
+// version adds is refused until it is reviewed and listed here
+// (TestTableFunctionsAreAllClassified). Left out on purpose, among the
+// engine's own duckdb_* functions: those that show the engine's settings,
+// secrets, extensions, file cache, temporary files, session variables or
+// logs, which name folders of the host and the copy's files (#3096).
 //
 // Everything else is refused by name, because a SELECT-shaped statement can
 // still change state through a table function after the lock (verified on
@@ -772,6 +787,248 @@ var allowedTableFunctions = map[string]bool{
 	"pragma_version": true, "pragma_platform": true, "pragma_database_size": true,
 	"pragma_storage_info": true, "pragma_table_info": true, "pragma_metadata_info": true,
 	"pragma_collations": true, "pragma_show": true, "pragma_user_agent": true,
+	"duckdb_columns": true, "duckdb_constraints": true, "duckdb_coordinate_systems": true,
+	"duckdb_databases": true, "duckdb_dependencies": true, "duckdb_functions": true,
+	"duckdb_indexes": true, "duckdb_keywords": true, "duckdb_schemas": true,
+	"duckdb_sequences": true, "duckdb_tables": true, "duckdb_types": true, "duckdb_views": true,
+}
+
+// refusedScalarFunctions are the scalar functions a statement may not call
+// at any depth: getvariable returns the session's variables, which the views
+// set to the copy's directories. The scalar functions are many and a
+// statement needs them, so these are refused by name;
+// TestScalarFunctionsNamedLikeTheHostAreReviewed watches the engine's list
+// for one more of the kind. current_setting is the other one of the kind,
+// refused only for the settings below (refusedSettingRead).
+var refusedScalarFunctions = map[string]bool{"getvariable": true}
+
+// pathSettings are the engine's settings that hold a path, a list of
+// folders, an extension repository, a proxy or where a log or profile is
+// written, by every name and alias the pinned engine knows them by: their
+// value is not shown on the copy (#3096). Every other setting is, through
+// current_setting (the session's time zone, threads, memory, the lock).
+// TestPathSettingsAreAllListed checks this against the engine's settings.
+var pathSettings = map[string]bool{
+	"allowed_directories": true, "allowed_paths": true,
+	"autoinstall_extension_repository": true, "custom_extension_repository": true,
+	"extension_directories": true, "extension_directory": true,
+	"file_search_path": true, "home_directory": true, "secret_directory": true, "temp_directory": true,
+	"http_logging_output": true, "log_query_path": true, "profile_output": true, "profiling_output": true,
+	"http_proxy": true, "http_proxy_password": true, "http_proxy_username": true,
+}
+
+// refusedSettingRead returns why a current_setting call in the statement
+// tree is refused, or "": a setting of pathSettings, or a name that is not
+// written as a fixed text (an expression or a parameter could name any
+// setting).
+func refusedSettingRead(node any) string {
+	switch x := node.(type) {
+	case map[string]any:
+		if name, _ := x["function_name"].(string); x["type"] == "FUNCTION" && strings.EqualFold(name, "current_setting") {
+			children, _ := x["children"].([]any)
+			if len(children) != 1 {
+				return fmt.Sprintf("the function %s is not allowed here with %d arguments; name one setting as a text", name, len(children))
+			}
+			arg, _ := children[0].(map[string]any)
+			value, _ := arg["value"].(map[string]any)
+			setting, isText := value["value"].(string)
+			if arg["type"] != "VALUE_CONSTANT" || !isText {
+				return fmt.Sprintf("the function %s is not allowed here unless the setting is named as a fixed text", name)
+			}
+			if pathSettings[strings.ToLower(strings.TrimSpace(setting))] {
+				return fmt.Sprintf("the function %s is not allowed here for %s: the engine's settings that hold a path are not shown on the copy", name, setting)
+			}
+		}
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if r := refusedSettingRead(x[k]); r != "" {
+				return r
+			}
+		}
+	case []any:
+		for _, e := range x {
+			if r := refusedSettingRead(e); r != "" {
+				return r
+			}
+		}
+	}
+	return ""
+}
+
+// viewTextFunctions print a view's text, which names the copy's files and
+// the hidden columns: refused on a server with hidden rules (#2529), like
+// viewTextCatalogs.
+var viewTextFunctions = map[string]bool{"pg_get_viewdef": true}
+
+// refusedEngineViews are the engine's own views over a refused function,
+// refused on every server (#3096): pg_settings reads duckdb_settings(),
+// duckdb_logs reads duckdb_logs(), pg_prepared_statements reads
+// duckdb_prepared_statements(), and a table reference does not show the
+// function it reads (TestEngineViewsOverRefusedFunctionsAreRefused lists
+// them all). A reference of one of these names is refused however it is
+// qualified or spelled, with one exception: a schema of the copy that really
+// holds a relation of that name, named with that schema
+// (copyOwnSettingsName). The engine resolves a name through more catalogs
+// and schemas than a spelling shows, so what is refused is the name, not one
+// way of writing it.
+var refusedEngineViews = map[string]bool{"pg_settings": true, "duckdb_logs": true, "pg_prepared_statements": true}
+
+// refusedShowNames are the SHOW forms the engine answers from a refused
+// function (SHOW VARIABLES reads duckdb_variables()). The parse shows them as
+// a SHOW of that name, not as a call.
+var refusedShowNames = map[string]bool{"variables": true}
+
+// refusedShow returns the first SHOW (or DESCRIBE, SUMMARIZE) in the
+// statement tree of one of refusedShowNames, or "".
+func refusedShow(node any) string {
+	switch x := node.(type) {
+	case map[string]any:
+		if t, _ := x["type"].(string); t == "SHOW_REF" {
+			// The parser keeps the name as an identifier, in double quotes
+			// ("variables").
+			name, _ := x["table_name"].(string)
+			if len(name) >= 2 && name[0] == '"' && name[len(name)-1] == '"' {
+				name = strings.ReplaceAll(name[1:len(name)-1], `""`, `"`)
+			}
+			if refusedShowNames[strings.ToLower(name)] {
+				return name
+			}
+		}
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if r := refusedShow(x[k]); r != "" {
+				return r
+			}
+		}
+	case []any:
+		for _, e := range x {
+			if r := refusedShow(e); r != "" {
+				return r
+			}
+		}
+	}
+	return ""
+}
+
+// engineSchemas are the schemas of the engine's own catalog views: a
+// settings name in one of them is never the copy's.
+var engineSchemas = map[string]bool{"pg_catalog": true, "information_schema": true}
+
+// settingsRef is a table reference whose name is one of refusedEngineViews.
+type settingsRef struct{ catalog, schema, name string }
+
+// mayBeTheCopys says whether the reference could name a relation of the
+// copy: qualified with a schema that is not one of the engine's, in the
+// copy's own database or in none. Whether that schema really holds one is
+// asked of the session once the views are in (copyOwnSettingsName).
+func (r settingsRef) mayBeTheCopys() bool {
+	c, s := strings.ToLower(r.catalog), strings.ToLower(r.schema)
+	return s != "" && !engineSchemas[s] && (c == "" || c == "memory")
+}
+
+// refusedFunctionCall returns the first function call in the statement tree
+// whose name is in names, or "". A call is a node of type FUNCTION at any
+// depth (the select list, WHERE, a CTE, a subquery, the arguments of a table
+// function); the name is compared without regard to case or to a schema
+// written before it.
+func refusedFunctionCall(node any, names map[string]bool) string {
+	switch x := node.(type) {
+	case map[string]any:
+		if x["type"] == "FUNCTION" {
+			name, _ := x["function_name"].(string)
+			if names[strings.ToLower(name)] {
+				return name
+			}
+		}
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if r := refusedFunctionCall(x[k], names); r != "" {
+				return r
+			}
+		}
+	case []any:
+		for _, e := range x {
+			if r := refusedFunctionCall(e, names); r != "" {
+				return r
+			}
+		}
+	}
+	return ""
+}
+
+// settingsCatalogRefs returns every table reference in the statement tree
+// whose name is one of refusedEngineViews, however it is qualified.
+func settingsCatalogRefs(node any) []settingsRef {
+	var out []settingsRef
+	var walk func(any)
+	walk = func(node any) {
+		switch x := node.(type) {
+		case map[string]any:
+			if x["type"] == "BASE_TABLE" {
+				name, _ := x["table_name"].(string)
+				if refusedEngineViews[strings.ToLower(name)] {
+					schema, _ := x["schema_name"].(string)
+					catalog, _ := x["catalog_name"].(string)
+					out = append(out, settingsRef{catalog: catalog, schema: schema, name: name})
+				}
+			}
+			keys := make([]string, 0, len(x))
+			for k := range x {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				walk(x[k])
+			}
+		case []any:
+			for _, e := range x {
+				walk(e)
+			}
+		}
+	}
+	walk(node)
+	return out
+}
+
+// settingsRefusal is the reason a statement naming one of the engine's
+// refusedEngineViews is refused.
+func settingsRefusal(name string) string {
+	return fmt.Sprintf("%s is not allowed here: it shows the engine's own settings or state, which the copy does not show; "+
+		"a table of the copy with that name is read when named with its schema (schema.%s)", name, name)
+}
+
+// copyOwnSettingsName refuses, once the copy's views are in, a reference
+// that mayBeTheCopys but names no relation the copy really has: then the
+// engine would resolve it to its own view. "" when every one is the copy's.
+// A check that cannot run is an error, not a refusal: the statement does not
+// run either way, and the reason is the real one.
+func copyOwnSettingsName(ctx context.Context, conn *sql.Conn, refs []settingsRef) (string, error) {
+	for _, r := range refs {
+		var n int
+		err := conn.QueryRowContext(ctx, `SELECT count(*) FROM (
+			SELECT schema_name, view_name AS name FROM duckdb_views() WHERE NOT internal AND database_name = 'memory'
+			UNION ALL SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = 'memory')
+			WHERE lower(schema_name) = lower(?) AND lower(name) = lower(?)`, r.schema, r.name).Scan(&n)
+		if err != nil {
+			return "", fmt.Errorf("could not check whether %s.%s is a table of the copy: %w", r.schema, r.name, err)
+		}
+		if n == 0 {
+			return settingsRefusal(r.name), nil
+		}
+	}
+	return "", nil
 }
 
 // fileReaderFunctions are the allowed table functions that read a file of the
@@ -867,7 +1124,7 @@ func fileReaderFunction(node any) string {
 }
 
 func tableFunctionAllowed(name string) bool {
-	return allowedTableFunctions[name] || strings.HasPrefix(name, "duckdb_")
+	return allowedTableFunctions[name]
 }
 
 // refusedTableFunction walks the serialized statement tree and returns the
@@ -956,9 +1213,26 @@ func parseStatement(ctx context.Context, conn *sql.Conn, text string, noFileRead
 		if name := fileReaderFunction(parsed.Statements[0]); name != "" {
 			return nil, fmt.Sprintf("%s is not allowed on this server: it hides some tables and columns, and the copy's files hold them; query its tables by name", name)
 		}
+		if name := refusedFunctionCall(parsed.Statements[0], viewTextFunctions); name != "" {
+			return nil, fmt.Sprintf("%s is not allowed on this server: it hides some tables and columns, and the views' text holds them; query its tables by name", name)
+		}
 	}
 	if name := refusedTableFunction(parsed.Statements[0]); name != "" {
-		return nil, fmt.Sprintf("the table function %s is not allowed here; only readers (read_parquet, glob, the parquet_* metadata functions, range, unnest, json_each and the duckdb_* catalog) can run on the copy", name)
+		return nil, fmt.Sprintf("the table function %s is not allowed here; only readers (read_parquet, glob, the parquet_* metadata functions, range, unnest, json_each) and the catalog (duckdb_tables, duckdb_columns, duckdb_schemas, duckdb_views and the like) can run on the copy", name)
+	}
+	if name := refusedFunctionCall(parsed.Statements[0], refusedScalarFunctions); name != "" {
+		return nil, fmt.Sprintf("the function %s is not allowed here: the session's variables are not shown on the copy", name)
+	}
+	if reason := refusedSettingRead(parsed.Statements[0]); reason != "" {
+		return nil, reason
+	}
+	for _, ref := range settingsCatalogRefs(parsed.Statements[0]) {
+		if !ref.mayBeTheCopys() {
+			return nil, settingsRefusal(ref.name)
+		}
+	}
+	if name := refusedShow(parsed.Statements[0]); name != "" {
+		return nil, fmt.Sprintf("SHOW %s is not allowed here: the session's variables are not shown on the copy", name)
 	}
 	return parsed.Statements[0], ""
 }

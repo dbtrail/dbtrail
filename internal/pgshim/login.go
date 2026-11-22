@@ -300,7 +300,9 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	// the question has its own, and the statement's must stay the one a
 	// cancel request stops.
 	if perr := s.zoneOnCopy(s.set.zone, true); perr != nil {
-		s.fallTo(ReasonCopyRefused)
+		if s.busyRefused == "" {
+			s.fallTo(ReasonCopyRefused)
+		}
 		return nil, nil, nil, "", perr
 	}
 	ctx, done := s.statementContext()
@@ -349,7 +351,8 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	if err != nil {
 		perr := s.statementError(ctx, err)
 		if ctx.Err() == nil {
-			s.fallTo(s.copyFallback(err, perr))
+			// To the source, or refused when the copy was busy (route.go).
+			perr = s.copyFailed(err, perr)
 		}
 		return nil, nil, nil, "", perr
 	}

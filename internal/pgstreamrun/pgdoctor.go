@@ -80,7 +80,9 @@ func BuildPGReport(ctx context.Context, cfg PGDoctorConfig) *doctor.Report {
 		for _, name := range dependentCheckNames {
 			r.Add(doctor.CheckResult{Name: name, Status: doctor.StatusSkip, Detail: "requires wal_level=logical"})
 		}
-		// Not a dependent: what the role may read does not hang on wal_level.
+		// Not dependents: what the role may read, and what the publication
+		// publishes, do not hang on wal_level.
+		addTruncateCheck(ctx, r, conn, cfg.Publication)
 		addReadAccessCheck(ctx, r, conn, cfg.Publication, filters)
 		return r
 	}
@@ -95,6 +97,7 @@ func BuildPGReport(ctx context.Context, cfg PGDoctorConfig) *doctor.Report {
 	} else {
 		r.Add(doctor.CheckResult{Name: "Publication coverage", Status: doctor.StatusPass})
 	}
+	addTruncateCheck(ctx, r, conn, cfg.Publication)
 
 	addReplicaIdentityChecks(ctx, r, conn, cfg.Publication)
 

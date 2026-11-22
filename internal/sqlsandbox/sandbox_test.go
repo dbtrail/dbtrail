@@ -384,7 +384,10 @@ func TestRun_memoryCapFailsInsideWorker(t *testing.T) {
 }
 
 // What the user's SQL sees of the session: the caps applied, external access
-// off, spilling off, extension autoload off, and the configuration locked.
+// off, extension autoload off, and the configuration locked. The settings
+// that hold a folder (the spill directory, the directories the copy may
+// read) are not shown to it at all (#3096); the lock-down that sets them is
+// pinned by TestLockdown_* and TestPathSettingsAreAllListed.
 func TestRun_sessionIsLockedAsSeenByTheQuery(t *testing.T) {
 	f := newCopyFixture(t)
 	l := testLimits()
@@ -396,32 +399,24 @@ func TestRun_sessionIsLockedAsSeenByTheQuery(t *testing.T) {
 		current_setting('threads')::VARCHAR,
 		current_setting('enable_external_access')::VARCHAR,
 		current_setting('lock_configuration')::VARCHAR,
-		current_setting('temp_directory')::VARCHAR,
 		current_setting('autoload_known_extensions')::VARCHAR,
-		current_setting('autoinstall_known_extensions')::VARCHAR,
-		current_setting('allowed_directories')::VARCHAR`))
+		current_setting('autoinstall_known_extensions')::VARCHAR`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	row := res.Rows[0]
-	want := []any{"3", "false", "true", nil, "false", "false"}
+	want := []any{"3", "false", "true", "false", "false"}
 	for i, w := range want {
-		if w != nil && row[i] != w {
+		if row[i] != w {
 			t.Errorf("setting %d = %#v, want %#v", i, row[i], w)
 		}
 	}
-	// The statement's own spill directory (#2210), under the spill root.
-	if temp, _ := row[3].(string); !strings.Contains(temp, spillPrefix) {
-		t.Errorf("temp_directory = %q, want the statement's %s* directory", temp, spillPrefix)
-	}
-	allowed, _ := row[6].(string)
-	for _, dir := range []string{f.archiveRoot, f.baselineRoot} {
-		if !strings.Contains(allowed, dir) {
-			t.Errorf("allowed_directories %q lacks %q", allowed, dir)
+	for _, s := range []string{"temp_directory", "allowed_directories"} {
+		_, err := r.Run(context.Background(), f.job("SELECT current_setting('"+s+"')"))
+		var re *RefusedError
+		if !errors.As(err, &re) {
+			t.Errorf("current_setting(%q): err = %v, want it refused", s, err)
 		}
-	}
-	if strings.Contains(allowed, os.TempDir()+"]") || strings.Count(allowed, "/") == 0 {
-		t.Errorf("allowed_directories %q", allowed)
 	}
 }
 

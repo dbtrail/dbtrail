@@ -962,16 +962,12 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	// keys are byte-identical to what the indexer stored in pk_values.
 	// A PostgreSQL stream writes one schema snapshot per table, so the latest
 	// snapshot alone describes one table (#1596).
-	pgSource := query.SourceFlavor(db) == "postgres"
+	flavor := query.SourceFlavor(db)
+	pgSource := flavor == "postgres"
 	if psqlMode && !pgSource {
 		return nil, ErrPsqlNeedsPostgres
 	}
-	var resolver *metadata.Resolver
-	if pgSource {
-		resolver, err = metadata.NewLatestPerTableResolver(db)
-	} else {
-		resolver, err = metadata.NewResolver(db, 0)
-	}
+	resolver, err := query.LatestSchemaResolverForFlavor(db, flavor)
 	if err != nil {
 		return nil, fmt.Errorf("load schema resolver: %w; run `bintrail snapshot` first", err)
 	}

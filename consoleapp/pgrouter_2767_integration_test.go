@@ -26,6 +26,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/hiderules"
 	"github.com/dbtrail/dbtrail/internal/pgbaseline"
 	"github.com/dbtrail/dbtrail/internal/pgshim"
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
@@ -55,6 +56,8 @@ type pgExtEnv struct {
 	// routes is the port's tally of which side answered each statement
 	// (#2770), with its per-statement table.
 	routes *pgRouteStats
+	// runner is the copy's pool of workers (#3109: how many run now).
+	runner *sqlsandbox.Runner
 }
 
 func startPGExtPort(t *testing.T, ctx context.Context) pgExtEnv {
@@ -97,6 +100,11 @@ type pgPortFixture struct {
 	// few rows, which every plan finds cheap, and what they test is the
 	// screen.
 	cost *pgshim.CostPolicy
+	// workers, when set, is how many statements run on the copy at once (2
+	// otherwise); maxWait, when set, how long one waits for a worker (the
+	// router's --max-wait; negative refuses at once, as a full line).
+	workers int
+	maxWait time.Duration
 }
 
 func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx pgPortFixture) pgExtEnv {
@@ -166,7 +174,14 @@ func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx
 		t.Fatal(err)
 	}
 	f.savePortFile(t, true, "tok")
-	srv, runner, err := newRouterConsole(f.settings(""), console.SQLPool{Workers: 2, Threads: 2})
+	settings, workers := f.settings(""), 2
+	if fx.maxWait != 0 {
+		settings.MaxWait = fx.maxWait
+	}
+	if fx.workers > 0 {
+		workers = fx.workers
+	}
+	srv, runner, err := newRouterConsole(settings, console.SQLPool{Workers: workers, Threads: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +205,7 @@ func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx
 	t.Cleanup(func() { stopPort(); <-served })
 	waitUntil(t, "the port to open", func() bool { return router.listening() != "" })
 	host, portNum, _ := net.SplitHostPort(router.listening())
-	return pgExtEnv{sourceDSN: baseDSN, host: host, port: portNum, owner: f.owner, srv: srv, serverID: ent.ID, eventAt: eventAt, indexDSN: dsn, routes: routes}
+	return pgExtEnv{sourceDSN: baseDSN, host: host, port: portNum, owner: f.owner, srv: srv, serverID: ent.ID, eventAt: eventAt, indexDSN: dsn, routes: routes, runner: runner}
 }
 
 func (e pgExtEnv) portDSN() string {

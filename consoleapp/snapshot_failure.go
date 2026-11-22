@@ -75,6 +75,10 @@ func snapshotFailureOf(err error, req console.BaselineRequest) *console.Snapshot
 		if quiet := (*mydumperlock.QuietWaitError)(nil); errors.As(err, &quiet) {
 			f.Summary = quiet.Summary()
 		}
+		// And the PostgreSQL refusals whose remedy is past the cut (#3078).
+		if s := pgFailureSummary(err); f.Postgres && s != "" {
+			f.Summary = s
+		}
 	}
 	return f
 }

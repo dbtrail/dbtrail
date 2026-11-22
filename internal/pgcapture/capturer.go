@@ -36,6 +36,20 @@ const standbyWriteTimeout = 10 * time.Second
 // deliberately use the full run ctx — they are long-lived.
 const startupTimeout = 30 * time.Second
 
+// beforeStartReplication, when set, runs right before Run starts
+// replication, after it read the slot's position: a test makes the slot's
+// creation end there (SetBeforeStartReplicationForTest).
+var beforeStartReplication func()
+
+// SetBeforeStartReplicationForTest makes fn run in every Run right before
+// replication starts, for tests of what a capture records when the slot's
+// position could not be read before that moment (#3078).
+func SetBeforeStartReplicationForTest(fn func()) (restore func()) {
+	prev := beforeStartReplication
+	beforeStartReplication = fn
+	return func() { beforeStartReplication = prev }
+}
+
 // Config binds everything Run needs. ReplDSN MUST carry replication=database (it is
 // a CopyBoth replication connection and cannot run queries); QueryDSN is a normal
 // connection used for the catalog PK lookup and the slot/publication checks.
@@ -94,9 +108,11 @@ type Capturer struct {
 // StartedFrom is where this run started reading the source from: the
 // consistent point of the slot it created, or, for a slot that was already
 // there, the slot's own position (SlotFloorLSN) read before replication
-// started. Every transaction that commits at or after it is delivered. 0
-// before replication starts, and when that position could not be read: no
-// position, never a guess.
+// started (or, when it could not be read then, right after replication
+// started, before anything was acknowledged: the same position). Every
+// transaction that commits at or after it is delivered. 0 before replication
+// starts, and on a resume whose read failed: no position, never a guess. A
+// first run whose position cannot be read at all does not start (#3078).
 //
 // It is what a first run records as the start of the capture (#2843). On a
 // resume it is the saved checkpoint, which is not a start.
@@ -249,11 +265,12 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 	// asked for is where this run reads from. A failed read is no position:
 	// the LSN asked for alone could be before the slot.
 	var from pglogrepl.LSN
-	if floor, fErr := SlotFloorLSN(startupCtx, queryConn, c.cfg.SlotName); fErr == nil {
+	floor, fErr := SlotFloorLSN(startupCtx, queryConn, c.cfg.SlotName)
+	if fErr == nil {
 		from = max(floor, startLSN)
-	} else if !c.cfg.ExpectExistingSlot {
-		// A first run records this, once; a resume does not use it.
-		c.logger.Warn("pgcapture: the slot's position at start could not be read, so where this capture started is not recorded; snapshot updates will warn of a possible gap they cannot rule out", "slot", c.cfg.SlotName, "error", fErr)
+	}
+	if hook := beforeStartReplication; hook != nil {
+		hook()
 	}
 
 	if err := pglogrepl.StartReplication(ctx, replConn, c.cfg.SlotName, startLSN, pglogrepl.StartReplicationOptions{
@@ -261,6 +278,28 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 		PluginArgs: []string{"proto_version '1'", fmt.Sprintf("publication_names '%s'", c.cfg.Publication)},
 	}); err != nil {
 		return fmt.Errorf("pgcapture: start replication slot %q from %s: %w", c.cfg.SlotName, startLSN, err)
+	}
+	// The read before failed: the slot was still being created (by a
+	// snapshot, which then finished it before replication started), or the
+	// startup budget ran out right there (#3078). A first run reads it again
+	// now. Replication has started, so the slot is this run's alone (no other
+	// session can acquire it) and has its position; and no standby update has
+	// been sent yet (the receive loop below sends them), so the slot's
+	// confirmed_flush_lsn is still exactly where PostgreSQL started this
+	// stream: it moves a lower requested LSN forward to it. Left unread, the
+	// first checkpoint would record no start, every resume would keep it so,
+	// and the gap checks that compare a snapshot with this start would be off
+	// for this server for good, with nothing to show it. So a read that
+	// fails again fails the run, and the supervisor starts it again.
+	if fErr != nil && !c.cfg.ExpectExistingSlot {
+		rctx, cancel := context.WithTimeout(ctx, startupTimeout)
+		floor, err := SlotFloorLSN(rctx, queryConn, c.cfg.SlotName)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("pgcapture: where this capture starts could not be read from replication slot %q, before replication started (%v) nor after (%w); without it the snapshot gap checks could not be made for this server, so capture is started again", c.cfg.SlotName, fErr, err)
+		}
+		from = max(floor, startLSN)
+		c.logger.Info("pgcapture: read the slot's position once replication started, since it could not be read before", "slot", c.cfg.SlotName, "from", from, "first_error", fErr)
 	}
 	// Seed the durable cursor to the resume point: everything up to startLSN is
 	// already durably indexed (first run = ConsistentPoint, nothing precedes it).
@@ -380,6 +419,16 @@ func (c *Capturer) warnCaptureCoverage(ctx context.Context, conn *pgx.Conn) {
 	// would silently disable the very guard this function exists to provide — the exact
 	// silent-failure class #555/#556 close. Visibility matches the doctor side, which
 	// also maps a probe failure to a WARN.
+	// #3108: a publication without TRUNCATE. Said once per start; the doctor
+	// and each health probe say it again, so a publication changed while
+	// capture runs is seen there.
+	if exists, publishes, err := QueryPublishesTruncate(ctx, conn, c.cfg.Publication); err != nil {
+		c.logger.Warn("pgcapture: could not read whether the publication publishes TRUNCATE; run `bintrail-pg doctor` to re-check", "error", err)
+	} else if exists && !publishes {
+		c.logger.Warn("pgcapture: "+TruncateNotPublishedProblem(c.cfg.Publication)+". Inserts, updates and deletes are captured normally. To record TRUNCATE, run the statement in fix on the source as the publication's owner",
+			"fix", TruncateFixStatement(c.cfg.Publication))
+	}
+
 	if unlogged, err := listUnloggedCaptureTables(ctx, conn, c.cfg.Publication, c.cfg.Filters); err != nil {
 		c.logger.Warn("pgcapture: UNLOGGED-table coverage check failed to run — could NOT determine whether a captured table writes no WAL (a silent recovery hole); run `bintrail-pg doctor` to re-check", "error", err)
 	} else if len(unlogged) > 0 {

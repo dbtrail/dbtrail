@@ -19,13 +19,6 @@ import (
 // client's Sync is sent on when the batch touched the source, and the
 // transaction status the source reports is what the client is told.
 
-// stmtToSource decides whether a prepared statement is described and run on
-// the source.
-func (s *session) stmtToSource(st *preparedStatement) bool {
-	d := s.stmtRoute(st)
-	return d.side == RouteSource || d.side == RouteRefused
-}
-
 // stmtRoute is the side that answers a prepared statement now, and why. A
 // statement the copy refused once (st.fallback) goes to the source from
 // then on: the client keeps the description it was given, so the decision
@@ -40,6 +33,11 @@ func (s *session) stmtRoute(st *preparedStatement) routeDecision {
 	// Classified with a stand-in for each argument, as Parse classifies it;
 	// screened as the client wrote it, each $n a value of its own type.
 	d := s.route(s.classify(st.probeText()), st.query)
+	// The copy too busy to list its columns (#3109, route.go): what the
+	// plan sends to the copy is refused where it would run, and nothing of
+	// it is kept with the statement (st.byCost holds the plan's verdict
+	// only).
+	busy := s.takeScreenBusy()
 	if !byCostApplies(d) {
 		return d
 	}
@@ -47,7 +45,7 @@ func (s *session) stmtRoute(st *preparedStatement) routeDecision {
 	// exists (route_cost.go): its Describe and every execution are answered
 	// by the same side.
 	if st.byCost.side != "" {
-		return st.byCost
+		return withScreenBusy(st.byCost, busy)
 	}
 	d, keep, stop := s.routeByCost(st.query, len(st.paramOIDs) > 0)
 	if keep || stop != nil && stop.code != "57014" {
@@ -57,7 +55,7 @@ func (s *session) stmtRoute(st *preparedStatement) routeDecision {
 		// error the client gets.
 		st.byCost = d
 	}
-	return d
+	return withScreenBusy(d, busy)
 }
 
 // cloneBind copies a Bind message, whose buffers the next message reuses.

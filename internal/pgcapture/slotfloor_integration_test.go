@@ -54,8 +54,8 @@ func TestSlotFloorLSN_Integration(t *testing.T) {
 	replConnect := func(ctx context.Context) (*pgconn.PgConn, error) {
 		return pgconn.Connect(ctx, replDSN(baseDSN))
 	}
-	if _, err := pgcapture.EnsureSlotExists(ctx, conn, slot, replConnect); err != nil {
-		t.Fatalf("EnsureSlotExists: %v", err)
+	if _, err := pgcapture.AnchorOnSlot(ctx, conn, slot, replConnect, 0, nil); err != nil {
+		t.Fatalf("AnchorOnSlot: %v", err)
 	}
 
 	floor1, err := pgcapture.SlotFloorLSN(ctx, conn, slot)

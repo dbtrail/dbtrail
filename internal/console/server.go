@@ -1040,10 +1040,15 @@ func New(cfg Config) (*Server, error) {
 		// The command-line server is not in the registry, so the registry's
 		// own wiring (connManager.buildBundle) never reaches it.
 		boot.sqlMirrorDir = cfg.Registry.BootCopyMirrorDir(cfg.BaselineDir, cfg.BaselineS3)
-		boot.resolver, boot.resolverUnavailable = loadResolver(cfg.DB)
 		// Read here, once, and not per statement: a statement refused as
 		// busy, or one that reads tables alone, sends the index nothing.
-		boot.pgSource = flavorIsPostgres(query.SourceFlavor(cfg.DB))
+		flavor := query.SourceFlavor(cfg.DB)
+		boot.pgSource = flavorIsPostgres(flavor)
+		if boot.pgSource {
+			boot.resolver, boot.resolverUnavailable = openPGShapes(context.Background(), cfg.DB)
+		} else {
+			boot.resolver, boot.resolverUnavailable = loadResolverForFlavor(cfg.DB, flavor)
+		}
 		s.cm.seedBoot(boot, cfg.BootDSN)
 	}
 

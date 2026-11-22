@@ -20,7 +20,6 @@ import (
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/indexer"
-	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/recovery"
@@ -259,7 +258,10 @@ func runRecover(cmd *cobra.Command, args []string) error {
 	// The resolver enables PK-only WHERE clauses in recovery SQL.
 	// If unavailable, the generator falls back to all-columns WHERE — verbose
 	// but always correct for tables without duplicate rows.
-	resolver, resolverErr := metadata.NewResolver(db, 0) // 0 = latest snapshot
+	// The source flavor is read once: it picks the schema loader here
+	// (#3110) and the SQL dialect below.
+	flavor, noStream := query.SourceFlavorDetail(db)
+	resolver, resolverErr := query.LatestSchemaResolverForFlavor(db, flavor)
 	if resolverErr != nil {
 		slog.Warn("could not load schema snapshot; WHERE clauses will use all columns", "error", resolverErr)
 		resolver = nil
@@ -391,10 +393,10 @@ func runRecover(cmd *cobra.Command, args []string) error {
 	// (single-source per stream_state) — PostgreSQL needs double-quoted identifiers
 	// and standard-conforming-string escaping; MySQL/MariaDB keep the default. The
 	// read is best-effort and defaults to MySQL on an empty/unreadable flavor (see
-	// query.SourceFlavor); the flavor is read here, not via DialectForIndex, so the
-	// flag warnings below can tell "known MySQL/MariaDB" apart from "unknown" and
-	// stay honest about which one they are asserting (#1121).
-	flavor, noStream := query.SourceFlavorDetail(db)
+	// query.SourceFlavor); the flavor is the one read above with the schema, not
+	// DialectForIndex's, so the flag warnings below can tell "known MySQL/MariaDB"
+	// apart from "unknown" and stay honest about which one they are asserting
+	// (#1121).
 	dialect := recovery.DialectForFlavor(flavor)
 	// A missing stream_state row is NOT an unknown dialect: file-indexed
 	// databases hold MySQL/MariaDB binlogs by construction, and a PostgreSQL

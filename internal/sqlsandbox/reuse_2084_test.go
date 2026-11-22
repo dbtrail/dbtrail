@@ -80,8 +80,8 @@ func TestReuse_theNextStatementSeesNothingOfTheOneBefore(t *testing.T) {
 	other := writeOutsideParquet(t)
 	r := newReuseRunner(t, Config{MaxInFlight: 1})
 
-	job := f.job("SELECT current_setting('threads'), current_setting('TimeZone'), current_setting('memory_limit'), getvariable('left_behind'), (SELECT count(*) FROM left_behind.t)")
-	job.ViewsSQL += "\nCREATE SCHEMA left_behind; CREATE VIEW left_behind.t AS SELECT 1 AS a; SET VARIABLE left_behind = 7;"
+	job := f.job("SELECT current_setting('threads'), current_setting('TimeZone'), current_setting('memory_limit'), (SELECT v FROM left_behind.seen), (SELECT count(*) FROM left_behind.t)")
+	job.ViewsSQL += "\nCREATE SCHEMA left_behind; CREATE VIEW left_behind.t AS SELECT 1 AS a; SET VARIABLE left_behind = 7; CREATE VIEW left_behind.seen AS SELECT getvariable('left_behind') AS v;"
 	job.Limits = Limits{Threads: 1, MemoryLimit: "600MiB"}
 	job.Session.TimeZone = "America/Bogota"
 	job.Schema = "shop"
@@ -90,7 +90,11 @@ func TestReuse_theNextStatementSeesNothingOfTheOneBefore(t *testing.T) {
 		t.Fatalf("the first statement: %s", got)
 	}
 
-	res, second := mustRun(t, r, f.job("SELECT current_setting('threads'), current_setting('TimeZone'), current_setting('memory_limit'), getvariable('left_behind'), current_schema()"))
+	next := f.job("SELECT current_setting('threads'), current_setting('TimeZone'), current_setting('memory_limit'), (SELECT v FROM probe_var), current_schema()")
+	// The session's variables are not readable by a statement (#3096): a view
+	// of this job's own reads the one the job before set, if it is still there.
+	next.ViewsSQL += "\nCREATE TEMP VIEW probe_var AS SELECT getvariable('left_behind') AS v;"
+	res, second := mustRun(t, r, next)
 	if second != first {
 		t.Fatalf("the second statement ran in %d, not in the first worker %d", second, first)
 	}

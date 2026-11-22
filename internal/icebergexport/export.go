@@ -221,7 +221,8 @@ func Run(ctx context.Context, cfg Config) ([]Outcome, error) {
 		return nil, fmt.Errorf("the index registers no source (bintrail_servers is empty, as in file mode), and a table in a shared %s catalog must record the source it was exported from; export from an index fed by `bintrail stream`, or to a local directory with --catalog hadoop",
 			cfg.Catalog.kind())
 	}
-	resolver, err := metadata.NewResolver(db, 0)
+	// A PostgreSQL index holds one table per snapshot (#3110).
+	resolver, err := query.LatestSchemaResolver(db)
 	if err != nil {
 		return nil, fmt.Errorf("load schema snapshot: %w", err)
 	}
