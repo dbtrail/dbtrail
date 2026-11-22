@@ -2,6 +2,7 @@ package pgshim
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -386,9 +388,20 @@ func (s *session) claimSource() {
 
 // idleEnded says why a connection kept idle can no longer be used, "" when
 // it can: an idle PostgreSQL connection sends nothing, so anything to read
-// (a FATAL for idle_session_timeout, a closed socket) means it is over.
+// (a FATAL for idle_session_timeout, a closed socket) means it is over. The
+// socket is looked at without waiting and without taking anything from it
+// (peekIdle); where that cannot be done, a read waits up to a millisecond.
 func (up *upstream) idleEnded() string {
-	if err := up.conn.SetReadDeadline(time.Now()); err != nil {
+	c := up.conn
+	if t, ok := c.(*tls.Conn); ok {
+		c = t.NetConn()
+	}
+	if sc, ok := c.(syscall.Conn); ok {
+		if why, ok := peekIdle(sc); ok {
+			return why
+		}
+	}
+	if err := up.conn.SetReadDeadline(time.Now().Add(time.Millisecond)); err != nil {
 		return err.Error()
 	}
 	var b [1]byte
@@ -397,7 +410,7 @@ func (up *upstream) idleEnded() string {
 	var ne net.Error
 	switch {
 	case n > 0:
-		return "the source sent something while the connection was idle"
+		return idleSentSomething
 	case errors.As(err, &ne) && ne.Timeout():
 		return ""
 	case err != nil:
@@ -405,6 +418,10 @@ func (up *upstream) idleEnded() string {
 	}
 	return "the connection read nothing and no error"
 }
+
+// idleSentSomething is why a kept connection the source wrote to while it
+// was idle is not used.
+const idleSentSomething = "the source sent something while the connection was idle"
 
 // markSourceRead notes that the source just sent the client a row or a
 // statement's end: from now on the copy may not answer this connection with

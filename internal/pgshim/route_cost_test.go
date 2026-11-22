@@ -185,6 +185,17 @@ type fakeSource struct {
 	conns map[net.Conn]bool
 }
 
+// sayToConns writes a FATAL to every connection it serves, without closing
+// them yet, as a source ending an idle one says why first.
+func (f *fakeSource) sayToConns() {
+	msg, _ := (&pgproto3.ErrorResponse{Severity: "FATAL", Code: "25P04", Message: "terminating connection due to idle-session timeout"}).Encode(nil)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for c := range f.conns {
+		_, _ = c.Write(msg)
+	}
+}
+
 // dropConns ends every connection it serves, as a source does for an idle
 // one past idle_session_timeout.
 func (f *fakeSource) dropConns() {

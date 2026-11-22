@@ -95,6 +95,15 @@ func TestKeepSource_3046_endedWhileIdle(t *testing.T) {
 	if n := l.held.Load(); n != 1 {
 		t.Errorf("%d held, want the one kept", n)
 	}
+	// The source says it ends it, and has not closed it yet.
+	src.sayToConns()
+	time.Sleep(20 * time.Millisecond)
+	if got := costSimple(ctx, c, l, keepLookup); got != keepAnswer {
+		t.Errorf("after the source said it ends it: %+v", got)
+	}
+	if n := l.opened.Load(); n != 4 {
+		t.Errorf("opened %d, want 4", n)
+	}
 }
 
 // What lives on the source is not parked: a transaction block holds the
