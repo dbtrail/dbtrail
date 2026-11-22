@@ -134,7 +134,7 @@ func pgPairEligible(cfg FullTableConfig, srcPath string, bmeta baseline.DumpMeta
 // table in full from the file and the chain. "" when one may be written.
 func pgChainOver(lastSeq int, chainBytes, baseBytes int64, age time.Duration) string {
 	switch {
-	case lastSeq+1 >= pgdelta.MaxSeq:
+	case lastSeq >= pgdelta.MaxSeq:
 		return fmt.Sprintf("the delta beside the previous file reached pair %d, the last a chain can have", lastSeq)
 	case age > pgChainMaxAge:
 		return fmt.Sprintf("the delta beside the previous file is %s old", age.Round(time.Minute))
@@ -866,7 +866,14 @@ func pgPrevPairOf(ctx context.Context, cfg FullTableConfig, srcPath string, bmet
 			p.size += st.Size()
 		}
 	}
-	p.over = pgChainOver(last.Seq, p.size-fi.Size(), fi.Size(), cfg.At.Sub(bmeta.SnapshotTimestamp))
+	// The chain's age, from where it starts: the file's rows (pgRowsStart,
+	// what FindBaseline returns for it too), as the MySQL chain's age is
+	// from its chain start.
+	start, serr := pgRowsStart(bmeta)
+	if serr != nil || start.IsZero() {
+		return nil, "the previous file does not record a time its rows stand at that can be read"
+	}
+	p.over = pgChainOver(last.Seq, p.size-fi.Size(), fi.Size(), cfg.At.Sub(start))
 	return p, ""
 }
 

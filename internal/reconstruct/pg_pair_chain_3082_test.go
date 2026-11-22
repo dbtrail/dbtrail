@@ -15,6 +15,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
 	"github.com/dbtrail/dbtrail/internal/pgdelta"
+	"github.com/dbtrail/dbtrail/internal/query"
 )
 
 // #3082: when a chain is over, by the MySQL chain's rules. Each rule alone,
@@ -31,7 +32,8 @@ func TestPGChainOver(t *testing.T) {
 		{"young and small", 3, 2 << 20, 100 << 20, time.Hour, false},
 		{"a day old", 3, 2 << 20, 100 << 20, day, false},
 		{"older than a day", 3, 2 << 20, 100 << 20, day + time.Minute, true},
-		{"the last sequence a chain can reach", pgdelta.MaxSeq - 1, 2 << 20, 100 << 20, time.Hour, true},
+		{"one pair before the last sequence", pgdelta.MaxSeq - 1, 2 << 20, 100 << 20, time.Hour, false},
+		{"the last sequence a chain can reach", pgdelta.MaxSeq, 2 << 20, 100 << 20, time.Hour, true},
 		{"half of the file", 3, 50 << 20, 100 << 20, time.Hour, false},
 		{"past half of the file", 3, 50<<20 + 1, 100 << 20, time.Hour, true},
 		{"past half of a small file, under 1 MiB", 3, 1<<20 - 1, 1 << 10, time.Hour, false},
@@ -51,8 +53,11 @@ func TestPGChainOver(t *testing.T) {
 }
 
 // The PostgreSQL chain ends by the MySQL chain's rules, with its own
-// variables: this holds the two equal until someone decides otherwise, and
-// says so here.
+// variables: the values are the same, and so is what each rule does with
+// the same inputs at its edges (pgChainOver and pgPairEligible against
+// chainCompactReason). And the age of a PostgreSQL chain is counted from
+// where the MySQL one's is, its start: pgRowsStart, the earlier of the
+// file's time and its bound.
 func TestPGChainRulesAreTheMySQLChains(t *testing.T) {
 	if pgChainMaxAge != tableDeltaMaxAge || pgChainMaxFraction != tableDeltaMaxFraction || pgChainMinCompactBytes != tableDeltaMinCompactBytes {
 		t.Fatalf("PostgreSQL chain: %s, %v, %d bytes; MySQL chain: %s, %v, %d bytes",
@@ -60,6 +65,56 @@ func TestPGChainRulesAreTheMySQLChains(t *testing.T) {
 	}
 	if pgdelta.MaxSeq != baseline.TableDeltaMaxSeq {
 		t.Fatalf("the last sequence: PostgreSQL %d, MySQL %d", pgdelta.MaxSeq, baseline.TableDeltaMaxSeq)
+	}
+
+	start := time.Date(2026, 11, 22, 9, 0, 0, 0, time.UTC)
+	const base = int64(100 << 20)
+	cases := []struct {
+		name      string
+		seq       int
+		chain     int64
+		base      int64
+		at, floor time.Time
+	}{
+		{"young and small", 3, 2 << 20, base, start.Add(time.Hour), time.Time{}},
+		{"exactly a day old", 3, 2 << 20, base, start.Add(24 * time.Hour), time.Time{}},
+		{"a day and a second old", 3, 2 << 20, base, start.Add(24*time.Hour + time.Second), time.Time{}},
+		{"exactly half of the file", 3, base / 2, base, start.Add(time.Hour), time.Time{}},
+		{"a byte past half of the file", 3, base/2 + 1, base, start.Add(time.Hour), time.Time{}},
+		{"past half of a small file, a byte under 1 MiB", 3, 1<<20 - 1, 1 << 10, start.Add(time.Hour), time.Time{}},
+		{"past half of a small file, exactly 1 MiB", 3, 1 << 20, 1 << 10, start.Add(time.Hour), time.Time{}},
+		{"one pair before the last sequence", baseline.TableDeltaMaxSeq - 1, 2 << 20, base, start.Add(time.Hour), time.Time{}},
+		{"the last sequence", baseline.TableDeltaMaxSeq, 2 << 20, base, start.Add(time.Hour), time.Time{}},
+		{"the retention line at the chain's start", 3, 2 << 20, base, start.Add(time.Hour), start},
+		{"the retention line a second before the start", 3, 2 << 20, base, start.Add(time.Hour), start.Add(-time.Second)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			mysql := chainCompactReason(&tableDelta{Meta: baseline.DumpMetadata{DeltaChainStart: start, DeltaSeq: c.seq}, PairSize: c.chain},
+				c.base, nil, c.at, true, "", c.floor, time.Time{}, 0) != ""
+			// The same file, a PostgreSQL one: its rows stand at start (its
+			// bound), written a while after.
+			md := baseline.DumpMetadata{SnapshotTimestamp: start.Add(10 * time.Minute), PGDeltaSince: start.Format(time.RFC3339)}
+			from, err := pgRowsStart(md)
+			if err != nil || !from.Equal(start) {
+				t.Fatalf("pgRowsStart = %s, %v; want the chain's start %s", from, err, start)
+			}
+			cfg := FullTableConfig{CarryForwardUnchanged: true, OutputFormat: OutputFormatParquet, ChainStartFloor: c.floor}
+			if c.floor.IsZero() {
+				cfg.ChainStartFloor = start.Add(-time.Hour)
+			}
+			eligible := func() bool {
+				prev := pgTableDeltas
+				pgTableDeltas = func() bool { return true }
+				defer func() { pgTableDeltas = prev }()
+				return pgPairEligible(cfg, "/data/"+SnapshotDirName(start)+"/public/orders.parquet", md, from,
+					&foldResult{Changes: map[string]*query.ResultRow{"1": {}}}, nil)
+			}()
+			pg := pgChainOver(c.seq, c.chain, c.base, c.at.Sub(from)) != "" || !eligible
+			if pg != mysql {
+				t.Fatalf("the PostgreSQL chain ends %v, the MySQL chain %v", pg, mysql)
+			}
+		})
 	}
 }
 

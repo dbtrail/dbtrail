@@ -420,3 +420,41 @@ func removePair(t *testing.T, base string, seq int, dead, rows bool) {
 		}
 	}
 }
+
+// A chain's age is counted from where it starts: the earliest its file's
+// rows can stand at (the earlier of the file's time and its bound), as the
+// MySQL chain's age is from its start and as FindBaseline reads it. A file
+// written at 10 minutes whose rows stand at 2, with chains ended at 25
+// minutes: at 30 the chain is 28 minutes old and is folded into a new file,
+// though the file itself was written only 20 minutes before.
+func TestReconstructTables_PGPairChainAgeFromTheFileBound(t *testing.T) {
+	reconstruct.SetPGChainMaxAge(t, 25*time.Minute)
+	f := newPGFixture(t)
+	root := t.TempDir()
+	taken := f.at(10 * time.Minute)
+	f.baseline(root, taken, 0x500, f.at(2*time.Minute).Format(time.RFC3339), chainRows()...)
+	f.other(0x600, 11*time.Minute)
+	reconstruct.SetPGTableDeltas(t, true)
+	f.event(0x700, 12*time.Minute, 2, "1", s("one"))
+	f.checkpoint(0x700)
+	at1 := f.at(14 * time.Minute)
+	if _, _, _, err := f.run(root, pgRun{at: at1, carry: true, chainFloor: f.base}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.pairFiles(root, at1)) != 2 {
+		t.Fatalf("the first update wrote no pair: %v", f.pairFiles(root, at1))
+	}
+	f.event(0x800, 26*time.Minute, 2, "3", s("three"))
+	f.checkpoint(0x800)
+	at2 := f.at(30 * time.Minute)
+	got, _, reps, err := f.run(root, pgRun{at: at2, carry: true, chainFloor: f.base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left := f.pairFiles(root, at2); len(left) != 0 || reps[0].DeltaCompacted == "" || f.sameFile(f.tableFile(root, taken), f.tableFile(root, at2)) {
+		t.Fatalf("at 30 minutes: pairs %v, reason %q; want the chain, 28 minutes old from its start, folded into a new file", left, reps[0].DeltaCompacted)
+	}
+	if got["1"] != "one" || got["3"] != "three" {
+		t.Fatalf("the new file reads %v", got)
+	}
+}

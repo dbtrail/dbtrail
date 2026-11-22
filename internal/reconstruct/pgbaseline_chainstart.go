@@ -62,18 +62,33 @@ func pgChainStart(ctx context.Context, path string) (time.Time, error) {
 	case md.SnapshotTimestamp.IsZero():
 		return time.Time{}, fmt.Errorf("a PostgreSQL table delta is beside %s, and the file records no time its rows were read at; take a full snapshot of the table", path)
 	}
-	at := md.SnapshotTimestamp
-	if md.PGDeltaSince != "" {
-		since, perr := time.Parse(time.RFC3339, md.PGDeltaSince)
-		if perr != nil {
-			return time.Time{}, fmt.Errorf("a PostgreSQL table delta is beside %s, and the file's bound on how far back its rows reach (%q) cannot be read; take a full snapshot of the table", path, md.PGDeltaSince)
-		}
-		if since.Before(at) {
-			at = since
-		}
+	at, perr := pgRowsStart(md)
+	if perr != nil {
+		return time.Time{}, fmt.Errorf("a PostgreSQL table delta is beside %s, and the file's bound on how far back its rows reach (%q) cannot be read; take a full snapshot of the table", path, md.PGDeltaSince)
 	}
 	if s3 {
 		s3PGPair0.Store(path, pgPair0Memo{has: true, timed: true, at: at})
+	}
+	return at, nil
+}
+
+// pgRowsStart is the earliest moment the rows of a PostgreSQL table file
+// with footer md can stand at: the earlier of its snapshot time and its
+// PGDeltaSince, when it records one. It is where a chain beside the file
+// starts, the one definition both FindBaseline (pgChainStart) and the
+// chain's age (pgPrevPairOf) read, as MySQL reads its chain start for both.
+// An error is a bound that does not read.
+func pgRowsStart(md baseline.DumpMetadata) (time.Time, error) {
+	at := md.SnapshotTimestamp
+	if md.PGDeltaSince == "" {
+		return at, nil
+	}
+	since, err := time.Parse(time.RFC3339, md.PGDeltaSince)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if at.IsZero() || since.Before(at) {
+		at = since
 	}
 	return at, nil
 }
