@@ -15,18 +15,18 @@ import (
 
 func TestPGTableDeltaOn(t *testing.T) {
 	for raw, want := range map[string]bool{
-		"": false, " ": false, "0": false, "false": false, "No": false, " OFF ": false,
-		"1": true, "true": true, "YES": true, " on ": true,
+		"0": false, "false": false, "No": false, " OFF ": false,
+		"": true, " ": true, "1": true, "true": true, "YES": true, " on ": true,
 	} {
 		on, warning := pgTableDeltaOn(raw)
 		if on != want || warning != "" {
 			t.Errorf("%q: on %v warning %q, want %v and none", raw, on, warning, want)
 		}
 	}
-	// A value that is neither spelling stays off, and says so.
+	// A value that is neither spelling is the default, on, and says so.
 	for _, raw := range []string{"2", "enabled", "si"} {
-		if on, warning := pgTableDeltaOn(raw); on || warning == "" {
-			t.Errorf("%q: on %v warning %q, want off with a warning", raw, on, warning)
+		if on, warning := pgTableDeltaOn(raw); !on || warning == "" {
+			t.Errorf("%q: on %v warning %q, want on with a warning", raw, on, warning)
 		}
 	}
 }

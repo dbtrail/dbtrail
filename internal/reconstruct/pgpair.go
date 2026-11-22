@@ -27,21 +27,24 @@ import (
 // and one pair of small files beside it (pgdelta) holding every change since
 // that file was written, in place of the whole table written again.
 //
-// Off unless set to 1/true/yes/on. It is off by default because what reads a
-// snapshot's tables for SQL on the copy does not read the pair yet: with it
-// on, a changed table would answer as of the file's own time.
+// On by default: unset, or 1/true/yes/on. 0/false/no/off turns it off, and a
+// changed table is then written in full at every update. Every reader of a
+// snapshot on this machine reads the delta with its file (the SQL page, the
+// ports, fresh mode, the views pinned to a snapshot, the upload and its
+// integrity checks); a views file that follows later snapshots refuses a
+// table with one, with what to do.
 const PGTableDeltaEnv = "BINTRAIL_PG_TABLE_DELTAS"
 
 // pgTableDeltaOn parses PGTableDeltaEnv's value. A value that is neither
-// spelling is the default, off, with a warning.
+// spelling is the default, on, with a warning.
 func pgTableDeltaOn(raw string) (on bool, warning string) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", "0", "false", "no", "off":
+	case "0", "false", "no", "off":
 		return false, ""
-	case "1", "true", "yes", "on":
+	case "", "1", "true", "yes", "on":
 		return true, ""
 	}
-	return false, fmt.Sprintf("%s=%q is not one of 1/true/yes/on or 0/false/no/off; the default applies and a changed PostgreSQL table is written in full", PGTableDeltaEnv, raw)
+	return true, fmt.Sprintf("%s=%q is not one of 1/true/yes/on or 0/false/no/off; the default applies and a changed PostgreSQL table is published as its previous file and a delta beside it", PGTableDeltaEnv, raw)
 }
 
 // pgTableDeltaSwitch reads the variable once per process and says so once.
@@ -51,9 +54,11 @@ var pgTableDeltaSwitch = sync.OnceValue(func() bool {
 		slog.Warn(warning)
 	}
 	if on {
-		slog.Info("PostgreSQL table deltas enabled by "+PGTableDeltaEnv+": a snapshot update publishes a changed table as its previous file and a pair of delta files beside it. "+
-			"Measured on 2026-11-18 it saved nothing: the delta grows with every update and the rewrite that ends it costs more than a rewrite at every update",
+		slog.Info("PostgreSQL table deltas on: a snapshot update publishes a changed table as its previous file and small delta files beside it, "+
+			"instead of writing the whole table again; "+PGTableDeltaEnv+"=0 turns them off",
 			"env", PGTableDeltaEnv)
+	} else {
+		slog.Info("PostgreSQL table deltas off by "+PGTableDeltaEnv+": a snapshot update writes a changed table in full", "env", PGTableDeltaEnv)
 	}
 	return on
 })

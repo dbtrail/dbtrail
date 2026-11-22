@@ -63,7 +63,7 @@ type pgTableInput struct {
 //     an LSN.
 //   - No MySQL table delta. A table that changed can be published as its
 //     previous file and a pair of PostgreSQL's own beside it (pgPairEligible,
-//     writePGPair), off by default. A table with no change is carried
+//     writePGPair), on unless PGTableDeltaEnv turns it off. A table with no change is carried
 //     forward only when its footer records its own time bound
 //     (pgCarryForwardEligible, #2757):
 //     a carried file keeps the previous floor and bound, and a bound the
@@ -402,7 +402,7 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 		PGGenerated:       generated,
 	}
 	// A table that changed, as its previous file and a delta beside it
-	// (#2757, off unless PGTableDeltaEnv says so). After every refusal above,
+	// (#2757, on unless PGTableDeltaEnv turns it off). After every refusal above,
 	// like the carry; when it declines, the merge below writes the table.
 	// A pair that has ended is folded into its file by the engine when this
 	// window's changes are in memory and none was lost (writePGPair's end);

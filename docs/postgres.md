@@ -1056,8 +1056,15 @@ What to know:
   unchanged for long is rewritten before the index drops the changes its file
   starts from. Only the scheduled updates of the web console carry tables
   forward: `bintrail baseline refresh` on the command line does not know how
-  long the index keeps its changes, and rewrites. A changed table is rewritten
-  in full: `--table-deltas` applies to MySQL only.
+  long the index keeps its changes, and rewrites. A changed table keeps its
+  file too, with small files of its changes beside it
+  (`<table>.000000.pgdead` and `.pgnew`), unless `BINTRAIL_PG_TABLE_DELTAS=0`
+  (`pg-table-deltas = off`) turns that off; it is written in full when its
+  changes pass a quarter of its rows, when its file grows too old for the
+  index to reach back, or when the delta cannot be written. Everything that
+  reads the copy reads them with the file; a views file that follows later
+  snapshots (`bintrail views` without `--pin-snapshot`) refuses such a table
+  and says to pin it. `--table-deltas` is the MySQL setting.
 - **Capture that is behind is safe for the chain, not for one file.** A
   snapshot folded while capture is behind holds the table as of the newest
   change the index has, under the requested point's name, and the run warns.
