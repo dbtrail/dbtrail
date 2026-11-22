@@ -27,9 +27,18 @@ func (l *markLogs) Reset()         { l.mu.Lock(); defer l.mu.Unlock(); l.buf.Res
 
 func captureLogs(t *testing.T) *markLogs {
 	t.Helper()
+	return captureLogsAt(t, slog.LevelInfo)
+}
+
+// captureLogsAt is captureLogs from level up. The log is the process's: a
+// goroutine another test left running (a tails' follower) can write to it
+// while the test reads, so the writer holds a lock, and a test that counts
+// lines counts its own (#3180).
+func captureLogsAt(t *testing.T, level slog.Level) *markLogs {
+	t.Helper()
 	l := &markLogs{}
 	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(l, nil)))
+	slog.SetDefault(slog.New(slog.NewTextHandler(l, &slog.HandlerOptions{Level: level})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	return l
 }
