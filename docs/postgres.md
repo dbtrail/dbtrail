@@ -554,6 +554,29 @@ or column list to any table — bintrail-pg refuses a partial publication at
 startup and in `doctor`, because pgoutput would silently drop the excluded
 changes.
 
+It should also publish **truncate** (also the default). A publication created
+`WITH (publish = 'insert, update, delete')` sends nothing for a `TRUNCATE`, so
+DBTrail never learns that the table was emptied: the removed rows stay in the
+copy and come back in every rebuild, and nothing in the recorded history says
+they are gone. Every insert, update and delete is still captured, so this is a
+**warning**, not a refusal: at the start of capture (once), in `doctor` and the
+server checks (**Publication publishes TRUNCATE**), and on the PostgreSQL
+health card of the web interface. A snapshot taken after the `TRUNCATE` starts
+from what the table holds then; a rebuild of a moment before it still shows
+the removed rows. bintrail-pg does not change the publication; run, as its
+owner or a superuser:
+
+```sql
+ALTER PUBLICATION bintrail_pub SET (publish = 'insert, update, delete, truncate');
+```
+
+`SET (publish = ...)` changes only which operations are published: the
+publication keeps its tables and its other options (`publish_via_partition_root`,
+`publish_generated_columns`). The check runs when capture starts, when the
+doctor runs, and with each health reading (every 30 seconds) while capture
+runs, so a publication changed later is shown on the health card and logged
+when it is first seen.
+
 ```sql
 -- Specific tables (recommended — you control exactly what is captured):
 CREATE PUBLICATION bintrail_pub FOR TABLE public.orders, public.customers;
@@ -606,6 +629,12 @@ bintrail-pg doctor --query-dsn "$PG" --slot bintrail_shop --publication bintrail
   [step 3](#3-replica-identity-full-optional-needed-only-for-undo).
 - **Replica identity holds the primary key** → FAIL for a table whose replica
   identity leaves a primary-key column out: capture skips it.
+- **Publication publishes TRUNCATE** → WARN if the publication leaves
+  `truncate` out of `publish`: a `TRUNCATE` on the source is not recorded, and
+  the rows it removed stay in the copy and in every rebuild. Doctor still exits
+  0, and capture starts. The check prints the `ALTER PUBLICATION ... SET
+  (publish = 'insert, update, delete, truncate')` to run (see
+  [step 4](#4-create-a-publication)).
 - **Read access to the published tables** → WARN if the role cannot read a
   table the first copy reads: no `USAGE` on its schema, or `SELECT` neither on
   the table nor on every column the copy reads. Doctor still exits 0, and
@@ -1336,7 +1365,7 @@ starts it.
 | `--sql-memory` | `BINTRAIL_CONSOLE_SQL_MEMORY` | 2GB, or the value saved in the web interface | Memory each statement may use |
 | `--max-connections` | `BINTRAIL_PG_ROUTER_MAX_CONNECTIONS` | 256 | Clients connected at once (1 to 1024). One more is refused with an error |
 | `--max-source-connections` | `BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS` | 16 | Connections to the servers' own PostgreSQL held at once, every server together (1 to 1024). A client holds one while a statement the source answers, its plan, or its transaction block runs there; past the limit the statement that needed one waits for one to be given back, up to 30 seconds, and is then refused (`53300`) |
-| `--max-wait` | `BINTRAIL_PG_ROUTER_MAX_WAIT` | none | How long a statement waits for its turn before it is refused |
+| `--max-wait` | `BINTRAIL_PG_ROUTER_MAX_WAIT` | none | How long a statement waits for its turn before it is refused (`53000`, `copy_wait_timeout`; it is not sent to the source) |
 | `--sql-port-max-rows` | `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS` | the port's row cap | Most rows one statement returns |
 | `--token` | `BINTRAIL_CONSOLE_TOKEN` | none | The access token, one more password. It does not open the port |
 | `--servers-file` | `BINTRAIL_CONSOLE_SERVERS` | `~/.config/bintrail/console-servers.yaml` | The servers file the web interface manages. Read, never written |
@@ -1696,11 +1725,30 @@ The source answers:
 - **What the copy cannot run, before the client is told anything**: a table
   the copy does not hold, a statement the copy refuses (a reserved word of its
   own dialect, a value it does not read, such as `NaN` in a numeric or
-  `24:00:00`), a copy that is busy or behind the server's lag limit. A
+  `24:00:00`), a copy that is behind the server's lag limit. A
   result over the port's row or size cap is still refused, as before: the
   source would send it whole, past the caps. A column of a
   `numeric` declared without precision, which the copy writes with 18
   decimals, is sent to the source too.
+- **Not a copy that is busy.** A statement headed for the copy that finds
+  every worker of the copy taking a statement, and the line for one full or
+  its wait over (`--max-wait`), is refused with `53000` and a message that
+  says so (`the copy is busy (copy_wait_timeout): ...`). It is **not** sent
+  to the source: the port is there to keep heavy reads off your PostgreSQL,
+  and a busy copy is when there are many of them. Run the statement again
+  in a moment; if it happens often, give the copy more workers
+  (`--workers`, `PG_ROUTER_WORKERS` in the compose `.env`) or a longer wait.
+  The connection stays usable, a transaction block is not touched (its
+  statements are the source's), and a prepared statement is tried on the
+  copy again at its next execution. What the source answers anyway still
+  goes there: a statement its plan finds cheap, one the screen sends there.
+  The same holds when the copy is too busy to list its columns, which the
+  screen reads every 10 seconds per connection: the source's plan decides,
+  and what it would send to the copy is refused. With no `--max-wait` (the
+  default) a statement waits for its turn as long as its client stays
+  connected, and the line holds 4096, more than `--max-connections` lets
+  connect: so the refusal is in practice what `--max-wait` sets. The MySQL
+  router does the same with error 1040.
 - **What is not a query**: `EXPLAIN`, cursors and savepoints outside a block,
   `VALUES`, `TABLE`. A statement that writes is refused (`25006`). `SHOW
   TABLES` and `DESCRIBE`, the copy's own, stay on the copy.
@@ -2025,8 +2073,9 @@ The reasons, with the MySQL port's names where they mean the same:
 | source | `copy_refused` | the copy could not run it |
 | source | `copy_columns_differ` | a column the copy writes otherwise (a `numeric` without precision) |
 | source | `copy_behind_source`, `copy_age_unknown` | the server's lag limit |
-| source | `copy_queue_full`, `copy_wait_timeout` | the copy was busy |
 | refused | `read_only` | not a read |
+| refused | `copy_queue_full` | for the copy, whose workers were all taken and the line for one full: refused with `53000`, not sent to the source; run it again |
+| refused | `copy_wait_timeout` | for the copy, it waited for a worker as long as `--max-wait` lets it: refused with `53000`, not sent to the source; run it again |
 
 Here `answers_the_same` counts the statements the copy answered: the ones it
 answers as PostgreSQL does and whose plan on the source is expensive.
@@ -2501,7 +2550,10 @@ user.
   reversible event: `recover` has no per-row before-images to put back, and a
   `reconstruct` whose window crosses the truncate refuses instead of bringing the
   removed rows back. A multi-table `TRUNCATE a, b` records one marker per
-  published table; a truncate of an out-of-scope table records nothing.
+  published table; a truncate of an out-of-scope table records nothing. All of
+  this needs a publication that publishes `truncate`: without it PostgreSQL
+  sends nothing and no marker is recorded (see
+  [step 4](#4-create-a-publication)).
 - **Other schema changes are inferred, not read.** See
   [Schema changes on PostgreSQL](#schema-changes-on-postgresql).
 - **Sequence cursors are not captured.** The materialized id values in your rows
@@ -2754,7 +2806,7 @@ where you want undo), which are plain SQL.
 | `table's replica identity does not hold its primary key; its changes are NOT captured` | `ALTER TABLE <t> REPLICA IDENTITY DEFAULT` (or `FULL`); capture of the table resumes by itself (step 3). |
 | `table has a primary key declared DEFERRABLE; its changes are NOT captured` | Make the key not deferrable (`ALTER TABLE <t> DROP CONSTRAINT <key>, ADD PRIMARY KEY (...)`), or take the table out of the publication (step 3). |
 | `publication "…" applies a row filter or column list to table(s) […]` | A PG15+ `WHERE (...)` row filter or column list makes pgoutput emit only a subset of changes (silent data loss). Recreate the publication — or `ALTER PUBLICATION … SET TABLE …` re-listing the tables — without `WHERE (...)` / column lists. |
-| `publication "…" does not publish […] — those changes would be silently lost` | The publication was created with a narrowed `publish` option (e.g. `WITH (publish = 'insert')`). Run `ALTER PUBLICATION … SET (publish = 'insert, update, delete')`, or recreate it leaving `publish` unset (the default publishes all operations). |
+| `publication "…" does not publish […] — those changes would be silently lost` | The publication was created with a narrowed `publish` option (e.g. `WITH (publish = 'insert')`). Run `ALTER PUBLICATION … SET (publish = 'insert, update, delete, truncate')` (it keeps the publication's tables and other options), or recreate it leaving `publish` unset (the default publishes all operations). |
 | `replication slot "…" is invalidated (wal_status=lost; max_slot_wal_keep_size exceeded)` | The source dropped WAL the slot still needed (slot was stopped too long). The data since the checkpoint is gone — `bintrail-pg reset` (drops the slot + clears the checkpoint), re-seed, and raise `max_slot_wal_keep_size` / keep the consumer running. `bintrail status` shows this as a loud `EVENTS PERMANENTLY LOST` banner. |
 | `resuming from a saved checkpoint but replication slot "…" no longer exists` | The slot was dropped while a checkpoint still pointed at it. Creating a fresh slot would skip data, so bintrail-pg refuses — `bintrail-pg reset --index-only` to clear the checkpoint and start fresh if the gap is acceptable. |
 | `must include replication=database` (connection error on `--repl-dsn`) | Add `replication=database` to the `--repl-dsn` connection string. |

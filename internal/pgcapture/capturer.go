@@ -380,6 +380,16 @@ func (c *Capturer) warnCaptureCoverage(ctx context.Context, conn *pgx.Conn) {
 	// would silently disable the very guard this function exists to provide — the exact
 	// silent-failure class #555/#556 close. Visibility matches the doctor side, which
 	// also maps a probe failure to a WARN.
+	// #3108: a publication without TRUNCATE. Said once per start; the doctor
+	// and each health probe say it again, so a publication changed while
+	// capture runs is seen there.
+	if exists, publishes, err := QueryPublishesTruncate(ctx, conn, c.cfg.Publication); err != nil {
+		c.logger.Warn("pgcapture: could not read whether the publication publishes TRUNCATE; run `bintrail-pg doctor` to re-check", "error", err)
+	} else if exists && !publishes {
+		c.logger.Warn("pgcapture: "+TruncateNotPublishedProblem(c.cfg.Publication)+". Inserts, updates and deletes are captured normally. To record TRUNCATE, run the statement in fix on the source as the publication's owner",
+			"fix", TruncateFixStatement(c.cfg.Publication))
+	}
+
 	if unlogged, err := listUnloggedCaptureTables(ctx, conn, c.cfg.Publication, c.cfg.Filters); err != nil {
 		c.logger.Warn("pgcapture: UNLOGGED-table coverage check failed to run — could NOT determine whether a captured table writes no WAL (a silent recovery hole); run `bintrail-pg doctor` to re-check", "error", err)
 	} else if len(unlogged) > 0 {

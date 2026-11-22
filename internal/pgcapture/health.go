@@ -177,6 +177,12 @@ type HealthSnapshot struct {
 	// be read. That read failing does not fail the probe.
 	Published    []PublishedTable
 	PublishedErr error
+	// TruncateFix is TruncateFixStatement when the publication does not
+	// publish TRUNCATE (#3108), and empty when it does, when it is missing,
+	// or when that could not be read (TruncateErr says why). That read
+	// failing does not fail the probe.
+	TruncateFix string
+	TruncateErr error
 }
 
 // PublishedTable is one table of a publication, by the OID that stays its
@@ -279,6 +285,11 @@ func ProbeHealth(ctx context.Context, queryDSN, slotName, publication string, fi
 	snap := HealthSnapshot{Slot: slot, ReplicaIdentityNotFull: notFull, NotCaptured: notCaptured}
 	snap.FlushedLSN, snap.FlushedSourceAt, snap.FlushedLSNErr = QueryFlushed(ctx, conn)
 	snap.Published, snap.PublishedErr = QueryPublishedTables(ctx, conn, publication)
+	if exists, publishes, err := QueryPublishesTruncate(ctx, conn, publication); err != nil {
+		snap.TruncateErr = err
+	} else if exists && !publishes {
+		snap.TruncateFix = TruncateFixStatement(publication)
+	}
 	return snap, nil
 }
 
