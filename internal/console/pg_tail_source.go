@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -19,7 +18,6 @@ import (
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/dbtrail/dbtrail/internal/metadata"
-	"github.com/dbtrail/dbtrail/internal/pgdelta"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/snapshotdir"
@@ -305,24 +303,21 @@ func (x *pgTailSource) cut(t views.BaselineTable) pgCut {
 }
 
 // pairCut is the cut of the table delta beside t's file, nil when it has
-// none: where the delta's own window ends, read from the footer of its
-// .pgnew file, which is the footer a table file written by the same update
-// would carry. Whatever keeps it from being read is a refusal, never the
-// file's floor instead: a tail from there is the one this replaces.
+// none: where the delta's own window ends, read from the footer of the
+// .pgnew file of its LAST pair (#3082: one pair per update, each after the
+// one before), which is the footer a table file written by the same update
+// would carry. Whatever keeps it from being read, a chain that is not whole
+// among them, is a refusal, never the file's floor or an earlier pair's cut
+// instead: a tail from there is the one this replaces.
 //
 // gap: the refusal is the delta's being published over a known loss.
 func (x *pgTailSource) pairCut(t views.BaselineTable, name string, file baseline.DumpMetadata, at time.Time) (_ *pgCut, refusal string, gap bool) {
-	dead, rows, err := pgdelta.Paths(t.Path, 0)
+	rows, err := reconstruct.PGCutLastPair(t.Path)
 	if err != nil {
-		return nil, "", false
+		return nil, fmt.Sprintf("the table delta beside the copy of %s is not whole, or cannot be asked about: %v", name, err), false
 	}
-	_, deadErr := os.Lstat(dead)
-	_, rowsErr := os.Lstat(rows)
-	if errors.Is(deadErr, os.ErrNotExist) && errors.Is(rowsErr, os.ErrNotExist) {
+	if rows == "" {
 		return nil, "", false
-	}
-	if deadErr != nil || rowsErr != nil {
-		return nil, fmt.Sprintf("the table delta beside the copy of %s is not whole, or cannot be asked about", name), false
 	}
 	md, err := x.s.copyCuts.footer(rows)
 	if err != nil {
