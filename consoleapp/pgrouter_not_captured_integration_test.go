@@ -236,3 +236,137 @@ func TestIntegrationPGRouterTableNotCapturedGoesToTheSource(t *testing.T) {
 		t.Errorf("SHOW dbtrail.router_status after the read of a: %v", rows)
 	}
 }
+
+// A capture that cannot save its state (here a trigger of the index refuses
+// every write to stream_state) keeps its ledger of drops in memory only. A
+// snapshot just read on a quiet source is answered by the copy, as before;
+// once it is older than the bound, the PostgreSQL port takes such a capture
+// for one that cannot save, and the source answers the table with its
+// current rows. Fast mode, where nothing else would hold the copy back.
+func TestIntegrationPGRouterNoCaptureStateGoesToTheSource(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	t.Setenv("BINTRAIL_SQL_TAILS", "")
+	t.Cleanup(func() { console.EnablePostgresTails(false) })
+	const (
+		table = "pgnostate_t"
+		slot  = "bintrail_pgnostate_slot"
+		pub   = "bintrail_pgnostate_pub"
+		role  = "dbtrail_fwd_nostate"
+		pass  = "fwd-pw-nostate"
+	)
+	baseDSN, source, exec1 := pgTestSource(t, ctx, table, slot, pub, "id int PRIMARY KEY, counter int NOT NULL")
+	exec1("INSERT INTO " + table + " VALUES (1, 10)")
+	exec1(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '` + role + `') THEN EXECUTE 'DROP OWNED BY ` + role + `'; END IF; END $$`)
+	exec1("DROP ROLE IF EXISTS " + role)
+	exec1("CREATE ROLE " + role + " LOGIN PASSWORD '" + pass + "'")
+	exec1("GRANT SELECT ON " + table + " TO " + role)
+	t.Cleanup(func() {
+		bg := context.Background()
+		for _, s := range []string{"DROP OWNED BY " + role, "DROP ROLE IF EXISTS " + role} {
+			_, _ = source.Exec(bg, s).ReadAll()
+		}
+	})
+
+	mon, bootDSN := pgTestMonitor(t, ctx, 200*time.Millisecond)
+	_, _, sup := newScheduleFixture(t, true)
+	f := newRouterFiles(t)
+	e, err := f.owner.Add(console.ServerEntry{
+		Name: "pg-nostate", Flavor: console.FlavorPostgres,
+		SourceDSN: baseDSN, SourceSlot: slot, SourcePublication: pub,
+		Schemas: "public", BaselineDir: t.TempDir(),
+		RouteDSN: withAccount(t, baseDSN, role, pass),
+	})
+	if err != nil {
+		t.Fatalf("add the server: %v", err)
+	}
+	if e.DSN, err = mon.DeriveIndexDSN(e.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.owner.Update(e); err != nil {
+		t.Fatal(err)
+	}
+	pgTestStart(t, ctx, mon, bootDSN, source, e)
+	if err := sup.Trigger(console.BaselineRequestFor(e)); err != nil {
+		t.Fatalf("start the full read: %v", err)
+	}
+	pgTestWait(t, "the snapshot", 2*time.Minute, func() (bool, string) {
+		st := sup.Status(e.ID)
+		if st.State == "failed" {
+			t.Fatalf("the full read failed: %s", st.LastError)
+		}
+		return st.State == "succeeded", st.State
+	})
+	snapshotAt := time.Now()
+	fast := false
+	if _, err := f.owner.SetSQLMode(e.ID, &fast, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// From here capture cannot save: every write to its state is refused,
+	// and the row it may have saved is gone.
+	idx, err := sql.Open("mysql", e.DSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = idx.Close() })
+	for _, s := range []string{
+		"CREATE TRIGGER pgnostate_no_insert BEFORE INSERT ON stream_state FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'refused by the test'",
+		"CREATE TRIGGER pgnostate_no_update BEFORE UPDATE ON stream_state FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'refused by the test'",
+		"DELETE FROM stream_state",
+	} {
+		if _, err := idx.ExecContext(ctx, s); err != nil {
+			t.Fatalf("%s: %v", s, err)
+		}
+	}
+
+	f.savePortFile(t, true, "tok")
+	srv, runner, err := newPGRouterConsole(f.settings(""), console.SQLPool{Workers: 2, Threads: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runner.Close)
+	srv.RefreshFollowedFiles()
+	routes := newPGRouteStats(time.Now(), true)
+	router := &pgRouterPort{srv: srv, addr: freeAddr(t), maxConns: 8, poll: 20 * time.Millisecond, out: io.Discard, routes: routes, cost: &pgshim.CostPolicy{}}
+	portCtx, stopPort := context.WithCancel(context.Background())
+	served := make(chan struct{})
+	go func() { _ = router.serve(portCtx); close(served) }()
+	defer func() { stopPort(); <-served }()
+	waitUntil(t, "the port to open", func() bool { return router.listening() != "" })
+	host, portNum, _ := net.SplitHostPort(router.listening())
+	dsn := fmt.Sprintf("host=%s port=%s sslmode=disable user=anyone password=tok dbname=pg-nostate", host, portNum)
+	oneOn := func(stmt string) string {
+		t.Helper()
+		c := pgClient(t, ctx, dsn, nil)
+		defer c.Close(context.Background())
+		return one(ctx, c, stmt)
+	}
+	reasonCount := func(reason string) uint64 { return routes.doc("").Servers[e.ID].Reasons[reason] }
+	read := "SELECT counter FROM " + table + " WHERE id = 1"
+
+	// Within the bound: the copy, as for a capture that has not saved yet.
+	if got := oneOn(read); got != "10" {
+		t.Fatalf("a snapshot just read, no state saved yet: %q, want the copy's 10", got)
+	}
+	if time.Since(snapshotAt) >= time.Minute {
+		t.Fatalf("the young read came %s after the snapshot, past the bound: the test is too slow to show it", time.Since(snapshotAt))
+	}
+	if n := reasonCount(pgshim.ReasonAnswersTheSame); n != 1 {
+		t.Errorf("answered by the copy %d times, want 1", n)
+	}
+
+	// Past the bound: the source, with the change capture could not save.
+	exec1("UPDATE " + table + " SET counter = 13 WHERE id = 1")
+	pgTestWait(t, "the source's 13 past the bound", 3*time.Minute, func() (bool, string) {
+		got := oneOn(read)
+		return got == "13", fmt.Sprintf("%s after %s", got, time.Since(snapshotAt).Round(time.Second))
+	})
+	if n := reasonCount(pgshim.ReasonTableNotCaptured); n == 0 {
+		t.Errorf("table_not_captured counted %d times, want at least once", n)
+	}
+	if since := time.Since(snapshotAt); since < 55*time.Second {
+		t.Errorf("the source answered %s after the snapshot, before the bound of a minute", since)
+	}
+}

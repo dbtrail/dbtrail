@@ -46,7 +46,7 @@ func TestPGNotCapturedOf(t *testing.T) {
 	}
 	lost := func(st *status.StreamStateInfo, unreadable string, cutOf func(views.BaselineTable) pgCut) string {
 		var names []string
-		for _, l := range pgNotCapturedOf(tables, cutOf, st, unreadable) {
+		for _, l := range pgNotCapturedOf(tables, cutOf, st, unreadable, read.Add(10*time.Second), func(views.BaselineTable) time.Time { return time.Time{} }) {
 			if l.Why == "" {
 				t.Errorf("%s.%s is listed without a reason", l.Schema, l.Table)
 			}
@@ -185,5 +185,38 @@ func TestPGCaptureLossState(t *testing.T) {
 	mock.ExpectQuery("SELECT mode, binlog_file").WillReturnError(boom)
 	if _, why := pgCaptureLossState(ctx, db); why == "" {
 		t.Error("an unreadable state must say so")
+	}
+}
+
+// A capture that has saved no state in the index: young within
+// pgNoCaptureStateBound of the snapshot's read, then one that cannot save,
+// whose drops are on record nowhere.
+func TestPGNotCapturedOf_noCaptureState(t *testing.T) {
+	read := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	tables := []views.BaselineTable{{Schema: "public", Table: "orders"}}
+	cut := func(views.BaselineTable) pgCut { return pgCut{md: baseline.DumpMetadata{LastDumpAt: read, LSN: 50}, footer: true} }
+	at := func(w time.Time) func(views.BaselineTable) time.Time { return func(views.BaselineTable) time.Time { return w } }
+	for _, tc := range []struct {
+		name    string
+		now     time.Time
+		written time.Time
+		listed  bool
+	}{
+		{"just read, a quiet source", read.Add(10 * time.Second), read.Add(time.Second), false},
+		{"past the bound", read.Add(pgNoCaptureStateBound), read.Add(time.Second), true},
+		{"past the bound by the file's write, the source's clock ahead", read.Add(-time.Minute).Add(10 * time.Second), read.Add(-2 * time.Minute), true},
+		{"past the bound by the read, the file written late", read.Add(2 * time.Minute), read.Add(110 * time.Second), true},
+		{"neither the read nor the write known", read, time.Time{}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := cut
+			if tc.name == "neither the read nor the write known" {
+				c = func(views.BaselineTable) pgCut { return pgCut{refusal: "the snapshot file of x could not be read"} }
+			}
+			got := pgNotCapturedOf(tables, c, nil, "", tc.now, at(tc.written))
+			if (len(got) == 1) != tc.listed {
+				t.Errorf("listed %v, want %v", got, tc.listed)
+			}
+		})
 	}
 }

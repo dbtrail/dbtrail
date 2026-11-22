@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -61,13 +62,52 @@ func (q *SQLOnCopy) PGTablesNotCaptured(ctx context.Context) ([]PGTableNotCaptur
 	}
 	st, unreadable := pgCaptureLossState(ctx, q.b.db)
 	src := newPGTailSource(q.s, q.b)
-	return pgNotCapturedOf(in.Baselines, src.cut, st, unreadable), nil
+	return pgNotCapturedOf(in.Baselines, src.cut, st, unreadable, time.Now(), pgFileWritten), nil
+}
+
+// pgNoCaptureStateBound is how long after a table's snapshot was read the
+// PostgreSQL port takes a capture that has saved no state in the index yet
+// (no stream_state row) for a young one, and answers the table from the
+// copy. Past it, the capture is taken as one that cannot save (a refused
+// write, an account without the right, a capture that stops before its first
+// save), whose drops live only in its memory: the table is listed. Six of the
+// daemon's saves (consoleapp/monitor.go runs PostgreSQL capture with a 10 s
+// checkpoint; bintrail-pg's default is 5 s), a minute.
+const pgNoCaptureStateBound = time.Minute
+
+// pgFileWritten is when t's file was last written, by this host's clock;
+// zero when it cannot be told.
+func pgFileWritten(t views.BaselineTable) time.Time {
+	fi, err := os.Stat(t.Path)
+	if err != nil {
+		return time.Time{}
+	}
+	return fi.ModTime()
+}
+
+// pgSnapshotAge is how old t's snapshot is at now, for pgNoCaptureStateBound:
+// the larger of the age by its rows' read (the source server's clock) and by
+// its file's write (this host's), so that neither clock being behind the
+// other makes it look younger than it is. ok false: neither is known.
+func pgSnapshotAge(now, read, written time.Time) (age time.Duration, ok bool) {
+	if !read.IsZero() {
+		age, ok = now.Sub(read), true
+	}
+	if !written.IsZero() {
+		if a := now.Sub(written); !ok || a > age {
+			age, ok = a, true
+		}
+	}
+	return age, ok
 }
 
 // pgNotCapturedOf is PGTablesNotCaptured over tables, with each one's cut
 // read by cutOf and the capture's state st; unreadable, when not "", is why
 // that state could not be read, and lists every table.
-func pgNotCapturedOf(tables []views.BaselineTable, cutOf func(views.BaselineTable) pgCut, st *status.StreamStateInfo, unreadable string) []PGTableNotCaptured {
+//
+// now and written (pgFileWritten) date the snapshots for a capture that has
+// saved no state (pgNoCaptureStateBound).
+func pgNotCapturedOf(tables []views.BaselineTable, cutOf func(views.BaselineTable) pgCut, st *status.StreamStateInfo, unreadable string, now time.Time, written func(views.BaselineTable) time.Time) []PGTableNotCaptured {
 	var out []PGTableNotCaptured
 	for _, t := range tables {
 		if unreadable != "" {
@@ -90,6 +130,16 @@ func pgNotCapturedOf(tables []views.BaselineTable, cutOf func(views.BaselineTabl
 		var read time.Time
 		if c.footer {
 			lsn, read = c.readPoint()
+		}
+		if st == nil {
+			// Capture has saved no state: young if the snapshot is, else a
+			// capture that cannot save, whose drops are nowhere on record.
+			age, known := pgSnapshotAge(now, read, written(t))
+			if !known || age >= pgNoCaptureStateBound {
+				out = append(out, PGTableNotCaptured{Schema: t.Schema, Table: t.Table, SnapshotRead: read,
+					Why: "capture has saved no state in the index since this table's snapshot was read, so its dropped changes are not on record"})
+			}
+			continue
 		}
 		if why := pgCaptureLossOf(st, lsn, read, t.Schema, t.Table); why != "" {
 			out = append(out, PGTableNotCaptured{Schema: t.Schema, Table: t.Table, Why: why, SnapshotRead: read})
