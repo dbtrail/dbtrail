@@ -35,7 +35,7 @@ func hostLeaks(f copyFixture, s string) []string {
 // depth, and the refusal names no folder.
 func TestHostPaths_introspectionRefused(t *testing.T) {
 	f := newCopyFixture(t)
-	r := newTestRunner(t, testLimits())
+	r := hostPathsRunner(t)
 	cases := map[string]string{
 		"settings":                     "SELECT * FROM duckdb_settings()",
 		"settings qualified":           "SELECT * FROM system.main.duckdb_settings()",
@@ -119,7 +119,7 @@ func TestHostPaths_introspectionRefused(t *testing.T) {
 func TestHostPaths_settingsViewEveryQualification(t *testing.T) {
 	f := newCopyFixture(t)
 	f.views += "\nCREATE VIEW shop.pg_settings AS SELECT 1 AS x;\n"
-	r := newTestRunner(t, testLimits())
+	r := hostPathsRunner(t)
 	for _, q := range []string{
 		"SELECT * FROM pg_settings",
 		`SELECT * FROM "pg_settings"`,
@@ -162,7 +162,7 @@ func TestHostPaths_settingsViewEveryQualification(t *testing.T) {
 // way, and plain reads of the copy are untouched.
 func TestHostPaths_catalogStillAnswers(t *testing.T) {
 	f := newCopyFixture(t)
-	r := newTestRunner(t, testLimits())
+	r := hostPathsRunner(t)
 	for _, q := range []string{
 		"SELECT id, status FROM shop.orders ORDER BY id",
 		"SELECT count(*) FROM duckdb_tables()",
@@ -208,7 +208,7 @@ func TestHostPaths_catalogStillAnswers(t *testing.T) {
 // views' text; pg_get_viewdef prints it too.
 func TestHostPaths_hiddenRulesServer(t *testing.T) {
 	f := newCopyFixture(t)
-	r := newTestRunner(t, testLimits())
+	r := hostPathsRunner(t)
 	hidden := func(q string) Job {
 		j := f.job(q)
 		j.NoFileReaders = true
@@ -248,7 +248,7 @@ func TestHostPaths_hiddenRulesServer(t *testing.T) {
 // with the folder replaced.
 func TestHostPaths_engineErrorsHideFolders(t *testing.T) {
 	f := newCopyFixture(t)
-	r := newTestRunner(t, testLimits())
+	r := hostPathsRunner(t)
 	for _, q := range []string{
 		"SELECT * FROM read_parquet('" + filepath.Join(f.archiveRoot, "nosuch.parquet") + "')",
 		"SELECT * FROM read_parquet('" + filepath.Join(f.baselineRoot, "x", "nosuch.parquet") + "')",
@@ -589,4 +589,13 @@ func engineFunctionNames(t *testing.T, db *sql.DB, where string) []string {
 	}
 	sort.Strings(got)
 	return got
+}
+
+// hostPathsRunner keeps its worker for many statements: these tests run a
+// hundred short ones, and a process per statement would cost the package's
+// time budget under the race detector. Each statement still gets a new
+// session of its own (TestReuse_theNextStatementSeesNothingOfTheOneBefore).
+func hostPathsRunner(t *testing.T) *Runner {
+	t.Helper()
+	return newReuseRunner(t, Config{MaxInFlight: 1})
 }
