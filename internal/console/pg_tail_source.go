@@ -236,6 +236,10 @@ type pgCut struct {
 	since   time.Time
 }
 
+// sourceRead is when the rows of the cut's file were read from the source
+// (the PostgreSQL server's clock), zero when not recorded.
+func (c pgCut) sourceRead() time.Time { return baseline.SourceReadOf(c.md).At }
+
 // cut reads t's cut. The snapshot's time is its folder's, not the file's: a
 // file carried forward was written by an earlier run.
 func (x *pgTailSource) cut(t views.BaselineTable) pgCut {
@@ -898,7 +902,7 @@ func (x *pgTailSource) shapesFrom(ctx context.Context, snapshotID int64, from ui
 // pgTailBroken is one table's answer to Broken, "" when its tail can go on.
 func pgTailBroken(ctx context.Context, db *sql.DB, t views.BaselineTable, c pgCut, st *status.StreamStateInfo, shapes []metadata.PGShape) (string, error) {
 	name := t.Schema + "." + t.Table
-	if why := pgTailCaptureLoss(st, c.md.LSN, baseline.SourceReadOf(c.md).At, t.Schema, t.Table); why != "" {
+	if why := pgTailCaptureLoss(st, c.md.LSN, c.sourceRead(), t.Schema, t.Table); why != "" {
 		return why, nil
 	}
 	rel, ok, err := baseline.ParsePGRelation(c.md.PGRelation)

@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/status"
 	"github.com/dbtrail/dbtrail/internal/views"
 )
@@ -81,7 +80,7 @@ func pgNotCapturedOf(tables []views.BaselineTable, cutOf func(views.BaselineTabl
 		if c.refusal != "" {
 			continue // no tail for another reason: not a loss of capture
 		}
-		read := baseline.SourceReadOf(c.md).At
+		read := c.sourceRead()
 		if read.IsZero() && c.md.LSN == 0 {
 			continue // what its rows reach is not recorded: not a loss either
 		}
