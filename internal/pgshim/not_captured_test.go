@@ -96,7 +96,7 @@ func TestNotCaptured_aFreshConnectionReadingADroppedTable(t *testing.T) {
 		// the copy's answer is a snapshot's: the rule of #2985, as before.
 		t.Errorf("no longer listed, after the source answered about it: %+v, want copy_too_old", got)
 	}
-	if got := costSimple(ctx, costPortConn(t, ctx, p.l), "SELECT sum(n) FROM big"); got != tablesOnCopy {
+	if got := costSimple(ctx, costPortConn(t, ctx, p.l), p.l, "SELECT sum(n) FROM big"); got != tablesOnCopy {
 		t.Errorf("no longer listed, a new connection: %+v, want the copy", got)
 	}
 }
