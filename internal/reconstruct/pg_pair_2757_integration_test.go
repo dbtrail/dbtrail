@@ -222,12 +222,13 @@ func rowsMap(rows [][2]string) map[string]string {
 // switch on, one with it off, whose rewritten file is what the first must
 // equal.
 //
-// A chain ends when it is older than a chain may be: 25 minutes here (a day
-// in a running daemon), so the fourth update, 30 minutes after the file the
-// chain sits beside, writes the table in full.
+// A chain ends when it is older than a chain may be: 35 minutes here (a day
+// in a running daemon), counted from where the file's rows stand (its bound,
+// 11 minutes, under the first update's 20), so the third update (29 minutes)
+// adds a pair and the fourth (39) writes the table in full.
 func TestReconstructTables_PGTablePair(t *testing.T) {
 	ctx := context.Background()
-	reconstruct.SetPGChainMaxAge(t, 25*time.Minute)
+	reconstruct.SetPGChainMaxAge(t, 35*time.Minute)
 	f := newPGFixture(t)
 	onRoot, offRoot := t.TempDir(), t.TempDir()
 	rows := pairRows()
