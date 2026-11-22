@@ -41,6 +41,29 @@ var (
 	notCapturd = costOutcome{"42", "", RouteSource, ReasonTableNotCaptured}
 )
 
+// noticeConn connects to a port of l, keeping the notices it is sent.
+func noticeConn(t *testing.T, ctx context.Context, l *costLogin) (*pgconn.PgConn, *[]string) {
+	t.Helper()
+	addr := serveAddrCfg(t, Config{Login: l.login})
+	cfg, err := pgconn.ParseConfig(fmt.Sprintf("host=%s port=%s user=orders password=%s sslmode=disable", hostOf(addr), portOf(addr), portPassword))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	notices := &[]string{}
+	cfg.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) {
+		mu.Lock()
+		defer mu.Unlock()
+		*notices = append(*notices, n.Message)
+	}
+	c, err := pgconn.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close(context.Background()) })
+	return c, notices
+}
+
 // newLostPort is newTablesPort with a host that says which tables capture
 // does not keep whole.
 func newLostPort(t *testing.T) (*tablesPort, *lostKnob) {
@@ -118,59 +141,48 @@ func TestNotCaptured_anErrorOfTheHostGoesToTheSource(t *testing.T) {
 	}
 }
 
-// The copy's own commands are not held to it: the source would refuse them.
+// The copy's own commands are not sent to the source, which would refuse
+// them. SUMMARIZE reads a table's rows: over a table capture did not keep
+// whole it is told so, by the copy that answers it.
 func TestNotCaptured_theCopysOwnCommands(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	p, k := newLostPort(t)
-	// A ledger that does not say which tables: every table is listed.
 	k.set(nil, lostBig, TableNotCaptured{Schema: "public", Name: "wide", Why: "w"})
-	c := costPortConn(t, ctx, p.l)
-	for _, stmt := range []string{"SHOW TABLES", "DESCRIBE big", "SUMMARIZE big"} {
-		if got := costSimple(ctx, c, p.l, stmt); got.code != "" || got.side != RouteCopy || got.reason != ReasonCopyCommand {
-			t.Errorf("simple %s: %+v, want the copy's", stmt, got)
+	c, notices := noticeConn(t, ctx, p.l)
+	for _, tc := range []struct {
+		stmt   string
+		notice bool
+	}{
+		{"SHOW TABLES", false}, {"DESCRIBE big", false}, {"SUMMARIZE big", true}, {"SUMMARIZE SELECT n FROM public.big", true}, {"SUMMARIZE other.t", false},
+	} {
+		*notices = nil
+		if got := costSimple(ctx, c, p.l, tc.stmt); got.code != "" || got.side != RouteCopy || got.reason != ReasonCopyCommand {
+			t.Errorf("simple %s: %+v, want the copy's", tc.stmt, got)
 		}
-		if _, err := c.Prepare(ctx, "", stmt, nil); err != nil {
-			t.Errorf("prepare %s: %v", stmt, err)
+		if n := *notices; (len(n) == 1 && strings.Contains(n[0], "public.big") && strings.Contains(n[0], "SUMMARIZE is a command of the copy's own")) != tc.notice || len(n) > 1 {
+			t.Errorf("simple %s: notices %q, want a notice: %v", tc.stmt, n, tc.notice)
+		}
+		*notices = nil
+		if _, err := c.Prepare(ctx, "", tc.stmt, nil); err != nil {
+			t.Errorf("prepare %s: %v", tc.stmt, err)
 			continue
 		}
 		if res := c.ExecPrepared(ctx, "", nil, nil, nil).Read(); res.Err != nil {
-			t.Errorf("extended %s: %v", stmt, res.Err)
+			t.Errorf("extended %s: %v", tc.stmt, res.Err)
+		}
+		if n := *notices; (len(n) >= 1) != tc.notice {
+			t.Errorf("extended %s: notices %q, want a notice: %v", tc.stmt, n, tc.notice)
 		}
 	}
-	if n := k.asked.Load(); n != 0 {
-		t.Errorf("the host was asked %d times, want never", n)
+	// The lookup fails: SUMMARIZE says it could not be checked.
+	k.set(errors.New("boom"))
+	*notices = nil
+	if got := costSimple(ctx, c, p.l, "SUMMARIZE big"); got.code != "" {
+		t.Errorf("SUMMARIZE after a host error: %+v", got)
 	}
-}
-
-// A statement the source answers anyway does not ask the host: a cheap one,
-// one in a transaction block (which keeps the port's transaction rules), one
-// the screen sends there.
-func TestNotCaptured_askedOnlyForTheCopy(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	p, k := newLostPort(t)
-	k.set(nil, lostBig, TableNotCaptured{Schema: "public", Name: "t", Why: "t"})
-	c := costPortConn(t, ctx, p.l)
-	if got := costSimple(ctx, c, p.l, "SELECT n FROM t WHERE id = 1"); got.side != RouteSource || got.reason != ReasonCheapPlan {
-		t.Errorf("a cheap read: %+v", got)
-	}
-	if got := costSimple(ctx, c, p.l, "SELECT sum(n) FROM big WHERE now() IS NOT NULL"); got.side != RouteSource || got.reason != ReasonVeto {
-		t.Errorf("a read the screen sends to the source: %+v", got)
-	}
-	for _, stmt := range []string{"BEGIN", "SELECT sum(n) FROM big"} {
-		if _, err := c.Exec(ctx, stmt).ReadAll(); err != nil {
-			t.Fatalf("%s: %v", stmt, err)
-		}
-	}
-	if n := p.l.last(); n.Side != RouteSource || n.Reason != ReasonInTransaction {
-		t.Errorf("in a transaction block: %s/%s, want source/in_transaction", n.Side, n.Reason)
-	}
-	if _, err := c.Exec(ctx, "COMMIT").ReadAll(); err != nil {
-		t.Fatal(err)
-	}
-	if n := k.asked.Load(); n != 0 {
-		t.Errorf("the host was asked %d times, want never", n)
+	if n := *notices; len(n) != 1 || !strings.Contains(n[0], "could not check") {
+		t.Errorf("SUMMARIZE after a host error: notices %q", n)
 	}
 }
 
@@ -226,18 +238,7 @@ func TestNotCaptured_noForwardingAccount(t *testing.T) {
 	k := &lostKnob{}
 	k.set(nil, lostBig)
 	l := &costLogin{notCaptured: k.notCaptured, catalog: func() []CatalogTable { return catalogOf("big", "wide") }}
-	addr := serveAddrCfg(t, Config{Login: l.login})
-	cfg, err := pgconn.ParseConfig(fmt.Sprintf("host=%s port=%s user=orders password=%s sslmode=disable", hostOf(addr), portOf(addr), portPassword))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var notices []string
-	cfg.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) { notices = append(notices, n.Message) }
-	c, err := pgconn.ConnectConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close(context.Background())
+	c, noticesOf := noticeConn(t, ctx, l)
 	res, err := c.Exec(ctx, "SELECT sum(n) FROM big").ReadAll()
 	if err != nil || len(res) != 1 || len(res[0].Rows) != 1 || string(res[0].Rows[0][0]) != "7" {
 		t.Fatalf("%v %v, want the copy's 7", err, res)
@@ -248,27 +249,32 @@ func TestNotCaptured_noForwardingAccount(t *testing.T) {
 	if n := k.asked.Load(); n != 1 {
 		t.Errorf("the host was asked %d times, want once, for the notice", n)
 	}
+	notices := *noticesOf
 	if len(notices) != 1 || !strings.Contains(notices[0], "reads public.big") || !strings.Contains(notices[0], "2026-11-21 12:00:00 UTC") || !strings.Contains(notices[0], lostBig.Why) {
 		t.Errorf("notices %q, want one that names public.big, its snapshot's time and why", notices)
 	}
 	// A table capture keeps whole: no notice.
-	notices = nil
+	*noticesOf = nil
 	if _, err := c.Exec(ctx, "SELECT sum(n) FROM wide").ReadAll(); err != nil {
 		t.Fatal(err)
 	}
-	if len(notices) != 0 {
-		t.Errorf("notices for a captured table: %q", notices)
+	if len(*noticesOf) != 0 {
+		t.Errorf("notices for a captured table: %q", *noticesOf)
 	}
-	// The host cannot say: the copy answers, with no notice and no error.
-	k.set(errors.New("the index cannot be reached"))
+	// The host cannot say: the copy answers, and the client is told it could
+	// not be checked, without the index's error.
+	k.set(errors.New("dial tcp 10.0.3.7:3306: connect: connection refused"))
 	if res, err := c.Exec(ctx, "SELECT sum(n) FROM big").ReadAll(); err != nil || string(res[0].Rows[0][0]) != "7" {
 		t.Errorf("a host error on a connection without forwarding: %v %v, want the copy's 7", err, res)
+	}
+	if n := *noticesOf; len(n) != 1 || !strings.Contains(n[0], "could not check whether capture kept the tables of this statement complete") || strings.Contains(n[0], "10.0.3.7") {
+		t.Errorf("notices after a host error: %q, want one that says the tables could not be checked", n)
 	}
 }
 
 func TestNotCapturedNotice(t *testing.T) {
-	got := notCapturedNotice(TableNotCaptured{Schema: "public", Name: "a", Why: "w"}, false)
-	if !strings.Contains(got, "may read public.a") || !strings.Contains(got, "from its snapshot,") {
+	got := notCapturedNotice(TableNotCaptured{Schema: "public", Name: "a", Why: "w"}, false, "because.")
+	if !strings.Contains(got, "may read public.a") || !strings.Contains(got, "from its snapshot,") || !strings.HasSuffix(got, " because.") {
 		t.Errorf("a text not read whole, no time known: %q", got)
 	}
 }

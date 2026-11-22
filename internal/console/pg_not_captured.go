@@ -39,7 +39,7 @@ type PGTableNotCaptured struct {
 // every table is read from its snapshot alone, by the operator's choice.
 // A table whose tail is refused for another reason (its snapshot does not
 // record a position, or when its rows were read; a MySQL delta beside it) is
-// not listed: it is not a loss of capture.
+// listed only when the loss rule lists it, asked with what its footer says.
 //
 // The ledger is read strictly: status.LoadStreamState reads it best effort,
 // and an error there would read as no drop. When the capture's state cannot
@@ -77,14 +77,17 @@ func pgNotCapturedOf(tables []views.BaselineTable, cutOf func(views.BaselineTabl
 			out = append(out, PGTableNotCaptured{Schema: t.Schema, Table: t.Table, Why: c.refusal})
 			continue
 		}
-		if c.refusal != "" {
-			continue // no tail for another reason: not a loss of capture
+		// A tail refused for another reason, or a snapshot that records
+		// neither what its rows reach nor when they were read: not a loss in
+		// itself, and the loss rule is asked with what is known (nothing,
+		// when the footer was not read), so that a drop or a lost slot that
+		// covers the table still lists it.
+		var lsn uint64
+		var read time.Time
+		if c.footer {
+			lsn, read = c.md.LSN, c.sourceRead()
 		}
-		read := c.sourceRead()
-		if read.IsZero() && c.md.LSN == 0 {
-			continue // what its rows reach is not recorded: not a loss either
-		}
-		if why := pgTailCaptureLoss(st, c.md.LSN, read, t.Schema, t.Table); why != "" {
+		if why := pgCaptureLossOf(st, lsn, read, t.Schema, t.Table); why != "" {
 			out = append(out, PGTableNotCaptured{Schema: t.Schema, Table: t.Table, Why: why, SnapshotRead: read})
 		}
 	}

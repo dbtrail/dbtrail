@@ -230,6 +230,9 @@ type pgCut struct {
 	// published over a known loss of captured changes: a loss of capture,
 	// for the PostgreSQL port (pgNotCapturedOf).
 	gap     bool
+	// footer: md is the file's footer, read; on a refusal, false when the
+	// refusal came before it was read.
+	footer bool
 	md      baseline.DumpMetadata
 	floor   uint64
 	from    *query.BinlogPos
@@ -259,6 +262,11 @@ func (x *pgTailSource) cut(t views.BaselineTable) pgCut {
 	md, err := x.s.copyCuts.footer(t.Path)
 	if err != nil {
 		return refuse("the snapshot file of %s could not be read: %v", name, err)
+	}
+	// From here a refusal carries the footer it was read from, for the
+	// capture-loss rule of the PostgreSQL port (pgNotCapturedOf).
+	refuse = func(format string, args ...any) pgCut {
+		return pgCut{refusal: fmt.Sprintf(format, args...), md: md, footer: true}
 	}
 	if baseline.ReadConsistencyOf(md) != baseline.ReadConsistent {
 		return refuse("the snapshot of %s does not say it was read at one moment of the source", name)
@@ -290,9 +298,9 @@ func (x *pgTailSource) cut(t views.BaselineTable) pgCut {
 		return c
 	}
 	if pair != nil {
-		return pgCut{md: md, floor: pair.floor, from: pair.from, since: pair.since}
+		return pgCut{md: md, footer: true, floor: pair.floor, from: pair.from, since: pair.since}
 	}
-	return pgCut{md: md, floor: md.LSN, from: from, since: since}
+	return pgCut{md: md, footer: true, floor: md.LSN, from: from, since: since}
 }
 
 // pairCut is the cut of the table delta beside t's file, nil when it has
@@ -970,14 +978,30 @@ func sameStringSet(a, b []string) bool {
 // wrote one, and they stopped instead of dropping. One that is there and does
 // not parse refuses.
 func pgTailCaptureLoss(st *status.StreamStateInfo, readLSN uint64, sourceRead time.Time, schema, table string) string {
+	if st != nil && st.GapColumnsPresent && sourceRead.IsZero() && readLSN == 0 {
+		return "the snapshot does not say when its rows were read from the source, nor the position they reach"
+	}
+	return pgCaptureLossOf(st, readLSN, sourceRead, schema, table)
+}
+
+// pgCaptureLossOf is pgTailCaptureLoss without its refusal of a snapshot
+// that records neither its LSN nor its read time: the loss of capture alone,
+// judged with what is known of the rows (readLSN 0 and a zero sourceRead
+// when nothing is), for the PostgreSQL port's list of tables
+// (pgNotCapturedOf). With nothing known, any loss on record, and any drop
+// the ledger covers the table with, refuses.
+//
+// The lost slot records no position, only the daemon's clock, and the read
+// time is the source server's: compared with reconstruct.PGSkipClockMargin,
+// so a daemon behind the source by less does not date the loss before the
+// read.
+func pgCaptureLossOf(st *status.StreamStateInfo, readLSN uint64, sourceRead time.Time, schema, table string) string {
 	switch {
 	case st == nil:
 		return "the capture's state is not recorded in the index"
 	case !st.GapColumnsPresent:
 		return "the capture's record of lost events is not readable"
-	case sourceRead.IsZero() && readLSN == 0:
-		return "the snapshot does not say when its rows were read from the source, nor the position they reach"
-	case st.GapLostAt.Valid && !st.GapLostAt.Time.Before(sourceRead):
+	case st.GapLostAt.Valid && !st.GapLostAt.Time.Before(sourceRead.Add(-reconstruct.PGSkipClockMargin)):
 		return "capture lost events since the snapshot's rows were read from the source"
 	}
 	return reconstruct.PGSkippedSince(st, readLSN, sourceRead, schema, table)

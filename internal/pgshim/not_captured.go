@@ -34,29 +34,23 @@ func (s *session) notCapturedRefusal(ctx context.Context, text string) *pgErr {
 	}
 	toks, _ := lexSQL(text)
 	switch firstWord(toks) {
-	case "show", "describe", "summarize", "explain":
-		// The copy's own commands (copy_command): the source would refuse
-		// them, and they are not the reads this is about.
+	case "show", "describe", "explain":
+		// The copy's own commands (copy_command) that read no rows of a
+		// table: the source would refuse them.
 		return nil
-	}
-	lost, err := s.bound.NotCaptured(ctx)
-	if ctx.Err() != nil {
-		// The client left, or the statement's time ran out, while the
-		// capture's record was read: that, not a statement to send again.
-		if perr := stoppedError(ctx); perr != nil {
-			return perr
-		}
-		return &pgErr{"57014", "the statement was stopped"}
+	case "summarize":
+		// A command of the copy's own that reads a table's rows: the source
+		// does not have it, so the copy answers, and says so.
+		return s.tellNotCaptured(ctx, summarizedQuery(text),
+			"SUMMARIZE is a command of the copy's own that your PostgreSQL does not have, so the copy's answer is the one given.")
 	}
 	if !s.canFallBack() {
-		if err != nil {
-			warnNotCapturedUnread(s, "the copy answers, as nothing is sent to the source on this connection", err)
-			return nil
-		}
-		if t, exact, ok := readsNotCapturedTable(text, lost); ok {
-			s.notice(notCapturedNotice(t, exact))
-		}
-		return nil
+		return s.tellNotCaptured(ctx, text,
+			"This connection sends nothing to your PostgreSQL (no forwarding user, or the server hides tables), so the copy's answer is the one given.")
+	}
+	lost, err := s.bound.NotCaptured(ctx)
+	if perr := notCapturedStopped(ctx); perr != nil {
+		return perr
 	}
 	if err != nil {
 		// Not known which tables capture keeps whole: the source answers,
@@ -76,6 +70,57 @@ func (s *session) notCapturedRefusal(ctx context.Context, text string) *pgErr {
 	return &pgErr{"55000", why}
 }
 
+// notCapturedStopped is the error of a statement stopped while the host was
+// asked which tables capture keeps whole (the client left, a cancel request,
+// its time ran out), nil when it was not: such a statement is not sent
+// again.
+func notCapturedStopped(ctx context.Context) *pgErr {
+	if ctx.Err() == nil {
+		return nil
+	}
+	if perr := stoppedError(ctx); perr != nil {
+		return perr
+	}
+	return &pgErr{"57014", "the statement was stopped"}
+}
+
+// tellNotCaptured is for a statement the copy answers whatever it reads
+// (text, as the copy reads it): the client is sent a NOTICE before the rows
+// when it reads a table capture did not keep whole, and one when that could
+// not be told. because says why the copy's answer is the one given. Its
+// error is only that of a statement stopped meanwhile.
+func (s *session) tellNotCaptured(ctx context.Context, text, because string) *pgErr {
+	lost, err := s.bound.NotCaptured(ctx)
+	if perr := notCapturedStopped(ctx); perr != nil {
+		return perr
+	}
+	if err != nil {
+		warnNotCapturedUnread(s, "the copy answers, and the client is told it could not be checked", err)
+		s.notice("DBTrail could not check whether capture kept the tables of this statement complete, so the answer may come from their snapshot without the changes made since. " + because)
+		return nil
+	}
+	if t, exact, ok := readsNotCapturedTable(text, lost); ok {
+		s.notice(notCapturedNotice(t, exact, because))
+	}
+	return nil
+}
+
+// summarizedQuery is what a SUMMARIZE reads, as a statement readsOf reads:
+// its query (SUMMARIZE SELECT ...), or its table (SUMMARIZE t) read whole.
+func summarizedQuery(text string) string {
+	i := strings.Index(strings.ToLower(text), "summarize")
+	if i < 0 {
+		return text
+	}
+	rest := text[i+len("summarize"):]
+	toks, _ := lexSQL(rest)
+	switch firstWord(toks) {
+	case "select", "with":
+		return rest
+	}
+	return "SELECT * FROM " + rest
+}
+
 // readsNotCaptured says why the statement text (as the copy is handed it)
 // may read one of lost, "" when it reads none of them.
 func readsNotCaptured(text string, lost []TableNotCaptured) string {
@@ -86,10 +131,11 @@ func readsNotCaptured(text string, lost []TableNotCaptured) string {
 	return t.Why
 }
 
-// notCapturedNotice is what a connection that cannot reach its source is
-// told when the copy answers a statement that reads t; exact false: its text
-// does not say which tables it reads, and t is one of the tables it may read.
-func notCapturedNotice(t TableNotCaptured, exact bool) string {
+// notCapturedNotice is what a client is told when the copy answers a
+// statement that reads t; exact false: its text does not say which tables it
+// reads, and t is one of the tables it may read. because says why the
+// copy's answer is the one given.
+func notCapturedNotice(t TableNotCaptured, exact bool, because string) string {
 	name := t.Schema + "." + t.Name
 	taken := "its snapshot"
 	if !t.SnapshotRead.IsZero() {
@@ -100,7 +146,7 @@ func notCapturedNotice(t TableNotCaptured, exact bool) string {
 		reads = "may read " + name
 	}
 	return "This statement " + reads + ", which capture did not keep whole (" + t.Why + "), so the copy answered it from " + taken +
-		", without the changes made since. This connection sends nothing to your PostgreSQL (no forwarding user, or the server hides tables), so the copy's answer is the one given."
+		", without the changes made since. " + because
 }
 
 // readsNotCapturedTable is the table of lost the statement text may read,

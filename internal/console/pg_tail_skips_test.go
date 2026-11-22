@@ -102,3 +102,19 @@ func TestPGTailCaptureLoss_daemonClockBehindTheSource(t *testing.T) {
 		t.Error("neither the LSN nor the read time: must refuse")
 	}
 }
+
+// A lost slot is dated by the daemon's clock and the snapshot's read by the
+// source server's. With the daemon 2 minutes behind, a slot lost after the
+// read is dated before it: within the margin, it refuses.
+func TestPGTailCaptureLoss_lostSlotWithTheDaemonBehind(t *testing.T) {
+	read := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	st := &status.StreamStateInfo{Mode: "gtid", GapColumnsPresent: true}
+	st.GapLostAt = sql.NullTime{Time: read.Add(-2 * time.Minute), Valid: true}
+	if pgTailCaptureLoss(st, 0x1000, read, "public", "orders") == "" {
+		t.Error("a slot lost 2 minutes before the read by a clock behind must refuse")
+	}
+	st.GapLostAt = sql.NullTime{Time: read.Add(-10 * time.Minute), Valid: true}
+	if why := pgTailCaptureLoss(st, 0x1000, read, "public", "orders"); why != "" {
+		t.Errorf("a slot lost well before the read: %q, want covered", why)
+	}
+}

@@ -42,7 +42,7 @@ func TestPGNotCapturedOf(t *testing.T) {
 	}
 	tables := []views.BaselineTable{{Schema: "public", Table: "orders"}, {Schema: "public", Table: "items"}}
 	cutAt := func(at time.Time) func(views.BaselineTable) pgCut {
-		return func(views.BaselineTable) pgCut { return pgCut{md: baseline.DumpMetadata{LastDumpAt: at}} }
+		return func(views.BaselineTable) pgCut { return pgCut{md: baseline.DumpMetadata{LastDumpAt: at}, footer: true} }
 	}
 	lost := func(st *status.StreamStateInfo, unreadable string, cutOf func(views.BaselineTable) pgCut) string {
 		var names []string
@@ -77,15 +77,30 @@ func TestPGNotCapturedOf(t *testing.T) {
 		{"a ledger that cannot be read", nil, "the capture's record of dropped changes could not be read", cutAt(read), "public.orders public.items"},
 		{"a slot lost after the snapshot read", lostSlot, "", cutAt(read), "public.orders public.items"},
 		{"no state of the capture in the index", nil, "", cutAt(read), "public.orders public.items"},
-		{"a tail refused for another reason is not a loss", state(ledger(read.Add(time.Minute), true)), "",
-			func(views.BaselineTable) pgCut { return pgCut{refusal: "the snapshot of x does not record an LSN to continue from"} }, ""},
+		{"a tail refused for another reason, no drop: not a loss", state(sql.NullString{}), "",
+			func(views.BaselineTable) pgCut {
+				return pgCut{refusal: "the snapshot of x does not say it was read at one moment of the source", md: baseline.DumpMetadata{LastDumpAt: read, LSN: 50}, footer: true}
+			}, ""},
+		{"a tail refused for another reason, a drop after its footer's read: listed", state(ledgerAt(read.Add(time.Minute), 100, "public.orders")), "",
+			func(views.BaselineTable) pgCut {
+				return pgCut{refusal: "the snapshot of x does not say it was read at one moment of the source", md: baseline.DumpMetadata{LastDumpAt: read, LSN: 50}, footer: true}
+			}, "public.orders"},
+		{"a tail refused for another reason, a drop before its footer's LSN: not listed", state(ledgerAt(read.Add(time.Minute), 10, "public.orders")), "",
+			func(views.BaselineTable) pgCut {
+				return pgCut{refusal: "the table delta beside the copy of x is not whole", md: baseline.DumpMetadata{LastDumpAt: read, LSN: 50}, footer: true}
+			}, ""},
+		{"a footer that could not be read, any drop that covers the table: listed", state(ledgerAt(read.Add(-time.Hour), 10, "public.orders")), "",
+			func(views.BaselineTable) pgCut { return pgCut{refusal: "the snapshot file of x could not be read"} }, "public.orders"},
+		{"a footer that could not be read, no drop: not listed", state(sql.NullString{}), "",
+			func(views.BaselineTable) pgCut { return pgCut{refusal: "the snapshot file of x could not be read"} }, ""},
 		{"a snapshot published over a known loss", state(sql.NullString{}), "",
 			func(views.BaselineTable) pgCut {
 				return pgCut{refusal: "the snapshot of x was published over a known loss of captured changes", gap: true}
 			}, "public.orders public.items"},
 		{"a snapshot with its LSN and no read time is judged by position", state(ledgerAt(read, 100, "public.orders")), "",
-			func(views.BaselineTable) pgCut { return pgCut{md: baseline.DumpMetadata{LSN: 50}} }, "public.orders"},
-		{"a snapshot that says neither what it reaches nor when it was read is not a loss", state(ledger(read.Add(time.Minute), true)), "", cutAt(time.Time{}), ""},
+			func(views.BaselineTable) pgCut { return pgCut{md: baseline.DumpMetadata{LSN: 50}, footer: true} }, "public.orders"},
+		{"a snapshot that says neither what it reaches nor when it was read, a drop: listed", state(ledger(read.Add(time.Minute), true)), "", cutAt(time.Time{}), "public.orders public.items"},
+		{"a snapshot that says neither what it reaches nor when it was read, no drop: not listed", state(sql.NullString{}), "", cutAt(time.Time{}), ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := lost(tc.st, tc.unreadable, tc.cutOf); got != tc.want {
