@@ -93,22 +93,21 @@ func pgFollowTable(path, schema, table string) BaselineTable {
 }
 
 // pgFollowRows reads schema.table's state view as "id=status", ordered by
-// id, which must be read as a number.
+// id as a number. Not its type: a pinned view casts id to the number it is,
+// a following one reads it as text (Generate drops the casts of a file that
+// follows, #2755).
 func pgFollowRows(t *testing.T, db *sql.DB, schema, table string) ([]string, error) {
 	t.Helper()
-	rows, err := db.Query(`SELECT id::VARCHAR || '=' || status, typeof(id) FROM "` + schema + `"."` + table + `" ORDER BY id`)
+	rows, err := db.Query(`SELECT id::VARCHAR || '=' || status FROM "` + schema + `"."` + table + `" ORDER BY id::BIGINT`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []string
 	for rows.Next() {
-		var s, typ string
-		if err := rows.Scan(&s, &typ); err != nil {
+		var s string
+		if err := rows.Scan(&s); err != nil {
 			return nil, err
-		}
-		if typ != "BIGINT" {
-			t.Fatalf("id is read as %s, want BIGINT", typ)
 		}
 		out = append(out, s)
 	}
