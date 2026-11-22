@@ -354,6 +354,12 @@ func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest,
 		if captureGap != nil && !args.AllowGaps {
 			return ErrorResult(reconstructCaptureGapError(captureGap, args.Schema, args.Table)), nil, nil
 		}
+		// PostgreSQL: changes of the table the capture dropped since the
+		// snapshot (a table not at REPLICA IDENTITY FULL). No override, and
+		// the message names no flag.
+		if err := reconstruct.CheckPGPastRead(ctx, t.DB, args.Schema, args.Table, bmeta); err != nil {
+			return ErrorResult(err), nil, nil
+		}
 
 		// 3. Fetch this PK's deltas in [baseline, at], oldest-first.
 		//    AllowGaps defaults FALSE — stricter than the query tool, which

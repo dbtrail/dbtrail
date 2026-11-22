@@ -173,6 +173,11 @@ type BaselinePair struct {
 	NewCascadeNote string
 	NewLock        baseline.ReadConsistency
 	PrevLock       baseline.ReadConsistency
+	// PrevFooter is the older side's footer, as FindBaselinePair read it:
+	// on PostgreSQL it says how far that side's rows are covered by the
+	// changes recorded after them (reconstruct.PGReadPoint). The zero value
+	// (a pair built by hand) reads as not known.
+	PrevFooter baseline.DumpMetadata
 	// Settled, when set, is this table's answer, decided while pairing: the
 	// read it needs is not kept, not on record, or has no earlier snapshot, a
 	// footer the pairing needed would not open, or a backup folder the answer
@@ -309,6 +314,19 @@ func VerifyBaselinePair(ctx context.Context, cfg BaselineConfig, p BaselinePair)
 	if unchecked != "" {
 		// A match over a window nobody could check is no proof (#2186).
 		return inconclusive(res, unchecked), nil
+	}
+	// PostgreSQL: changes of the table the capture dropped since the older
+	// side's rows were read (a table not at REPLICA IDENTITY FULL). The
+	// replay would miss them and report the capture's loss as a difference.
+	if pg {
+		why, err := reconstruct.PGNotCovered(ctx, cfg.IndexDB, p.Schema, p.Table, p.PrevFooter)
+		if err != nil {
+			return res, fmt.Errorf("%s.%s: %w", p.Schema, p.Table, err)
+		}
+		if why != "" {
+			return inconclusive(res, why+"; the replay from the older snapshot would miss those changes, so the table is not compared. "+
+				"Fix the table on the source (for a table that is not at REPLICA IDENTITY FULL: ALTER TABLE ... REPLICA IDENTITY FULL), then take a full read of it"), nil
+		}
 	}
 
 	// From where the changes are read: on PostgreSQL a TRUNCATE that raced
@@ -824,6 +842,7 @@ func pairLastRead(ctx context.Context, snaps []reconstruct.BaselineFile, other s
 		PrevDir:             prev.SnapshotTime,
 		NewLock:             baseline.ReadConsistencyOf(nMeta),
 		PrevLock:            baseline.ReadConsistencyOf(prevMeta),
+		PrevFooter:          prevMeta,
 	}
 	from := prev.SnapshotTime
 	if prevElsewhere {

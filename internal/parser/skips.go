@@ -249,6 +249,15 @@ func (c *SkipCounters) RecordSkipAttributed(reason string, attr SkipAttribution)
 		switch reason {
 		case SkipStatementFormatDML:
 			remediation = "set binlog_format=ROW server-wide on the source (a STATEMENT/MIXED format or a session-level override is producing row-less events)"
+		case "replica_identity_not_full", "replica_identity_index_without_primary_key", "primary_key_deferrable", "primary_key_not_in_description":
+			// A PostgreSQL capture's reasons (pgcapture.Skip*, which cannot
+			// be imported here; pgcapture's TestSkipAlarmRemedy pins the
+			// names), in the run only while no table it captures has been
+			// described in this session: a MySQL capture never records them.
+			remediation = "the changes skipped are of tables this PostgreSQL capture does not take, each counted under the reason shown, and no table it takes has had a change in this session yet " +
+				"(PostgreSQL describes a table to the capture at its first change, so a quiet table it takes looks the same as none). " +
+				"To capture a skipped table, put it at REPLICA IDENTITY FULL (ALTER TABLE <t> REPLICA IDENTITY FULL), make a DEFERRABLE primary key not deferrable, or take it out of the publication; " +
+				"`bintrail-pg doctor` prints the statement for each. The changes skipped before the fix are not recorded"
 		case SkipTableExcludedFromSnapshot:
 			// Never point this reason at `bintrail snapshot`: the validator
 			// excludes the same table on every re-run (#1051/#1199), so that

@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-mysql-org/go-mysql/mysql"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
@@ -161,6 +162,11 @@ func mysqlRenderErr(err error) error {
 // is logged. The MySQL renderer also hands it to the client (SHOW WARNINGS)
 // through resolveFlashbackRow.
 func (h *Handler) ResolveFlashbackRow(ctx context.Context, q TimeTravelQuery) (map[string]any, error) {
+	// The recorded changes alone: refused over any change of the table a
+	// PostgreSQL capture dropped (reconstruct.CheckPGPastRead).
+	if err := reconstruct.CheckPGPastRead(ctx, h.indexDB, q.Schema, q.Table, baseline.DumpMetadata{}); err != nil {
+		return nil, err
+	}
 	image, notes, err := h.resolveFlashbackRow(ctx, q, false)
 	for _, n := range notes {
 		h.logOrderNote(q, n)
@@ -282,6 +288,26 @@ func foldRowInBinlogOrder(initial map[string]any, rows []query.ResultRow, asOf t
 	return state, ordered, note, err
 }
 
+// checkPGPastRead is reconstruct.CheckPGPastRead for a single-row _snapshot
+// read on the PostgreSQL port, over the footer of the snapshot the read
+// folds from (none known: the recorded changes alone). ResolveSnapshotRow
+// and ResolveFlashbackRow are the PostgreSQL port's seam; the MySQL port does
+// not come through them.
+func (h *Handler) checkPGPastRead(ctx context.Context, q TimeTravelQuery) error {
+	if query.SourceFlavor(h.indexDB) != "postgres" {
+		return nil
+	}
+	var md baseline.DumpMetadata
+	if h.baselineSource() != "" || h.cfg.FindBaseline != nil {
+		if path, _, _, err := h.findBaseline(ctx, q.Schema, q.Table, q.AsOf); err == nil {
+			if m, merr := baseline.ReadParquetMetadataAny(ctx, path); merr == nil {
+				md = m
+			}
+		}
+	}
+	return reconstruct.CheckPGPastRead(ctx, h.indexDB, q.Schema, q.Table, md)
+}
+
 // logOrderNote logs the order note of a single-row read (#2156) for a
 // front-end with no place to hand it to the client.
 func (h *Handler) logOrderNote(q TimeTravelQuery, note string) {
@@ -302,6 +328,9 @@ func (h *Handler) logOrderNote(q TimeTravelQuery, note string) {
 // lives here, the pgwire front-end inherits it for free — a second renderer must
 // NOT re-derive it.
 func (h *Handler) ResolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (map[string]any, error) {
+	if err := h.checkPGPastRead(ctx, q); err != nil {
+		return nil, err
+	}
 	state, notes, err := h.resolveSnapshotRow(ctx, q, false)
 	for _, n := range notes {
 		h.logOrderNote(q, n)
