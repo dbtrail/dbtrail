@@ -150,9 +150,9 @@ func TestNotCaptured_askedOnlyForTheCopy(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	p, k := newLostPort(t)
-	k.set(nil, lostBig)
+	k.set(nil, lostBig, TableNotCaptured{Schema: "public", Name: "t", Why: "t"})
 	c := costPortConn(t, ctx, p.l)
-	if got := costSimple(ctx, c, p.l, "SELECT n FROM big WHERE id = 1"); got.side != RouteSource || got.reason != ReasonCheapPlan {
+	if got := costSimple(ctx, c, p.l, "SELECT n FROM t WHERE id = 1"); got.side != RouteSource || got.reason != ReasonCheapPlan {
 		t.Errorf("a cheap read: %+v", got)
 	}
 	if got := costSimple(ctx, c, p.l, "SELECT sum(n) FROM big WHERE now() IS NOT NULL"); got.side != RouteSource || got.reason != ReasonVeto {
