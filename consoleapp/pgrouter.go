@@ -1031,6 +1031,11 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 				schema = pgPortSchema
 			}
 			sess := sqlsandbox.Session{PostgresRules: true, PostgresNames: true, TimeZone: opts.TimeZone}
+			if opts.NeedTails {
+				// Refused before it runs when its tables' recent changes are
+				// not ready: the port would not give that answer (#3086).
+				ctx = console.WithPGNeedTails(ctx)
+			}
 			res, err := copySQL.Run(ctx, statement, schema, sess)
 			if err == nil && !opts.Probe {
 				// How old what it read was, for /status (#2756), kept once
