@@ -68,18 +68,25 @@ func TestIntegrationPGNeedTailsRefusesBeforeRunning_3086(t *testing.T) {
 		{"a PostgreSQL statement that does not: the snapshot, said", func(c context.Context) context.Context { return c }, sqlsandbox.Session{PostgresRules: true, PostgresNames: true}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var ran time.Time
-			t0 := time.Now()
+			// A keeper of its own: the last case's is still following the
+			// index it was kept from.
+			r.s.tails.mu.Lock()
+			for _, k := range r.s.tails.by {
+				k.close()
+			}
+			r.s.tails.by = nil
+			r.s.tails.mu.Unlock()
 			tbl := r.table(nil)
 			r.change(tbl.Table, event.EventUpdate, "1", "paid", "binlog.000008", 100, time.Now().UTC().Add(-time.Hour).Truncate(time.Second))
 			stmt := "SELECT CAST(id AS VARCHAR) || '=' || status FROM shop." + tbl.Table + " ORDER BY id"
 			start := time.Now()
-			t.Logf("table and change %v", start.Sub(t0))
 			unlock := lock(t)
-			defer func() { u := time.Now(); unlock(); t.Logf("setup %v, run %v, unlock %v", ran.Sub(start), u.Sub(ran), time.Since(u)) }()
+			defer unlock()
 			before := viewsFor.Load()
 			res, err := q.Run(tc.ctx(context.Background()), stmt, "", tc.sess)
-			ran = time.Now()
+			if took := time.Since(start); took > 2*freshTailsWait {
+				t.Errorf("the statement took %v, more than fresh mode's wait", took)
+			}
 			if viewsFor.Load() == before {
 				t.Fatal("the statement never reached the tails step")
 			}
