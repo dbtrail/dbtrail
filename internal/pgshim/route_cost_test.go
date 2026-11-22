@@ -475,6 +475,8 @@ type costLogin struct {
 	// of 7 when it is not nil; catalogErr the same for its catalog.
 	copyErr    func(st string) error
 	catalogErr func() error
+	// sides, when set, is the server's Forward.Sides.
+	sides *CostSides
 }
 
 func (l *costLogin) run(_ context.Context, st string, _ RunOptions) (sqlsandbox.Result, error) {
@@ -500,7 +502,7 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 		l.notes = append(l.notes, n)
 	}}
 	if l.src != nil {
-		b.Forward = &Forward{DSN: l.src.dsn(), Limit: 4, Cost: l.cost, Acquire: func(ctx context.Context) (func(), bool) {
+		b.Forward = &Forward{DSN: l.src.dsn(), Limit: 4, Cost: l.cost, Sides: l.sides, Acquire: func(ctx context.Context) (func(), bool) {
 			if l.refuse {
 				return nil, false
 			}

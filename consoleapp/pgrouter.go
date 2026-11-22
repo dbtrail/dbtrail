@@ -855,6 +855,9 @@ func servePGPortRouted(ctx context.Context, srv *console.Server, ln net.Listener
 // connections share (#2771), and routes counts which side answered each of
 // their statements (#2770; nil counts nothing).
 func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, logger *slog.Logger, sources *pgSourceSlots, routes *pgRouteStats, cost *pgshim.CostPolicy) pgshim.LoginFunc {
+	// The side each statement shape of a server was last sent to by its
+	// plan, for all the port's connections to it (#3045).
+	sides := &pgCostSides{}
 	return func(ctx context.Context, user, database string, password *pgshim.Password, drop func()) (*pgshim.Binding, *pgshim.Error) {
 		// Before the passwords are read: a connection opened with an
 		// application login is served only if no login changed since
@@ -975,7 +978,7 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			}
 			closers = append(closers, untrack)
 			bound.Forward = &pgshim.Forward{DSN: fwd.DSN, CaptureAccount: fwd.CaptureAccount, Acquire: sources.acquire, Limit: sources.limit(), Timeout: timeout,
-				Barred: pgForwardBarred(tgt.ID, tgt.TimeTravelRefusal, routes, logger), Cost: cost}
+				Barred: pgForwardBarred(tgt.ID, tgt.TimeTravelRefusal, routes, logger), Cost: cost, Sides: sides.of(tgt.ID)}
 		case fwd.Refused != "":
 			bound.Forward = &pgshim.Forward{Refused: fwd.Refused}
 		}
@@ -1054,6 +1057,15 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		}
 		return bound, nil
 	}
+}
+
+// pgCostSides is a port's pgshim.CostSides, one per server: a server's
+// statement shapes are another server's only by name.
+type pgCostSides struct{ by sync.Map }
+
+func (p *pgCostSides) of(id string) *pgshim.CostSides {
+	v, _ := p.by.LoadOrStore(id, &pgshim.CostSides{})
+	return v.(*pgshim.CostSides)
 }
 
 // pgHiddenBarred is why nothing is sent to the source of a server that hides

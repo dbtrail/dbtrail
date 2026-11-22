@@ -78,6 +78,11 @@ type Forward struct {
 	// there rather than to the source, by the source's plan (route_cost.go);
 	// nil for DefaultCostPolicy.
 	Cost *CostPolicy
+	// Sides, when set, is the side each statement shape of the server was
+	// last sent to by its plan, shared by its connections: a plan near a
+	// threshold keeps the shape there (route_cost.go, #3045). Nil: the plan
+	// alone decides, against the threshold.
+	Sides *CostSides
 }
 
 // barred is why nothing may be sent to the source now, "" when it may.

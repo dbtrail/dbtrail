@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
@@ -315,7 +316,7 @@ func (s *session) routeByCostPlan(text string, generic bool) (d routeDecision, k
 		s.logger.Warn("pgshim: the source's plan could not be read; the statement goes to the source", "err", err)
 		return failed, true, nil, nil
 	}
-	toCopy, why := pol.toCopy(pl)
+	toCopy, why := s.bandedToCopy(pol, pl, text)
 	if !toCopy {
 		s.logger.Debug("pgshim: sent to the source", "reason", ReasonCheapPlan, "plan", why)
 		return routeDecision{RouteSource, ReasonCheapPlan}, true, nil, &pl
@@ -334,6 +335,112 @@ func (s *session) routeByCostPlan(text string, generic bool) (d routeDecision, k
 	// now, not when the copy has answered, which can be minutes.
 	s.releaseIdleSource()
 	return routeDecision{RouteCopy, ReasonAnswersTheSame}, true, nil, &pl
+}
+
+// A statement shape whose plan sits near a threshold changes side when the
+// estimate moves a little (#3045): measured on a 10-million-row table, the
+// same lookup's cost was 46,100 to 49,800 in one 35-minute run, answered by
+// the source at 13.1 answers a second, and 50,300 to 54,600 in the next,
+// answered by the copy one at a time at about 18 s each (4.8 a second), with
+// nothing changed but the table's growth. The MySQL port has no rule for it:
+// a fixed threshold, the plan asked for every statement. Here a shape keeps
+// the side it was last sent to by its plan while the plan stays within
+// costSideBand of the threshold: one the source answered goes to the copy
+// only past the threshold by more than that, and one the copy answered goes
+// back to the source only under it by more. The band is the drift measured
+// between those two runs (about 10 %); a run's own spread (about 4 %) stays
+// inside it.
+//
+// The plan is still asked for every time, as before: only the side it is
+// compared against moves. A side is remembered by the port for the server
+// (Forward.Sides), across its connections and for as long as the port runs,
+// by the same key as a connection's verdicts (costVerdictKey), so a shape
+// does not change side because a new connection asked.
+
+// costSideBand is how far past a threshold a plan must be to move a shape
+// off the side it was last sent to.
+const costSideBand = 0.10
+
+// costSidesMax bounds what a server's sides remember; past it, they are
+// forgotten and learned again.
+const costSidesMax = 4096
+
+// CostSides is the side each statement shape of a server was last sent to by
+// its plan (#3045), shared by the server's connections. The zero value is
+// ready; nil remembers nothing.
+type CostSides struct {
+	mu    sync.Mutex
+	sides map[string]string
+}
+
+func (c *CostSides) last(key string) string {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sides[key]
+}
+
+func (c *CostSides) note(key, side string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sides == nil || len(c.sides) >= costSidesMax {
+		c.sides = map[string]string{}
+	}
+	c.sides[key] = side
+}
+
+// toCopyBanded is toCopy for a shape last sent to last (RouteSource,
+// RouteCopy, or "" when none): within costSideBand of a threshold the shape
+// stays where it was.
+func (p CostPolicy) toCopyBanded(pl pgPlan, last string) (bool, string) {
+	toCopy, why := p.toCopy(pl)
+	switch {
+	case last == RouteSource && toCopy:
+		over := p.CostThreshold > 0 && pl.cost >= (1+costSideBand)*p.CostThreshold ||
+			p.ScanRows > 0 && pl.maxSeqScanRows >= (1+costSideBand)*float64(p.ScanRows)
+		if !over {
+			return false, why + ", within " + bandWords + " over it, and the source answered this statement shape last"
+		}
+	case last == RouteCopy && !toCopy:
+		over := p.CostThreshold > 0 && pl.cost >= (1-costSideBand)*p.CostThreshold ||
+			p.ScanRows > 0 && pl.maxSeqScanRows >= (1-costSideBand)*float64(p.ScanRows)
+		if over {
+			return true, why + ", within " + bandWords + " under it, and the copy answered this statement shape last"
+		}
+	}
+	return toCopy, why
+}
+
+// bandWords is costSideBand in the log's words.
+var bandWords = fmt.Sprintf("%.0f %%", costSideBand*100)
+
+// bandedToCopy is the plan's verdict for text on this connection's server,
+// kept within the band by the side the shape last went to, and remembered.
+func (s *session) bandedToCopy(pol CostPolicy, pl pgPlan, text string) (bool, string) {
+	var sides *CostSides
+	if s.bound != nil && s.bound.Forward != nil {
+		sides = s.bound.Forward.Sides
+	}
+	if sides == nil {
+		return pol.toCopy(pl)
+	}
+	key := s.costVerdictKey(text)
+	last := sides.last(key)
+	toCopy, why := pol.toCopyBanded(pl, last)
+	side := RouteSource
+	if toCopy {
+		side = RouteCopy
+	}
+	if last != "" && last != side {
+		s.logger.Info("pgshim: a statement shape changed side by its plan", "from", last, "to", side, "plan", why)
+	}
+	sides.note(key, side)
+	return toCopy, why
 }
 
 // sourceUnreachable reports whether a failure to reach the source is the
