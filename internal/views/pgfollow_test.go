@@ -209,13 +209,13 @@ func TestPGFollowStateView(t *testing.T) {
 	check(t, "pinned", execViews(t, pinned))
 
 	pointer := pgPairGenerate(root, FollowPointer, pgFollowTables(filepath.Join(root, baseline.CurrentLinkName), cases)...)
-	if strings.Contains(pointer, "PostgreSQL table delta beside its file") {
+	if strings.Contains(pointer, "public.orders has a PostgreSQL table delta") {
 		t.Fatalf("the file that follows the pointer still refuses a table with a pair:\n%s", pointer)
 	}
 	check(t, "following the pointer", execViews(t, pointer))
 
 	newest := pgPairGenerate(root, FollowNewest, pgFollowTables(snap, cases)...)
-	if strings.Contains(newest, "PostgreSQL table delta beside its file") {
+	if strings.Contains(newest, "public.orders has a PostgreSQL table delta") {
 		t.Fatalf("the file that follows the newest snapshot still refuses a table with a pair:\n%s", newest)
 	}
 	db := execViews(t, newest)
