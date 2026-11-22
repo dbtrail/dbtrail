@@ -115,12 +115,30 @@ type Binding struct {
 	// of the source before lsn, a WAL position, and says whether it does, or
 	// why not (waitForCopy). nil: nothing waits, and RunAge alone decides.
 	CopyWait func(ctx context.Context, lsn uint64) (CopyWaitOutcome, string)
+	// NotCaptured, when set, lists the copy's tables whose capture lost or
+	// dropped changes since their snapshot's rows were read from the source,
+	// asked before a statement runs on the copy (not_captured.go). On a
+	// connection that can fall back, a statement that reads one is answered
+	// by the source (ReasonTableNotCaptured); an error sends it there too.
+	// Where nothing can go to the source the copy answers, with a NOTICE that
+	// names the table. nil: nothing is asked.
+	NotCaptured func(ctx context.Context) ([]TableNotCaptured, error)
 	// Status, when set, answers SHOW dbtrail.router_status on this
 	// connection (portstatus.go): name and value pairs, in the order to
 	// show them. last is the connection's last answer, whose rows
 	// (LastAnswer.Rows) the host places among its own. Nil: the statement
 	// answers the last answer's rows alone.
 	Status func(ctx context.Context, last LastAnswer) [][2]string
+}
+
+// TableNotCaptured is a table of the copy whose capture lost or dropped
+// changes since its snapshot's rows were read (Binding.NotCaptured): Schema
+// and Name as the copy's catalog writes them, Why in words.
+type TableNotCaptured struct {
+	Schema, Name, Why string
+	// SnapshotRead is when the rows of its snapshot were read from the
+	// source, for the notice; zero when not known.
+	SnapshotRead time.Time
 }
 
 // CopyWaitOutcome is what Binding.CopyWait found.
@@ -327,6 +345,12 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		// A char(n) column used where the copy counts its padding (#3068):
 		// the source's, or refused where nothing is sent there.
 		if refusal := s.paddedRefusal(text); refusal != nil {
+			return nil, nil, nil, "", refusal
+		}
+		// A table whose capture dropped its changes (not_captured.go): the
+		// copy holds old rows of it, and the source answers, before the copy
+		// does any work or waits for anything.
+		if refusal := s.notCapturedRefusal(ctx, text); refusal != nil {
 			return nil, nil, nil, "", refusal
 		}
 		// On a connection the source answered, the copy first waits to
