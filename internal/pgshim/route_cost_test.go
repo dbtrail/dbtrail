@@ -514,6 +514,8 @@ type costLogin struct {
 	keep *keptSources
 	// barred, when set, is the server's Forward.Barred.
 	barred func() string
+	// notCaptured, when set, is Binding.NotCaptured.
+	notCaptured func(context.Context) ([]TableNotCaptured, error)
 }
 
 // keptSources is a port's pool of connections kept idle by their clients, as
@@ -559,8 +561,6 @@ func (k *keptSources) parked() int {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return len(k.idle)
-	// notCaptured, when set, is Binding.NotCaptured.
-	notCaptured func(context.Context) ([]TableNotCaptured, error)
 }
 
 func (l *costLogin) run(_ context.Context, st string, _ RunOptions) (sqlsandbox.Result, error) {
