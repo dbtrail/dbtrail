@@ -110,6 +110,55 @@ func sourceConnectedHook(h *Hooks) func() {
 	return h.OnSourceConnected
 }
 
+// startedHook is the capturer's OnStarted: replication has started on the
+// slot. It writes the capture's row (saveStartedPG) and calls the hook the
+// caller gave, if any.
+func startedHook(db *sql.DB, serverID uint32, skips *parser.SkipCounters, h *Hooks, logger *slog.Logger) func() {
+	connected := sourceConnectedHook(h)
+	return func() {
+		saveStartedPG(db, serverID, skips, logger)
+		if connected != nil {
+			connected()
+		}
+	}
+}
+
+// saveStartedPG writes the capture's stream_state row as soon as replication
+// starts, before the first commit: a capture of a quiet source saves no
+// checkpoint until a transaction ends (lastCommitLSN 0), and a reader of the
+// row (the copy's tails, the PostgreSQL port) cannot tell "no row" from a
+// capture that never wrote one. It carries the capture-skip ledger, empty or
+// not, and changes nothing about where a run resumes:
+//
+//   - a new row is the one saveSourceHealth seeds: the NOT NULL columns, no
+//     position (binlog_position 0), which loadStreamStatePG reads as a first
+//     run, the same as no row;
+//   - an existing row keeps everything it holds (position, gtid_set,
+//     pg_capture_from_lsn, the ledger), and only gets the ledger where it has
+//     none.
+//
+// Best-effort, as saveSourceHealth: a failed write is logged and the stream
+// goes on; the first checkpoint writes the row in any case.
+func saveStartedPG(db *sql.DB, serverID uint32, skips *parser.SkipCounters, logger *slog.Logger) {
+	ledger, err := skips.Snapshot()
+	if err != nil {
+		logger.Warn("pgstreamrun: could not serialize the capture-skip counters for the capture's first row; it is written at the first checkpoint", "error", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), indexer.WriteTimeout)
+	defer cancel()
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO stream_state (id, mode, flavor, server_id, last_checkpoint, capture_skips)
+		VALUES (1, 'gtid', ?, ?, UTC_TIMESTAMP(), ?)
+		ON DUPLICATE KEY UPDATE
+			capture_skips = COALESCE(capture_skips, VALUES(capture_skips))`,
+		pgFlavor, serverID, ledger)
+	if err != nil {
+		logger.Warn("pgstreamrun: could not write the capture's row when replication started; readers of the copy see no capture state until the first checkpoint",
+			"error", err)
+	}
+}
+
 // pgStreamState mirrors the streamrun checkpoint row, scoped to what a PG source
 // needs. The live cursor (last committed LSN) is tracked in the loop, NOT here — this
 // holds the loaded resume point and the running counters.
@@ -275,7 +324,7 @@ func One(ctx context.Context, cfg Config) error {
 		Filters:            cliutil.BuildIndexFilters(cfg.Schemas, cfg.Tables),
 		StartLSN:           pglogrepl.LSN(startLSN),
 		ExpectExistingSlot: saved != nil, // resuming → the slot must still exist + be valid
-		OnStarted:          sourceConnectedHook(cfg.Hooks),
+		OnStarted:          startedHook(indexDB, state.serverID, skips, cfg.Hooks, logger),
 		Logger:             logger,
 		// The shapes the index holds (#2441), loaded by the capturer once it
 		// knows where the slot resends from. If they cannot be read, the

@@ -413,14 +413,14 @@ func TestBuildPGReport_ReplicaIdentity_3027(t *testing.T) {
 		return out.String()
 	}
 
-	t.Run("a table at DEFAULT: a warning, and the server can be added", func(t *testing.T) {
+	t.Run("a table at DEFAULT: a failure, and the server is not added", func(t *testing.T) {
 		r := report()
 		t.Logf("the report as printed:\n%s", printed(r))
 		c := findCheck(t, r, undo)
-		if c.Status != doctor.StatusWarn {
-			t.Fatalf("%s = %s (%s), want a warning", undo, c.Status, c.Detail)
+		if c.Status != doctor.StatusFail {
+			t.Fatalf("%s = %s (%s), want a failure", undo, c.Status, c.Detail)
 		}
-		if c.Detail != `1 table of the publication is not at REPLICA IDENTITY FULL: "public"."ri3027_def"` {
+		if c.Detail != `1 table of the publication is not at REPLICA IDENTITY FULL, so its changes are not captured: "public"."ri3027_def"` {
 			t.Errorf("detail: %s", c.Detail)
 		}
 		if !strings.Contains(c.Remediation, "\n\n  ALTER TABLE \"public\".\"ri3027_def\" REPLICA IDENTITY FULL;\n") {
@@ -430,19 +430,29 @@ func TestBuildPGReport_ReplicaIdentity_3027(t *testing.T) {
 			t.Errorf("%s = %s (%s), want pass", key, k.Status, k.Detail)
 		}
 		// What add and Start stop on.
-		if r.Failed != 0 || r.Err() != nil {
-			t.Errorf("a table below FULL must not fail the report: failed=%d err=%v", r.Failed, r.Err())
+		if r.Failed != 1 || r.Err() == nil {
+			t.Errorf("a table below FULL must fail the report: failed=%d err=%v", r.Failed, r.Err())
+		}
+		// A server that captures the other table alone: capture does not take
+		// the one at DEFAULT, so it does not fail the report either.
+		scoped := pgstreamrun.BuildPGReport(ctx, pgstreamrun.PGDoctorConfig{QueryDSN: dsn, SlotName: slot, Publication: pub, Tables: "public.ri3027_full"})
+		if c := findCheck(t, scoped, undo); c.Status != doctor.StatusPass || scoped.Failed != 0 {
+			t.Errorf("with the capture's filter: %s = %s (%s), failed=%d", undo, c.Status, c.Detail, scoped.Failed)
 		}
 	})
 
-	t.Run("the printed statement clears the warning", func(t *testing.T) {
+	t.Run("the printed statement clears the failure", func(t *testing.T) {
 		mustExec(`ALTER TABLE "public"."ri3027_def" REPLICA IDENTITY FULL`)
-		if c := findCheck(t, report(), undo); c.Status != doctor.StatusPass {
+		r := report()
+		if c := findCheck(t, r, undo); c.Status != doctor.StatusPass {
 			t.Errorf("%s = %s (%s), want pass", undo, c.Status, c.Detail)
 		}
+		if r.Failed != 0 {
+			t.Errorf("failed=%d after the fix", r.Failed)
+		}
 	})
 
-	t.Run("an index without the primary key: a failure; no identity: said in the warning", func(t *testing.T) {
+	t.Run("an index without the primary key, and no identity: failures, one statement each", func(t *testing.T) {
 		mustExec(`CREATE TABLE "Ri3027 Idx" (id int PRIMARY KEY, u int NOT NULL, v text)`)
 		mustExec(`CREATE UNIQUE INDEX ri3027_idx_uk ON "Ri3027 Idx" (u)`)
 		mustExec(`ALTER TABLE "Ri3027 Idx" REPLICA IDENTITY USING INDEX ri3027_idx_uk`)
@@ -458,22 +468,26 @@ func TestBuildPGReport_ReplicaIdentity_3027(t *testing.T) {
 		if k.Detail != `1 table of the publication has a replica identity that does not hold the primary key: "public"."Ri3027 Idx" (primary-key column id left out)` {
 			t.Errorf("detail: %s", k.Detail)
 		}
-		if !strings.Contains(k.Remediation, "\n\n  ALTER TABLE \"public\".\"Ri3027 Idx\" REPLICA IDENTITY DEFAULT;\n") {
+		if !strings.Contains(k.Remediation, "\n\n  ALTER TABLE \"public\".\"Ri3027 Idx\" REPLICA IDENTITY FULL;\n") {
 			t.Errorf("remediation lacks the statement:\n%s", k.Remediation)
 		}
 		u := findCheck(t, r, undo)
-		if u.Status != doctor.StatusWarn || strings.Contains(u.Detail, "Ri3027 Idx") || !strings.Contains(u.Detail, `"public"."ri3027_nothing"`) ||
+		if u.Status != doctor.StatusFail || !strings.Contains(u.Detail, `"public"."Ri3027 Idx"`) || !strings.Contains(u.Detail, `"public"."ri3027_nothing"`) ||
 			!strings.Contains(u.Remediation, `has no replica identity at all (REPLICA IDENTITY NOTHING, or no usable primary key): "public"."ri3027_nothing"`) {
-			t.Errorf("warning: %s (%s)\n%s", u.Status, u.Detail, u.Remediation)
+			t.Errorf("FULL check: %s (%s)\n%s", u.Status, u.Detail, u.Remediation)
 		}
-		if r.Failed != 1 || r.Err() == nil {
-			t.Errorf("failed=%d err=%v, want the one failure", r.Failed, r.Err())
+		if r.Failed != 2 || r.Err() == nil {
+			t.Errorf("failed=%d err=%v, want the two failures", r.Failed, r.Err())
 		}
 
-		mustExec(`ALTER TABLE "public"."Ri3027 Idx" REPLICA IDENTITY DEFAULT`)
+		// The statements printed, run as printed: both checks pass.
+		mustExec(`ALTER TABLE "public"."Ri3027 Idx" REPLICA IDENTITY FULL`)
+		mustExec(`ALTER TABLE "public"."ri3027_nothing" REPLICA IDENTITY FULL`)
 		r = report()
-		if k := findCheck(t, r, key); k.Status != doctor.StatusPass {
-			t.Errorf("after the printed statement %s = %s (%s), want pass", key, k.Status, k.Detail)
+		for _, name := range []string{key, undo} {
+			if c := findCheck(t, r, name); c.Status != doctor.StatusPass {
+				t.Errorf("after the printed statements %s = %s (%s), want pass", name, c.Status, c.Detail)
+			}
 		}
 		if r.Failed != 0 {
 			t.Errorf("failed=%d after the fix", r.Failed)

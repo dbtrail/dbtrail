@@ -58,8 +58,8 @@ type UnpublishedGenerated struct {
 const pgGeneratedRuleVersion = 180000
 
 // unpublishedGeneratedQuery lists, for every table of publication $1 at
-// REPLICA IDENTITY FULL, each generated column that some publication of the
-// table leaves out of what it publishes.
+// REPLICA IDENTITY FULL ($2 true) or below it ($2 false), each generated
+// column that some publication of the table leaves out of what it publishes.
 const unpublishedGeneratedQuery = `
 	SELECT ours.schemaname, ours.tablename, a.attname, a.attgenerated = 'v', pt.pubname
 	FROM pg_publication_tables ours
@@ -67,13 +67,26 @@ const unpublishedGeneratedQuery = `
 	JOIN pg_class c ON c.relname = ours.tablename AND c.relnamespace = n.oid
 	JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated <> ''
 	JOIN pg_publication_tables pt ON pt.schemaname = ours.schemaname AND pt.tablename = ours.tablename
-	WHERE ours.pubname = $1 AND c.relreplident = 'f' AND NOT (a.attname = ANY (pt.attnames))
+	WHERE ours.pubname = $1 AND (c.relreplident = 'f') = $2 AND NOT (a.attname = ANY (pt.attnames))
 	ORDER BY 1, 2, 3, 5`
 
 // QueryUnpublishedGenerated returns the generated columns that make
 // PostgreSQL 18 refuse UPDATE and DELETE on tables of publication. Empty on
 // a server older than 18, which has no such rule, and when there is none.
 func QueryUnpublishedGenerated(ctx context.Context, conn *pgx.Conn, publication string) ([]UnpublishedGenerated, error) {
+	return queryUnpublishedGenerated(ctx, conn, publication, true)
+}
+
+// QueryUnpublishedGeneratedBelowFull returns the same columns for the tables
+// of publication that are NOT at REPLICA IDENTITY FULL: the ones that
+// PostgreSQL 18 would refuse UPDATE and DELETE on once put at FULL, which is
+// what capture needs (`bintrail-pg doctor` must not offer that statement for
+// them alone). Empty on a server older than 18.
+func QueryUnpublishedGeneratedBelowFull(ctx context.Context, conn *pgx.Conn, publication string) ([]UnpublishedGenerated, error) {
+	return queryUnpublishedGenerated(ctx, conn, publication, false)
+}
+
+func queryUnpublishedGenerated(ctx context.Context, conn *pgx.Conn, publication string, atFull bool) ([]UnpublishedGenerated, error) {
 	var version int
 	if err := conn.QueryRow(ctx, "SELECT current_setting('server_version_num')::int").Scan(&version); err != nil {
 		return nil, fmt.Errorf("pgcapture: reading server_version_num to check generated columns: %w", err)
@@ -81,7 +94,7 @@ func QueryUnpublishedGenerated(ctx context.Context, conn *pgx.Conn, publication 
 	if version < pgGeneratedRuleVersion {
 		return nil, nil
 	}
-	rows, err := conn.Query(ctx, unpublishedGeneratedQuery, publication)
+	rows, err := conn.Query(ctx, unpublishedGeneratedQuery, publication, atFull)
 	if err != nil {
 		return nil, fmt.Errorf("pgcapture: checking generated columns of publication %q: %w", publication, err)
 	}
@@ -151,7 +164,7 @@ func GeneratedColumnsProblem(found []UnpublishedGenerated) string {
 	fmt.Fprintf(&b, "on PostgreSQL 18 the source's own application cannot UPDATE or DELETE rows of %s: ", countTables(len(names)))
 	b.WriteString("each records whole rows (REPLICA IDENTITY FULL) and has a generated column that a publication it belongs to does not publish, " +
 		"which PostgreSQL 18 refuses (\"Replica identity must not contain unpublished generated columns\"). ")
-	b.WriteString("To let the application write again now, run on each: ")
+	b.WriteString("To let the application write again now, run on each (DBTrail then does not capture the table, since it captures a table only at REPLICA IDENTITY FULL): ")
 	for i, n := range names {
 		if i > 0 {
 			b.WriteString(" ")
@@ -164,9 +177,9 @@ func GeneratedColumnsProblem(found []UnpublishedGenerated) string {
 			pubs = append(pubs, p)
 		}
 		sort.Strings(pubs)
-		b.WriteString(" The table is then captured, without undo of its UPDATE and DELETE. To have undo for a table whose generated column is STORED (")
+		b.WriteString(" To capture a table whose generated column is STORED (")
 		b.WriteString(strings.Join(stored, ", "))
-		b.WriteString("), make the publication publish it and set REPLICA IDENTITY FULL again:")
+		b.WriteString("), make the publication publish it, then set REPLICA IDENTITY FULL again:")
 		for _, p := range pubs {
 			fmt.Fprintf(&b, " ALTER PUBLICATION %s SET (publish_generated_columns = stored);", pgx.Identifier{p}.Sanitize())
 		}
@@ -174,7 +187,7 @@ func GeneratedColumnsProblem(found []UnpublishedGenerated) string {
 	if len(virtual) > 0 {
 		b.WriteString(" A VIRTUAL generated column (")
 		b.WriteString(strings.Join(virtual, ", "))
-		b.WriteString(") cannot be published by any setting, so its table cannot be at REPLICA IDENTITY FULL while it is published: leave it at REPLICA IDENTITY DEFAULT (captured, without undo of its UPDATE and DELETE), or take it out of the publication:")
+		b.WriteString(") cannot be published by any setting, so its table cannot be at REPLICA IDENTITY FULL while it is published, and DBTrail cannot capture it while it has that column. Leave it at REPLICA IDENTITY DEFAULT (not captured), or take it out of the publication:")
 		vt := make([]string, 0, len(virtualTables))
 		for k := range virtualTables {
 			vt = append(vt, fmt.Sprintf(" ALTER PUBLICATION %s DROP TABLE %s;", pgx.Identifier{k.pub}.Sanitize(), quoteQualified(k.schema, k.table)))

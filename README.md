@@ -123,11 +123,11 @@ All of them: [Limitations](https://www.dbtrail.com/docs/limitations/).
 | MariaDB 10.11+, including Amazon RDS for MariaDB | Yes | Yes. See [MariaDB source](docs/mariadb.md) |
 | PostgreSQL 15+ | Yes. Scheduled updates run, and a table added to the publication later is read in | Yes. See [PostgreSQL source](docs/postgres.md) |
 
-On PostgreSQL 18, a table with a `VIRTUAL` generated column cannot be at
-`REPLICA IDENTITY FULL` (it is captured without undo), and a table with a
-`STORED` one needs `publish_generated_columns = stored` on the publication to
-be. See
-[PostgreSQL source](docs/postgres.md#3-replica-identity-full-optional-needed-only-for-undo).
+On PostgreSQL, DBTrail captures a table only at `REPLICA IDENTITY FULL`. On
+PostgreSQL 18, a table with a `VIRTUAL` generated column cannot be at `FULL`,
+so it cannot be captured, and a table with a `STORED` one needs
+`publish_generated_columns = stored` on the publication to be. See
+[PostgreSQL source](docs/postgres.md#3-set-replica-identity-full-on-every-captured-table).
 
 DBTrail never needs the binlog files on disk, which is why managed cloud
 databases work.
