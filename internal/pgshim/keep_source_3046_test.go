@@ -265,3 +265,21 @@ func TestKeepSource_3046_keptTooLong(t *testing.T) {
 		t.Errorf("%d held, want 1", n)
 	}
 }
+
+// A client that drops its socket while its connection to the source is
+// kept: the connection is taken back from the pool and ended, its slot given
+// back.
+func TestKeepSource_3046_aClientThatDropsItsSocket(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	l := &costLogin{src: startFakeSource(t, costPlans), keep: &keptSources{}}
+	c := costPortConn(t, ctx, l)
+	if got := costSimple(ctx, c, l, keepLookup); got != keepAnswer {
+		t.Fatal(got)
+	}
+	if l.keep.parked() != 1 {
+		t.Fatal("nothing kept")
+	}
+	_ = c.Conn().Close() // no Terminate
+	waitUntilTest(t, "the kept connection ended", func() bool { return l.held.Load() == 0 && l.keep.parked() == 0 })
+}
