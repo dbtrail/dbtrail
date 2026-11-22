@@ -59,13 +59,24 @@ func TestPGTailSource_aCopyReadOutOfTimeTwiceRefusesItsCut(t *testing.T) {
 	defer stop()
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	read := func(x *pgTailSource, c context.Context, tbl views.BaselineTable) (string, error) {
+	// midCancel is a context cancelled during the read, as when the keeper
+	// closes or the build is no longer wanted while it reads.
+	midCancel := func() context.Context {
+		c, cancel := context.WithCancel(ctx)
+		time.AfterFunc(100*time.Millisecond, cancel)
+		t.Cleanup(cancel)
+		return c
+	}
+	is := func(c context.Context) func() context.Context { return func() context.Context { return c } }
+	// read reads tbl's copy for a tail made first, in the context mk makes
+	// once the tail is made (nil: late).
+	read := func(x *pgTailSource, mk func() context.Context, tbl views.BaselineTable) (string, error) {
 		t.Helper()
 		tail := waiting(tbl)
-		if c == nil {
-			c = late()
+		if mk == nil {
+			mk = late
 		}
-		return x.fillStartedFromCopy(c, tbl, tail)
+		return x.fillStartedFromCopy(mk(), tbl, tail)
 	}
 	tried := func(what string, why string, err error) {
 		t.Helper()
@@ -84,9 +95,11 @@ func TestPGTailSource_aCopyReadOutOfTimeTwiceRefusesItsCut(t *testing.T) {
 	why, err := read(x, nil, cut)
 	tried("the first read out of time", why, err)
 	for i := 0; i < 3; i++ {
-		why, err = read(x, cancelled, cut)
+		why, err = read(x, is(cancelled), cut)
+		tried("a build cancelled before its read", why, err)
+		why, err = read(x, midCancel, cut)
 		tried("a read cut short by a cancel", why, err)
-		why, err = read(x, spent, cut)
+		why, err = read(x, is(spent), cut)
 		tried("a build whose time was up before the read began", why, err)
 	}
 	why, err = read(x, nil, items)
@@ -105,7 +118,7 @@ func TestPGTailSource_aCopyReadOutOfTimeTwiceRefusesItsCut(t *testing.T) {
 	why, err = read(y, nil, cut)
 	tried("a first read out of time", why, err)
 	slow.Store(false)
-	if why, err := read(y, ctx, cut); why != "" || err != nil {
+	if why, err := read(y, is(ctx), cut); why != "" || err != nil {
 		t.Fatalf("a read with time: %q, %v", why, err)
 	}
 	slow.Store(true)
