@@ -370,3 +370,80 @@ func TestPGFollowStateView_keptToTheFile(t *testing.T) {
 		})
 	}
 }
+
+// A table capture dropped changes of is published in the next snapshot as
+// it was (#3189): its file and its old pairs linked into the new folder
+// under the same names, beside tables brought up to date. A following file
+// that reaches that snapshot reads the carried table as the pinned view of
+// either snapshot does: the file as its pairs leave it.
+func TestPGFollowStateView_carriedTable(t *testing.T) {
+	root := t.TempDir()
+	base := writePGFollowBase(t, root, "public", "orders", [2]string{"1", "one"}, [2]string{"2", "two"}, [2]string{"3", "three"})
+	writePGFollowLink(t, base, 0, map[string]string{"1": "ONE", "2": ""})
+	writePGFollowLink(t, base, 1, map[string]string{"1": "uno", "4": "four"})
+	writePGFollowBase(t, root, "public", "items", [2]string{"5", "five"})
+	older := filepath.Join(root, pgFollowStamp)
+	if err := os.WriteFile(filepath.Join(older, baseline.SuccessMarker), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const newerStamp = "2026-04-30T04-00-00Z"
+	newer := filepath.Join(root, newerStamp)
+	if err := os.MkdirAll(filepath.Join(newer, "public"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(filepath.Join(older, "public"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), "orders.") {
+			continue
+		}
+		if err := os.Link(filepath.Join(older, "public", e.Name()), filepath.Join(newer, "public", e.Name())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// items brought up to date in the newer snapshot: a new file, no pair.
+	w, err := baseline.NewWriter(filepath.Join(newer, "public", "items.parquet"), []baseline.Column{{Name: "id", RawText: true}, {Name: "status", RawText: true}},
+		baseline.WriterConfig{Compression: "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteRow([]string{"5", "FIVE"}, []bool{false, false}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(newer, baseline.SuccessMarker), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(newerStamp, filepath.Join(root, baseline.CurrentLinkName)); err != nil {
+		t.Fatal(err)
+	}
+	tables := func(dir string) []BaselineTable {
+		return []BaselineTable{
+			pgFollowTable(filepath.Join(dir, "public", "orders.parquet"), "public", "orders"),
+			pgFollowTable(filepath.Join(dir, "public", "items.parquet"), "public", "items"),
+		}
+	}
+	want := map[string][]string{"orders": {"1=uno", "3=three", "4=four"}, "items": {"5=FIVE"}}
+	for label, text := range map[string]string{
+		"pinned to the newer snapshot": pgPairGenerate(root, FollowNone, tables(newer)...),
+		"following the pointer":        pgPairGenerate(root, FollowPointer, tables(filepath.Join(root, baseline.CurrentLinkName))...),
+		// Generated against the older snapshot, read when the newer one is
+		// the newest.
+		"following the newest snapshot": pgPairGenerate(root, FollowNewest, tables(older)...),
+	} {
+		db := execViews(t, text)
+		for table, w := range want {
+			if got, err := pgFollowRows(t, db, "public", table); err != nil || !reflect.DeepEqual(got, w) {
+				t.Errorf("%s: %s reads %v, %v; want %v", label, table, got, err, w)
+			}
+		}
+	}
+	pinnedOlder := execViews(t, pgPairGenerate(root, FollowNone, tables(older)...))
+	if got, err := pgFollowRows(t, pinnedOlder, "public", "orders"); err != nil || !reflect.DeepEqual(got, want["orders"]) {
+		t.Errorf("pinned to the older snapshot: orders reads %v, %v", got, err)
+	}
+}
