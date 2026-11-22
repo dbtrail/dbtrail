@@ -19,8 +19,14 @@ import (
 // of its own), as a snapshot update leaves a table file it carried forward.
 func writePGFindBase(t *testing.T, root string, dir, read time.Time) string {
 	t.Helper()
+	return writePGFindBaseSince(t, root, dir, read, read.Add(-time.Minute))
+}
+
+// writePGFindBaseSince is writePGFindBase with the file's PGDeltaSince.
+func writePGFindBaseSince(t *testing.T, root string, dir, read, since time.Time) string {
+	t.Helper()
 	path := filepath.Join(root, SnapshotDirName(dir), "public", "orders.parquet")
-	md := map[string]string{baseline.MetaKeyLSN: "4096", baseline.MetaKeyPGDeltaSince: read.Add(-time.Minute).Format(time.RFC3339)}
+	md := map[string]string{baseline.MetaKeyLSN: "4096", baseline.MetaKeyPGDeltaSince: since.Format(time.RFC3339)}
 	if !read.IsZero() {
 		md[baseline.MetaKeySnapshotTimestamp] = read.Format(time.RFC3339)
 	}
@@ -60,31 +66,64 @@ func writePGPair0(t *testing.T, base string, files ...bool) {
 
 // #3082 (the snapshot update writes a chain of pairs beside a PostgreSQL
 // table file it carries forward): the time FindBaseline returns for such a
-// file is the time its rows were read, from its own footer, not the folder
-// it sits in, as it is the start of the chain for a MySQL delta. Every reader
-// bounds its TRUNCATE and capture-gap checks from it, and a single-row read
-// that applies no change labels its row with it.
+// file is the earliest its rows can stand at, from its own footer (the
+// earlier of its snapshot time and its PGDeltaSince), not the folder it sits
+// in, as it is the start of the chain for a MySQL delta. Every reader bounds
+// its TRUNCATE and capture-gap checks from it, and a single-row read that
+// applies no change labels its row with it.
 func TestFindBaseline_PGChainReturnsTheFileOwnTime(t *testing.T) {
 	ctx := context.Background()
 	read := time.Date(2026, 11, 22, 9, 0, 0, 0, time.UTC)
 	folder := read.Add(3 * time.Hour)
 	at := folder.Add(time.Minute)
+	// writePGFindBase records a bound a minute before the read.
+	bound := read.Add(-time.Minute)
 
 	t.Run("a chain beside the file: the file's time", func(t *testing.T) {
 		root := t.TempDir()
 		base := writePGFindBase(t, root, folder, read)
 		writePGPair0(t, base)
 		_, got, _, err := FindBaseline(ctx, root, "public", "orders", at)
-		if err != nil || !got.Equal(read) {
-			t.Fatalf("FindBaseline = %s, %v; want the file's own time %s (the folder is %s)", got, err, read, folder)
+		if err != nil || !got.Equal(bound) {
+			t.Fatalf("FindBaseline = %s, %v; want the file's own bound %s (the folder is %s)", got, err, bound, folder)
 		}
 	})
 	t.Run("half of pair 0 is enough to say a chain is there", func(t *testing.T) {
 		root := t.TempDir()
 		base := writePGFindBase(t, root, folder, read)
 		writePGPair0(t, base, false, true)
-		if _, got, _, err := FindBaseline(ctx, root, "public", "orders", at); err != nil || !got.Equal(read) {
-			t.Fatalf("FindBaseline = %s, %v; want %s", got, err, read)
+		if _, got, _, err := FindBaseline(ctx, root, "public", "orders", at); err != nil || !got.Equal(bound) {
+			t.Fatalf("FindBaseline = %s, %v; want %s", got, err, bound)
+		}
+	})
+	t.Run("a folded file: its bound, earlier than the update that wrote it", func(t *testing.T) {
+		root := t.TempDir()
+		// An update at 14 minutes folded the table; its rows stand where its
+		// bound says, 11 minutes.
+		folded, since := read.Add(14*time.Minute), read.Add(11*time.Minute)
+		base := writePGFindBaseSince(t, root, folder, folded, since)
+		writePGPair0(t, base)
+		if _, got, _, err := FindBaseline(ctx, root, "public", "orders", at); err != nil || !got.Equal(since) {
+			t.Fatalf("FindBaseline = %s, %v; want the folded file's bound %s, not the update's time %s", got, err, since, folded)
+		}
+	})
+	t.Run("a bound that does not read: refused", func(t *testing.T) {
+		root := t.TempDir()
+		path := filepath.Join(root, SnapshotDirName(folder), "public", "orders.parquet")
+		w, err := baseline.NewWriter(path, []baseline.Column{{Name: "id", RawText: true}}, baseline.WriterConfig{Compression: "none", RowGroupSize: 10,
+			Metadata: map[string]string{baseline.MetaKeyLSN: "4096", baseline.MetaKeySnapshotTimestamp: read.Format(time.RFC3339), baseline.MetaKeyPGDeltaSince: "yesterday"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.WriteRow([]string{"1"}, []bool{false}); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		writePGPair0(t, path)
+		if _, _, _, err := FindBaseline(ctx, root, "public", "orders", at); err == nil || !strings.Contains(err.Error(), "yesterday") {
+			t.Fatalf("FindBaseline over a bound that does not read: %v; want a refusal naming it", err)
 		}
 	})
 	t.Run("no chain: the folder's time, as before", func(t *testing.T) {
@@ -122,21 +161,24 @@ func TestPGChainStart_S3(t *testing.T) {
 	read := time.Date(2026, 11, 22, 9, 0, 0, 0, time.UTC)
 	prevProbe, prevFooter := pgPair0S3, pgFindFooter
 	t.Cleanup(func() { pgPair0S3, pgFindFooter = prevProbe, prevFooter; resetS3PGPair0() })
+	resetS3PGPair0()
 	asked := 0
 	answer, probeErr := true, error(nil)
 	pgPair0S3 = func(context.Context, string, string) (bool, error) { asked++; return answer, probeErr }
+	footers := 0
 	pgFindFooter = func(context.Context, string) (baseline.DumpMetadata, error) {
+		footers++
 		return baseline.DumpMetadata{LSN: 4096, SnapshotTimestamp: read}, nil
 	}
 	path := "s3://bucket/snaps/" + SnapshotDirName(read.Add(time.Hour)) + "/public/orders.parquet"
-	for range 2 {
+	for range 3 {
 		got, err := pgChainStart(ctx, path)
 		if err != nil || !got.Equal(read) {
 			t.Fatalf("pgChainStart = %s, %v; want %s", got, err, read)
 		}
 	}
-	if asked != 1 {
-		t.Fatalf("the store was asked %d times for one file; want once", asked)
+	if asked != 1 || footers != 1 {
+		t.Fatalf("for one file the store was asked %d times and its footer read %d times; want once each", asked, footers)
 	}
 	resetS3PGPair0()
 	answer = false
@@ -158,6 +200,68 @@ func TestPGChainStart_S3(t *testing.T) {
 	}
 	if asked != 4 {
 		t.Fatalf("the store was asked %d times; an error is not remembered", asked)
+	}
+}
+
+// In S3 the MySQL lookup's own listing (every name that starts with the
+// table's) already says whether pair 0 is there: FindBaseline asks the store
+// nothing more, for a MySQL file (no request beyond the one listing a lookup
+// made before #3194) and for a PostgreSQL one (its footer, once).
+func TestFindBaseline_S3RequestsForTheChainStart(t *testing.T) {
+	ctx := context.Background()
+	read := time.Date(2026, 11, 22, 9, 0, 0, 0, time.UTC)
+	prevList, prevProbe, prevFooter := listTableDeltaNames, pgPair0S3, pgFindFooter
+	t.Cleanup(func() {
+		listTableDeltaNames, pgPair0S3, pgFindFooter = prevList, prevProbe, prevFooter
+		resetS3PGPair0()
+		s3ChainStarts.Clear()
+	})
+	resetS3PGPair0()
+	s3ChainStarts.Clear()
+	var listed, probed, footers int
+	var names []string
+	listTableDeltaNames = func(context.Context, string) (*baseline.TableDeltaChain, []string, error) {
+		listed++
+		return nil, names, nil
+	}
+	pgPair0S3 = func(context.Context, string, string) (bool, error) { probed++; return false, nil }
+	pgFindFooter = func(context.Context, string) (baseline.DumpMetadata, error) {
+		footers++
+		return baseline.DumpMetadata{LSN: 4096, SnapshotTimestamp: read}, nil
+	}
+	// What FindBaseline asks after it found the file, twice.
+	lookup := func(path string) time.Time {
+		t.Helper()
+		start, err := deltaChainStart(ctx, path)
+		if err != nil || !start.IsZero() {
+			t.Fatalf("deltaChainStart = %s, %v", start, err)
+		}
+		got, err := pgChainStartOf(ctx, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	mysql := "s3://bucket/snaps/" + SnapshotDirName(read) + "/shop/orders.parquet"
+	names = []string{"orders.parquet", "orders_old.000000.pgnew"}
+	for range 2 {
+		if got := lookup(mysql); !got.IsZero() {
+			t.Fatalf("a MySQL file in S3: %s, want no time", got)
+		}
+	}
+	if listed != 1 || probed != 0 || footers != 0 {
+		t.Fatalf("a MySQL file in S3, two lookups: %d listings, %d probes, %d footer reads; want 1, 0, 0 (what the lookup cost before)", listed, probed, footers)
+	}
+	listed = 0
+	pg := "s3://bucket/snaps/" + SnapshotDirName(read) + "/public/orders.parquet"
+	names = []string{"orders.parquet", "orders.000000.pgdead", "orders.000000.pgnew", "orders.000001.pgdead", "orders.000001.pgnew"}
+	for range 2 {
+		if got := lookup(pg); !got.Equal(read) {
+			t.Fatalf("a PostgreSQL file with a chain in S3: %s, want %s", got, read)
+		}
+	}
+	if listed != 1 || probed != 0 || footers != 1 {
+		t.Fatalf("a PostgreSQL file in S3, two lookups: %d listings, %d probes, %d footer reads; want 1, 0, 1", listed, probed, footers)
 	}
 }
 
