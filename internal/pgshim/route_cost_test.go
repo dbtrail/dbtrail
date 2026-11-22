@@ -181,6 +181,18 @@ type fakeSource struct {
 	// statements it was asked to confirm the tables of.
 	positions int
 	proofs    []string
+	// conns are the connections it serves now (dropConns).
+	conns map[net.Conn]bool
+}
+
+// dropConns ends every connection it serves, as a source does for an idle
+// one past idle_session_timeout.
+func (f *fakeSource) dropConns() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for c := range f.conns {
+		_ = c.Close()
+	}
 }
 
 // proofRef is one name of a proofSQL statement and whether it may stay
@@ -279,6 +291,17 @@ func (f *fakeSource) ran() []string {
 var dollarParam = regexp.MustCompile(`\$(\d+)`)
 
 func (f *fakeSource) serve(c net.Conn) {
+	f.mu.Lock()
+	if f.conns == nil {
+		f.conns = map[net.Conn]bool{}
+	}
+	f.conns[c] = true
+	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		delete(f.conns, c)
+		f.mu.Unlock()
+	}()
 	defer c.Close()
 	be := pgproto3.NewBackend(c, c)
 	if _, err := be.ReceiveStartupMessage(); err != nil {
@@ -475,6 +498,56 @@ type costLogin struct {
 	// of 7 when it is not nil; catalogErr the same for its catalog.
 	copyErr    func(st string) error
 	catalogErr func() error
+	// keep, when set, is the port's pool of connections kept idle between
+	// statements (Forward.Park).
+	keep *keptSources
+	// barred, when set, is the server's Forward.Barred.
+	barred func() string
+}
+
+// keptSources is a port's pool of connections kept idle by their clients, as
+// the pg-router's is: reclaimAll ends them all, as clients waiting for a
+// slot would.
+type keptSources struct {
+	mu   sync.Mutex
+	idle map[*func()]bool
+}
+
+func (k *keptSources) park(reclaim func()) func() bool {
+	e := &reclaim
+	k.mu.Lock()
+	if k.idle == nil {
+		k.idle = map[*func()]bool{}
+	}
+	k.idle[e] = true
+	k.mu.Unlock()
+	return func() bool {
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		ok := k.idle[e]
+		delete(k.idle, e)
+		return ok
+	}
+}
+
+func (k *keptSources) reclaimAll() int {
+	k.mu.Lock()
+	var all []*func()
+	for e := range k.idle {
+		all = append(all, e)
+	}
+	clear(k.idle)
+	k.mu.Unlock()
+	for _, e := range all {
+		(*e)()
+	}
+	return len(all)
+}
+
+func (k *keptSources) parked() int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return len(k.idle)
 }
 
 func (l *costLogin) run(_ context.Context, st string, _ RunOptions) (sqlsandbox.Result, error) {
@@ -500,7 +573,7 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 		l.notes = append(l.notes, n)
 	}}
 	if l.src != nil {
-		b.Forward = &Forward{DSN: l.src.dsn(), Limit: 4, Cost: l.cost, Acquire: func(ctx context.Context) (func(), bool) {
+		b.Forward = &Forward{DSN: l.src.dsn(), Limit: 4, Cost: l.cost, Barred: l.barred, Acquire: func(ctx context.Context) (func(), bool) {
 			if l.refuse {
 				return nil, false
 			}
@@ -525,6 +598,9 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 				})
 			}, true
 		}}
+	}
+	if l.src != nil && l.keep != nil {
+		b.Forward.Park = l.keep.park
 	}
 	b.RunAge = l.age
 	if l.catalog != nil {

@@ -775,7 +775,15 @@ type pgSourceSlots struct {
 	// wait is how long a statement waits for one when every one is taken,
 	// the time a statement waits in line for the copy (#2985).
 	wait time.Duration
+	// idle are the connections clients keep open between their statements
+	// (park, #3046), oldest first: each holds a slot, and gives it up to a
+	// client that waits for one when none is free.
+	mu   sync.Mutex
+	idle []*pgIdleSource
 }
+
+// pgIdleSource is one connection to a source kept idle by its client.
+type pgIdleSource struct{ reclaim func() }
 
 // pgSourceSlotWait is how long a statement waits for a connection to the
 // source when the port holds as many as it opens: the copy's line
@@ -793,17 +801,62 @@ func newPGSourceSlots(n int) *pgSourceSlots {
 // limit is how many there may be.
 func (p *pgSourceSlots) limit() int { return cap(p.ch) }
 
+// park offers the slot of a connection its client keeps idle between
+// statements (pgshim.Forward.Park): reclaim ends that connection, giving its
+// slot back, and is called at most once, here, for a client that waits for a
+// slot. unpark takes it back for its client and reports whether it was still
+// there; once it returns, reclaim is never called.
+func (p *pgSourceSlots) park(reclaim func()) (unpark func() bool) {
+	e := &pgIdleSource{reclaim: reclaim}
+	p.mu.Lock()
+	p.idle = append(p.idle, e)
+	p.mu.Unlock()
+	return func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		for i, x := range p.idle {
+			if x == e {
+				p.idle = append(p.idle[:i], p.idle[i+1:]...)
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// reclaimIdle ends the connection kept idle longest, if any, and reports
+// whether one was.
+func (p *pgSourceSlots) reclaimIdle() bool {
+	p.mu.Lock()
+	if len(p.idle) == 0 {
+		p.mu.Unlock()
+		return false
+	}
+	e := p.idle[0]
+	p.idle = p.idle[1:]
+	p.mu.Unlock()
+	e.reclaim()
+	return true
+}
+
 // acquire takes one, waiting for it up to p.wait while ctx lasts; release
-// gives it back, once.
+// gives it back, once. When every one is taken and some are kept idle by
+// their clients (park), the one kept longest is ended for this one first:
+// a client never waits behind a connection nobody is using.
 func (p *pgSourceSlots) acquire(ctx context.Context) (release func(), ok bool) {
 	give := func() func() {
 		var once sync.Once
 		return func() { once.Do(func() { <-p.ch }) }
 	}
-	select {
-	case p.ch <- struct{}{}:
-		return give(), true
-	default:
+	for {
+		select {
+		case p.ch <- struct{}{}:
+			return give(), true
+		default:
+		}
+		if !p.reclaimIdle() {
+			break
+		}
 	}
 	if p.wait <= 0 {
 		return nil, false
@@ -974,7 +1027,7 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 				return nil, &pgshim.Error{Code: "57P03", Message: "the server's forwarding account changed while connecting; reconnect"}
 			}
 			closers = append(closers, untrack)
-			bound.Forward = &pgshim.Forward{DSN: fwd.DSN, CaptureAccount: fwd.CaptureAccount, Acquire: sources.acquire, Limit: sources.limit(), Timeout: timeout,
+			bound.Forward = &pgshim.Forward{DSN: fwd.DSN, CaptureAccount: fwd.CaptureAccount, Acquire: sources.acquire, Park: sources.park, Limit: sources.limit(), Timeout: timeout,
 				Barred: pgForwardBarred(tgt.ID, tgt.TimeTravelRefusal, routes, logger), Cost: cost}
 		case fwd.Refused != "":
 			bound.Forward = &pgshim.Forward{Refused: fwd.Refused}

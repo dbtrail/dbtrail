@@ -840,9 +840,9 @@ func (s *session) errorResponse(code, msg string) {
 // failure — after a ParameterStatus for each reported parameter the
 // statements before it changed.
 func (s *session) readyFlush() error {
-	// A connection to the source nothing of the client's lives on goes back
-	// to the port (forward.go).
-	s.releaseIdleSource()
+	// A connection to the source nothing of the client's lives on is kept
+	// for the client's next statement, or goes back to the port (forward.go).
+	s.parkIdleSource()
 	s.reportChanges()
 	s.be.Send(&pgproto3.ReadyForQuery{TxStatus: s.txStatus()})
 	return s.be.Flush()

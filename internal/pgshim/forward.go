@@ -78,6 +78,15 @@ type Forward struct {
 	// there rather than to the source, by the source's plan (route_cost.go);
 	// nil for DefaultCostPolicy.
 	Cost *CostPolicy
+	// Park, when set, keeps the client's connection to the source open
+	// between its statements, as the MySQL port keeps its own (#3046): it
+	// is offered to the port's pool with reclaim, which the pool calls, from
+	// any goroutine, when another client waits for a connection and none is
+	// free; reclaim ends the connection and gives its slot back. unpark
+	// takes it back for the client's next statement, and reports false when
+	// it was reclaimed first. Nil: the connection is ended after every
+	// answer, as before.
+	Park func(reclaim func()) (unpark func() bool)
 }
 
 // barred is why nothing may be sent to the source now, "" when it may.
@@ -155,6 +164,10 @@ type upstream struct {
 	// cancelled is set while a cancel request was sent for the statement
 	// running.
 	cancelled atomic.Bool
+	// unpark, when set, is the connection kept idle between the client's
+	// statements (parkIdleSource): calling it takes it back from the
+	// port's pool, and reports whether it was still this client's.
+	unpark func() bool
 }
 
 // forwarding reports whether this connection can send statements to its
@@ -305,16 +318,92 @@ func (s *session) openSource(dsn string) (*upstream, *pgErr) {
 
 // closeSource ends the connection to the source and gives its slot back.
 func (s *session) closeSource() {
+	s.claimSource()
 	up := s.up
 	if up == nil {
 		return
 	}
 	s.up = nil
+	up.terminate()
+}
+
+// terminate ends the connection and gives its slot back. It touches nothing
+// of the session's: the port's pool calls it from another goroutine for a
+// parked connection (parkIdleSource).
+func (up *upstream) terminate() {
 	up.fe.Send(&pgproto3.Terminate{})
 	_ = up.conn.SetWriteDeadline(time.Now().Add(time.Second))
 	_ = up.fe.Flush()
 	_ = up.conn.Close()
 	up.release()
+}
+
+// parkIdleSource keeps the connection to the source open past the answer
+// just given when nothing of the client's lives there, for the client's
+// next statement (#3046): the MySQL port keeps its connection to the source
+// for the client's whole life, and opening one costs a login and the
+// settings each time, several times the statement a key lookup is. Unlike
+// MySQL's it is not held from other clients: the port's pool takes it back
+// (Forward.Park) when another client waits for a connection and none is
+// free. Without a pool that can, it is ended (releaseIdleSource). Called
+// before every ReadyForQuery; claimSource takes it back on the client's next
+// message, before anything can be sent on it.
+func (s *session) parkIdleSource() {
+	up := s.up
+	if up == nil || up.unpark != nil || up.inTx || up.inCycle || len(up.portals) > 0 || up.tx != 'I' {
+		return
+	}
+	if up.unsafe || s.bound == nil || s.bound.Forward == nil || s.bound.Forward.Park == nil {
+		s.closeSource()
+		return
+	}
+	up.unpark = s.bound.Forward.Park(up.terminate)
+}
+
+// claimSource takes back a parked connection to the source (parkIdleSource)
+// before anything of the client's next message is done: what the pool
+// reclaimed meanwhile, or the source ended while it was idle, is dropped,
+// and the next statement that needs the source opens one again, as it did
+// before connections were kept. Nothing of the client's lived on it.
+func (s *session) claimSource() {
+	up := s.up
+	if up == nil || up.unpark == nil {
+		return
+	}
+	unpark := up.unpark
+	up.unpark = nil
+	if !unpark() {
+		// Ended by the pool, on its own goroutine: not touched here.
+		s.up = nil
+		return
+	}
+	if why := up.idleEnded(); why != "" {
+		s.logger.Debug("pgshim: the connection to the source kept between statements was ended while idle; another is opened", "why", why)
+		s.up = nil
+		up.terminate()
+	}
+}
+
+// idleEnded says why a connection kept idle can no longer be used, "" when
+// it can: an idle PostgreSQL connection sends nothing, so anything to read
+// (a FATAL for idle_session_timeout, a closed socket) means it is over.
+func (up *upstream) idleEnded() string {
+	if err := up.conn.SetReadDeadline(time.Now()); err != nil {
+		return err.Error()
+	}
+	var b [1]byte
+	n, err := up.conn.Read(b[:])
+	_ = up.conn.SetReadDeadline(time.Time{})
+	var ne net.Error
+	switch {
+	case n > 0:
+		return "the source sent something while the connection was idle"
+	case errors.As(err, &ne) && ne.Timeout():
+		return ""
+	case err != nil:
+		return err.Error()
+	}
+	return "the connection read nothing and no error"
 }
 
 // markSourceRead notes that the source just sent the client a row or a
