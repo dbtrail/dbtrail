@@ -303,10 +303,10 @@ During a snapshot refresh that writes table deltas, finds the changed rows throu
 
 ### `pg-table-deltas`
 
-For PostgreSQL servers only: when a snapshot is updated, a changed table keeps its previous file and gets a pair of small files with its changes, instead of being written again in full. Off by default because SQL on the copy does not read those files yet, so with it on a changed table would answer as of the older file.
+For PostgreSQL servers only: when a snapshot is updated, a changed table keeps its previous file and gets small files with its changes beside it, instead of being written again in full. Everything that reads the copy on this machine reads those files with the table's file. 0, false, no or off turns it off: every changed table is written in full at every update.
 
-- Default: off.
-- Example: `pg-table-deltas = on`
+- Default: on.
+- Example: `pg-table-deltas = off`
 - Environment variable: `BINTRAIL_PG_TABLE_DELTAS`
 - Read by: watch (PostgreSQL servers).
 

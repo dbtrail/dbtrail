@@ -308,13 +308,13 @@
 #key-index = off
 
 # For PostgreSQL servers only: when a snapshot is updated, a changed table
-# keeps its previous file and gets a pair of small files with its changes,
-# instead of being written again in full. Off by default because SQL on the
-# copy does not read those files yet, so with it on a changed table would
-# answer as of the older file.
-# Default: off.
+# keeps its previous file and gets small files with its changes beside it,
+# instead of being written again in full. Everything that reads the copy on
+# this machine reads those files with the table's file. 0, false, no or off
+# turns it off: every changed table is written in full at every update.
+# Default: on.
 # Read by: watch (PostgreSQL servers).
-#pg-table-deltas = on
+#pg-table-deltas = off
 
 # An S3 bucket name. For bintrail init: the bucket to create for archives (it
 # gets a rule that deletes objects after 365 days). For bintrail agent: the
