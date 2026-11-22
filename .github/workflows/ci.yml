@@ -295,7 +295,11 @@ jobs:
           BINTRAIL_REQUIRE_DUCKDB_ICEBERG: "1"
           BINTRAIL_REQUIRE_DUCKDB_HTTPFS: "1"
           BINTRAIL_REQUIRE_NODE: "1"
-        run: go test ./... -race -count=1
+        # -timeout: go test stops a package's test binary after 10 minutes by
+        # default, and internal/sqlsandbox under -race takes 570 to 596 s on
+        # these runners, so a slow runner fails it on time alone. 20 minutes
+        # leaves room; a hung test is still stopped.
+        run: go test ./... -race -count=1 -timeout 20m
 
   # The MySQL integration suite, split in shards that run side by side.
   # It used to be ONE job per MySQL version running every package one at a
