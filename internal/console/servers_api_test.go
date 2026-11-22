@@ -1,12 +1,10 @@
 package console
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -773,11 +771,12 @@ func TestFailedCheckSummary(t *testing.T) {
 // preflight failure must be visible from the host (docker logs), not only in
 // the browser that fired the request. Without the slog.Warn, an operator
 // running --log-level debug sees NOTHING when Start fails.
+//
+// The log is the process's: a goroutine an earlier test left running (a
+// tails' follower logs at every update) writes to it while this test reads
+// it, so it is read through captureLogs' lock (#3180).
 func TestMonitorStartLogsPreflightFailure(t *testing.T) {
-	var buf bytes.Buffer
-	old := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	defer slog.SetDefault(old)
+	buf := captureLogs(t)
 
 	srv, ctrl := newSupervisorServer(t)
 	ctrl.report = &DoctorReport{
