@@ -29,6 +29,9 @@ func TestReconstructTables_PGSnapshotBeforeTheIndexsFirstHour(t *testing.T) {
 		// hour's, 2 the one after it.
 		drop int
 		want map[string]string
+		// refused is what the refusal says when want is nil; empty is the
+		// refusal for hours with no data.
+		refused string
 	}{
 		{name: "capture started before the floor", from: 0x400, snap: -30 * time.Second, at: 10 * time.Minute,
 			want: map[string]string{"1": "after-the-snapshot", "3": "newbie", "5": "keep"}},
@@ -42,7 +45,9 @@ func TestReconstructTables_PGSnapshotBeforeTheIndexsFirstHour(t *testing.T) {
 			want: map[string]string{"1": "after-the-snapshot", "5": "keep"}},
 		// An hour from the first one on is judged as it always was.
 		{name: "an hour after the first is still judged", from: 0x400, snap: -30 * time.Second, at: 2*time.Hour + 10*time.Minute, drop: 2},
-		{name: "capture started after the floor", from: 0x501, snap: -30 * time.Second, at: 10 * time.Minute},
+		// Refused before the hours are looked at, for what it is (#3078): the
+		// changes between the floor and capture's start were never captured.
+		{name: "capture started after the floor", from: 0x501, snap: -30 * time.Second, at: 10 * time.Minute, refused: "never captured"},
 		{name: "no recorded start", snap: -30 * time.Second, at: 10 * time.Minute},
 		{name: "history unknown", from: 0x400, snap: -30 * time.Second, at: 10 * time.Minute,
 			spoil: "UPDATE partition_history SET history_known = 0 WHERE id = 1"},
@@ -74,8 +79,12 @@ func TestReconstructTables_PGSnapshotBeforeTheIndexsFirstHour(t *testing.T) {
 
 			got, _, _, err := f.run(root, pgRun{at: f.at(tc.at)})
 			if tc.want == nil {
-				if err == nil || !strings.Contains(err.Error(), "hours with no data") {
-					t.Fatalf("err = %v (rows %v), want the refusal for hours with no data", err, got)
+				refused := tc.refused
+				if refused == "" {
+					refused = "hours with no data"
+				}
+				if err == nil || !strings.Contains(err.Error(), refused) {
+					t.Fatalf("err = %v (rows %v), want the refusal that says %q", err, got, refused)
 				}
 				return
 			}

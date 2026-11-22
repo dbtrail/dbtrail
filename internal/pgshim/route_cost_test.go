@@ -471,10 +471,19 @@ type costLogin struct {
 	runs atomic.Int32
 	// catalog, when set, is the copy's tables (Binding.Catalog).
 	catalog func() []CatalogTable
+	// copyErr, when set, is what the copy answers a statement with instead
+	// of 7 when it is not nil; catalogErr the same for its catalog.
+	copyErr    func(st string) error
+	catalogErr func() error
 }
 
 func (l *costLogin) run(_ context.Context, st string, _ RunOptions) (sqlsandbox.Result, error) {
 	l.runs.Add(1)
+	if l.copyErr != nil {
+		if err := l.copyErr(st); err != nil {
+			return sqlsandbox.Result{}, err
+		}
+	}
 	l.mu.Lock()
 	l.heldAtCopy = append(l.heldAtCopy, l.held.Load())
 	l.mu.Unlock()
@@ -519,7 +528,14 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 	}
 	b.RunAge = l.age
 	if l.catalog != nil {
-		b.Catalog = func(context.Context) ([]CatalogTable, error) { return l.catalog(), nil }
+		b.Catalog = func(context.Context) ([]CatalogTable, error) {
+			if l.catalogErr != nil {
+				if err := l.catalogErr(); err != nil {
+					return nil, err
+				}
+			}
+			return l.catalog(), nil
+		}
 	}
 	if l.wait != nil {
 		b.CopyWait = l.wait

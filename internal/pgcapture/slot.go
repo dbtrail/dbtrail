@@ -33,8 +33,8 @@ func validatePublication(ctx context.Context, conn *pgx.Conn, pubname string, fi
 	// can be created WITH (publish = 'insert'), which silently drops updates and deletes.
 	// Check before the allTables short-circuit.
 	if ops := missingPublishedOps(pubIns, pubUpd, pubDel); len(ops) > 0 {
-		return fmt.Errorf("pgcapture: publication %q does not publish %s — those changes would be silently lost; recreate it WITH (publish = 'insert, update, delete') or leave publish unset for all operations",
-			pubname, strings.Join(ops, ", "))
+		return fmt.Errorf("pgcapture: publication %q does not publish %s — those changes would be silently lost; run %s (it keeps the publication's tables and other options), or recreate the publication leaving publish unset",
+			pubname, strings.Join(ops, ", "), TruncateFixStatement(pubname))
 	}
 	// FOR ALL TABLES covers everything and cannot carry per-table row filters or column
 	// lists (PostgreSQL rejects WHERE/column-lists on FOR ALL TABLES), so it is unambiguously safe.
@@ -167,8 +167,10 @@ func restrictedPublicationError(pubname string, restricted []restrictedTable) er
 
 // missingPublishedOps returns the row-changing operations (insert/update/delete) a
 // publication does NOT publish. pgoutput emits nothing for an unpublished operation,
-// so bintrail would silently miss those changes. TRUNCATE is excluded deliberately —
-// bintrail does not rely on TRUNCATE row events. Pure, so the decision is unit-testable.
+// so bintrail would silently miss those changes. TRUNCATE is not in this fatal set:
+// without it every row change is still captured and only the record of a TRUNCATE
+// (the decoder's marker, #827) is lost, so it is a warning of its own
+// (pubtruncate.go, #3108). Pure, so the decision is unit-testable.
 func missingPublishedOps(ins, upd, del bool) []string {
 	var missing []string
 	if !ins {
@@ -629,7 +631,7 @@ func ensureSlot(ctx context.Context, replConn *pgconn.PgConn, queryConn *pgx.Con
 	// another plugin or one of another database that happens to be called
 	// this is not the capture's, and resuming "on" it would look healthy
 	// while reading a stream nobody positioned (queryScopedSlotState, as
-	// EnsureSlotExists has always asked). Catalog columns only, so a standby
+	// AnchorOnSlot asks). Catalog columns only, so a standby
 	// source answers it like a primary.
 	found, walStatus, err := queryScopedSlotState(ctx, queryConn, slotName)
 	if err != nil {
@@ -670,74 +672,6 @@ func ensureSlot(ctx context.Context, replConn *pgconn.PgConn, queryConn *pgx.Con
 	return lsn, nil
 }
 
-// EnsureSlotExists guarantees the named permanent pgoutput slot exists, creating
-// it when absent. It is the baseline producer's (#593) slot seam: the baseline
-// must ensure the slot BEFORE opening its snapshot transaction so the slot's
-// consistent_point ≤ the baseline anchor LSN (overlap redelivery is harmless —
-// reconstruct's merge is last-write-wins idempotent — but a slot created AFTER
-// the anchor would silently skip the deltas in between).
-//
-// replConnect lazily opens a REPLICATION connection (replication=database) and
-// is called ONLY when the slot must actually be created; pass nil when no
-// replication DSN is available, in which case a missing slot is an actionable
-// error rather than a silent skip. EnsureSlotExists owns the connection it
-// opens through replConnect and closes it before returning — the caller never
-// sees it.
-//
-// Slot identity is SCOPED, not name-only (review medium): pg_replication_slots
-// is cluster-wide, so a same-named PHYSICAL slot, a non-pgoutput logical slot,
-// or a logical slot for a DIFFERENT database would satisfy a bare name match
-// while anchoring nothing — the baseline would publish with a void ordering
-// guarantee. A name collision with anything that is not a pgoutput logical
-// slot on the current database fails loud.
-//
-// It shares ensureSlot's other safety semantics: a wal_status=lost slot fails
-// loud (wrapping ErrSlotLost), and a create racing another capturer (SQLSTATE
-// 42710) re-checks the scoped state — success only if the raced slot is
-// actually ours in kind. Returns created=true only when this call created the
-// slot.
-func EnsureSlotExists(ctx context.Context, queryConn *pgx.Conn, slotName string, replConnect func(context.Context) (*pgconn.PgConn, error)) (created bool, err error) {
-	found, walStatus, err := queryScopedSlotState(ctx, queryConn, slotName)
-	if err != nil {
-		return false, err
-	}
-	if found && walStatus == WalStatusLost {
-		return false, fmt.Errorf("pgcapture: replication slot %q is invalidated (wal_status=lost; max_slot_wal_keep_size exceeded) — drop and recreate it (the stream must also re-baseline): %w", slotName, ErrSlotLost)
-	}
-	if found {
-		return false, nil
-	}
-	if replConnect == nil {
-		return false, fmt.Errorf("pgcapture: replication slot %q does not exist and no replication connection is configured — provide --repl-dsn (replication=database) so the slot can be created, or create it first (e.g. by running `bintrail-pg stream`)", slotName)
-	}
-	replConn, err := replConnect(ctx)
-	if err != nil {
-		return false, fmt.Errorf("pgcapture: connecting to create replication slot %q: %w", slotName, err)
-	}
-	defer replConn.Close(ctx)
-	_, err = pglogrepl.CreateReplicationSlot(ctx, replConn, slotName, "pgoutput", pglogrepl.CreateReplicationSlotOptions{Mode: pglogrepl.LogicalReplication})
-	if err != nil {
-		// TOCTOU: something created a slot with this name between the check and
-		// now (SQLSTATE 42710 = duplicate_object). Re-check with the SCOPED
-		// query: only a pgoutput logical slot on this database counts as "the
-		// slot exists"; a raced foreign slot (physical / other plugin / other
-		// database) is the collision error, not success.
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.SQLState() == "42710" {
-			raceFound, _, raceErr := queryScopedSlotState(ctx, queryConn, slotName)
-			if raceErr != nil {
-				return false, raceErr
-			}
-			if raceFound {
-				return false, nil
-			}
-			return false, fmt.Errorf("pgcapture: replication slot %q was created concurrently but is not visible as a pgoutput logical slot on this database — retry, or resolve the name collision", slotName)
-		}
-		return false, fmt.Errorf("pgcapture: creating replication slot %q: %w", slotName, err)
-	}
-	return true, nil
-}
-
 // SlotFloorLSN returns a safe lower bound for replaying this slot's changes as
 // deltas on top of a baseline snapshot — the fix for #771.
 //
@@ -752,10 +686,12 @@ func EnsureSlotExists(ctx context.Context, queryConn *pgx.Conn, slotName string,
 // here" on that live LSN can therefore silently exclude a transaction from
 // BOTH the baseline (correctly, per MVCC) AND the delta window (incorrectly).
 //
-// SlotFloorLSN instead reports the slot's own confirmed_flush_lsn (falling
-// back to restart_lsn when confirmed_flush_lsn is unset — a brand new slot
-// that has never streamed) — call it BEFORE the caller's snapshot
-// transaction begins. Logical decoding only advances these positions past
+// SlotFloorLSN instead reports the slot's own confirmed_flush_lsn — call it
+// BEFORE the caller's snapshot transaction begins. A slot with none is still
+// being created and is refused (ErrSlotNotReady, #3078): its restart_lsn is
+// where the creation began, not a position the slot delivers from, and the
+// slot is gone if the creation is given up. A logical slot whose creation
+// has ended always has a confirmed_flush_lsn, streamed from or not. Logical decoding only advances these positions past
 // transactions it has already resolved in full WAL order, so no transaction
 // concurrent with (or later than) the caller's snapshot can have a commit
 // LSN below what this returns; the value is therefore always <= any LSN read
@@ -764,32 +700,26 @@ func EnsureSlotExists(ctx context.Context, queryConn *pgx.Conn, slotName string,
 // deltas from this floor forward — rather than from the live anchor — may
 // redeliver some already-visible-in-the-baseline changes; that overlap is
 // harmless because the baseline+delta merge is last-write-wins over
-// full-row images (same idempotency EnsureSlotExists's ordering invariant
+// full-row images (same idempotency AnchorOnSlot's ordering invariant
 // already relies on).
 func SlotFloorLSN(ctx context.Context, conn *pgx.Conn, slotName string) (pglogrepl.LSN, error) {
-	var restartText, confirmedText *string
+	var confirmedText *string
 	err := conn.QueryRow(ctx, `
-		SELECT restart_lsn::text, confirmed_flush_lsn::text
+		SELECT confirmed_flush_lsn::text
 		FROM pg_replication_slots WHERE slot_name = $1`, slotName).
-		Scan(&restartText, &confirmedText)
+		Scan(&confirmedText)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, fmt.Errorf("pgcapture: replication slot %q not found while reading its floor LSN", slotName)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("pgcapture: reading floor LSN for replication slot %q: %w", slotName, err)
 	}
-	var text string
-	switch {
-	case confirmedText != nil && *confirmedText != "":
-		text = *confirmedText
-	case restartText != nil && *restartText != "":
-		text = *restartText
-	default:
-		return 0, fmt.Errorf("pgcapture: replication slot %q has neither confirmed_flush_lsn nor restart_lsn set — cannot compute a safe delta floor", slotName)
+	if confirmedText == nil || *confirmedText == "" {
+		return 0, fmt.Errorf("pgcapture: replication slot %q has no confirmed_flush_lsn, so it has no position to read from: %w", slotName, ErrSlotNotReady)
 	}
-	lsn, err := pglogrepl.ParseLSN(text)
+	lsn, err := pglogrepl.ParseLSN(*confirmedText)
 	if err != nil {
-		return 0, fmt.Errorf("pgcapture: parsing floor LSN %q for replication slot %q: %w", text, slotName, err)
+		return 0, fmt.Errorf("pgcapture: parsing floor LSN %q for replication slot %q: %w", *confirmedText, slotName, err)
 	}
 	return lsn, nil
 }

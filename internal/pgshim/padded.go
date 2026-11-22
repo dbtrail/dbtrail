@@ -518,7 +518,12 @@ func paddedInText(text string, types map[string][]string) string {
 // A command of the copy's own (SHOW TABLES, DESCRIBE, SUMMARIZE) and an
 // EXPLAIN have no answer of PostgreSQL's to differ from. A host that lists
 // no catalog (Binding.Catalog nil) has no column to mark.
+//
+// s.catalogBusy says, after it, whether the catalog was unread because the
+// copy was busy: the veto is then the moment's, not the statement's
+// (paddedRefusal, describeWith).
 func (s *session) paddedVeto(text string) string {
+	s.catalogBusy = ""
 	if s.bound == nil || s.bound.Catalog == nil {
 		return ""
 	}
@@ -568,6 +573,12 @@ func (s *session) paddedRefusal(text string) *pgErr {
 	veto := s.paddedVeto(text)
 	if veto == "" {
 		return nil
+	}
+	if why := s.catalogBusy; why != "" && s.canFallBack() {
+		// The copy was too busy to list its columns (#3109): refused as
+		// busy, not sent to the source (route.go).
+		s.busyRefused = why
+		return busyRefusal(why)
 	}
 	s.fallTo(ReasonVeto)
 	e := s.paddedError(veto)
