@@ -65,6 +65,17 @@ func newPGTailRig(t *testing.T) *pgTailRig {
 	r.b = &bundle{db: db, dbName: dbName, engine: query.New(db), baselineSrc: r.root}
 	r.s.cm.boot = r.b
 	r.k = newTailKeeper(newPGTailSource(r.s, r.b).capturing(nil), t.TempDir(), tailBudget{Keys: 1000}, time.Minute, time.Hour)
+	t.Cleanup(func() {
+		// A keeper the server made for a statement runs a follower for up to
+		// tailFollowIdle after the test: left running, it logs into the logs
+		// a later test of the package captures (#3180).
+		r.s.tails.mu.Lock()
+		defer r.s.tails.mu.Unlock()
+		for _, k := range r.s.tails.by {
+			k.close()
+		}
+		r.k.close()
+	})
 	return r
 }
 
