@@ -521,6 +521,16 @@ func (s *Server) handleReconstruct(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusUnprocessableEntity, captureGapRefusal(captureGap))
 		return
 	}
+	//   - PostgreSQL: changes of the table the capture dropped since the
+	//     snapshot (a table not at REPLICA IDENTITY FULL). No override.
+	if err := reconstruct.CheckPGPastRead(ctx, b.db, schema, table, bmeta); err != nil {
+		if errors.Is(err, reconstruct.ErrPGPastReadNotCovered) {
+			writeJSONError(w, http.StatusUnprocessableEntity, "time-travel stopped: "+err.Error())
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
 	// 2. Fetch this PK's binlog deltas in [baseline, at], oldest-first.
 	//    AllowGaps defaults FALSE — the opposite of events/recover: a coverage

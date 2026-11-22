@@ -17,3 +17,15 @@ func SetSlotNoticesForTest(d time.Duration) (restore func()) {
 	slotNoticeEvery, slotWaitWarnAfter = d, d
 	return func() { slotNoticeEvery, slotWaitWarnAfter = prevEvery, prevWarn }
 }
+
+// WithCaptureBelowFull turns off the decoder's gate on tables below REPLICA
+// IDENTITY FULL, for the tests of the code that stores an earlier row in
+// part, which no table reaches outside them.
+var WithCaptureBelowFull = withCaptureBelowFull
+
+// CaptureBelowFull is cfg with the same gate off, for the capturer's tests of
+// that code.
+func CaptureBelowFull(cfg Config) Config {
+	cfg.captureBelowFull = true
+	return cfg
+}

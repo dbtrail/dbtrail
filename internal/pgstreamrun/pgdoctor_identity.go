@@ -8,18 +8,21 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/dbtrail/dbtrail/internal/doctor"
+	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/pgcapture"
 )
 
 // replicaIdentityCheck is the name of the check on tables below REPLICA
-// IDENTITY FULL. It was a failure while capture needed FULL; it is a warning
-// now, under the same name, because other code keys on it
-// (dependentCheckNames, and whatever read the report before).
+// IDENTITY FULL. A failure: DBTrail captures a table only at FULL (the
+// decoder's gate, pgcapture.SkipReplicaIdentityNotFull). Its name is the one
+// it had while it was a warning (version 0.138.0) and before, because other
+// code keys on it (dependentCheckNames, and whatever read the report before).
 const replicaIdentityCheck = "REPLICA IDENTITY FULL"
 
 // identityKeyCheck is the name of the check on tables whose replica identity
-// leaves a primary-key column out: the one kind of table below FULL that is
-// not captured.
+// leaves a primary-key column out. Such a table is below FULL, so it is in
+// replicaIdentityCheck too, with the same statement; this check says the
+// second thing wrong with it.
 const identityKeyCheck = "Replica identity holds the primary key"
 
 // identityStatementsShown bounds how many statements a check prints; a
@@ -27,35 +30,74 @@ const identityKeyCheck = "Replica identity holds the primary key"
 const identityStatementsShown = 20
 
 // addReplicaIdentityChecks reports the published tables that are not at
-// REPLICA IDENTITY FULL (#3027), as two checks.
+// REPLICA IDENTITY FULL, as two checks, both failures when they find a table.
 //
-// FULL is needed for one thing: undo. A table below it is recorded, and
-// everything else works on it; so replicaIdentityCheck is a warning, never a
-// failure. This report is also what `server add` and Start read, and a
-// failure there keeps capture from starting: what is missing for one function
-// (undo) must not stop another (capture).
+// As failures they stop `server add` and Start for the whole server until
+// the tables are fixed or out of the publication, which is said in their
+// text: that is the moment the operator can still fix them before anything is
+// missed. A capture that is already running, or that the daemon resumes at
+// boot (which does not run these checks), skips such a table alone and
+// records the others.
 //
-// identityKeyCheck is a failure: capture does not record such a table at all
-// (pgcapture.SkipReplicaIdentityIndexWithoutPrimaryKey). As a failure it
-// stops `server add` and Start for the whole server until the table is fixed
-// or out of the publication, which is said in its text; a capture that is
-// running when a table becomes one skips that table alone.
-func addReplicaIdentityChecks(ctx context.Context, r *doctor.Report, conn *pgx.Conn, publication string) {
-	ids, err := pgcapture.QueryTableIdentities(ctx, conn, publication)
+// On PostgreSQL 18 the generated columns of those tables are read too: at
+// FULL, one the publication does not publish makes PostgreSQL refuse the
+// application's UPDATE and DELETE, so the statement given for such a table
+// is not ALTER TABLE ... FULL alone (notFullResult).
+func addReplicaIdentityChecks(ctx context.Context, r *doctor.Report, conn *pgx.Conn, publication string, filters event.Filters) {
+	all, err := pgcapture.QueryTableIdentities(ctx, conn, publication)
 	if err != nil {
 		r.Add(doctor.CheckResult{Name: replicaIdentityCheck, Status: doctor.StatusWarn, Detail: "could not check: " + err.Error()})
 		r.Add(doctor.CheckResult{Name: identityKeyCheck, Status: doctor.StatusWarn, Detail: "could not check: " + err.Error()})
 		return
 	}
-	withoutUndo, key := replicaIdentityResults(ids)
-	r.Add(withoutUndo)
+	ids := inScopeIdentities(all, filters)
+	var gen []pgcapture.UnpublishedGenerated
+	var genErr error
+	if len(ids) > 0 {
+		gen, genErr = pgcapture.QueryUnpublishedGeneratedBelowFull(ctx, conn, publication)
+		// A partitioned table at FULL is listed for its partitions: its own
+		// generated columns are read with the tables at FULL, and kept for
+		// the tables listed here (the partitions inherit them).
+		listed := map[[2]string]bool{}
+		for _, t := range ids {
+			if t.Identity == "f" {
+				listed[[2]string{t.Schema, t.Table}] = true
+			}
+		}
+		if genErr == nil && len(listed) > 0 {
+			var atFull []pgcapture.UnpublishedGenerated
+			atFull, genErr = pgcapture.QueryUnpublishedGenerated(ctx, conn, publication)
+			for _, g := range atFull {
+				if listed[[2]string{g.Schema, g.Table}] {
+					gen = append(gen, g)
+				}
+			}
+		}
+	}
+	full, key := replicaIdentityResults(ids, gen, genErr)
+	r.Add(full)
 	r.Add(key)
 }
 
-// replicaIdentityResults maps the tables below FULL to the two checks. Pure.
-func replicaIdentityResults(ids []pgcapture.TableIdentity) (withoutUndo, key doctor.CheckResult) {
-	undo, missesKey, noIdentity := pgcapture.SplitTableIdentities(ids)
-	return withoutUndoResult(undo, noIdentity), identityKeyResult(missesKey)
+// inScopeIdentities keeps the tables capture takes (filters, the server's
+// schemas and tables): a table it does not take is not skipped by it either,
+// and must not keep a server from being added. Pure.
+func inScopeIdentities(all []pgcapture.TableIdentity, filters event.Filters) []pgcapture.TableIdentity {
+	var out []pgcapture.TableIdentity
+	for _, t := range all {
+		if filters.Matches(t.Schema, t.Table) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// replicaIdentityResults maps the tables below FULL to the two checks; gen
+// are the generated columns of those tables that a publication does not
+// publish (PostgreSQL 18), genErr why they could not be read. Pure.
+func replicaIdentityResults(ids []pgcapture.TableIdentity, gen []pgcapture.UnpublishedGenerated, genErr error) (full, key doctor.CheckResult) {
+	_, missesKey, _ := pgcapture.SplitTableIdentities(ids)
+	return notFullResult(ids, gen, genErr), identityKeyResult(missesKey)
 }
 
 func quotedTable(t pgcapture.TableIdentity) string {
@@ -108,30 +150,54 @@ func identityStatements(b *strings.Builder, stmts []string) {
 	}
 }
 
-func withoutUndoResult(undo, noIdentity []pgcapture.TableIdentity) doctor.CheckResult {
-	if len(undo)+len(noIdentity) == 0 {
+func notFullResult(all []pgcapture.TableIdentity, gen []pgcapture.UnpublishedGenerated, genErr error) doctor.CheckResult {
+	if len(all) == 0 {
 		return doctor.CheckResult{Name: replicaIdentityCheck, Status: doctor.StatusPass}
 	}
-	all := append(append([]pgcapture.TableIdentity{}, undo...), noIdentity...)
+	// The report prints a detail inside parentheses, so it ends without a
+	// full stop (as readAccessResult's does).
 	isAre := "are"
 	if len(all) == 1 {
 		isAre = "is"
 	}
-	// The report prints a detail inside parentheses, so it ends without a
-	// full stop (as readAccessResult's does).
-	detail := fmt.Sprintf("%s of the publication %s not at REPLICA IDENTITY FULL: %s", tableCount(len(all)), isAre, tableNames(all))
+	detail := fmt.Sprintf("%s of the publication %s not at REPLICA IDENTITY FULL, so %s not captured: %s",
+		tableCount(len(all)), isAre, itsTheir(len(all)), tableNames(all))
 	if len(all) == 1 && all[0].Identity == "f" {
-		detail = fmt.Sprintf("1 partitioned table of the publication has partitions that are not at REPLICA IDENTITY FULL: %s", tableNames(all))
+		detail = fmt.Sprintf("1 partitioned table of the publication has partitions that are not at REPLICA IDENTITY FULL, so its changes are not captured: %s", tableNames(all))
+	}
+
+	// PostgreSQL 18: a generated column a publication does not publish.
+	type tbl struct{ schema, table string }
+	storedPubs := map[tbl][]string{}
+	virtualCols := map[tbl][]string{}
+	virtualPubs := map[tbl][]string{}
+	for _, g := range gen {
+		k := tbl{g.Schema, g.Table}
+		if g.Virtual {
+			virtualCols[k] = appendNew(virtualCols[k], g.Column)
+			virtualPubs[k] = appendNew(virtualPubs[k], g.Publication)
+		} else {
+			storedPubs[k] = appendNew(storedPubs[k], g.Publication)
+		}
 	}
 
 	var rem strings.Builder
-	rem.WriteString("FULL is optional: it is needed only for undo. The changes of these tables are recorded, and everything else works on them: " +
-		"history, the copy and the queries it answers, snapshots and their updates. This does not stop the server from being added or started. " +
-		"The exception is undo: PostgreSQL sends only the key of the row an UPDATE or a DELETE changed, so DBTrail does not have the earlier row to put back, " +
-		"and refuses to undo those changes. Undo of an INSERT works. To make a table's changes undoable, run this on the database:\n\n")
+	rem.WriteString("DBTrail captures a table only at REPLICA IDENTITY FULL, where PostgreSQL sends the whole earlier row of an UPDATE and a DELETE. " +
+		"A server is not added or started while this check fails. A capture that is already running does not record the changes of these tables " +
+		"(each one is counted as skipped in capture health), and records the other tables normally. Run this on the database:\n\n")
 	var stmts []string
 	partitioned := 0
+	var virtual []string
 	for _, t := range all {
+		k := tbl{t.Schema, t.Table}
+		if len(virtualCols[k]) > 0 {
+			// No statement makes such a table capturable: see below.
+			virtual = append(virtual, quotedTable(t))
+			continue
+		}
+		for _, p := range storedPubs[k] {
+			stmts = appendNew(stmts, "ALTER PUBLICATION "+pgx.Identifier{p}.Sanitize()+" SET (publish_generated_columns = stored);")
+		}
 		// Identity "f" is a partitioned table at FULL listed for its
 		// partitions alone.
 		if t.Identity != "f" {
@@ -144,11 +210,28 @@ func withoutUndoResult(undo, noIdentity []pgcapture.TableIdentity) doctor.CheckR
 			partitioned++
 		}
 	}
-	identityStatements(&rem, stmts)
-	rem.WriteString("\nIt takes effect for changes made after it, not for earlier ones. It costs WAL: the table then logs the whole earlier row for every UPDATE and DELETE.")
+	if genErr != nil {
+		// Not one statement: on PostgreSQL 18 one of them could stop the
+		// source's own application from writing (see below).
+		fmt.Fprintf(&rem, "No statement is given here: the generated columns of these tables could not be read (%v); "+
+			"on PostgreSQL 18, ALTER TABLE ... REPLICA IDENTITY FULL on a table with a generated column that a publication does not publish "+
+			"makes PostgreSQL refuse the application's UPDATE and DELETE. Run the check again.\n", genErr)
+	} else {
+		identityStatements(&rem, stmts)
+	}
+	rem.WriteString("\nCapture of a table starts by itself after the statement, with no restart. The changes made before it are not recorded: " +
+		"the table's copy is brought up to date by its next full read, and its history of that stretch stays missing. " +
+		"FULL costs WAL: the table then logs the whole earlier row for every UPDATE and DELETE.")
 	if partitioned > 0 {
 		rem.WriteString(" REPLICA IDENTITY is set per partition, and the statement on a partitioned table does not reach its partitions: " +
-			"the table and each of its partitions need it, which is why the partitions are listed above.")
+			"the table and each of its partitions need it, which is why the partitions are listed above. " +
+			"A partitioned table is captured again once PostgreSQL describes it with every partition at FULL: before the first change made after the statement in the partition the change is in, and at the latest when capture restarts.")
+	}
+	var noIdentity []pgcapture.TableIdentity
+	for _, t := range all {
+		if t.NoIdentity {
+			noIdentity = append(noIdentity, t)
+		}
 	}
 	if len(noIdentity) > 0 {
 		have := "have"
@@ -156,17 +239,77 @@ func withoutUndoResult(undo, noIdentity []pgcapture.TableIdentity) doctor.CheckR
 			have = "has"
 		}
 		fmt.Fprintf(&rem, "\n\n%s of them %s no replica identity at all (REPLICA IDENTITY NOTHING, or no usable primary key): %s. "+
-			"PostgreSQL itself refuses UPDATE and DELETE on such a table while it is in a publication, with or without DBTrail, so only its INSERT and TRUNCATE are recorded. "+
-			"Give the table a primary key, or run the statement above for it. "+
-			"A partitioned table is the exception: PostgreSQL checks the replica identity of each partition, so the UPDATE and DELETE made in a partition that has one are accepted and recorded, without undo.",
+			"PostgreSQL itself refuses UPDATE and DELETE on such a table while it is in a publication, with or without DBTrail, and DBTrail does not record its INSERTs either until it is at FULL. "+
+			"FULL needs no primary key.",
 			tableCount(len(noIdentity)), have, tableNames(noIdentity))
+	}
+	if len(storedPubs) > 0 {
+		rem.WriteString("\n\nOn PostgreSQL 18, a table with a STORED generated column that a publication does not publish refuses the application's UPDATE and DELETE once it is at FULL. " +
+			"That is why the statements above make each such publication publish its stored generated columns first; run them in that order.")
+	}
+	if len(virtual) > 0 {
+		var cols, drops []string
+		for _, t := range all {
+			k := tbl{t.Schema, t.Table}
+			for _, c := range virtualCols[k] {
+				cols = append(cols, pgx.Identifier{t.Schema, t.Table, c}.Sanitize())
+			}
+			for _, p := range virtualPubs[k] {
+				drops = append(drops, "ALTER PUBLICATION "+pgx.Identifier{p}.Sanitize()+" DROP TABLE "+quotedTable(t)+";")
+			}
+		}
+		fmt.Fprintf(&rem, "\n\nOn PostgreSQL 18, %s %s a VIRTUAL generated column (%s), which no publication can publish. "+
+			"PostgreSQL refuses UPDATE and DELETE on a table at FULL that has one, so DBTrail cannot capture %s while %s that column, and no statement above is given for %s: "+
+			"do not run ALTER TABLE ... REPLICA IDENTITY FULL on %s, or the application's UPDATE and DELETE fail. "+
+			"To capture it, replace the column with a STORED generated one and publish it (publish_generated_columns = stored). "+
+			"Or take it out of the publication, and this check stops listing it: %s",
+			strings.Join(virtual, ", "), hasOrHaveN(len(virtual)), strings.Join(cols, ", "),
+			itOrThem(len(virtual)), itHasOrTheyHave(len(virtual)), itOrThem(len(virtual)), itOrThem(len(virtual)), strings.Join(drops, " "))
+		rem.WriteString(" (a FOR ALL TABLES publication has no way to leave one table out: use a publication that lists its tables).")
 	}
 	return doctor.CheckResult{
 		Name:        replicaIdentityCheck,
-		Status:      doctor.StatusWarn,
+		Status:      doctor.StatusFail,
 		Detail:      detail,
 		Remediation: rem.String(),
 	}
+}
+
+func appendNew(list []string, s string) []string {
+	for _, x := range list {
+		if x == s {
+			return list
+		}
+	}
+	return append(list, s)
+}
+
+func itsTheir(n int) string {
+	if n == 1 {
+		return "its changes are"
+	}
+	return "their changes are"
+}
+
+func itOrThem(n int) string {
+	if n == 1 {
+		return "it"
+	}
+	return "them"
+}
+
+func hasOrHaveN(n int) string {
+	if n == 1 {
+		return "has"
+	}
+	return "have"
+}
+
+func itHasOrTheyHave(n int) string {
+	if n == 1 {
+		return "it has"
+	}
+	return "they have"
 }
 
 func identityKeyResult(missesKey []pgcapture.TableIdentity) doctor.CheckResult {
@@ -193,20 +336,18 @@ func identityKeyResult(missesKey []pgcapture.TableIdentity) doctor.CheckResult {
 		"so a change could not be matched to the row it changed. Run this on the database:\n\n")
 	var stmts []string
 	for _, t := range missesKey {
-		switch {
-		case len(t.MissesKey) > 0 && t.Identity == "i":
-			stmts = append(stmts, "ALTER TABLE "+quotedTable(t)+" REPLICA IDENTITY DEFAULT;")
-		case len(t.MissesKey) > 0:
+		if len(t.MissesKey) > 0 {
 			stmts = append(stmts, "ALTER TABLE "+quotedTable(t)+" REPLICA IDENTITY FULL;")
 		}
 		// A partition with an identity of its own that leaves the key out:
 		// the statement is the partition's.
 		for _, part := range t.PartitionsMissKey {
-			stmts = append(stmts, "ALTER TABLE "+part+" REPLICA IDENTITY DEFAULT;")
+			stmts = append(stmts, "ALTER TABLE "+part+" REPLICA IDENTITY FULL;")
 		}
 	}
 	identityStatements(&rem, stmts)
-	rem.WriteString("\nREPLICA IDENTITY DEFAULT sends the primary key. REPLICA IDENTITY FULL works for every table and also makes its changes undoable, at the cost of more WAL. " +
+	rem.WriteString("\nThe statements are the ones of the check \"" + replicaIdentityCheck + "\": FULL sends the whole row, the primary key included, and DBTrail captures a table only at FULL " +
+		"(REPLICA IDENTITY DEFAULT would send the primary key, but the table would still not be captured). " +
 		"Recording of the table starts by itself after the statement. The changes skipped before it are never recorded: the next full copy of the table brings its rows up to date, and the history of that stretch stays missing.")
 	return doctor.CheckResult{
 		Name:        identityKeyCheck,

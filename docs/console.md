@@ -2640,9 +2640,10 @@ per server as `source` in [`/api/capabilities`](#api), derived from
   PostgreSQL sources rather than leaving it an unexplained gap.
 - **Replication-health panel.** The Status page shows the replication slot's
   WAL-retention state (`wal_status`, retained WAL, the safe margin before
-  invalidation) and how many published tables are not at `REPLICA IDENTITY FULL`,
-  in amber as `N tables without undo`: those tables are recorded, and only undo
-  of their `UPDATE` and `DELETE` is refused ([PostgreSQL source](postgres.md)).
+  invalidation) and the published tables that capture does not take, in red as
+  `N tables NOT captured`, each with why: a table that is not at
+  `REPLICA IDENTITY FULL` (or has a partition that is not) is one of them
+  ([PostgreSQL source](postgres.md)).
   The web interface is still index-only: it never queries the source. Instead the
   streaming daemon (`bintrail-pg stream` / `watch`) polls the source every ~30s
   and persists a snapshot to the index (`stream_state.source_health`), which the

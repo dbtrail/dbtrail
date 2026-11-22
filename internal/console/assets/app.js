@@ -7176,10 +7176,9 @@ function pgHealthCard(h) {
       card.append(healthKV("consumer", el("span", { class: "kv-v", text: h.active ? "connected" : "—" })));
     }
 
-    // Tables capture does not take at all (a replica identity without the
-    // primary key, a deferrable primary key): a fault, in red, and never
-    // under a green "all FULL". A snapshot written before this list existed
-    // has none.
+    // Tables capture does not take at all (not at REPLICA IDENTITY FULL, a
+    // deferrable primary key): a fault, in red, and never under a green "all
+    // FULL". A snapshot written before this list existed has none.
     const nc = h.not_captured || [];
     if (nc.length > 0) {
       card.append(healthKV("capture", el("span", { class: "hstat hstat-err",
@@ -7193,8 +7192,9 @@ function pgHealthCard(h) {
     if (nf.length === 0) {
       if (nc.length === 0) card.append(healthKV("replica identity", el("span", { class: "hstat hstat-ok", text: "all FULL ✓" })));
     } else {
-      // Not a fault: a table below REPLICA IDENTITY FULL is recorded, and only
-      // undo of its UPDATE and DELETE is refused. Amber, with what it means.
+      // Written only by a capture of version 0.138.0, which recorded a table
+      // below REPLICA IDENTITY FULL without undo; a later one lists such a
+      // table under not_captured above. Amber, with what it meant there.
       card.append(healthKV("replica identity", el("span", { class: "hstat hstat-warn",
         text: "⚠ " + nf.length + (nf.length === 1 ? " table" : " tables") + " without undo" })));
       card.append(el("div", { class: "hlist", text: "Not at REPLICA IDENTITY FULL: recorded, and everything else works. Undo of an UPDATE or a DELETE is refused; ALTER TABLE ... REPLICA IDENTITY FULL makes later changes undoable." }));
@@ -18544,11 +18544,11 @@ function buildServerForm(offered, familyLine) {
   mon.append(pgHint);
   mon.append(tagFlavor(el("pre", { class: "form-code", text:
     "CREATE PUBLICATION bintrail_pub FOR ALL TABLES;" }), "postgres"));
-  // REPLICA IDENTITY FULL is not a prerequisite: a table without it is
-  // recorded, and only undo of its UPDATE and DELETE is refused.
+  // REPLICA IDENTITY FULL is required: a table without it is not captured
+  // (its changes are skipped and counted; the other tables are recorded).
   const pgUndoHint = tagFlavor(el("p", { class: "form-hint", style: "margin-top:10px" }), "postgres");
   pgUndoHint.append(el("code", { text: "REPLICA IDENTITY FULL" }));
-  pgUndoHint.append(" is optional, only for undo: without it a table is recorded and everything else works, but its UPDATE and DELETE cannot be undone. To make a table's later changes undoable (the table then writes more WAL):");
+  pgUndoHint.append(" is required on every table you capture, and on each partition of a partitioned one: a table that is not at FULL is not captured, and the server is not added while one is. Copy and run on the source for each (the table then writes more WAL):");
   mon.append(pgUndoHint);
   mon.append(tagFlavor(el("pre", { class: "form-code", text:
     "ALTER TABLE your_table REPLICA IDENTITY FULL;" }), "postgres"));

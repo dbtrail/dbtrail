@@ -496,3 +496,26 @@ func TestSkipCounters_lastAtStamped(t *testing.T) {
 		t.Fatalf("last_at = %v, want a recent UTC timestamp", st.LastAt)
 	}
 }
+
+// The escalation's remedy for a PostgreSQL capture's table reasons is
+// PostgreSQL's (they are recorded only when every table it was described is
+// skipped); a MySQL reason keeps its own, unchanged.
+func TestSkipCounters_escalationRemedyByReason(t *testing.T) {
+	for _, tc := range []struct {
+		reason, has, lacks string
+	}{
+		{"replica_identity_not_full", "ALTER TABLE <t> REPLICA IDENTITY FULL", "bintrail snapshot"},
+		{"primary_key_deferrable", "DEFERRABLE primary key", "bintrail snapshot"},
+		{SkipUnhandledRowEvent, "run `bintrail snapshot` against the source, then restart the stream", "REPLICA IDENTITY"},
+		{SkipStatementFormatDML, "binlog_format=ROW", "REPLICA IDENTITY"},
+	} {
+		var buf bytes.Buffer
+		c := NewSkipCounters(newTestLogger(&buf))
+		for range SkipEscalationThreshold {
+			c.RecordSkip(tc.reason)
+		}
+		if !strings.Contains(buf.String(), tc.has) || strings.Contains(buf.String(), tc.lacks) {
+			t.Errorf("%s: remedy:\n%s", tc.reason, buf.String())
+		}
+	}
+}
