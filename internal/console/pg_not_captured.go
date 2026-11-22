@@ -35,8 +35,12 @@ type PGTableNotCaptured struct {
 // A snapshot, or the table delta beside it, published over a known loss of
 // captured changes is listed too: its rows are known to miss changes.
 //
-// Only where the server's statements read tails (fresh mode): in fast mode
-// every table is read from its snapshot alone, by the operator's choice.
+// In fresh mode and in fast mode alike. In fast mode every table is read
+// from its snapshot, but a table capture drops is carried forward as the
+// file of its last full read and its snapshot does not move, and the copy's
+// age is not computed for a PostgreSQL server, so no lag limit would catch
+// it either.
+//
 // A table whose tail is refused for another reason (its snapshot does not
 // record a position, or when its rows were read; a MySQL delta beside it) is
 // listed only when the loss rule lists it, asked with what its footer says.
@@ -45,7 +49,7 @@ type PGTableNotCaptured struct {
 // and an error there would read as no drop. When the capture's state cannot
 // be read, every table is listed.
 func (q *SQLOnCopy) PGTablesNotCaptured(ctx context.Context) ([]PGTableNotCaptured, error) {
-	if q == nil || q.s == nil || q.b == nil || q.b.db == nil || !q.s.pgTailsFor(q.id, q.b) || !q.s.tailsOnFor(q.id) {
+	if q == nil || q.s == nil || q.b == nil || q.b.db == nil || !q.s.pgTailsFor(q.id, q.b) {
 		return nil, nil
 	}
 	in, err := q.s.buildViewsInput(ctx, q.b, viewsRequest{PinSnapshot: true, OmitEvents: true, StateOnly: true, ForStatement: true, LocalCopy: true, ApplyHidden: true})
@@ -85,7 +89,7 @@ func pgNotCapturedOf(tables []views.BaselineTable, cutOf func(views.BaselineTabl
 		var lsn uint64
 		var read time.Time
 		if c.footer {
-			lsn, read = c.md.LSN, c.sourceRead()
+			lsn, read = c.readPoint()
 		}
 		if why := pgCaptureLossOf(st, lsn, read, t.Schema, t.Table); why != "" {
 			out = append(out, PGTableNotCaptured{Schema: t.Schema, Table: t.Table, Why: why, SnapshotRead: read})

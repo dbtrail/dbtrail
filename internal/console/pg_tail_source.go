@@ -239,9 +239,10 @@ type pgCut struct {
 	since   time.Time
 }
 
-// sourceRead is when the rows of the cut's file were read from the source
-// (the PostgreSQL server's clock), zero when not recorded.
-func (c pgCut) sourceRead() time.Time { return baseline.SourceReadOf(c.md).At }
+// readPoint is what the capture-loss rule compares the cut's file with
+// (reconstruct.PGReadPoint): its WAL floor when it is a full read of the
+// source, else 0, and when its rows were last read.
+func (c pgCut) readPoint() (uint64, time.Time) { return reconstruct.PGReadPoint(c.md) }
 
 // cut reads t's cut. The snapshot's time is its folder's, not the file's: a
 // file carried forward was written by an earlier run.
@@ -910,7 +911,8 @@ func (x *pgTailSource) shapesFrom(ctx context.Context, snapshotID int64, from ui
 // pgTailBroken is one table's answer to Broken, "" when its tail can go on.
 func pgTailBroken(ctx context.Context, db *sql.DB, t views.BaselineTable, c pgCut, st *status.StreamStateInfo, shapes []metadata.PGShape) (string, error) {
 	name := t.Schema + "." + t.Table
-	if why := pgTailCaptureLoss(st, c.md.LSN, c.sourceRead(), t.Schema, t.Table); why != "" {
+	lsn, read := c.readPoint()
+	if why := pgTailCaptureLoss(st, lsn, read, t.Schema, t.Table); why != "" {
 		return why, nil
 	}
 	rel, ok, err := baseline.ParsePGRelation(c.md.PGRelation)
@@ -963,9 +965,11 @@ func sameStringSet(a, b []string) bool {
 // capture_skips (a table below REPLICA IDENTITY FULL has its changes dropped
 // while the other tables keep flowing), and a tail built from the index would
 // serve such a table with old rows. That rule is the one the snapshot update
-// applies, reconstruct.PGSkippedSince: by WAL position (readLSN, the
-// snapshot's floor, against the drop's commit LSN) where both are known, by
-// the clock with a margin where not. The snapshot's read time is the source
+// applies, reconstruct.PGSkippedSince: by WAL position (readLSN, the floor of
+// a file that is a full read, against the drop's commit LSN) where both are
+// known, by the clock with a margin where not. readLSN and sourceRead are
+// reconstruct.PGReadPoint of the file's footer (pgCut.readPoint): a folded
+// file's floor is not what its rows were read at. The snapshot's read time is the source
 // server's clock and a drop's the capture daemon's, so the clocks alone would
 // let a daemon behind the source date a new drop before the read. st's
 // ledger must have been read strictly (pgReadLedgerStrict).

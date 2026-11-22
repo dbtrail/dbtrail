@@ -27,7 +27,7 @@ const (
 )
 
 // A table whose capture drops its changes, read through the PostgreSQL port
-// by a NEW connection in fresh mode, against a real PostgreSQL 16 and a
+// by a NEW connection, in fresh mode and then in fast mode, against a real PostgreSQL 16 and a
 // real index. Capture keeps running and keeps the other table, records the
 // drops in its ledger, and the copy holds the dropped table as of its
 // snapshot alone. Before, the port answered it from there: no answer of the
@@ -207,6 +207,25 @@ func TestIntegrationPGRouterTableNotCapturedGoesToTheSource(t *testing.T) {
 		t.Fatalf("prepared: %v %q, want the source's 11", res.Err, res.Rows)
 	}
 	counted("prepared", before, pgshim.ReasonTableNotCaptured)
+
+	// Fast mode: every table is read from its snapshot, and the copy's age
+	// of a PostgreSQL server is not computed, so nothing else would hold the
+	// dropped table back. It goes to the source all the same; the captured
+	// one is the snapshot's, as fast mode answers it.
+	fast := false
+	if _, err := f.owner.SetSQLMode(e.ID, &fast, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	srv.RefreshFollowedFiles()
+	pgTestWait(t, "fast mode: b from the snapshot", 30*time.Second, func() (bool, string) {
+		got := oneOn(readB)
+		return got == "20", got
+	})
+	before = reasons()
+	if got := oneOn(readA); got != "11" {
+		t.Fatalf("fast mode, a new connection reading the table capture drops: %q, want the source's current 11", got)
+	}
+	counted("fast mode, a", before, pgshim.ReasonTableNotCaptured)
 
 	// The connection's own status says so.
 	_, rows, err := pgText(t, c, "SHOW dbtrail.router_status")
