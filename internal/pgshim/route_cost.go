@@ -358,8 +358,8 @@ func (s *session) routeByCostPlan(text string, generic bool) (d routeDecision, k
 // does not change side because a new connection asked.
 
 // costSideBand is how far past a threshold a plan must be to move a shape
-// off the side it was last sent to.
-const costSideBand = 0.10
+// off the side it was last sent to, in percent of the threshold.
+const costSideBand = 10
 
 // costSidesMax bounds what a server's sides remember; past it, they are
 // forgotten and learned again.
@@ -401,14 +401,14 @@ func (p CostPolicy) toCopyBanded(pl pgPlan, last string) (bool, string) {
 	toCopy, why := p.toCopy(pl)
 	switch {
 	case last == RouteSource && toCopy:
-		over := p.CostThreshold > 0 && pl.cost >= (1+costSideBand)*p.CostThreshold ||
-			p.ScanRows > 0 && pl.maxSeqScanRows >= (1+costSideBand)*float64(p.ScanRows)
+		over := p.CostThreshold > 0 && pl.cost >= banded(p.CostThreshold, costSideBand) ||
+			p.ScanRows > 0 && pl.maxSeqScanRows >= banded(float64(p.ScanRows), costSideBand)
 		if !over {
 			return false, why + ", within " + bandWords + " over it, and the source answered this statement shape last"
 		}
 	case last == RouteCopy && !toCopy:
-		over := p.CostThreshold > 0 && pl.cost >= (1-costSideBand)*p.CostThreshold ||
-			p.ScanRows > 0 && pl.maxSeqScanRows >= (1-costSideBand)*float64(p.ScanRows)
+		over := p.CostThreshold > 0 && pl.cost >= banded(p.CostThreshold, -costSideBand) ||
+			p.ScanRows > 0 && pl.maxSeqScanRows >= banded(float64(p.ScanRows), -costSideBand)
 		if over {
 			return true, why + ", within " + bandWords + " under it, and the copy answered this statement shape last"
 		}
@@ -416,8 +416,11 @@ func (p CostPolicy) toCopyBanded(pl pgPlan, last string) (bool, string) {
 	return toCopy, why
 }
 
+// banded is threshold moved by pct percent, exact for whole thresholds.
+func banded(threshold float64, pct int) float64 { return threshold * float64(100+pct) / 100 }
+
 // bandWords is costSideBand in the log's words.
-var bandWords = fmt.Sprintf("%.0f %%", costSideBand*100)
+var bandWords = fmt.Sprintf("%d %%", costSideBand)
 
 // bandedToCopy is the plan's verdict for text on this connection's server,
 // kept within the band by the side the shape last went to, and remembered.
