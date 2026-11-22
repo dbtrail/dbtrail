@@ -18,16 +18,16 @@ import (
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
-// TestCapturer_TableAddedNotFull_CapturedThenWhole is the scenario the old skip
-// was written for, step by step on a live PostgreSQL, with the answer it has now.
-// Capture runs on table A (FULL); table B is created at the default replica
-// identity and added to the publication; both are written. Once, Run stopped for
-// every table; then B's changes were skipped and recorded. Now B is captured like
-// A: its INSERT whole, its UPDATE with the earlier row's key only. And after
-// ALTER TABLE b REPLICA IDENTITY FULL a restart on the same slot, unacknowledged
-// so PostgreSQL re-sends the old WAL, delivers B's old changes again as they were
-// made (below FULL) and the new ones with whole rows: exact at the boundary.
-func TestCapturer_TableAddedNotFull_CapturedThenWhole(t *testing.T) {
+// TestCapturer_TableAddedNotFull_SkippedThenResumes, step by step on a live
+// PostgreSQL. Capture runs on table A (FULL); table B is created at the
+// default replica identity and added to the publication; both are written.
+// Run keeps running, A's rows arrive, and B's changes are skipped and
+// recorded under replica_identity_not_full. After ALTER TABLE b REPLICA
+// IDENTITY FULL, made while capture runs, B's new changes are captured with
+// whole rows and no restart. A restart on the same slot, unacknowledged so
+// PostgreSQL re-sends the old WAL (decoded with the identity B had when it was
+// written), skips B's old changes again and delivers the new ones whole.
+func TestCapturer_TableAddedNotFull_SkippedThenResumes(t *testing.T) {
 	baseDSN := testutil.SkipIfNoPostgres(t)
 	ctx := context.Background()
 	const slot = "bintrail_pgcap_riadd"
@@ -85,23 +85,34 @@ func TestCapturer_TableAddedNotFull_CapturedThenWhole(t *testing.T) {
 	mustExec("UPDATE " + tb + " SET note = 'not full, updated' WHERE id = 1")
 	mustExec("INSERT INTO " + ta + " VALUES (2, 'after')")
 
-	var bUpd event.Event
 	got := collectUntil(t, events, runErr, 20*time.Second, func(seen map[string]bool) bool {
 		return seen[key(ta, event.EventInsert, "1")] && seen[key(ta, event.EventInsert, "2")]
-	}, func(ev event.Event) {
-		if ev.Table == tb && ev.EventType == event.EventUpdate {
-			bUpd = ev
-		}
 	})
-	if !got[key(tb, event.EventInsert, "1")] || !got[key(tb, event.EventUpdate, "1")] {
-		t.Fatalf("B's changes made below FULL must be captured; rows seen: %v", got)
-	}
-	if bUpd.RowBefore["id"] != "1" || !event.IsNotCapturedMarker(bUpd.RowBefore["note"]) || bUpd.RowAfter["note"] != "not full, updated" {
-		t.Errorf("B's UPDATE below FULL: before must hold the key and the not-captured marker, after the new row: before=%v after=%v", bUpd.RowBefore, bUpd.RowAfter)
+	if got[key(tb, event.EventInsert, "1")] || got[key(tb, event.EventUpdate, "1")] {
+		t.Fatalf("B's changes made below FULL must not be captured; rows seen: %v", got)
 	}
 	assertRunning(t, runErr)
-	if n := skips.Total(); n != 0 {
-		t.Fatalf("nothing is skipped for a table below FULL, got %d recorded skips", n)
+	if n := skips.Count(pgcapture.SkipReplicaIdentityNotFull); n != 2 || skips.Total() != 2 {
+		t.Fatalf("want B's 2 changes recorded under %q, got %d of %d", pgcapture.SkipReplicaIdentityNotFull, n, skips.Total())
+	}
+	assertLedgerNames(t, skips, pgcapture.SkipReplicaIdentityNotFull, "public."+tb)
+
+	// ── B to FULL while capture runs: captured from its next change, no restart ──
+	mustExec("ALTER TABLE " + tb + " REPLICA IDENTITY FULL")
+	mustExec("UPDATE " + tb + " SET note = 'full now' WHERE id = 1")
+	var live event.Event
+	got = collectUntil(t, events, runErr, 20*time.Second, func(seen map[string]bool) bool {
+		return seen[key(tb, event.EventUpdate, "1")]
+	}, func(ev event.Event) {
+		if ev.Table == tb && ev.EventType == event.EventUpdate {
+			live = ev
+		}
+	})
+	if live.RowBefore["note"] != "not full, updated" || live.RowAfter["note"] != "full now" {
+		t.Errorf("B's first UPDATE at FULL must carry whole images: before=%v after=%v", live.RowBefore, live.RowAfter)
+	}
+	if n := skips.Total(); n != 2 {
+		t.Errorf("nothing more is skipped once B is at FULL: %d", n)
 	}
 
 	// Stop WITHOUT acknowledging anything: the slot keeps the old WAL, so the
@@ -111,37 +122,32 @@ func TestCapturer_TableAddedNotFull_CapturedThenWhole(t *testing.T) {
 		t.Fatalf("Run returned non-nil on graceful cancel: %v", err)
 	}
 
-	// ── B to FULL, write, restart on the same slot ──
-	mustExec("ALTER TABLE " + tb + " REPLICA IDENTITY FULL")
+	// ── write, restart on the same slot ──
 	mustExec("INSERT INTO " + tb + " VALUES (2, 'full')")
 	mustExec("UPDATE " + tb + " SET note = 'full, updated' WHERE id = 2")
 	mustExec("INSERT INTO " + ta + " VALUES (3, 'after the fix')")
 
 	events, runErr, cancel = start(true)
 	defer cancel()
-	var upd, oldUpd event.Event
+	var upd event.Event
 	got = collectUntil(t, events, runErr, 20*time.Second, func(seen map[string]bool) bool {
 		return seen[key(tb, event.EventInsert, "2")] && seen[key(tb, event.EventUpdate, "2")] && seen[key(ta, event.EventInsert, "3")]
 	}, func(ev event.Event) {
-		if ev.Table == tb && ev.EventType == event.EventUpdate {
-			if ev.PKValues == "2" {
-				upd = ev
-			} else {
-				oldUpd = ev
-			}
+		if ev.Table == tb && ev.EventType == event.EventUpdate && ev.PKValues == "2" {
+			upd = ev
 		}
 	})
 	// PostgreSQL decodes the old WAL with the identity B had when it was
-	// written: the change comes again exactly as it came the first time.
-	if !got[key(tb, event.EventUpdate, "1")] || !event.IsNotCapturedMarker(oldUpd.RowBefore["note"]) {
-		t.Errorf("B's old UPDATE, re-sent from the WAL written below FULL, must come again with its key-only earlier row: seen=%v before=%v", got, oldUpd.RowBefore)
+	// written: its old changes come again below FULL, and are skipped again.
+	if got[key(tb, event.EventInsert, "1")] {
+		t.Errorf("B's old INSERT, re-sent from the WAL written below FULL, was emitted: %v", got)
 	}
 	if upd.RowBefore["note"] != "full" || upd.RowAfter["note"] != "full, updated" {
 		t.Errorf("B's UPDATE made at FULL must carry whole images: before=%v after=%v", upd.RowBefore, upd.RowAfter)
 	}
 	assertRunning(t, runErr)
-	if n := skips.Total(); n != 0 {
-		t.Errorf("want no recorded skip, got %d", n)
+	if n := skips.Count(pgcapture.SkipReplicaIdentityNotFull); n != 4 {
+		t.Errorf("the re-sent below-FULL changes are skipped again: want 4 skips in total, got %d", n)
 	}
 	cancel()
 	if err := <-runErr; err != nil {

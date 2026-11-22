@@ -51,7 +51,7 @@ func TestProbeHealth_Integration(t *testing.T) {
 	mustExec("CREATE TABLE probe_full (id int PRIMARY KEY)")
 	mustExec("CREATE TABLE probe_nofull (id int PRIMARY KEY)")
 	mustExec("ALTER TABLE probe_full REPLICA IDENTITY FULL")
-	// probe_nofull keeps the default identity (relreplident='d') → reported not-FULL.
+	// probe_nofull keeps the default identity (relreplident='d') → reported not captured.
 	mustExec("CREATE PUBLICATION " + pub + " FOR TABLE probe_full, probe_nofull")
 	if _, err := conn.Exec(ctx, "SELECT pg_create_logical_replication_slot($1, 'pgoutput')", slot); err != nil {
 		t.Fatalf("create slot: %v", err)
@@ -64,13 +64,13 @@ func TestProbeHealth_Integration(t *testing.T) {
 	if !snap.Slot.Exists {
 		t.Errorf("ProbeHealth slot Exists=false for a created slot: %+v", snap.Slot)
 	}
-	if len(snap.ReplicaIdentityNotFull) != 1 || !strings.Contains(snap.ReplicaIdentityNotFull[0], "probe_nofull") {
-		t.Errorf("ReplicaIdentityNotFull = %v, want exactly the one default-identity table", snap.ReplicaIdentityNotFull)
+	// The default-identity table is not captured; the list of tables without
+	// undo (what 0.138.0 captured below FULL) stays empty.
+	if len(snap.ReplicaIdentityNotFull) != 0 {
+		t.Errorf("ReplicaIdentityNotFull = %v, want none", snap.ReplicaIdentityNotFull)
 	}
-	for _, s := range snap.ReplicaIdentityNotFull {
-		if strings.Contains(s, "probe_full") {
-			t.Errorf("a REPLICA IDENTITY FULL table must not be reported not-FULL: %v", snap.ReplicaIdentityNotFull)
-		}
+	if len(snap.NotCaptured) != 1 || snap.NotCaptured[0] != "public.probe_nofull (not at REPLICA IDENTITY FULL)" {
+		t.Errorf("NotCaptured = %v, want exactly the one default-identity table", snap.NotCaptured)
 	}
 
 	// The publication's tables, by OID: a rename keeps a table's, and a

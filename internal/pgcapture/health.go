@@ -154,13 +154,14 @@ func QuerySlotHealth(ctx context.Context, conn *pgx.Conn, slotName string) (Slot
 // form the probe returns.
 type HealthSnapshot struct {
 	Slot SlotHealth
-	// ReplicaIdentityNotFull lists the tables that are captured without undo:
-	// "schema.table (relreplident=x)" of each one in the capture's scope that is
-	// not at REPLICA IDENTITY FULL (or has a partition that is not).
+	// ReplicaIdentityNotFull listed the tables captured without undo, which
+	// version 0.138.0 did for a table below REPLICA IDENTITY FULL. Always
+	// empty now: such a table is not captured, and is in NotCaptured.
 	ReplicaIdentityNotFull []string
 	// NotCaptured lists the tables in the capture's scope whose changes capture
-	// does not take, each with why: a replica identity that leaves the primary
-	// key out, a primary key declared DEFERRABLE. A table is in one list only.
+	// does not take, each with why: not at REPLICA IDENTITY FULL (or a
+	// partition that is not), a replica identity that leaves the primary key
+	// out, a primary key declared DEFERRABLE. A table is in one list only.
 	NotCaptured []string
 	// FlushedLSN is how far the source's WAL was flushed when the probe ran
 	// (QueryFlushedLSN): where a capture has to have read to for it to hold
@@ -226,11 +227,14 @@ func QueryPublishedTables(ctx context.Context, conn *pgx.Conn, publication strin
 }
 
 // HealthTableLists sorts the published tables the health panel names into
-// the two lists of HealthSnapshot: captured without undo, and not captured.
-// Only tables in the capture's scope (filters) are in either: the rest are
-// neither recorded nor skipped. A table whose key is deferrable is not
-// captured whatever its replica identity. Both lists are sorted and never
-// nil. Pure.
+// the two lists of HealthSnapshot. Every table of ids is below REPLICA
+// IDENTITY FULL, or has a partition that is, so every one in the capture's
+// scope is not captured (the decoder's gate, requireFull), each with why;
+// withoutUndo, what version 0.138.0 captured without undo, is always empty
+// now, and stays in the snapshot for the consoles that read it. Only tables
+// in the capture's scope (filters) are listed: the rest are neither recorded
+// nor skipped. A table whose key is deferrable is not captured whatever its
+// replica identity. Both lists are sorted and never nil. Pure.
 func HealthTableLists(ids []TableIdentity, deferrable []DeferrableKey, filters event.Filters) (withoutUndo, notCaptured []string) {
 	withoutUndo, notCaptured = []string{}, []string{}
 	isDeferrable := map[[2]string]bool{}
@@ -247,8 +251,10 @@ func HealthTableLists(ids []TableIdentity, deferrable []DeferrableKey, filters e
 			notCaptured = append(notCaptured, fmt.Sprintf("%s.%s (%d partition(s) with a replica identity without the primary key)", t.Schema, t.Table, len(t.PartitionsMissKey)))
 		case len(t.MissesKey) > 0:
 			notCaptured = append(notCaptured, fmt.Sprintf("%s.%s (replica identity without the primary key)", t.Schema, t.Table))
+		case t.Identity == "f":
+			notCaptured = append(notCaptured, fmt.Sprintf("%s.%s (%d partition(s) not at REPLICA IDENTITY FULL)", t.Schema, t.Table, len(t.PartitionsBelowFull)))
 		default:
-			withoutUndo = append(withoutUndo, t.Name())
+			notCaptured = append(notCaptured, fmt.Sprintf("%s.%s (not at REPLICA IDENTITY FULL)", t.Schema, t.Table))
 		}
 	}
 	sort.Strings(withoutUndo)

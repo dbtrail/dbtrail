@@ -25,6 +25,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
+	"github.com/dbtrail/dbtrail/internal/status"
 )
 
 // pkChangeSuspected reports whether a single-row lookup that found no baseline
@@ -320,6 +321,9 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	// final immediately — there are no events to consult for the #782
 	// PK-changing-UPDATE diagnosis.
 	if recBaselineOnly {
+		if err := baselineOnlyPGCheck(cmd.Context(), bmeta, metaErr, recIndexDSN, recSchema, recTable, baselinePath, connectAndCheckPGPastRead); err != nil {
+			return err
+		}
 		baselineRow, err := reconstruct.ReadBaselineRow(cmd.Context(), baselinePath, pkFilter, nil)
 		if err != nil {
 			return fmt.Errorf("read baseline: %w", err)
@@ -410,6 +414,11 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	// with no archive); stream_state.gap_lost_at records events permanently
 	// lost at the source, which no archive can fill.
 	if err := reconstruct.CheckCaptureGap(cmd.Context(), db, recSchema, recTable, snapshotTime, at, recAllowGaps); err != nil {
+		return err
+	}
+	// PostgreSQL: changes of the table the capture dropped since the
+	// snapshot (a table not at REPLICA IDENTITY FULL). No override.
+	if err := reconstruct.CheckPGPastRead(cmd.Context(), db, recSchema, recTable, bmeta); err != nil {
 		return err
 	}
 
@@ -1183,6 +1192,76 @@ func (e *noSnapshotError) Unwrap() error { return e.err }
 // listSnapshots lists a snapshot location, with the snapshot folders it could
 // not read; a variable so a test can make the listing fail.
 var listSnapshots = reconstruct.ListBaselinesUnreadable
+
+// baselineOnlyPGCheck is the PostgreSQL check of `reconstruct --baseline-only`
+// (reconstruct.CheckPGPastRead): a table whose capture dropped changes since
+// its rows were read is refused. It is a recovery path that needs no index,
+// so it never fails for the index: with none given, one that cannot be
+// reached, a record that cannot be read, or a footer that cannot be read
+// (which leaves no way to tell a PostgreSQL snapshot), it says the snapshot
+// was not checked and the read goes on. A snapshot with no WAL floor is not
+// a PostgreSQL one, and is not asked about.
+func baselineOnlyPGCheck(ctx context.Context, md baseline.DumpMetadata, metaErr error, indexDSN, schema, table, path string,
+	check func(ctx context.Context, indexDSN, schema, table string, md baseline.DumpMetadata) error) error {
+	notChecked := func(why string, args ...any) {
+		slog.Warn("the snapshot was not checked against the capture's record of dropped changes ("+why+"): a PostgreSQL table that is not at REPLICA IDENTITY FULL can be older here than the snapshot's time says",
+			append([]any{"schema", schema, "table", table, "snapshot", path}, args...)...)
+	}
+	switch {
+	case metaErr != nil:
+		// Nothing says this is a PostgreSQL snapshot: said without naming
+		// what only PostgreSQL has.
+		slog.Warn("the snapshot's footer could not be read, so it was not checked against the capture's record of dropped or lost changes",
+			"schema", schema, "table", table, "snapshot", path, "error", metaErr)
+		return nil
+	case md.LSN == 0:
+		return nil
+	case indexDSN == "":
+		notChecked("no --index-dsn")
+		return nil
+	}
+	err := check(ctx, indexDSN, schema, table, md)
+	switch {
+	case errors.Is(err, reconstruct.ErrPGPastReadNotCovered):
+		return err
+	case errors.Is(err, errPGIndexNotChecked):
+		_, why, _ := strings.Cut(err.Error(), ": ")
+		notChecked(why)
+	case err != nil:
+		notChecked("the index could not be read", "error", err)
+	}
+	return nil
+}
+
+// connectAndCheckPGPastRead is baselineOnlyPGCheck's check against the index.
+//
+// The index must be this PostgreSQL capture's: CheckPGPastRead asks nothing
+// of another (a MySQL source's index on the same server, a database with no
+// capture state), and would answer covered. And the record of lost events
+// must be readable here, since this path runs no capture-gap check of its
+// own. Either missing is errPGIndexNotChecked, with why.
+func connectAndCheckPGPastRead(ctx context.Context, indexDSN, schema, table string, md baseline.DumpMetadata) error {
+	db, err := config.Connect(indexDSN)
+	if err != nil {
+		return fmt.Errorf("connect to index: %w", err)
+	}
+	defer db.Close()
+	if flavor, _ := query.SourceFlavorDetail(db); flavor != "postgres" {
+		return fmt.Errorf("%w: the index given is not this PostgreSQL capture's", errPGIndexNotChecked)
+	}
+	st, err := status.LoadStreamState(ctx, db)
+	switch {
+	case err != nil:
+		return fmt.Errorf("read the capture's state: %w", err)
+	case st == nil || !st.GapColumnsPresent:
+		return fmt.Errorf("%w: the index does not record lost events", errPGIndexNotChecked)
+	}
+	return reconstruct.CheckPGPastRead(ctx, db, schema, table, md)
+}
+
+// errPGIndexNotChecked marks an index baselineOnlyPGCheck cannot check the
+// snapshot against; its message after the colon is why.
+var errPGIndexNotChecked = errors.New("not checked")
 
 // noSnapshotBeforeError is the refusal when the location holds no snapshot
 // of the table from at or before the moment. The lookup cannot say why, so

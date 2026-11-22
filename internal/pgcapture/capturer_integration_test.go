@@ -194,12 +194,12 @@ func TestCapturer_Integration(t *testing.T) {
 // TestCapturer_PublicationCoverageFailsLoud proves the validate-don't-create gate:
 // a publication that omits a requested table fails loud rather than silently
 // streaming zero events for it.
-// TestCapturer_NonFullReplicaIdentityAtStartIsCaptured: a publication table left at
-// the default replica identity (not FULL) once made Run refuse to start, and then
-// had its changes dropped and recorded in the skip ledger. It is captured now: Run
-// starts, says once which tables are without undo, and the table's rows are
-// emitted, the earlier row of an UPDATE or a DELETE with its key only.
-func TestCapturer_NonFullReplicaIdentityAtStartIsCaptured(t *testing.T) {
+// TestCapturer_NonFullReplicaIdentityAtStartIsSkipped: a publication table left at
+// the default replica identity (not FULL) does not stop capture, and is not
+// captured: Run starts, says once which tables are not captured and how to fix
+// them, and the table's changes are dropped and recorded in the skip ledger.
+// (Version 0.138.0 captured it, with the earlier rows in part.)
+func TestCapturer_NonFullReplicaIdentityAtStartIsSkipped(t *testing.T) {
 	baseDSN := testutil.SkipIfNoPostgres(t)
 	ctx := context.Background()
 	const pub = "bintrail_pgcap_ri_pub"
@@ -255,25 +255,13 @@ func TestCapturer_NonFullReplicaIdentityAtStartIsCaptured(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	byType := map[event.EventType]event.Event{}
-	collectUntil(t, events, runErr, 20*time.Second, func(seen map[string]bool) bool {
-		return seen[key(tbl, event.EventDelete, "1")]
-	}, func(ev event.Event) { byType[ev.EventType] = ev })
+	waitFor(t, 15*time.Second, func() bool { return skips.Count(pgcapture.SkipReplicaIdentityNotFull) >= 3 },
+		"the three changes of the non-FULL table recorded as skips")
 	assertRunning(t, runErr)
-	if ins := byType[event.EventInsert]; ins.RowAfter["body"] != "x" || ins.RowBefore != nil {
-		t.Errorf("INSERT: %+v", ins)
-	}
-	for _, typ := range []event.EventType{event.EventUpdate, event.EventDelete} {
-		ev := byType[typ]
-		if ev.RowBefore["id"] != "1" || !event.IsNotCapturedMarker(ev.RowBefore["body"]) {
-			t.Errorf("event type %d: the earlier row must hold the key and the not-captured marker, got %v", typ, ev.RowBefore)
+	for _, ev := range drain(events) {
+		if ev.Table == tbl && isRow(ev) {
+			t.Errorf("a row of the non-FULL table was emitted: %+v", ev)
 		}
-	}
-	if byType[event.EventUpdate].RowAfter["body"] != "y" {
-		t.Errorf("UPDATE after-image: %v", byType[event.EventUpdate].RowAfter)
-	}
-	if n := skips.Total(); n != 0 {
-		t.Errorf("nothing is skipped, got %d", n)
 	}
 	cancel()
 	if err := <-runErr; err != nil {
@@ -281,13 +269,14 @@ func TestCapturer_NonFullReplicaIdentityAtStartIsCaptured(t *testing.T) {
 	}
 	// What the operator reads at start, printed from the real run.
 	t.Logf("startup log:\n%s", logs.String())
-	for _, want := range []string{"1 table without undo", "public." + tbl, "Their changes are captured"} {
+	for _, want := range []string{"1 table not at REPLICA IDENTITY FULL", "public." + tbl, "their changes are NOT captured", "ALTER TABLE <t> REPLICA IDENTITY FULL",
+		"table is not at REPLICA IDENTITY FULL; its changes are NOT captured", `fix="ALTER TABLE \"public\".\"` + tbl + `\" REPLICA IDENTITY FULL"`} {
 		if !strings.Contains(logs.String(), want) {
-			t.Errorf("the startup warning lacks %q", want)
+			t.Errorf("the log lacks %q", want)
 		}
 	}
-	if strings.Contains(logs.String(), "NOT captured") {
-		t.Errorf("the table is captured; the log must not say otherwise")
+	if strings.Contains(logs.String(), "without undo") {
+		t.Errorf("the table is not captured; the log must not say it is captured without undo")
 	}
 }
 

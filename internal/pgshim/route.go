@@ -63,6 +63,7 @@ const (
 	ReasonCheapPlan         = "cheap_plan"          // the source's plan is below both thresholds (route_cost.go)
 	ReasonExplainFailed     = "explain_failed"      // the source's plan could not be had: EXPLAIN did not run, or was not asked
 	ReasonCopyTooOld        = "copy_too_old"        // the copy's answer was older than one the source already gave this connection
+	ReasonTableNotCaptured  = "table_not_captured"  // it reads a table whose capture lost or dropped changes since its snapshot (not_captured.go)
 
 	// Nobody ran it.
 	ReasonReadOnly        = "read_only"         // not a read, and the port is read-only toward the source
@@ -645,6 +646,9 @@ func parseLSN(s string) (uint64, bool) {
 func transientFallback(reason string) bool {
 	switch reason {
 	case ReasonCopyBehindSource, ReasonCopyAgeUnknown, ReasonCopyQueueFull, ReasonCopyWaitTimeout, ReasonCopyTooOld:
+		return true
+	case ReasonTableNotCaptured:
+		// The table's next snapshot read after its last drop heals it.
 		return true
 	}
 	return false

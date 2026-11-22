@@ -194,15 +194,12 @@ func missingPublishedOps(ins, upd, del bool) []string {
 //   - Every table in pg_publication_tables (which expands FOR ALL TABLES to the actual
 //     set PostgreSQL will stream — NOT the narrower client-side Filters) that is not
 //     at REPLICA IDENTITY FULL (pg_class.relreplident 'd' default, 'i' using-index,
-//     'n' nothing) is RETURNED, never refused. Such a table is captured: PostgreSQL
-//     sends at most the key of the row an UPDATE or a DELETE changed, the decoder
-//     stores that earlier row in part, and only undo needs it whole. The caller
-//     warns with the list. Only the tables filters accepts are returned: the
-//     decoder neither warns about nor captures the others.
-//
-// The one table below FULL that is NOT captured, a replica identity that leaves a
-// primary-key column out (TableIdentity.MissesKey), is skipped by the decoder at each
-// description of the table (cacheRelation); here it is only named.
+//     'n' nothing), or partitioned with a partition that is not, is RETURNED, never
+//     refused: capture starts and takes the other tables. Such a table is NOT
+//     captured: the decoder skips it at each description it receives
+//     (cacheRelation, judgePartitions), and the caller warns with the list. Only
+//     the tables filters accepts are returned: the decoder neither warns about
+//     nor captures the others.
 func validateReplicaIdentity(ctx context.Context, conn *pgx.Conn, publication string, filters event.Filters) ([]TableIdentity, error) {
 	if err := checkWALLevel(ctx, conn); err != nil {
 		return nil, err
@@ -285,8 +282,10 @@ type TableIdentity struct {
 	PartitionsMissKey []string
 }
 
-// Captured reports whether capture takes the table's changes, as far as its
-// replica identity says.
+// Captured reports whether the table's replica identity holds its primary
+// key (no MissesKey, no PartitionsMissKey). It says nothing more: a table
+// listed here is below REPLICA IDENTITY FULL, so capture takes none of its
+// changes whatever this says.
 func (t TableIdentity) Captured() bool {
 	return len(t.MissesKey) == 0 && len(t.PartitionsMissKey) == 0
 }
@@ -758,9 +757,10 @@ func (t TableIdentity) Name() string {
 }
 
 // SplitTableIdentities sorts the tables below REPLICA IDENTITY FULL by what
-// it means for each: captured without undo; not captured because the
-// identity leaves the primary key out; and with no identity at all, where
-// PostgreSQL itself refuses UPDATE and DELETE. A table is in one list only.
+// else is true of each: nothing else (withoutUndo, the name of what version
+// 0.138.0 captured without undo); an identity that leaves the primary key
+// out; and no identity at all, where PostgreSQL itself refuses UPDATE and
+// DELETE. None of them is captured. A table is in one list only.
 func SplitTableIdentities(all []TableIdentity) (withoutUndo, missesKey, noIdentity []TableIdentity) {
 	for _, t := range all {
 		switch {

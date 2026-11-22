@@ -19,7 +19,10 @@ import (
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
-// A table below REPLICA IDENTITY FULL is captured. PostgreSQL sends, of the row
+// The code that stores an earlier row in part, which no table reaches while
+// the decoder's gate on tables below REPLICA IDENTITY FULL is on: every
+// decoder here is built with the gate off (WithCaptureBelowFull, tests only).
+// Below FULL PostgreSQL sends, of the row
 // as it was before an UPDATE or a DELETE, the identity columns only ('K'), or
 // no earlier row at all; the decoder stores that earlier row in part. These
 // tests pin what it stores, from messages shaped exactly as a live PostgreSQL
@@ -116,7 +119,7 @@ func TestDecode_BelowFull_ImagesByIdentityAndChange(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			skips := parser.NewSkipCounters(slog.New(slog.DiscardHandler))
-			d := pgcapture.NewDecoder(pkResolver(tc.pk...), event.Filters{}, nil, pgcapture.WithSkipCounters(skips))
+			d := pgcapture.NewDecoder(pkResolver(tc.pk...), event.Filters{}, nil, pgcapture.WithSkipCounters(skips), pgcapture.WithCaptureBelowFull())
 			rel := relMsgRI(1, "public", "t", tc.ri, tc.identity, tc.cols...)
 			ev, emit := mustDecode(t, d, rel)
 			if !emit || ev.EventType != event.EventRelation {
@@ -221,7 +224,7 @@ func TestDecode_BelowFull_ImagesByIdentityAndChange(t *testing.T) {
 // The undo refusal is what a reader gives for such a change: the decoder's
 // image, through the index's JSON, into the shared check.
 func TestDecode_BelowFull_UndoRefusesWhatWasStored(t *testing.T) {
-	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil)
+	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil, pgcapture.WithCaptureBelowFull())
 	mustDecode(t, d, relMsgRI(1, "Sales", "Order Items", 'd', []string{"id"}, "id", "Note"))
 	mustDecode(t, d, beginMsg())
 	ev, _ := mustDecode(t, d, &pglogrepl.DeleteMessage{RelationID: 1,
@@ -242,7 +245,7 @@ func TestDecode_BelowFull_UndoRefusesWhatWasStored(t *testing.T) {
 // sends a 'K' old tuple carrying the key in full and the new tuple carries it
 // as 'u'. The new row's key is filled from 'K': a 'u' never reaches a key.
 func TestDecode_BelowFull_UnchangedLargeKeyFilledFromKeyTuple(t *testing.T) {
-	d := pgcapture.NewDecoder(pkResolver("k"), event.Filters{}, nil)
+	d := pgcapture.NewDecoder(pkResolver("k"), event.Filters{}, nil, pgcapture.WithCaptureBelowFull())
 	mustDecode(t, d, relMsgRI(1, "public", "t", 'd', []string{"k"}, "k", "v"))
 	mustDecode(t, d, beginMsg())
 	big := strings.Repeat("x", 4000)
@@ -264,7 +267,7 @@ func TestDecode_BelowFull_UnchangedLargeKeyFilledFromKeyTuple(t *testing.T) {
 func TestDecode_BelowFull_UnchangedValueIsNeverNullNorNotCaptured(t *testing.T) {
 	for _, withK := range []bool{false, true} {
 		t.Run(fmt.Sprintf("old tuple K=%v", withK), func(t *testing.T) {
-			d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil)
+			d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil, pgcapture.WithCaptureBelowFull())
 			mustDecode(t, d, relMsgRI(1, "public", "t", 'd', []string{"id"}, "id", "v", "big"))
 			mustDecode(t, d, beginMsg())
 			m := &pglogrepl.UpdateMessage{RelationID: 1, NewTuple: tuple(textCol("2"), textCol("b"), toastCol())}
@@ -296,7 +299,7 @@ func TestDecode_BelowFull_IdentityColumnWithoutValue(t *testing.T) {
 	}{{"n", nullCol}, {"u", toastCol}} {
 		t.Run("outside the primary key/"+datum.name, func(t *testing.T) {
 			skips := parser.NewSkipCounters(slog.New(slog.DiscardHandler))
-			d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil, pgcapture.WithSkipCounters(skips))
+			d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil, pgcapture.WithSkipCounters(skips), pgcapture.WithCaptureBelowFull())
 			mustDecode(t, d, relMsgRI(1, "public", "t", 'i', []string{"id", "u"}, "id", "u", "v"))
 			mustDecode(t, d, beginMsg())
 			ev, emit := mustDecode(t, d, &pglogrepl.DeleteMessage{RelationID: 1,
@@ -315,7 +318,7 @@ func TestDecode_BelowFull_IdentityColumnWithoutValue(t *testing.T) {
 			var buf bytes.Buffer
 			skips := parser.NewSkipCounters(slog.New(slog.DiscardHandler))
 			d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{},
-				slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})), pgcapture.WithSkipCounters(skips))
+				slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})), pgcapture.WithSkipCounters(skips), pgcapture.WithCaptureBelowFull())
 			mustDecode(t, d, relMsgRI(1, "public", "t", 'd', []string{"id"}, "id", "v"))
 			buf.Reset()
 			got := decodeAll(t, d, beginMsg(),
@@ -348,7 +351,7 @@ func TestDecode_BelowFull_IdentityColumnWithoutValue(t *testing.T) {
 // the table again before the next change, and each change is stored by what
 // held when it was made.
 func TestDecode_IdentitySwitchedMidStream_ExactPerChange(t *testing.T) {
-	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil)
+	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil, pgcapture.WithCaptureBelowFull())
 	def := func() *pglogrepl.RelationMessage {
 		return relMsgRI(1, "public", "t", 'd', []string{"id"}, "id", "v", "big")
 	}
@@ -385,7 +388,7 @@ func TestDecode_IdentitySwitchedMidStream_ExactPerChange(t *testing.T) {
 // Under FULL nothing changes: an unchanged large value inside the whole old
 // row is still a hard error.
 func TestDecode_Full_UnchangedValueInWholeOldRowStillFails(t *testing.T) {
-	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil)
+	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil, pgcapture.WithCaptureBelowFull())
 	mustDecode(t, d, relMsgRI(1, "public", "t", 'f', nil, "id", "big"))
 	mustDecode(t, d, beginMsg())
 	_, _, err := d.Decode(&pglogrepl.UpdateMessage{RelationID: 1,
@@ -416,7 +419,7 @@ func TestDecode_FullRootOverPartitions_EachRowByWhatItHolds(t *testing.T) {
 		pgcapture.WithPartitionsResolver(func(oid uint32, _, _ string) (pgcapture.Partitions, error) {
 			asked = append(asked, oid)
 			return catalog[oid], nil
-		}))
+		}), pgcapture.WithCaptureBelowFull())
 	cols := []string{"id", "v", "big"}
 	mustDecode(t, d, relMsgRI(1, "public", "parted", 'f', nil, cols...))
 	mustDecode(t, d, relMsgRI(2, "public", "plain", 'f', nil, cols...))
@@ -498,7 +501,7 @@ func TestDecode_IdentityChangedSinceTheChangeWasWritten_ReadFromTheRow(t *testin
 	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil,
 		pgcapture.WithPartitionsResolver(func(uint32, string, string) (pgcapture.Partitions, error) {
 			return pgcapture.Partitions{Known: true, Partitioned: true}, nil
-		}))
+		}), pgcapture.WithCaptureBelowFull())
 	cols := []string{"id", "u", "x", "v"}
 	mustDecode(t, d, relMsgRI(1, "public", "parted", 'f', nil, cols...))
 	mustDecode(t, d, beginMsg())
@@ -544,7 +547,7 @@ func TestDecode_PartitionsNotKnown_RowByRow_OneAttemptAMinuteForAllTables(t *tes
 				return pgcapture.Partitions{}, errBoom
 			}
 			return pgcapture.Partitions{Known: true}, nil // plain tables, as most are
-		}))
+		}), pgcapture.WithCaptureBelowFull())
 	now := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
 	pgcapture.SetClockForTest(d, func() time.Time { return now })
 	del := func(oid uint32, old *pglogrepl.TupleData) event.Event {
@@ -632,7 +635,7 @@ func TestDecode_PartitionsNotKnown_ThenSkipped_LedgerHoldsTheStretch(t *testing.
 						return pgcapture.Partitions{}, errBoom
 					}
 					return pgcapture.Partitions{Known: true, Partitioned: true, BelowFull: 1, MissesKey: 1}, nil
-				}))
+				}), pgcapture.WithCaptureBelowFull())
 			now := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
 			pgcapture.SetClockForTest(d, func() time.Time { return now })
 			rel := func() *pglogrepl.RelationMessage {
@@ -680,7 +683,7 @@ func TestDecode_RootWithoutKeyOverPartitions_ReadFromTheRow(t *testing.T) {
 		{Known: true, Partitioned: true}, // every partition at FULL today
 	} {
 		d := pgcapture.NewDecoder(pkResolver(), event.Filters{}, nil,
-			pgcapture.WithPartitionsResolver(func(uint32, string, string) (pgcapture.Partitions, error) { return parts, nil }))
+			pgcapture.WithPartitionsResolver(func(uint32, string, string) (pgcapture.Partitions, error) { return parts, nil }), pgcapture.WithCaptureBelowFull())
 		mustDecode(t, d, relMsgRI(1, "public", "nokey", 'f', nil, cols...))
 		mustDecode(t, d, beginMsg())
 		ev, _ := mustDecode(t, d, &pglogrepl.DeleteMessage{RelationID: 1,
@@ -720,7 +723,7 @@ func TestDecode_PartitionedRootWithoutIdentity_CapturedUnderThePrimaryKey(t *tes
 				return pgcapture.Partitions{}, errBoom
 			}
 			return answer, nil
-		}))
+		}), pgcapture.WithCaptureBelowFull())
 	mustDecode(t, d, relMsgRI(1, "public", "parted", 'n', nil, cols...))
 	mustDecode(t, d, beginMsg())
 	// As PostgreSQL 16 sends them (the probe in the pull request).
@@ -773,7 +776,7 @@ func TestDecode_PlainTableAtFull_OldRowAlwaysWhole(t *testing.T) {
 	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil,
 		pgcapture.WithPartitionsResolver(func(uint32, string, string) (pgcapture.Partitions, error) {
 			return pgcapture.Partitions{Known: true}, nil
-		}))
+		}), pgcapture.WithCaptureBelowFull())
 	mustDecode(t, d, relMsgRI(1, "public", "plain", 'f', nil, "id", "v", "big"))
 	mustDecode(t, d, beginMsg())
 	for _, old := range []*pglogrepl.TupleData{
@@ -813,7 +816,7 @@ func TestDecode_PartitionIdentityWithoutPrimaryKey_TableSkipped(t *testing.T) {
 			skips := parser.NewSkipCounters(slog.New(slog.DiscardHandler))
 			catalog := pgcapture.Partitions{Known: true, Partitioned: true, BelowFull: 1, MissesKey: 1}
 			d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil, pgcapture.WithSkipCounters(skips),
-				pgcapture.WithPartitionsResolver(func(uint32, string, string) (pgcapture.Partitions, error) { return catalog, nil }))
+				pgcapture.WithPartitionsResolver(func(uint32, string, string) (pgcapture.Partitions, error) { return catalog, nil }), pgcapture.WithCaptureBelowFull())
 			rel := func() *pglogrepl.RelationMessage {
 				return relMsgRI(1, "public", "parted", ri, []string{"id"}, "id", "u", "v")
 			}
@@ -828,7 +831,7 @@ func TestDecode_PartitionIdentityWithoutPrimaryKey_TableSkipped(t *testing.T) {
 			}
 			st := skipLedger(t, skips)[pgcapture.SkipReplicaIdentityIndexWithoutPrimaryKey]
 			t.Logf("ledger detail: %s", st.LastDetail)
-			if st.Count != 1 || !slices.Equal(st.Tables, []string{"public.parted"}) || !strings.Contains(st.LastDetail, "ALTER TABLE <partition> REPLICA IDENTITY DEFAULT") {
+			if st.Count != 1 || !slices.Equal(st.Tables, []string{"public.parted"}) || !strings.Contains(st.LastDetail, "ALTER TABLE <partition> REPLICA IDENTITY FULL") {
 				t.Errorf("ledger entry %+v", st)
 			}
 			// The partition's identity is put back: described again, the table flows.
@@ -843,7 +846,7 @@ func TestDecode_PartitionIdentityWithoutPrimaryKey_TableSkipped(t *testing.T) {
 // A description at FULL, and a tuple PostgreSQL itself labels key-only, or an
 // UPDATE with no old tuple at all: never stored as a whole row.
 func TestDecode_FullDescription_KeyOnlyTupleIsStoredInPart(t *testing.T) {
-	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil)
+	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil, pgcapture.WithCaptureBelowFull())
 	mustDecode(t, d, relMsgRI(1, "public", "t", 'f', nil, "id", "v", "big"))
 	mustDecode(t, d, beginMsg())
 	cols := []string{"id", "v", "big"}
@@ -864,7 +867,7 @@ func TestDecode_FullDescription_KeyOnlyTupleIsStoredInPart(t *testing.T) {
 func TestDecode_BelowFull_QuotedNames(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	d := pgcapture.NewDecoder(pkResolver("Order Id"), event.Filters{}, logger)
+	d := pgcapture.NewDecoder(pkResolver("Order Id"), event.Filters{}, logger, pgcapture.WithCaptureBelowFull())
 	cols := []string{"Order Id", `Qty "x"`, "NOTE"}
 	mustDecode(t, d, relMsgRI(2, "Sales", `Order "Items"`, 'd', []string{"Order Id"}, cols...))
 	var line map[string]any
@@ -886,7 +889,7 @@ func TestDecode_BelowFull_QuotedNames(t *testing.T) {
 // A column added, then one dropped, between changes: each change's before-image
 // holds the columns its own after-image holds.
 func TestDecode_BelowFull_ColumnsAddedAndDroppedBetweenChanges(t *testing.T) {
-	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil)
+	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil, pgcapture.WithCaptureBelowFull())
 	shapes := [][]string{{"id", "v"}, {"id", "v", "added"}, {"id", "added"}}
 	for _, cols := range shapes {
 		mustDecode(t, d, relMsgRI(1, "public", "t", 'd', []string{"id"}, cols...))
@@ -914,7 +917,7 @@ func TestDecode_NoIdentity_InsertAndTruncateCaptured(t *testing.T) {
 			var buf bytes.Buffer
 			skips := parser.NewSkipCounters(slog.New(slog.DiscardHandler))
 			d := pgcapture.NewDecoder(pkResolver(tc.pk...), event.Filters{},
-				slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})), pgcapture.WithSkipCounters(skips))
+				slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})), pgcapture.WithSkipCounters(skips), pgcapture.WithCaptureBelowFull())
 			mustDecode(t, d, relMsgRI(1, "public", "t", tc.ri, nil, "id", "v"))
 			if !strings.Contains(buf.String(), "has no replica identity") || strings.Contains(buf.String(), "without undo") {
 				t.Errorf("the warning must say the table has no replica identity, got:\n%s", buf.String())
@@ -942,7 +945,7 @@ func TestDecode_NoIdentity_InsertAndTruncateCaptured(t *testing.T) {
 func TestDecode_BelowFull_WarnsWithoutUndoOncePerDescription(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, logger)
+	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, logger, pgcapture.WithCaptureBelowFull())
 	b := relMsgRI(2, "public", "b", 'd', []string{"id"}, "id", "v")
 	msgs := []pglogrepl.Message{b, beginMsg()}
 	for i := range 5 {
@@ -975,7 +978,7 @@ func TestDecode_BelowFull_OutOfFilterNeitherWarnedNorCaptured(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	skips := parser.NewSkipCounters(slog.New(slog.DiscardHandler))
-	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{Tables: map[string]bool{"public.a": true}}, logger, pgcapture.WithSkipCounters(skips))
+	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{Tables: map[string]bool{"public.a": true}}, logger, pgcapture.WithSkipCounters(skips), pgcapture.WithCaptureBelowFull())
 	got := decodeAll(t, d, relMsgRI(2, "public", "b", 'd', []string{"id"}, "id", "v"), beginMsg(),
 		&pglogrepl.InsertMessage{RelationID: 2, Tuple: tuple(textCol("1"), textCol("x"))},
 		commitMsg())
@@ -988,7 +991,7 @@ func TestDecode_BelowFull_OutOfFilterNeitherWarnedNorCaptured(t *testing.T) {
 }
 
 func TestDecode_BelowFull_BinaryDatumInKeyTupleFailsLoud(t *testing.T) {
-	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil)
+	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, nil, pgcapture.WithCaptureBelowFull())
 	mustDecode(t, d, relMsgRI(1, "public", "t", 'd', []string{"id"}, "id", "v"))
 	mustDecode(t, d, beginMsg())
 	_, _, err := d.Decode(&pglogrepl.DeleteMessage{RelationID: 1,
