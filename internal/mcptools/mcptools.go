@@ -1025,7 +1025,7 @@ func MakeRecoverTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Rec
 		resolver := t.Resolver
 		var resolverErr error
 		if !t.ResolverLoaded {
-			resolver, resolverErr = metadata.NewResolver(t.DB, 0)
+			resolver, resolverErr = query.LatestSchemaResolver(t.DB)
 			if resolverErr != nil {
 				resolver = nil
 			}
@@ -1865,7 +1865,7 @@ func (t *Target) resolvePKRange(opts *query.Options) error {
 			return fmt.Errorf("pk_min/pk_max: the active profile does not allow reading %s.%s", opts.Schema, opts.Table)
 		}
 	}
-	resolver, err := metadata.NewResolver(t.DB, 0)
+	resolver, err := query.LatestSchemaResolver(t.DB)
 	if err != nil {
 		return fmt.Errorf("pk_min/pk_max need the schema snapshot to check the primary key type: %w", err)
 	}

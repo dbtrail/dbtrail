@@ -23,7 +23,6 @@ import (
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/indexer"
-	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/parser"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
@@ -368,7 +367,7 @@ func runQuery(cmd *cobra.Command, args []string) error {
 	// key (see the staleness note above). After the profile rules, as the
 	// MCP tools do.
 	if pkRange != nil {
-		resolver, resolverErr := metadata.NewResolver(db, 0)
+		resolver, resolverErr := query.LatestSchemaResolver(db)
 		if err := resolvePKRange(resolver, resolverErr, qSchema, qTable, pkRange); err != nil {
 			return err
 		}

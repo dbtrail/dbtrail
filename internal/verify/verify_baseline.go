@@ -47,13 +47,10 @@ const flavorPostgres = "postgres"
 // metadata.NewResolver(db, 0) would resolve only the newest relation and every
 // other table would StatusError; the per-table resolver folds each relation's own
 // MAX snapshot_id into one whole-schema view. MySQL keeps the latest-snapshot
-// resolver. This is the #1018-wide resolver seam — any console reconstruct
-// surface for PG hits the same one-table-per-id trap.
+// resolver. The decision itself is query.LatestSchemaResolver, shared with the
+// other read surfaces (#3110).
 func ResolverFor(db *sql.DB) (*metadata.Resolver, error) {
-	if query.SourceFlavor(db) == flavorPostgres {
-		return metadata.NewLatestPerTableResolver(db)
-	}
-	return metadata.NewResolver(db, 0)
+	return query.LatestSchemaResolver(db)
 }
 
 // anchorLabel renders the human anchor string for a result: an LSN for a
