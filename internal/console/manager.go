@@ -154,6 +154,16 @@ func newConnManager(reg *Registry, profileActive bool) *connManager {
 // fan-out a tab switch fires (capabilities + schemas + events) opens ONE
 // connection, not four.
 func (cm *connManager) Resolve(ctx context.Context, id string) (*bundle, error) {
+	b, err := cm.resolveBundle(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return cm.freshPGShapes(ctx, b), nil
+}
+
+// resolveBundle is Resolve before a PostgreSQL server's table shapes are
+// brought up to date (freshPGShapes).
+func (cm *connManager) resolveBundle(ctx context.Context, id string) (*bundle, error) {
 	boot, id, err := cm.target(id)
 	if err != nil {
 		return nil, err
@@ -218,6 +228,7 @@ func (cm *connManager) Resolve(ctx context.Context, id string) (*bundle, error) 
 			return nb, nil
 		}
 		cm.mu.Unlock()
+		forgetPGShapes(b.db)
 		_ = b.db.Close() // built against a deleted or DSN-edited entry
 		if !stillThere {
 			return nil, ErrUnknownServer
@@ -320,7 +331,14 @@ func (cm *connManager) buildBundle(entry ServerEntry) (*bundle, error) {
 	}
 	b := cm.newBundle(db, cfg.DBName, entry)
 	b.dsn = entry.DSN
-	b.resolver, b.resolverUnavailable = loadResolver(db)
+	// The entry's flavor is fixed when it is made, so it picks the loader
+	// without reading the index; a MySQL or MariaDB entry loads the newest
+	// snapshot as before (#3110).
+	if entry.IsPostgres() {
+		b.resolver, b.resolverUnavailable = openPGShapes(context.Background(), db)
+	} else {
+		b.resolver, b.resolverUnavailable = loadResolverForFlavor(db, "")
+	}
 	return b, nil
 }
 
@@ -449,7 +467,8 @@ func (b *bundle) findBaseline(ctx context.Context, schema, table string, at time
 	return path, snapshotTime, stale, err
 }
 
-// loadResolver loads the latest schema snapshot, best-effort: a missing
+// loadResolver loads the latest schema snapshot (each table's own newest on a
+// PostgreSQL index, query.LatestSchemaResolver), best-effort: a missing
 // snapshot just means recovery falls back to all-column WHERE clauses.
 // unavailable reports a failure OTHER than "no snapshots exist" — permissions
 // on schema_snapshots, an un-migrated index, a transient error at open — so
@@ -459,7 +478,16 @@ func loadResolver(db *sql.DB) (r *metadata.Resolver, unavailable bool) {
 	if db == nil {
 		return nil, false
 	}
-	r, err := metadata.NewResolver(db, 0)
+	return loadResolverForFlavor(db, query.SourceFlavor(db))
+}
+
+// loadResolverForFlavor is loadResolver for a caller that has already read
+// the index's flavor (the boot server reads it once).
+func loadResolverForFlavor(db *sql.DB, flavor string) (r *metadata.Resolver, unavailable bool) {
+	if db == nil {
+		return nil, false
+	}
+	r, err := query.LatestSchemaResolverForFlavor(db, flavor)
 	switch {
 	case err == nil:
 		return r, false
@@ -500,6 +528,7 @@ func (cm *connManager) evict(id string) {
 	delete(cm.bundles, id)
 	cm.mu.Unlock()
 	if b != nil && b.db != nil {
+		forgetPGShapes(b.db)
 		if err := b.db.Close(); err != nil {
 			slog.Warn("console: closing evicted server connection", "server", id, "error", err)
 		}
@@ -614,6 +643,7 @@ func (cm *connManager) CloseAll() {
 	cm.mu.Unlock()
 	for id, b := range bundles {
 		if b.db != nil {
+			forgetPGShapes(b.db)
 			if err := b.db.Close(); err != nil {
 				slog.Warn("console: closing server connection at shutdown", "server", id, "error", err)
 			}

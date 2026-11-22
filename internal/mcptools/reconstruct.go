@@ -270,7 +270,7 @@ func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest,
 		// caller supplies only pipe-delimited values, matching the CLI and console.
 		resolver := t.Resolver
 		if !t.ResolverLoaded {
-			r, rerr := metadata.NewResolver(t.DB, 0)
+			r, rerr := query.LatestSchemaResolver(t.DB)
 			if rerr != nil {
 				return ErrorResult(fmt.Errorf("load schema snapshot (required to resolve primary-key columns): %w", rerr)), nil, nil
 			}
