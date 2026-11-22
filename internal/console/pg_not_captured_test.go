@@ -29,6 +29,14 @@ func TestPGNotCapturedOf(t *testing.T) {
 		}
 		return sql.NullString{String: string(doc), Valid: true}
 	}
+	ledgerAt := func(at time.Time, pos uint64, tables ...string) sql.NullString {
+		doc, err := json.Marshal(map[string]any{"replica_identity_not_full": map[string]any{
+			"count": 1, "last_at": at, "last_pos": pos, "tables": tables}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sql.NullString{String: string(doc), Valid: true}
+	}
 	state := func(skips sql.NullString) *status.StreamStateInfo {
 		return &status.StreamStateInfo{Mode: "gtid", GapColumnsPresent: true, CaptureSkips: skips}
 	}
@@ -57,12 +65,12 @@ func TestPGNotCapturedOf(t *testing.T) {
 	}{
 		{"no ledger", state(sql.NullString{}), "", cutAt(read), ""},
 		{"a drop of orders after the snapshot read", state(ledger(read.Add(time.Minute), false, "public.orders")), "", cutAt(read), "public.orders"},
-		{"a drop older than the snapshot read: the copy answers as today", state(ledger(read.Add(-time.Minute), false, "public.orders")), "", cutAt(read), ""},
+		{"a drop well before the snapshot read: the copy answers as today", state(ledger(read.Add(-10*time.Minute), false, "public.orders")), "", cutAt(read), ""},
 		// The table was ALTERed to FULL after its drops: the ledger still
 		// dates its last drop after this snapshot, and it stays listed until
 		// a snapshot read after that drop.
 		{"altered to FULL after drops, the same snapshot", state(ledger(read.Add(time.Minute), false, "public.orders")), "", cutAt(read), "public.orders"},
-		{"altered to FULL after drops, a snapshot read after the last drop", state(ledger(read.Add(time.Minute), false, "public.orders")), "", cutAt(read.Add(2 * time.Minute)), ""},
+		{"altered to FULL after drops, a snapshot read after the last drop", state(ledger(read.Add(time.Minute), false, "public.orders")), "", cutAt(read.Add(10 * time.Minute)), ""},
 		{"a ledger whose list of tables is cut short", state(ledger(read.Add(time.Minute), true, "public.other")), "", cutAt(read), "public.orders public.items"},
 		{"a ledger that names no table", state(ledger(read.Add(time.Minute), false)), "", cutAt(read), "public.orders public.items"},
 		{"a ledger that does not parse", state(sql.NullString{String: "{", Valid: true}), "", cutAt(read), "public.orders public.items"},
@@ -75,7 +83,9 @@ func TestPGNotCapturedOf(t *testing.T) {
 			func(views.BaselineTable) pgCut {
 				return pgCut{refusal: "the snapshot of x was published over a known loss of captured changes", gap: true}
 			}, "public.orders public.items"},
-		{"a snapshot that does not say when it was read is not a loss", state(ledger(read.Add(time.Minute), true)), "", cutAt(time.Time{}), ""},
+		{"a snapshot with its LSN and no read time is judged by position", state(ledgerAt(read, 100, "public.orders")), "",
+			func(views.BaselineTable) pgCut { return pgCut{md: baseline.DumpMetadata{LSN: 50}} }, "public.orders"},
+		{"a snapshot that says neither what it reaches nor when it was read is not a loss", state(ledger(read.Add(time.Minute), true)), "", cutAt(time.Time{}), ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := lost(tc.st, tc.unreadable, tc.cutOf); got != tc.want {

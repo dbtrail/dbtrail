@@ -10,10 +10,11 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
@@ -783,6 +784,9 @@ func (x *pgTailSource) Broken(ctx context.Context, tables []views.BaselineTable)
 	if err != nil {
 		return nil, fmt.Errorf("read the capture's state: %w", err)
 	}
+	if err := pgReadLedgerStrict(ctx, x.b.db, st); err != nil {
+		return nil, fmt.Errorf("read the capture's record of dropped changes: %w", err)
+	}
 	snapshotID, err := x.maxSnapshotID(ctx)
 	if err != nil {
 		return nil, err
@@ -946,62 +950,56 @@ func sameStringSet(a, b []string) bool {
 // Dropped changes refuse too. A PostgreSQL capture records them in
 // capture_skips (a table below REPLICA IDENTITY FULL has its changes dropped
 // while the other tables keep flowing), and a tail built from the index would
-// serve such a table with old rows. The rule is the MySQL one
-// (tailCaptureLoss): a drop dated at or after the source read. Unlike it,
-// this answers for one table: an entry that names the table, or that does not
-// say which tables it covers (no list, or a list cut short), refuses it. An
-// entry's time is its newest drop of any table it names, so a table named
-// with an old drop beside a newer one of another table is refused as well:
-// over-refusing sends the table to a full read, never serves it stale.
+// serve such a table with old rows. That rule is the one the snapshot update
+// applies, reconstruct.PGSkippedSince: by WAL position (readLSN, the
+// snapshot's floor, against the drop's commit LSN) where both are known, by
+// the clock with a margin where not. The snapshot's read time is the source
+// server's clock and a drop's the capture daemon's, so the clocks alone would
+// let a daemon behind the source date a new drop before the read. st's
+// ledger must have been read strictly (pgReadLedgerStrict).
+//
+// A snapshot that records neither its LSN nor when its rows were read
+// refuses: nothing says what its rows reach. One with only its LSN is the
+// rule's to judge.
 //
 // A NULL ledger is no drop: PostgreSQL captures from before the ledger never
 // wrote one, and they stopped instead of dropping. One that is there and does
 // not parse refuses.
-//
-// readLSN is the snapshot's own LSN (its footer's), for the ledger's rule
-// (pgLedgerSkipped). The snapshot's read time is the SOURCE's clock and a
-// drop's time the daemon's, so they are not compared here.
 func pgTailCaptureLoss(st *status.StreamStateInfo, readLSN uint64, sourceRead time.Time, schema, table string) string {
 	switch {
 	case st == nil:
 		return "the capture's state is not recorded in the index"
 	case !st.GapColumnsPresent:
 		return "the capture's record of lost events is not readable"
-	case sourceRead.IsZero():
-		return "the snapshot does not say when its rows were read from the source"
+	case sourceRead.IsZero() && readLSN == 0:
+		return "the snapshot does not say when its rows were read from the source, nor the position they reach"
 	case st.GapLostAt.Valid && !st.GapLostAt.Time.Before(sourceRead):
 		return "capture lost events since the snapshot's rows were read from the source"
 	}
-	return pgLedgerSkipped(st, readLSN, sourceRead, schema, table)
+	return reconstruct.PGSkippedSince(st, readLSN, sourceRead, schema, table)
 }
 
-// pgLedgerSkipped is the ledger's part of pgTailCaptureLoss: why capture's
-// record of dropped changes says the table may have lost changes since its
-// snapshot was read, "" when it does not.
-//
-// The one call site of that rule for the copy. It is to call
-// reconstruct.PGSkippedSince (#3189), the rule the snapshot update applies,
-// once that is exported; until then it is the rule as it was, which compares
-// the snapshot's read time (the source's clock) with a drop's (the daemon's).
-func pgLedgerSkipped(st *status.StreamStateInfo, readLSN uint64, sourceRead time.Time, schema, table string) string {
-	_ = readLSN
-	if !st.CaptureSkips.Valid || strings.TrimSpace(st.CaptureSkips.String) == "" {
-		return ""
+// pgReadLedgerStrict reads st's ledger of dropped changes again, strictly:
+// status.LoadStreamState reads it best effort and leaves it NULL on an error,
+// which reconstruct.PGSkippedSince takes for no drop. A column the index does
+// not have yet (an index from before the ledger) is no ledger, as there; the
+// row gone between the two reads keeps what was read. st nil, or without
+// the loss columns: nothing to read.
+func pgReadLedgerStrict(ctx context.Context, db *sql.DB, st *status.StreamStateInfo) error {
+	if st == nil || !st.GapColumnsPresent {
+		return nil
 	}
-	skips, readable := st.ParseCaptureSkips()
-	if !readable {
-		return "the capture's record of dropped changes is not readable"
+	var skips sql.NullString
+	err := db.QueryRowContext(ctx, "SELECT capture_skips FROM stream_state WHERE id = 1").Scan(&skips)
+	var my *mysql.MySQLError
+	switch {
+	case err == nil:
+		st.CaptureSkips = skips
+	case errors.As(err, &my) && my.Number == 1054, errors.Is(err, sql.ErrNoRows):
+	default:
+		return err
 	}
-	name := schema + "." + table
-	for reason, sk := range skips {
-		if sk.Count == 0 || (!sk.LastAt.IsZero() && sk.LastAt.Before(sourceRead)) {
-			continue
-		}
-		if len(sk.Tables) == 0 || sk.TablesTruncated || slices.Contains(sk.Tables, name) {
-			return fmt.Sprintf("capture dropped changes of %s (%s) since the snapshot's rows were read from the source", name, reason)
-		}
-	}
-	return ""
+	return nil
 }
 
 var _ tailSource = (*pgTailSource)(nil)

@@ -3,13 +3,10 @@ package console
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
-
-	"github.com/go-sql-driver/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/status"
@@ -85,8 +82,8 @@ func pgNotCapturedOf(tables []views.BaselineTable, cutOf func(views.BaselineTabl
 			continue // no tail for another reason: not a loss of capture
 		}
 		read := baseline.SourceReadOf(c.md).At
-		if read.IsZero() {
-			continue // when its rows were read is not recorded: not a loss either
+		if read.IsZero() && c.md.LSN == 0 {
+			continue // what its rows reach is not recorded: not a loss either
 		}
 		if why := pgTailCaptureLoss(st, c.md.LSN, read, t.Schema, t.Table); why != "" {
 			out = append(out, PGTableNotCaptured{Schema: t.Schema, Table: t.Table, Why: why, SnapshotRead: read})
@@ -106,20 +103,7 @@ func pgCaptureLossState(ctx context.Context, db *sql.DB) (*status.StreamStateInf
 		pgWarnLossStateUnread(err)
 		return nil, "the capture's state could not be read from the index (DBTrail's log has the details)"
 	}
-	if st == nil || !st.GapColumnsPresent {
-		// pgTailCaptureLoss refuses both itself.
-		return st, ""
-	}
-	var skips sql.NullString
-	err = db.QueryRowContext(ctx, "SELECT capture_skips FROM stream_state WHERE id = 1").Scan(&skips)
-	var my *mysql.MySQLError
-	switch {
-	case err == nil:
-		st.CaptureSkips = skips
-	case errors.As(err, &my) && my.Number == 1054, errors.Is(err, sql.ErrNoRows):
-		// No ledger column (an index from before it), or the row went
-		// between the two reads: as LoadStreamState has it.
-	default:
+	if err := pgReadLedgerStrict(ctx, db, st); err != nil {
 		pgWarnLossStateUnread(err)
 		return nil, "the capture's record of dropped changes could not be read from the index (DBTrail's log has the details)"
 	}
