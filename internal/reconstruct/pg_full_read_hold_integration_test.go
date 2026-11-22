@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
@@ -19,7 +20,7 @@ func TestReconstructTables_PGUpdateWaitsForCaptureToPassAFullRead(t *testing.T) 
 	// What the hold publishes, read from the table file: past the read the
 	// changes are written into it in full, which with deltas on (the default)
 	// would be a pair beside it instead.
-	SetPGTableDeltas(t, false)
+	reconstruct.SetPGTableDeltas(t, false)
 	// Row 1 changed at 0x600 ("first") and at 0x700 ("second"); the full
 	// read opened at 0x800, so its file holds "second". Its floor is 0x500.
 	setup := func(t *testing.T, since string) (*pgFixture, string, time.Time) {
