@@ -32,3 +32,7 @@ func pgNeedTails(ctx context.Context) bool {
 	v, _ := ctx.Value(pgNeedTailsKey{}).(bool)
 	return v
 }
+
+// PGNeedsTails reports whether ctx was marked by WithPGNeedTails, for the
+// host that marks it.
+func PGNeedsTails(ctx context.Context) bool { return pgNeedTails(ctx) }
