@@ -57,10 +57,11 @@ func hideHostPaths(msg string, roots []string) string {
 	// client can type one, and the engine repeats what it was given) says
 	// nothing about the path after it. A folder inside one just hidden
 	// (/tmp/tmp, /data/copy/tmp) follows a letter of the hidden one, so it
-	// is not a folder of its own.
+	// is not a folder of its own. An equals sign or an at sign before it
+	// starts a value (x=/data, user@/data), not a longer path.
 	var b strings.Builder
 	for i := 0; i < len(msg); {
-		if i == 0 || !pathByte(msg[i-1]) {
+		if i == 0 || !pathByte(msg[i-1]) || msg[i-1] == '=' || msg[i-1] == '@' {
 			if n := wholePathAt(msg, i, clean); n > 0 {
 				b.WriteString(hiddenPathWord)
 				i += n
@@ -75,7 +76,9 @@ func hideHostPaths(msg string, roots []string) string {
 
 // wholePathAt returns the length of the first of roots (longest first) that
 // msg holds at i as a whole path, or 0. It ends the message, a path
-// component, or is followed by a character that cannot be part of a path. A
+// component, or is followed by a character that cannot be part of a path, or
+// by a period that ends the sentence (one followed by the end of the text, a
+// space or a new line, so /data/copy.parquet is not taken for it). A
 // URL keeps its path: after "scheme://host" a folder follows a letter of the
 // host or a slash, both of which can be part of a path, so the caller never
 // asks here.
@@ -86,6 +89,9 @@ func wholePathAt(msg string, i int, roots []string) int {
 		}
 		end := i + len(r)
 		if end == len(msg) || msg[end] == '/' || !pathByte(msg[end]) {
+			return len(r)
+		}
+		if msg[end] == '.' && (end+1 == len(msg) || msg[end+1] == ' ' || msg[end+1] == '\n') {
 			return len(r)
 		}
 	}

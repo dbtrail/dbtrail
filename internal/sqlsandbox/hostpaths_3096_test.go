@@ -290,6 +290,17 @@ func TestHideHostPaths(t *testing.T) {
 		// Two folders back to back.
 		{"/data/copy:/tmp/x", h + ":" + h + "/x"},
 		{"[/data/copy, /tmp]", "[" + h + ", " + h + "]"},
+		// A folder that ends a sentence.
+		{"in /data/copy.", "in " + h + "."},
+		{"in /data/copy. Next", "in " + h + ". Next"},
+		{"in /data/copy.\nNext", "in " + h + ".\nNext"},
+		// A file name with a dot is not the folder followed by a period.
+		{"in /data/copy.parquet", "in /data/copy.parquet"},
+		{"in /data/copy.old/x", "in /data/copy.old/x"},
+		// After an equals sign or an at sign.
+		{"x=/data/copy/a.parquet", "x=" + h + "/a.parquet"},
+		{"@/data/copy/x", "@" + h + "/x"},
+		{"path=/tmp", "path=" + h},
 		// Not a known folder: a longer name, a folder inside another one, a
 		// URL, a date, a division.
 		{"/tmpfiles/x", "/tmpfiles/x"},
@@ -441,6 +452,41 @@ func TestScalarFunctionsNamedLikeTheHostAreReviewed(t *testing.T) {
 			t.Errorf("refusedScalarFunctions has %q, not listed as reviewed here", n)
 		}
 	}
+	// A macro is expanded where it is called, so a statement names only the
+	// macro: one whose body reads a refused function, or one of the engine's
+	// refused views, must be refused itself, whatever its name.
+	refused := append(append([]string{}, knownRefusedTableFunctions...), "getvariable", "current_setting")
+	rows, err := db.Query(`SELECT DISTINCT function_name, function_type, lower(coalesce(macro_definition, ''))
+		FROM duckdb_functions() WHERE function_type IN ('macro', 'table_macro') ORDER BY 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var name, typ, body string
+		if err := rows.Scan(&name, &typ, &body); err != nil {
+			t.Fatal(err)
+		}
+		n++
+		macroRefused := refusedScalarFunctions[name] || slices.Contains(knownRefusedTableFunctions, name)
+		for _, fn := range refused {
+			if regexp.MustCompile(`\b`+regexp.QuoteMeta(fn)+`\s*\(`).MatchString(body) && !macroRefused {
+				t.Errorf("the engine's %s %s reads %s, refused on the copy, and is not refused itself", typ, name, fn)
+			}
+		}
+		for v := range refusedEngineViews {
+			if regexp.MustCompile(`\b`+regexp.QuoteMeta(v)+`\b`).MatchString(body) && !macroRefused {
+				t.Errorf("the engine's %s %s reads the refused view %s, and is not refused itself", typ, name, v)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 {
+		t.Fatal("the engine listed no macros: the check above checked nothing")
+	}
 }
 
 // reviewedSafeSettings are the engine's settings whose name speaks of
@@ -558,6 +604,13 @@ func TestEngineViewsOverRefusedFunctionsAreRefused(t *testing.T) {
 		for _, fn := range refused {
 			if regexp.MustCompile(`\b`+regexp.QuoteMeta(fn)+`\s*\(`).MatchString(text) && !refusedEngineViews[strings.ToLower(view)] {
 				t.Errorf("the engine's view %s.%s reads %s, refused on the copy, and is not in refusedEngineViews", schema, view, fn)
+			}
+		}
+		// A view over one of the refused views reads it by name, with no
+		// parenthesis after it.
+		for v := range refusedEngineViews {
+			if v != strings.ToLower(view) && regexp.MustCompile(`\b`+regexp.QuoteMeta(v)+`\b`).MatchString(text) && !refusedEngineViews[strings.ToLower(view)] {
+				t.Errorf("the engine's view %s.%s reads the refused view %s, and is not in refusedEngineViews", schema, view, v)
 			}
 		}
 	}
