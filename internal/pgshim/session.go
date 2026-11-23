@@ -91,6 +91,10 @@ type session struct {
 	// be read for at its last read (catalog), "" when it was read or failed
 	// otherwise.
 	catalogBusy string
+	// argsBound: the statement being decided holds arguments already written
+	// into its text, whose declared types the text no longer shows, so no
+	// star of it is exempted (paddedExempt).
+	argsBound bool
 	// costVerdicts are the source's plans' verdicts this connection
 	// remembers, by statement shape (route_cost.go).
 	costVerdicts map[string]costVerdict

@@ -259,7 +259,11 @@ func (s *session) columnTypes(stmt string) (types map[string][]string, unread bo
 	if perr != nil {
 		return nil, true
 	}
-	return withColumnOrder(screenTypes(v.tables, tablesRead(stmt, v.tables)), v.tables), false
+	types = withColumnOrder(screenTypes(v.tables, tablesRead(stmt, v.tables)), v.tables)
+	if s.argsBound {
+		types[starUnprovenKey] = []string{relType}
+	}
+	return types, false
 }
 
 // untypedAsInteger is a column type for every name in toks: INTEGER, the type

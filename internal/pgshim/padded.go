@@ -96,6 +96,9 @@ func screenTypes(tables []CatalogTable, read func(*CatalogTable) bool) map[strin
 	out := map[string][]string{}
 	for i := range tables {
 		t := &tables[i]
+		// The table is in the catalog, by name and by schema.name (paddedExempt).
+		out[listedKey+strings.ToLower(t.Name)] = []string{relType}
+		out[listedKey+strings.ToLower(t.Schema+"."+t.Name)] = []string{relType}
 		for _, c := range t.Columns {
 			n := strings.ToLower(c.Name)
 			typ := strings.ToUpper(c.Type)
@@ -103,6 +106,9 @@ func screenTypes(tables []CatalogTable, read func(*CatalogTable) bool) map[strin
 				typ = m
 			}
 			out[n] = append(out[n], typ)
+			if !provenNotPadded(c) && (read == nil || read(t)) {
+				out[starUnprovenKey] = []string{relType}
+			}
 			if paddedType(typ) {
 				// The table itself: its name, or its alias, written as a
 				// value stands for every column of it (paddedUse).
@@ -226,6 +232,9 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 	if !anyPadded {
 		return ""
 	}
+
+	// The stars whose padded columns the statement never reads (padded_star.go).
+	exempt := paddedExempt(toks, types)
 
 	// One SELECT and nothing else, and where its select list's items are.
 	selects, sel := 0, -1
@@ -425,6 +434,9 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 				// count(*) counts rows, whatever they hold.
 				continue
 			}
+			if exempt[i] {
+				continue
+			}
 			if whole, _ := wholeItem(i); !whole {
 				return "* of a table with a char(n) column, outside a plain select list (PostgreSQL ignores its trailing blanks, the copy compares them)"
 			}
@@ -543,6 +555,12 @@ func (s *session) paddedVeto(text string) string {
 		veto = paddedInText(text, types)
 	default:
 		veto = paddedUse(toks, types)
+		// A star this leaves to a connection with no source to fall back on
+		// passes the whole screen too: it was refused before, and the copy
+		// must not now answer it with text sorted its own way.
+		if padded, _ := paddedAmong(types); veto == "" && padded && !s.canFallBack() && len(paddedExempt(toks, types)) > 0 {
+			veto = screenForCopy(toks, types)
+		}
 	}
 	if veto != "" {
 		if unread {
