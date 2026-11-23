@@ -577,6 +577,13 @@ func TestPreLogin_firstModeClientHangsUpDuringAStatement(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatalf("the statement did not reach the index server's events (it saw: %s)", idx.statements())
 	}
+	time.Sleep(300 * time.Millisecond)
+	select {
+	case <-idx.cancelled:
+		t.Fatalf("DEBUG the statement ended before the client left (the index server saw: %s)", idx.statements())
+	default:
+	}
+	t.Logf("DEBUG saw: %s", idx.statements())
 	// The client is gone, with its statement still running.
 	_ = c.Conn().Close()
 	select {
