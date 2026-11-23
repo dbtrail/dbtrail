@@ -59,9 +59,10 @@ type expectation struct {
 func TestIntegrationPGCompare(t *testing.T) {
 	baseDSN := testutil.SkipIfNoPostgres(t)
 	// Under -race, as CI runs it, the list and the numeric statements again
-	// without a forwarding account take about six minutes; under the ten
-	// go test gives the package.
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	// without a forwarding account take about nine minutes (a statement
+	// takes a second there, and the list holds some 450); CI gives the
+	// package 20 (-timeout, ci.yml), go test's own ten are not enough.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
 	setup, err := pgx.Connect(ctx, baseDSN)
