@@ -19919,8 +19919,41 @@ function startupNotice(res, name) {
     content: [doctorCards(shown), opt, all].filter(Boolean), button: "Back to the form" };
 }
 
+// removeServerPrompt is the question asked before a server is removed. For a
+// PostgreSQL server "nothing happens" is not the whole answer (#3079): removing
+// it leaves its replication slot on the source, and PostgreSQL keeps WAL for an
+// inactive slot without limit. DBTrail does not drop the slot on its own, so
+// the question gives the statement.
+//
+// That statement is copied and run on a production database, and the saved
+// slot name is not validated when it is saved, so it is not trusted here: only
+// a name PostgreSQL itself accepts for a slot is shown or put in the statement.
+// Quoting would not be enough (a backslash reads differently with
+// standard_conforming_strings off). Any other value is not repeated, and the
+// question shows how to list the slots instead. The server's name is free
+// text in the same message, so the PostgreSQL text shows a limited form of it
+// (letters, digits, space, ". _ -", at most 64 characters) that cannot imitate
+// the warning or the statement.
+function removeServerPrompt(s) {
+  if (s.flavor !== "postgres" && s.flavor !== "postgresql") return 'Remove server "' + s.name + '"? This only removes the saved connection; nothing happens to the server itself.';
+  const shown = Array.from(String(s.name).replace(/[^\p{L}\p{N} ._-]/gu, " "));
+  const name = shown.length > 64 ? shown.slice(0, 64).join("") + "…" : shown.join("");
+  const ask = 'Remove server "' + name + '"? This removes the saved connection and does not touch the PostgreSQL source. ';
+  const risk = " keeps holding WAL on the source until it is dropped, which can fill the source's disk.";
+  const list = "SELECT slot_name, database, active FROM pg_replication_slots;";
+  const slot = s.source_slot;
+  if (typeof slot === "string" && /^[a-z0-9_]{1,63}$/.test(slot)) {
+    return ask + 'The slot saved for this server, "' + slot + '", may still exist there. If it does, it' + risk +
+      " First check that it exists, is not active and is not used by another tool:\n\n" + list +
+      "\n\nThen, connected to the slot's database on the source, after removing the server:\n\nSELECT pg_drop_replication_slot('" + slot + "');";
+  }
+  const why = slot ? " The slot name saved for this server is not a valid PostgreSQL slot name, so it is not shown." : " DBTrail has no slot name saved for this server.";
+  return ask + "If DBTrail captured from it, its replication slot" + risk + why +
+    " To see the slots, run this on the source:\n\n" + list;
+}
+
 async function deleteServer(s) {
-  if (!window.confirm('Remove server "' + s.name + '"? This only removes the saved connection; nothing happens to the server itself.')) return;
+  if (!window.confirm(removeServerPrompt(s))) return;
   try { await api("/api/servers/" + encodeURIComponent(s.id), { method: "DELETE" }); }
   catch (err) { toastError("Could not remove server: " + ((err && err.message) || err)); return; }
   if (currentServer === s.id) { await switchServer(""); const sel = document.getElementById("server-select"); if (sel) sel.value = defaultServerId; }
