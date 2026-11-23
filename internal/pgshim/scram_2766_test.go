@@ -689,6 +689,11 @@ func TestSCRAM_aWrongPasswordTakesTheSameWork(t *testing.T) {
 	coldOtherMsg, coldOther := try("nobody")
 	change("app1-\uff52\u00e9\u00b2")
 	coldLoginMsg, coldLogin := try("app1")
+	// The other name's first login since the change costs what the login
+	// user's did (a change forgets every name's keys, #3097).
+	if _, again := try("nobody"); again != coldLogin {
+		t.Errorf("first login since the change: %+v for another, %+v for a login user", again, coldLogin)
+	}
 	// Warm: nothing changed since.
 	warmLoginMsg, warmLogin := try("app1")
 	warmOtherMsg, warmOther := try("nobody")
@@ -733,7 +738,7 @@ func TestSCRAM_attemptsDeriveNothingNew(t *testing.T) {
 // The first mode (bintrail-pg flashback): an unknown tenant and a known one
 // with a wrong password, the same answer and the same work.
 func TestSCRAM_firstModeUnknownTenantAndWrongPassword(t *testing.T) {
-	auth, err := shim.NewTenantAuth(map[string]string{"alice": "alice-pw"})
+	auth, err := shim.NewTenantAuth(map[string]string{"alice": "alice-pw", "bob": "bob-pw"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -765,9 +770,7 @@ func TestSCRAM_firstModeUnknownTenantAndWrongPassword(t *testing.T) {
 	}
 	// The first login under a name derives its keys, the same number for a
 	// tenant and for nobody (a salt for each name, #3097).
-	WarmPasswords([]string{"a set that forgets every key"})
-	_, firstKnown := try("alice", "wrong")
-	WarmPasswords([]string{"and another"})
+	_, firstKnown := try("bob", "wrong")
 	_, firstUnknown := try("mallory", "wrong")
 	if firstKnown != firstUnknown || firstKnown < 1000 {
 		t.Errorf("first login under a name, work (checks + 1000 x derivations): %d for a tenant, %d for an unknown one", firstKnown, firstUnknown)
