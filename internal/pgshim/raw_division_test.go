@@ -18,6 +18,9 @@ func TestCopyScreen_rawDivisionLeftSide(t *testing.T) {
 		"SELECT ratio / 4, ratio * qty / 4 FROM t", "SELECT id + qty / 2 FROM t",
 		"SELECT amount + qty / 2 FROM t", "SELECT id FROM t WHERE qty / 2 > 1",
 		"SELECT DISTINCT qty / 2 FROM t", "SELECT CASE WHEN id > 1 THEN qty / 2 END FROM t",
+		// A numeric on the left is the macro's division since #3238.
+		"SELECT amount * qty / 2 FROM t", "SELECT o.amount * o.qty / 2 FROM t o", "SELECT (amount + 1) * qty / 2 FROM t",
+		"SELECT 1.5 * qty / 2 FROM t", "SELECT abs(amount) * qty / 2 FROM t", "SELECT amount / 2 FROM t",
 	} {
 		if veto := CopyScreen(q, types); veto != "" {
 			t.Errorf("%s: sent to the source for %s", q, veto)
@@ -25,25 +28,22 @@ func TestCopyScreen_rawDivisionLeftSide(t *testing.T) {
 	}
 	for _, q := range []string{
 		"SELECT sum(id) * qty / 2 FROM t GROUP BY qty",
-		"SELECT amount * qty / 2 FROM t",
-		"SELECT o.amount * o.qty / 2 FROM t o",
-		"SELECT (amount + 1) * qty / 2 FROM t",
 		"SELECT (qty + 1) * qty / 2 FROM t",
-		"SELECT 1.5 * qty / 2 FROM t",
 		"SELECT amount % qty / 2 FROM t",
-		"SELECT amount / qty * pack / 2 FROM t",
 		"SELECT amount ^ qty / 2 FROM t",
 		"SELECT amount::int * qty / 2 FROM t",
 		"SELECT note * qty / 2 FROM t",
 		"SELECT nosuch * qty / 2 FROM t",
-		"SELECT abs(amount) * qty / 2 FROM t",
 		"SELECT $1 * qty / 2 FROM t",
 		"SELECT 7 / 2",
+		// More than 18 digits is a number the lexer does not read, so what
+		// is written here always fits a bigint.
+		"SELECT qty / 12345678901234567890 FROM t",
+		"SELECT 12345678901234567890 * qty / 2 FROM t",
 		// As before: % is not the copy's, and the second slash of a chain
 		// has a number before it.
 		"SELECT qty % 7 / 2 FROM t",
 		"SELECT qty / 2 / 3 FROM t",
-		"SELECT amount / 2 FROM t",
 		"WITH c(qty) AS (SELECT amount FROM t) SELECT qty / 2 FROM c",
 		"SELECT qty / 2 FROM (SELECT amount FROM t) AS s(qty)",
 	} {

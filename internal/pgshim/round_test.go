@@ -286,6 +286,8 @@ FROM order_line GROUP BY ol_supply_w_id ORDER BY ol_supply_w_id LIMIT 10`,
 	for _, q := range []string{
 		"SELECT round(d_ytd, 1), round(d_ytd, 3), round(d_ytd), round(d_ytd, -2) FROM district",
 		"SELECT d_w_id, CASE WHEN d_w_id = 1 THEN round(avg(d_tax), 2) ELSE 0 END, coalesce(round(sum(d_ytd), 1), 0) FROM district GROUP BY d_w_id",
+		// avg of a numeric on its own: the numeric avg since #3219.
+		"SELECT avg(d_tax) FROM district",
 	} {
 		if veto := CopyScreen(q, types); veto != "" {
 			t.Errorf("%s: sent to the source for %s", q, veto)
@@ -297,7 +299,6 @@ FROM order_line GROUP BY ol_supply_w_id ORDER BY ol_supply_w_id LIMIT 10`,
 	for q, says := range map[string]string{
 		"SELECT round(d_ytd, 16) FROM district":                          "round",
 		"SELECT round(avg(d_tax) OVER (), 2) FROM district":              "avg",
-		"SELECT avg(d_tax) FROM district":                                "_bintrail_pg_avg",
 		"SELECT round(d_ytd, 2) FROM district UNION SELECT 0":            "UNION",
 		"SELECT greatest(round(d_ytd, 2), 0) FROM district":              "greatest",
 		"SELECT _bintrail_pg_round_div(d_ytd, 2, 2, 0.01) FROM district": "_bintrail_pg_round_div",
