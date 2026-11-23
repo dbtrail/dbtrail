@@ -260,6 +260,9 @@ func pgRouterSettingsFrom(cmd *cobra.Command) (pgRouterSettings, error) {
 	if st.Cost, err = pgRouterCostFrom(cmd); err != nil {
 		return st, err
 	}
+	// The copy refuses a result of more rows than this: a statement whose
+	// plan says it returns more is the source's (pgshim.CostPolicy.RowCap).
+	st.Cost.RowCap = int64(st.SQLPortMaxRows)
 	st.StatusStatements, _ = f.GetBool("status-statements")
 	if !f.Changed("status-statements") {
 		if v := os.Getenv("BINTRAIL_PG_ROUTER_STATUS_STATEMENTS"); v != "" {

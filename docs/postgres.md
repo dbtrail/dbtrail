@@ -1795,7 +1795,31 @@ sends it to the copy only when:
   scan run by parallel workers counts the rows of all of them.
 
 Anything else is answered by the source (`cheap_plan` in `/status`). 0 turns
-one rule off; both cannot be 0. In the compose `.env` they are
+one rule off; both cannot be 0.
+
+An expensive statement the copy could not return is answered by the source
+too (`result_over_row_cap` in `/status`). The copy returns at most
+`--sql-port-max-rows` rows for one statement (10,000 by default) and refuses a
+larger result, it does not cut it. So when the plan says the statement
+returns more rows than that, the port does not run it on the copy only to
+refuse it: your PostgreSQL answers it, and sends every row. The plan's
+estimate is used for one kind of statement, the one where it can be trusted:
+one table read alone, whole or by an index, with nothing left to check row
+by row (no `Filter` in the plan), under a `LIMIT` or a sort at most
+(`SELECT * FROM orders`, `SELECT * FROM orders WHERE id > 5000 ORDER BY id`).
+A `LIMIT` at or under the cap, written as a number, keeps the statement on
+the copy. A prepared statement with parameters (`LIMIT $1`, `WHERE id > $1`)
+is never sent to the source for its size: its plan is asked for once,
+without its values, PostgreSQL then estimates by fixed guesses (a `LIMIT $1`
+is taken to return a tenth of the rows), and the port does not take a guess
+for the size of a result. It is tried on the copy, as before. For anything
+else (a filter no index serves, a join, an aggregate, `GROUP BY`, `DISTINCT`,
+a window, a `UNION`, a partitioned table) the estimate is a guess, so the
+statement is tried on the copy as before, and one that does return more rows
+than the cap still gets the copy's error (`54000`, "the result has more than
+N rows"). A statement that the source answers this way runs there in full:
+it is the read of a whole table or a wide index range that the client asked
+for, and it loads the source as it would without the port. In the compose `.env` they are
 `PG_ROUTER_COST_THRESHOLD` and `PG_ROUTER_SCAN_ROWS`. The defaults come from a
 TPC-C source of 97 million rows on PostgreSQL 16: reads by a primary key cost
 1 to 12, an order's lines by an index 12, the stock level join 712, a
@@ -2093,6 +2117,7 @@ The reasons, with the MySQL port's names where they mean the same:
 | copy | `hidden_rules` | the server hides tables or columns: nothing is sent to its source |
 | copy | `capture_gate` | the server forwards with the capture account, and the statement did not pass that account's check, so the copy answered it without asking the source for its plan |
 | source | `cheap_plan` | its plan on the source is under both thresholds: the source answers it, by its indexes |
+| source | `result_over_row_cap` | its plan on the source is expensive and says it returns more rows than the copy returns for one statement (`--sql-port-max-rows`): the copy would refuse the result, so it is not tried there |
 | source | `explain_failed` | its plan could not be had (the source refused the `EXPLAIN`, a text of more than one statement): the source answers it, its error included |
 | source | `in_transaction` | the client's transaction block |
 | source | `veto` | a construct the copy answers differently, or is not known to answer the same |
