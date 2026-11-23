@@ -1,5 +1,7 @@
 package pgshim
 
+import "strings"
+
 // notTextType is the type the screen gives a name the statement defines
 // (an alias of a select list, a column of a WITH or a subquery) whose every
 // definition is known not to be text: a count, a sum, a number, a numeric
@@ -23,7 +25,7 @@ const notTextType = "DERIVED"
 // A definition may name another (a WITH's column read in the next one), so
 // what is known grows until it stops changing. Types not known (nil) stay
 // not known: every name may be text.
-func withAliasTypes(toks []rtToken, types map[string][]string) map[string][]string {
+func withAliasTypes(toks []rtToken, types map[string][]string, untyped bool) map[string][]string {
 	defs := aliasDefinitions(toks)
 	if types == nil || len(defs) == 0 {
 		return types
@@ -32,10 +34,10 @@ func withAliasTypes(toks []rtToken, types map[string][]string) map[string][]stri
 		// Names given in a column list (AS b(n), WITH c(n) AS) are not
 		// among the definitions read here, so one of them may share a name
 		// with a definition that is: nothing defined is known then.
-		return mergeAliasTypes(types, defs, nil)
+		return mergeAliasTypes(types, defs, nil, untyped)
 	}
 	notText := map[string]bool{}
-	cur := mergeAliasTypes(types, defs, notText)
+	cur := mergeAliasTypes(types, defs, notText, untyped)
 	for range len(defs) + 1 {
 		changed := false
 		for name, exprs := range defs {
@@ -43,11 +45,22 @@ func withAliasTypes(toks []rtToken, types map[string][]string) map[string][]stri
 				continue
 			}
 			known := true
+			// Inside its own definition a name is the column of that name
+			// (SELECT amount AS amount), not what the statement makes of it.
+			own, had := cur[name]
+			if column, ok := types[name]; ok {
+				cur[name] = column
+			}
 			for _, e := range exprs {
 				if !exprNotText(e, cur) {
 					known = false
 					break
 				}
+			}
+			if had {
+				cur[name] = own
+			} else {
+				delete(cur, name)
 			}
 			if known {
 				notText[name] = true
@@ -57,12 +70,27 @@ func withAliasTypes(toks []rtToken, types map[string][]string) map[string][]stri
 		if !changed {
 			break
 		}
-		cur = mergeAliasTypes(types, defs, notText)
+		cur = mergeAliasTypes(types, defs, notText, untyped)
 	}
 	return cur
 }
 
-func mergeAliasTypes(types map[string][]string, defs map[string][][]rtToken, notText map[string]bool) map[string][]string {
+// mergeAliasTypes is types with the names the statement defines read as what
+// they stand for. A defined name known not to be text (notText) keeps the
+// types of the columns of that name and gains notTextType. Any other
+// defined name may stand for text: when no column has its name it is of
+// unknown type (absent), as it always was, and so it is when the columns of
+// its name are not text (the rules already take an unknown name for possibly
+// text where that matters) and when none of its definitions reads text (a
+// table's alias). When a text
+// column has its name it keeps that column's types and gains maybeTextType,
+// so that it never loses the text of the column it stands for (SELECT name
+// AS name ... ORDER BY name sorts text, and so does min(name) AS name).
+//
+// untyped: the types are not the columns' own (screenUntyped), every name
+// is a whole number there, and a defined name is of unknown type as before:
+// that screen may not veto what the typed one lets through.
+func mergeAliasTypes(types map[string][]string, defs map[string][][]rtToken, notText map[string]bool, untyped bool) map[string][]string {
 	out := make(map[string][]string, len(types)+len(defs))
 	for k, v := range types {
 		if _, defined := defs[k]; !defined {
@@ -70,11 +98,73 @@ func mergeAliasTypes(types map[string][]string, defs map[string][][]rtToken, not
 		}
 	}
 	for name := range defs {
-		if notText[name] {
-			out[name] = append(append([]string(nil), types[name]...), notTextType)
+		column := types[name]
+		switch {
+		case notText[name]:
+			out[name] = append(append([]string(nil), column...), notTextType)
+		case !untyped && anyTextType(column) && readsText(defs[name], types, defs, notText):
+			out[name] = append(append([]string(nil), column...), maybeTextType)
 		}
 	}
 	return out
+}
+
+// maybeTextType is the type a defined name gains when it shares its name
+// with a text column and is not known to stand for something that is not
+// text. typeIsText must take it for text (TestMaybeTextType pins it), and it
+// is no column's type, so that a rule that asks what a value is, and not
+// only whether it may be text, can tell it (concatOK).
+const maybeTextType = "MAYBE TEXT"
+
+// anyTextType reports whether one of a name's columns is text.
+func anyTextType(types []string) bool {
+	for _, ty := range types {
+		if typeIsText(ty) {
+			return true
+		}
+	}
+	return false
+}
+
+// readsText reports whether one of a name's definitions reads something
+// that is text: a text column, a string, a function that makes text, ||. A
+// table's alias (FROM t AS c, whose definition is the table's name) reads
+// none, and neither does a name given to something the screen knows nothing
+// of; both stay of unknown type.
+//
+// Another name the statement defines counts as text unless it is known not
+// to be (notText): a text column given one name in a subquery and its own
+// name again outside (SELECT u AS name FROM (SELECT name AS u ...)) is read
+// through the name between.
+func readsText(exprs [][]rtToken, types map[string][]string, defs map[string][][]rtToken, notText map[string]bool) bool {
+	named := func(n string) bool {
+		if anyTextType(types[n]) {
+			return true
+		}
+		_, other := defs[n]
+		return other && !notText[n]
+	}
+	for _, e := range exprs {
+		for _, t := range e {
+			switch t.kind {
+			case rtString:
+				return true
+			case rtOp:
+				if t.text == "||" {
+					return true
+				}
+			case rtWord:
+				if textMakers[t.text] || named(t.text) {
+					return true
+				}
+			case rtQuoted:
+				if named(strings.ToLower(t.text)) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // columnList reports whether the statement names columns in a list: a FROM

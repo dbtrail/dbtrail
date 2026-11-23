@@ -27,15 +27,25 @@ import (
 //     the source would pass the first two and serve no purpose.
 func checkRouting(t *testing.T, ctx context.Context, cp *SnapshotCopy, rep *Report, want []expectation) {
 	t.Helper()
-	cols, _, err := cp.Query(ctx, "SELECT lower(column_name), data_type FROM information_schema.columns WHERE table_schema = 'public'", 10000)
+	cols, _, err := cp.Query(ctx, "SELECT lower(column_name), data_type, lower(table_name) FROM information_schema.columns WHERE table_schema = 'public' ORDER BY table_name, ordinal_position", 10000)
 	if err != nil {
 		t.Fatalf("the copy's column types: %v", err)
 	}
 	types := map[string][]string{}
+	// Each table's column types in their order too, as the port has them:
+	// a position behind a star is read with them.
+	ordered, tables := map[string][]string{}, []string{}
 	for _, r := range cols.Rows {
-		if r[0] != nil && r[1] != nil {
+		if r[0] != nil && r[1] != nil && r[2] != nil {
 			types[*r[0]] = append(types[*r[0]], strings.ToUpper(*r[1]))
+			if _, seen := ordered[*r[2]]; !seen {
+				tables = append(tables, *r[2])
+			}
+			ordered[*r[2]] = append(ordered[*r[2]], strings.ToUpper(*r[1]))
 		}
+	}
+	for _, table := range tables {
+		pgshim.SetColumnOrder(types, table, ordered[table])
 	}
 	// unsized reports whether the copy answers stmt with a column the port
 	// sends to the source for.

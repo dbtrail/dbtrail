@@ -11,6 +11,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	// The port resolves SET time_zone names (#2035). Embedded here, in the
 	// package every console binary is built from, so a host with no zoneinfo
@@ -95,6 +96,12 @@ type flashbackConfig struct {
 	// encryption (#2636). nil: the one go-mysql makes up at start, which no
 	// client can verify (shim.NewMySQLServer).
 	TLS *shim.PortTLS
+	// MaxConns is how many clients may be connected at once (#3162); one
+	// more is refused with error 1040 before the handshake, as a MySQL
+	// server at its max_connections does. 0 = no limit. The router sets it
+	// (--max-connections): applications connect to it. The port inside
+	// watch leaves it at 0.
+	MaxConns int
 	// ResultBudget bounds the SQL-on-the-copy results the port holds while
 	// it sends them (#2241). nil = withDefaults makes one of
 	// defaultFlashbackResultBudget; a test passes its own to read it.
@@ -111,6 +118,14 @@ const (
 	// connections, is what a burst of clients reading large results costs.
 	defaultFlashbackResultBudget = 256 << 20
 )
+
+// flashbackLoginTimeout is how long a client has, from connecting, to finish
+// the handshake and log in (#3162); past it the connection is closed. The
+// PostgreSQL port gives the same 30 seconds. A client that connects and
+// sends nothing would otherwise hold a connection, and one of the places
+// MaxConns counts, for as long as it liked. A variable so a test can shorten
+// it.
+var flashbackLoginTimeout = 30 * time.Second
 
 // withDefaults resolves the zero-value fields to their production defaults.
 // QueryTimeout is the load-bearing one: 0 means "unbounded", and a client
@@ -197,12 +212,22 @@ func serveFlashback(ctx context.Context, srv *console.Server, ln net.Listener, c
 		_ = ln.Close()
 	}()
 
-	// No per-connection cap (the standalone shim's --max-connections has no
-	// equivalent here): this is a loopback-default, token-gated operator port,
-	// and the shared FullTableGate already bounds the memory-heavy queries.
+	// cfg.MaxConns bounds the clients connected at once, the way the
+	// standalone shim's --max-connections does (#3162): a place is taken
+	// here, before the goroutine starts, and given back when the connection
+	// ends however it ends, so a refused connection costs neither.
+	// A full port makes room for a new client by closing a connection that
+	// has not logged in (preLoginSet.evictOne), never one that has.
+	var connSem chan struct{}
+	var pre *preLoginSet
+	if cfg.MaxConns > 0 {
+		connSem = make(chan struct{}, cfg.MaxConns)
+		pre = newPreLoginSet()
+	}
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
+	refusedLog := refusalLog{every: flashbackRefusedLogEvery}
 	var backoff time.Duration
 	for {
 		conn, err := ln.Accept()
@@ -220,11 +245,88 @@ func serveFlashback(ctx context.Context, srv *console.Server, ln net.Listener, c
 			continue
 		}
 		backoff = 0
+		if connSem != nil {
+			if !takeFlashbackPlace(connSem, pre, logger) {
+				// Not a line per refusal: a burst of them would fill the log.
+				if n, say := refusedLog.refused(time.Now()); say {
+					logger.Warn("flashback connections refused: the connection limit is reached",
+						"refused_since_last_line", n, "last_remote", conn.RemoteAddr(), "max_connections", cfg.MaxConns)
+				}
+				shim.RefuseTooManyConnections(conn)
+				_ = conn.Close()
+				continue
+			}
+			conn = pre.add(conn, time.Now())
+		}
 		wg.Add(1)
 		go func(c net.Conn) {
 			defer wg.Done()
+			if p, ok := c.(*preLoginConn); ok {
+				// The place first, then the word that it is back: the
+				// accept loop takes it only after this goroutine is done
+				// with the connection.
+				defer func() {
+					<-connSem
+					pre.ended(p)
+				}()
+			}
 			handleFlashbackConn(ctx, srv, c, mysrv, creds, gate, cfg, logger)
 		}(conn)
+	}
+}
+
+// flashbackRefusedLogEvery is the least time between two log lines about
+// connections refused for the limit.
+const flashbackRefusedLogEvery = 10 * time.Second
+
+// refusalLog counts refused connections and says when to log them: the
+// first at once, then at most one line per every, each with how many were
+// refused since the line before. The accept loop alone uses it.
+type refusalLog struct {
+	every time.Duration
+	last  time.Time
+	n     int
+}
+
+func (r *refusalLog) refused(now time.Time) (n int, say bool) {
+	r.n++
+	if !r.last.IsZero() && now.Sub(r.last) < r.every {
+		return 0, false
+	}
+	n, r.n, r.last = r.n, 0, now
+	return n, true
+}
+
+// takeFlashbackPlace takes one of the port's places for a new client. When
+// none is free it closes a connection that has not logged in, if there is
+// one to close (preLoginSet.evictOne), and takes the place only once that
+// connection's goroutine has ended and given it back: the closed one does
+// no more work, and no place is counted twice. Called from the accept loop
+// alone, so nothing else can take the place in between. False: the port is
+// full of clients that logged in, or of ones that connected a moment ago.
+func takeFlashbackPlace(sem chan struct{}, pre *preLoginSet, logger *slog.Logger) bool {
+	select {
+	case sem <- struct{}{}:
+		return true
+	default:
+	}
+	closed := pre.evictOne(time.Now())
+	if closed == nil {
+		return false
+	}
+	logger.Debug("flashback connection closed to make room: it had not logged in", "remote", closed.RemoteAddr(), "connected_for", time.Since(closed.since))
+	wait := time.NewTimer(flashbackEvictWait)
+	defer wait.Stop()
+	select {
+	case <-closed.gone:
+	case <-wait.C:
+		return false
+	}
+	select {
+	case sem <- struct{}{}:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -266,10 +368,32 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 	// (console.Server.LoginEpoch).
 	loginEpoch := srv.LoginEpoch()
 	cc := &connCreds{AuthenticationHandler: creds}
+	// A client has flashbackLoginTimeout to log in (#3162): the socket is
+	// closed under a handshake that takes longer, which fails it below.
+	var loginTimedOut atomic.Bool
+	loginTimer := time.AfterFunc(flashbackLoginTimeout, func() {
+		loginTimedOut.Store(true)
+		_ = c.Close()
+	})
 	// shim.NewConn: the handshake announces autocommit (#2110).
 	mysqlConn, err := shim.NewConn(wc, mysrv, cc, proxy)
+	loginTimer.Stop()
+	if p, ok := c.(*preLoginConn); ok && err == nil && !p.loggedIn() {
+		// Closed to make room at the moment its login finished: not served.
+		return
+	}
 	if err != nil {
 		level := slog.LevelWarn
+		if p, ok := c.(*preLoginConn); ok && p.evicted() {
+			// Closed to make room: said where it was closed.
+			return
+		}
+		if loginTimedOut.Load() {
+			// One line per connection that stalls: not a WARN each, which a
+			// client that opens many would fill the log with.
+			logger.Debug("flashback connection closed: the client did not log in in time", "timeout", flashbackLoginTimeout, "remote", c.RemoteAddr())
+			return
+		}
 		if isFlashbackProbe(err) {
 			// Bare TCP probes (health checks, port scanners) close before the
 			// handshake completes; don't log those at WARN.
@@ -510,6 +634,8 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 		// none outside the character sets its screen reads safely.
 		fw.ClientCollation, fw.GlobalSession = proxy.collation, proxy.globalSession
 		fw.SafeCharsetsOnly = cfg.RouteReadOnly
+		// And the source itself refuses a write the screen did not see.
+		fw.ReadOnlySession = cfg.RouteReadOnly
 	}
 	if fw == nil && cfg.RouteStatus {
 		// SHOW ROUTER STATUS on a connection the copy answers alone: the
@@ -716,6 +842,11 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 				if err == nil {
 					srv.RecordRouteAccountOK(id, gen)
 					return
+				}
+				if errors.Is(err, readrouter.ErrReadOnlyMarkRefused) {
+					// The client gets error 2006 on every statement; the
+					// cause is said here (#3093).
+					logger.Warn("Engine Routing: the source refused to mark the session read-only, so this read-only port forwards nothing to it on this connection", "server", user, "error", err)
 				}
 				if _, refused := readrouter.AccountRefused(err); refused {
 					text := accountRefusedText(account, err)
