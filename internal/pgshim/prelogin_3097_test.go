@@ -468,9 +468,8 @@ func TestPreLogin_firstModeClientLeavesDuringTheLogin(t *testing.T) {
 }
 
 // hangingIndex is an index server whose read of the events never answers:
-// it waits for the statement's context to end. Its partitions are none, and
-// anything else it is asked fails at once (the engine goes on without the
-// schema snapshots).
+// it waits for the statement's context to end. It holds the schema of one table, public.users, and no
+// partitions; anything else it is asked fails at once.
 type hangingIndex struct {
 	entered, cancelled chan struct{}
 	release            chan struct{}
@@ -502,7 +501,16 @@ func (c hangingConn) QueryContext(ctx context.Context, q string, _ []driver.Name
 	c.d.mu.Unlock()
 	switch {
 	case strings.Contains(q, "information_schema.PARTITIONS"):
-		return emptyIndexRows{"PARTITION_NAME", "PARTITION_DESCRIPTION"}, nil
+		return &indexRows{cols: []string{"PARTITION_NAME", "PARTITION_DESCRIPTION"}}, nil
+	case strings.Contains(q, "FROM schema_snapshots s"):
+		// The newest snapshot of each table: public.users (id, name).
+		return &indexRows{
+			cols: []string{"schema_name", "table_name", "column_name", "ordinal_position", "column_key", "data_type", "column_type", "is_generated", "is_identity_always", "character_set_name", "is_nullable"},
+			rows: [][]driver.Value{
+				{"public", "users", "id", int64(1), "PRI", "int", "int", false, false, "", "NO"},
+				{"public", "users", "name", int64(2), "", "varchar", "varchar(64)", false, false, "utf8mb4", "YES"},
+			},
+		}, nil
 	case !strings.Contains(q, "binlog_events"):
 		return nil, errors.New("this index server holds nothing but events")
 	}
@@ -522,12 +530,22 @@ func (c hangingConn) QueryContext(ctx context.Context, q string, _ []driver.Name
 	}
 }
 
-// emptyIndexRows is an empty result with these columns.
-type emptyIndexRows []string
+// indexRows is a result of the index server.
+type indexRows struct {
+	cols []string
+	rows [][]driver.Value
+}
 
-func (r emptyIndexRows) Columns() []string         { return r }
-func (r emptyIndexRows) Close() error              { return nil }
-func (r emptyIndexRows) Next([]driver.Value) error { return io.EOF }
+func (r *indexRows) Columns() []string { return r.cols }
+func (r *indexRows) Close() error      { return nil }
+func (r *indexRows) Next(dest []driver.Value) error {
+	if len(r.rows) == 0 {
+		return io.EOF
+	}
+	copy(dest, r.rows[0])
+	r.rows = r.rows[1:]
+	return nil
+}
 
 // A client that hangs up in the middle of a statement, in the first mode:
 // the socket is watched while the statement runs (shim.WatchConn), so the
