@@ -187,7 +187,7 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
 	at := func(tmpl, id string) string { return strings.Replace(tmpl, "%s", id, 1) }
 	calls := func(name string, g ran, want ...string) {
 		t.Helper()
-		if !reflect.DeepEqual(g.Calls, want) {
+		if len(g.Calls)+len(want) > 0 && !reflect.DeepEqual(g.Calls, want) {
 			t.Errorf("%s sends\n  %s\nwant\n  %s", name, strings.Join(g.Calls, "\n  "), strings.Join(want, "\n  "))
 		}
 	}
