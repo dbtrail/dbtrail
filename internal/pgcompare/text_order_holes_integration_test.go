@@ -28,6 +28,13 @@ func textOrderHoles() []expectation {
 		differs("order", `WITH s AS (SELECT name AS name FROM `+c+`) SELECT name FROM s ORDER BY name`),
 		differs("order", `SELECT s.name FROM (SELECT name AS name, id FROM `+c+`) s ORDER BY s.name`),
 		{stmt: `SELECT id FROM (SELECT name AS name, id FROM ` + c + `) s WHERE name > 'B'`, verdict: sqlcompare.Equal},
+		differs("rows", `SELECT max(name) AS name FROM `+c),
+		// Under a quoted name that is a number column's elsewhere.
+		differs("order", `SELECT name AS "qty" FROM `+c+` ORDER BY qty`),
+		differs("order", `SELECT name AS "qty" FROM `+c+` ORDER BY "qty"`),
+		// A float under the name of a text column, concatenated: the copy
+		// writes a float otherwise as text.
+		{stmt: `SELECT name || '!' FROM (SELECT ratio AS name FROM ` + o + ` WHERE id = 6) s`, verdict: sqlcompare.Different, kind: "text", why: "a float written as text"},
 		// The same name over a column that is not text, and a name of its
 		// own: the copy's.
 		stay(`SELECT id AS id, signup AS signup FROM ` + c + ` ORDER BY signup NULLS LAST, id`),
@@ -42,6 +49,16 @@ func textOrderHoles() []expectation {
 		differs("order", `SELECT * FROM `+pe+` p ORDER BY 3`),
 		differs("order", `SELECT * FROM (SELECT * FROM `+c+`) s ORDER BY 2`),
 		differs("order", `SELECT x.*, 1 AS one FROM `+c+` x ORDER BY 2`),
+		// However the ORDER BY is written, and wherever it stands.
+		differs("order", `(SELECT * FROM `+c+`) ORDER BY 2`),
+		differs("order", `(SELECT * FROM `+c+`) UNION ALL (SELECT * FROM `+c+` WHERE id < 0) ORDER BY 2`),
+		differs("order", `SELECT * FROM `+c+` ORDER BY (2)`),
+		differs("order", `SELECT * FROM `+c+` UNION ALL SELECT id, NULL, NULL, NULL, NULL FROM `+pe+` WHERE id < 0 ORDER BY 2`),
+		differs("order", `SELECT * FROM (`+c+` a JOIN `+pe+` b ON b.id = a.id) ORDER BY 2`),
+		differs("order", `WITH w AS (SELECT * FROM `+c+`) SELECT * FROM (SELECT * FROM w) s ORDER BY 2`),
+		differs("order", `SELECT DISTINCT ON (2) * FROM `+c+` ORDER BY 2`),
+		stay(`(SELECT * FROM `+c+`) ORDER BY 1`),
+		stay(`SELECT * FROM `+c+` ORDER BY (1)`),
 		stay(`SELECT * FROM ` + c + ` ORDER BY 1`),
 		stay(`SELECT * FROM ` + c + ` ORDER BY 5 NULLS LAST, 1 DESC`),
 		stay(`SELECT * FROM ` + pe + ` WHERE age > 10 ORDER BY 4, 1`),
