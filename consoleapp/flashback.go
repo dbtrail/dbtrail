@@ -11,6 +11,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	// The port resolves SET time_zone names (#2035). Embedded here, in the
 	// package every console binary is built from, so a host with no zoneinfo
