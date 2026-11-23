@@ -699,6 +699,13 @@ var docs = map[string]Doc{
 		Example: "8",
 		ReadBy:  "router",
 	},
+	"BINTRAIL_ROUTER_MAX_CONNECTIONS": {
+		Group:   "router",
+		Text:    "How many clients may be connected to the MySQL port at once, 1 to 1024. One more is refused with error 1040 (Too many connections), as a MySQL server at its max_connections does.",
+		Default: "256",
+		Example: "512",
+		ReadBy:  "router",
+	},
 	"BINTRAIL_ROUTER_MAX_WAIT": {
 		Group:   "router",
 		Text:    "How long a statement waits for a free worker on the copy when all are busy, written with a unit like 30s or 2m. Past it the client gets an error (1040 on a routed connection, 1203 otherwise). A bare number without a unit is refused; empty or 0 means it waits as long as the client stays connected.",
