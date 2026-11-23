@@ -19940,14 +19940,16 @@ function removeServerPrompt(s) {
   const name = shown.length > 64 ? shown.slice(0, 64).join("") + "…" : shown.join("");
   const ask = 'Remove server "' + name + '"? This removes the saved connection and does not touch the PostgreSQL source. ';
   const risk = " keeps holding WAL on the source until it is dropped, which can fill the source's disk.";
+  const list = "SELECT slot_name, database, active FROM pg_replication_slots;";
   const slot = s.source_slot;
   if (typeof slot === "string" && /^[a-z0-9_]{1,63}$/.test(slot)) {
-    return ask + 'Its replication slot "' + slot + '"' + risk +
-      " If nothing else uses the slot, run this on the source after removing the server:\n\nSELECT pg_drop_replication_slot('" + slot + "');";
+    return ask + 'The slot saved for this server, "' + slot + '", may still exist there. If it does, it' + risk +
+      " First check that it exists, is not active and is not used by another tool:\n\n" + list +
+      "\n\nThen, connected to the slot's database on the source, after removing the server:\n\nSELECT pg_drop_replication_slot('" + slot + "');";
   }
   const why = slot ? " The slot name saved for this server is not a valid PostgreSQL slot name, so it is not shown." : " DBTrail has no slot name saved for this server.";
   return ask + "If DBTrail captured from it, its replication slot" + risk + why +
-    " To see the slots, run this on the source:\n\nSELECT slot_name, active FROM pg_replication_slots;";
+    " To see the slots, run this on the source:\n\n" + list;
 }
 
 async function deleteServer(s) {

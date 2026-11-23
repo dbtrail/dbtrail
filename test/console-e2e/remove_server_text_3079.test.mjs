@@ -16,7 +16,8 @@ assert.ok(start >= 0, "removeServerPrompt is not in app.js");
 const end = APP.indexOf("\n}\n", start);
 const prompt = new Function(APP.slice(start, end + 2) + "\nreturn removeServerPrompt;")();
 
-const dropOf = (text) => text.slice(text.indexOf("SELECT"));
+const dropOf = (text) => text.slice(text.lastIndexOf("SELECT"));
+const LIST = "SELECT slot_name, database, active FROM pg_replication_slots;";
 
 test("MySQL, MariaDB and a server with no flavor keep their text, byte for byte", () => {
   const want = 'Remove server "db1"? This only removes the saved connection; nothing happens to the server itself.';
@@ -29,13 +30,13 @@ test("PostgreSQL names the slot, what it does and the statement", () => {
   for (const flavor of ["postgres", "postgresql"]) {
     const text = prompt({ name: "shop", flavor, source_slot: "bintrail_shop" });
     assert.ok(!text.includes("nothing happens"), text);
-    assert.ok(text.includes('replication slot "bintrail_shop"'), text);
+    assert.ok(text.includes('The slot saved for this server, "bintrail_shop", may still exist'), text);
     assert.ok(text.includes("keeps holding WAL"), text);
+    assert.ok(text.indexOf(LIST) > 0 && text.indexOf(LIST) < text.indexOf("pg_drop_replication_slot"), "the check comes before the drop: " + text);
+    assert.ok(text.includes("connected to the slot's database"), text);
     assert.equal(dropOf(text), "SELECT pg_drop_replication_slot('bintrail_shop');");
   }
 });
-
-const LIST = "SELECT slot_name, active FROM pg_replication_slots;";
 
 test("a saved value PostgreSQL would not take as a slot name is not repeated", () => {
   for (const source_slot of [
@@ -78,7 +79,7 @@ test("a server name cannot imitate the PostgreSQL text", () => {
   ]) {
     const text = prompt({ name, flavor: "postgres", source_slot: "ok_slot" });
     assert.equal(nameIn(text), want);
-    assert.equal(text.split("\n").length, 3, text);
+    assert.equal(text.split("\n").length, 7, text);
     assert.ok(text.endsWith("\n\nSELECT pg_drop_replication_slot('ok_slot');"), text);
   }
 });
