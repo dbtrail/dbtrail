@@ -242,8 +242,7 @@ func TestKeepSource_3046_barredThenAllowedAgain(t *testing.T) {
 func TestKeepSource_3046_keptTooLong(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	defer func(d time.Duration) { sourceKeepIdle = d }(sourceKeepIdle)
-	sourceKeepIdle = 50 * time.Millisecond
+	shortenKeepIdle(t, 50*time.Millisecond)
 	l := &costLogin{src: startFakeSource(t, costPlans), keep: &keptSources{}}
 	c := costPortConn(t, ctx, l)
 	for range 2 {
@@ -254,7 +253,8 @@ func TestKeepSource_3046_keptTooLong(t *testing.T) {
 	if n := l.opened.Load(); n != 1 {
 		t.Fatalf("back to back: opened %d, want 1", n)
 	}
-	time.Sleep(100 * time.Millisecond)
+	// Ended by its timer, with the client silent.
+	waitUntilTest(t, "the kept connection ended at the limit", func() bool { return l.held.Load() == 0 && l.keep.parked() == 0 })
 	if got := costSimple(ctx, c, l, keepLookup); got != keepAnswer {
 		t.Fatal(got)
 	}
@@ -282,4 +282,91 @@ func TestKeepSource_3046_aClientThatDropsItsSocket(t *testing.T) {
 	}
 	_ = c.Conn().Close() // no Terminate
 	waitUntilTest(t, "the kept connection ended", func() bool { return l.held.Load() == 0 && l.keep.parked() == 0 })
+}
+
+func shortenKeepIdle(t *testing.T, d time.Duration) {
+	t.Helper()
+	was := sourceKeepIdle.Swap(int64(d))
+	t.Cleanup(func() { sourceKeepIdle.Store(was) })
+}
+
+// A message the port answers itself does not restart the clock of a kept
+// connection: a client that only sends those does not hold it.
+func TestKeepSource_3046_portAnsweredMessagesDoNotExtendIt(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	shortenKeepIdle(t, 300*time.Millisecond)
+	src := startFakeSource(t, costPlans)
+	l := &costLogin{src: src, keep: &keptSources{}}
+	c := costPortConn(t, ctx, l)
+	if got := costSimple(ctx, c, l, keepLookup); got != keepAnswer {
+		t.Fatal(got)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for l.held.Load() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("a client sending only SET kept the connection past the limit")
+		}
+		if _, err := c.Exec(ctx, "SET extra_float_digits = 1").ReadAll(); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A source that stops answering holds neither a command the port answers
+// itself, nor, past the reset's own limit, a statement: that one gets
+// another connection and its answer.
+func TestKeepSource_3046_aHungSource(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	was := sourceResetLimit.Swap(int64(200 * time.Millisecond))
+	t.Cleanup(func() { sourceResetLimit.Store(was) })
+	src := startFakeSource(t, costPlans)
+	l := &costLogin{src: src, keep: &keptSources{}}
+	c := costPortConn(t, ctx, l)
+	if got := costSimple(ctx, c, l, keepLookup); got != keepAnswer {
+		t.Fatal(got)
+	}
+	src.mu.Lock()
+	src.hangDiscard = true
+	src.mu.Unlock()
+	start := time.Now()
+	if _, err := c.Exec(ctx, "SET extra_float_digits = 1").ReadAll(); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(start); took > 150*time.Millisecond {
+		t.Errorf("a SET the port answers took %v", took)
+	}
+	src.mu.Lock()
+	n := src.discards
+	src.hangDiscard = false
+	src.discards = 0
+	hung := n
+	src.hangDiscard = true
+	src.mu.Unlock()
+	if hung != 0 {
+		t.Errorf("a SET the port answers sent %d resets to the source", hung)
+	}
+	start = time.Now()
+	done := make(chan costOutcome, 1)
+	go func() { done <- costSimple(ctx, c, l, keepLookup) }()
+	waitUntilTest(t, "the reset sent", func() bool {
+		src.mu.Lock()
+		defer src.mu.Unlock()
+		if src.discards > 0 {
+			src.hangDiscard = false // the next connection answers
+			return true
+		}
+		return false
+	})
+	if got := <-done; got != keepAnswer {
+		t.Errorf("after a hung reset: %+v", got)
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Errorf("took %v", took)
+	}
+	if n := l.opened.Load(); n != 2 {
+		t.Errorf("opened %d, want 2", n)
+	}
 }

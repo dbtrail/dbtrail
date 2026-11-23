@@ -780,6 +780,9 @@ type pgSourceSlots struct {
 	// client that waits for one when none is free.
 	mu   sync.Mutex
 	idle []*pgIdleSource
+	// parked is closed, and replaced, each time a connection is kept: every
+	// client waiting for a slot looks at the idle ones again.
+	parked chan struct{}
 }
 
 // pgIdleSource is one connection to a source kept idle by its client.
@@ -795,7 +798,7 @@ type pgIdleSource struct{ reclaim func() }
 const pgSourceSlotWait = sqlsandbox.DefaultMaxWait
 
 func newPGSourceSlots(n int) *pgSourceSlots {
-	return &pgSourceSlots{ch: make(chan struct{}, n), wait: pgSourceSlotWait}
+	return &pgSourceSlots{ch: make(chan struct{}, n), wait: pgSourceSlotWait, parked: make(chan struct{})}
 }
 
 // limit is how many there may be.
@@ -810,6 +813,8 @@ func (p *pgSourceSlots) park(reclaim func()) (unpark func() bool) {
 	e := &pgIdleSource{reclaim: reclaim}
 	p.mu.Lock()
 	p.idle = append(p.idle, e)
+	close(p.parked)
+	p.parked = make(chan struct{})
 	p.mu.Unlock()
 	return func() bool {
 		p.mu.Lock()
@@ -848,28 +853,39 @@ func (p *pgSourceSlots) acquire(ctx context.Context) (release func(), ok bool) {
 		var once sync.Once
 		return func() { once.Do(func() { <-p.ch }) }
 	}
+	var expired <-chan time.Time
+	if p.wait > 0 {
+		t := time.NewTimer(p.wait)
+		defer t.Stop()
+		expired = t.C
+	}
 	for {
+		// Taken before the idle ones are looked at: a connection kept after
+		// this look closes this channel, so it is not missed.
+		p.mu.Lock()
+		parked := p.parked
+		p.mu.Unlock()
 		select {
 		case p.ch <- struct{}{}:
 			return give(), true
 		default:
 		}
-		if !p.reclaimIdle() {
-			break
+		if p.reclaimIdle() {
+			continue
+		}
+		if p.wait <= 0 {
+			return nil, false
+		}
+		select {
+		case p.ch <- struct{}{}:
+			return give(), true
+		case <-parked:
+		case <-ctx.Done():
+			return nil, false
+		case <-expired:
+			return nil, false
 		}
 	}
-	if p.wait <= 0 {
-		return nil, false
-	}
-	t := time.NewTimer(p.wait)
-	defer t.Stop()
-	select {
-	case p.ch <- struct{}{}:
-		return give(), true
-	case <-ctx.Done():
-	case <-t.C:
-	}
-	return nil, false
 }
 
 // servePGPortWith is servePGPortWithin with the bound on connections to the

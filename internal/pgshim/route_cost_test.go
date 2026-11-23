@@ -185,6 +185,10 @@ type fakeSource struct {
 	// error.
 	discards      int
 	refuseDiscard bool
+	// hangDiscard answers a DISCARD ALL with nothing.
+	hangDiscard bool
+	// realDSN, when set, is a real PostgreSQL the port forwards to.
+	realDSN string
 	// conns are the connections it serves now (dropConns).
 	conns map[net.Conn]bool
 }
@@ -288,6 +292,9 @@ func startFakeSourceWith(t *testing.T, f *fakeSource) *fakeSource {
 }
 
 func (f *fakeSource) dsn() string {
+	if f.realDSN != "" {
+		return f.realDSN
+	}
 	return fmt.Sprintf("postgres://fwd:pw@%s/db?sslmode=disable&connect_timeout=5", f.addr)
 }
 
@@ -394,8 +401,13 @@ func (f *fakeSource) serve(c net.Conn) {
 			case upper == "DISCARD ALL":
 				f.mu.Lock()
 				f.discards++
-				refuse := f.refuseDiscard
+				refuse, hang := f.refuseDiscard, f.hangDiscard
 				f.mu.Unlock()
+				if hang {
+					// Answers nothing, until the port closes the connection.
+					_, _ = be.Receive()
+					return
+				}
 				if refuse {
 					be.Send(&pgproto3.ErrorResponse{Severity: "ERROR", Code: "25006", Message: "refused by the fake source"})
 				} else {

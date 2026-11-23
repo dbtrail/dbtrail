@@ -351,9 +351,6 @@ func commandLoop(be *pgproto3.Backend, sess *session) {
 		// session's again before anything of this message is done
 		// (forward.go parkIdleSource).
 		sess.claimSource()
-		if _, leaving := msg.(*pgproto3.Terminate); !leaving {
-			sess.resetKeptSource()
-		}
 		if sess.ext.skip {
 			// PostgreSQL's extended-query error rule: after an error every
 			// message up to the client's Sync is discarded, a simple query
