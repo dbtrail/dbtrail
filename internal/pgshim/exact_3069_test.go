@@ -451,8 +451,7 @@ func TestNumReader_bounded(t *testing.T) {
 	if why := screenWithin(t, "40 names over a real", chained(40, "rl", "a%d * 2"), exactTypes); why != realArithmeticVeto {
 		t.Errorf("40 chained names over a real, multiplied: %q", why)
 	}
-	if why := screenWithin(t, "40 names over a real, summed", chained(40, "rl", "sum(a%d)"), exactTypes); why != realArithmeticVeto {
-		// The first + of the chain is over the real column itself.
+	if why := screenWithin(t, "40 names over a real, summed", chained(40, "rl", "sum(a%d)"), exactTypes); why != realSumVeto {
 		t.Errorf("40 chained names over a real, summed: %q", why)
 	}
 	// Whole numbers all the way: nothing to send to the source for, and
