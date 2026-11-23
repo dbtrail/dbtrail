@@ -52,10 +52,13 @@ func screenExactness() []expectation {
 		stay(`SELECT id, substring(word, 1, 3), substring(word, 2), substring(word, 4, 100) FROM ` + x + ` ORDER BY id`),
 		stay(`SELECT id, substring(word FROM 2 FOR 3), substring(word FROM 3) FROM ` + x + ` ORDER BY id`),
 		stay(`SELECT substring('apple', 2, 3), substring('apple' FROM 5)`),
-		// substr, left, right and overlay were never the copy's: the screen
-		// sends each to the source, whatever it is given.
+		// substr is substring with commas (#3219): the copy's under the same
+		// rule, a start and a length that are positive whole numbers.
 		differs("text", sub, `SELECT id, substr(word, -1, 3) FROM `+x+` ORDER BY id`),
-		eq(`SELECT id, substr(word, 2, 3) FROM ` + x + ` ORDER BY id`),
+		stay(`SELECT id, substr(word, 2, 3), substr(word, 1, 1), substr(word, 2), substr(word, 4, 100) FROM ` + x + ` ORDER BY id`),
+		stay(`SELECT substr('apple', 2, 3), substr('apple', 5), substr('año', 2, 1)`),
+		// left, right and overlay were never the copy's: the screen sends
+		// each to the source, whatever it is given.
 		eq(`SELECT id, left(word, 2), right(word, 2) FROM ` + x + ` ORDER BY id`),
 		eq(`SELECT id, left(word, -2), right(word, -2) FROM ` + x + ` ORDER BY id`),
 		{stmt: `SELECT id, overlay(word placing 'XX' from 2 for 1) FROM ` + x + ` ORDER BY id`, verdict: sqlcompare.NotOnCopy, says: "overlay", why: "the copy has no overlay()"},

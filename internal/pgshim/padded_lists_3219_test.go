@@ -312,6 +312,11 @@ func TestPaddedLists_noSourcePassesTheWholeScreen(t *testing.T) {
 		`SELECT p.name FROM plain p, codes c WHERE c.id = p.id ORDER BY p.name`,
 		`SELECT * FROM plain p, codes c WHERE c.id = p.id ORDER BY 2`,
 		`SELECT p.name FROM plain p WHERE EXISTS (SELECT * FROM codes c WHERE c.id = p.id) ORDER BY p.name`,
+		// A cut of a char(n) column passes the whole screen too: compared by
+		// order, beside a cut the copy counts otherwise, or sorted.
+		`SELECT id FROM codes WHERE substr(code, 1, 1) < 'b'`,
+		`SELECT substr(code, 1, 2), substr(label, -1, 3) FROM codes`,
+		`SELECT substr(code, 1, 1) AS k2 FROM codes ORDER BY k2`,
 	} {
 		toks, types := read(q)
 		if paddedUse(toks, types) != "" {
@@ -324,6 +329,8 @@ func TestPaddedLists_noSourcePassesTheWholeScreen(t *testing.T) {
 	for _, q := range []string{
 		`SELECT p.id FROM plain p, codes c WHERE c.id = p.id ORDER BY p.id`,
 		`SELECT p.id FROM plain p WHERE EXISTS (SELECT * FROM codes c WHERE c.id = p.id) ORDER BY p.id`,
+		// A plain cut stays on the copy.
+		`SELECT id, substr(code, 1, 2) FROM codes`,
 	} {
 		toks, types := read(q)
 		if veto := paddedForNoSource(toks, types); veto != "" {
