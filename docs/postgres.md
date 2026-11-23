@@ -1310,34 +1310,43 @@ listener, its own workers, its own memory.
   - `extract` of a field that is a whole number (`year`, `quarter`, `month`,
     `week`, `day`, `hour`, `minute`, `dow`, `doy`, `isodow`, `isoyear`,
     `decade`, `century`, `millennium`) is a `numeric`, and `date_part` of one
-    a `double precision` when it is a whole item of the statement's select
-    list;
+    a `double precision`, each when it is a whole item of the statement's
+    select list;
   - a `NULL` alone in the select list is `text`.
 
-  That holds under an alias, in a subquery or a `WITH`, behind `SELECT *`,
-  as a window (`sum(x) OVER (...)`), inside another expression
-  (`length(x) + 1` is an `integer`, `sum(x) + 1` a `bigint`) and in what a
-  prepared statement announces before it runs. These still carry another type
-  than on PostgreSQL, with the same value:
+  For `length`, `position`, `ntile` and `sum` that holds under an alias, in a
+  subquery or a `WITH`, behind `SELECT *`, as a window (`sum(x) OVER (...)`),
+  inside another expression (`length(x) + 1` is an `integer`, `sum(x) + 1` a
+  `bigint`) and in what a prepared statement announces before it runs. No
+  value changes with it, and a column keeps the heading it had, or takes
+  PostgreSQL's (`length`, `sum`). These still carry another type than on
+  PostgreSQL, with the same value:
   - a `date` less a `date` is a `bigint` (PostgreSQL: `integer`);
-  - `date_part` of a whole field inside another expression or in a subquery
-    (`date_part('year', d) + 1`) is a `bigint` (PostgreSQL: `double
-    precision`);
-  - `length`, `position`, `extract` and the others above keep the copy's type
-    in a statement that also uses the same function inside a `round()`,
-    `floor()` or `avg()` the port rewrites;
   - a `smallint` with a number (`s + 1`) stays a `smallint` (PostgreSQL:
     `integer`), and is an error where the result passes 32767;
+  - `extract` and `date_part` of a whole field anywhere but as a whole item
+    of the statement's select list (inside another expression such as
+    `extract(year FROM d) + 1`, after `DISTINCT`, in a subquery) are a
+    `bigint` (PostgreSQL: `numeric` and `double precision`);
   - `sum` is a `numeric` where PostgreSQL has a `bigint` when its argument
     is a name the statement defines itself (`SELECT sum(n) FROM (SELECT qty
     AS n ...)`), a column that is an `integer` in one table and another type
     in another, or anything but whole-number columns, numbers, casts, `CASE`
     and `+ - * / %` between them, and in a statement that names columns in a
     list (`AS t(a, b)`);
+  - `length`, `position`, `ntile` and `sum` keep the copy's type in a whole
+    statement that uses the same function inside a `round()`, `floor()` or
+    `avg()` the port rewrites, or, in a subquery's select list or beside a
+    `*`, in an item with no name that is more than the call itself
+    (`length(x) + 1`) or twice in one list; give the item a name (`AS n`)
+    to get PostgreSQL's type there;
   - a `NULL` named inside a subquery or a `WITH`, and a second `NULL` with no
     name in one select list, are an `integer` (PostgreSQL: `text`);
   - arithmetic over a `real` column is a `real` (PostgreSQL: `double
     precision`), and `sum` of one a `double precision` (PostgreSQL: `real`).
+
+  A statement of more than a few thousand words, or one whose conversions
+  would make it longer than the port takes, is answered with the copy's types.
 
   Also not PostgreSQL's: a `round()` the copy answers is PostgreSQL's
   `numeric`, with exactly the decimals PostgreSQL writes, on every

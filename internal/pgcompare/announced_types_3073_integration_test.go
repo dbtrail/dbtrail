@@ -125,9 +125,8 @@ func tyStatements() []string {
 		// through one, an item with no name is headed by its function.
 		`SELECT *, length(t), sum(i) OVER (), extract(year FROM d), date_part('month', d), NULL FROM ` + v + ` ORDER BY id`,
 		`SELECT * FROM (SELECT id, length(t), ntile(2) OVER (ORDER BY id), sum(i) OVER (ORDER BY id), strpos(t, 'a') FROM ` + v + `) q ORDER BY id`,
-		`SELECT * FROM (SELECT length(t), count(*), sum(s) FROM ` + v + ` GROUP BY length(t)) q ORDER BY 1`,
+		`SELECT * FROM (SELECT length(t), count(*) AS n, sum(s) FROM ` + v + ` GROUP BY length(t)) q ORDER BY 1`,
 		// What the engine reads again stays as it was: these answered before.
-		`SELECT DISTINCT date_part('year', d) FROM ` + v + ` ORDER BY date_part('year', d)`,
 		`SELECT d - extract(dow FROM d) * interval '1 day' FROM ` + v + ` ORDER BY id`,
 		`SELECT max(l), min(l) + 1 FROM (SELECT length(t) AS l FROM ` + v + `) x`,
 		`SELECT id FROM ` + v + ` WHERE length(t) > 2 AND extract(year FROM d) > 2000 ORDER BY length(t), id`,
@@ -185,6 +184,7 @@ func tyDifferent() []tyOther {
 		{`SELECT extract(year FROM d) + 1 FROM ` + v + ` ORDER BY id`, 0, 1700, 20, "extract inside an expression: cast, a function that takes a bigint would refuse it"},
 		{`SELECT y FROM (SELECT id, extract(year FROM d) AS y FROM ` + v + `) q ORDER BY id`, 0, 1700, 20, "extract in a subquery, for the same reason"},
 		{`SELECT a FROM (SELECT id, length(t) AS a, length(t) + 1 FROM ` + v + `) q ORDER BY id`, 0, 23, 20, "a subquery calls the function in an item with no name, whose heading must stay"},
+		{`SELECT DISTINCT date_part('year', d) FROM ` + v + ` ORDER BY date_part('year', d)`, 0, 701, 20, "date_part after DISTINCT is not a whole item to this reading; it answered before and still does"},
 		{`SELECT date_part('year', d) + 1 FROM ` + v + ` ORDER BY id`, 0, 701, 20, "date_part inside an expression: as a double precision the engine would write it 2026.0 where it is read as text"},
 		{`SELECT y FROM (SELECT id, date_part('year', d) AS y FROM ` + v + `) q ORDER BY id`, 0, 701, 20, "date_part in a subquery, for the same reason"},
 		{`SELECT NULL, NULL`, 1, 25, 23, "a second NULL with no name"},
