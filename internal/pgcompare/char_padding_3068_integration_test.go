@@ -158,6 +158,23 @@ func charCases() []charCase {
 		// A table alias spelled like a keyword, with a list that renames the
 		// columns: the renamed char(n) column is compared.
 		differs(`SELECT count(*) FROM ` + x + ` AS materialized(p, q) WHERE q = 'ab'`),
+		// A char(n) as a key of GROUP BY (#3219) beside a list with commas
+		// and an EXISTS (#3219): neither lets the other through.
+		stays(`SELECT a.c, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY a.c`),
+		stays(`SELECT a.c, d.c, count(*) FROM ` + x + ` a, ` + x + ` d WHERE a.id = d.id GROUP BY a.c, d.c`),
+		stays(`SELECT a.c, b.c, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY a.c, b.c`),
+		differs(`SELECT a.c, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.c = b.c GROUP BY a.c`),
+		differs(`SELECT a.c, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id AND a.c = 'ab' GROUP BY a.c`),
+		sent(`SELECT a.c, d.c, count(*) FROM ` + x + ` a, ` + x + ` d WHERE a.c = d.c GROUP BY a.c, d.c`),
+		differs(`SELECT a.u, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY a.u`),
+		differs(`SELECT a.c, a.u, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY a.c, a.u`),
+		differs(`SELECT a.c, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY a.c ORDER BY a.c`),
+		sent(`SELECT a.c AS z, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY z`),
+		{`SELECT b.t AS c, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY c`, sqlcompare.SourceError, false},
+		sent(`SELECT count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY a.arr`),
+		sent(`SELECT a.c, count(*) FROM ` + x + ` a WHERE EXISTS (SELECT * FROM ` + p + ` b WHERE b.id = a.id) GROUP BY a.c`),
+		sent(`SELECT a.c, count(*) FROM ` + x + ` a WHERE EXISTS (SELECT * FROM ` + x + ` d WHERE d.c = a.c) GROUP BY a.c`),
+		differs(`SELECT b.k, count(*) FROM ` + p + ` b WHERE EXISTS (SELECT * FROM ` + x + ` a WHERE a.c = b.c) GROUP BY b.k`),
 		// WITH ... AS [NOT] MATERIALIZED.
 		stays(`WITH y AS MATERIALIZED (SELECT id, k FROM ` + p + `) SELECT id, k FROM y ORDER BY id`),
 		stays(`WITH y AS NOT MATERIALIZED (SELECT id, k FROM ` + p + `) SELECT id FROM y WHERE k > 2 ORDER BY id`),
