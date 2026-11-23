@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/dbtrail/dbtrail/ext"
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/doctor"
 	"github.com/dbtrail/dbtrail/internal/rotation"
@@ -107,6 +108,19 @@ type capacityResponse struct {
 	// DaysUntilFull is the same figure, present only where it IS a forecast:
 	// the index is known to have no retention window (#2263).
 	DaysUntilFull *float64 `json:"days_until_full,omitempty"`
+	// SnapshotFolder is set only while the check says the disk is low, for a
+	// snapshot folder confirmed to be on the measured disk and holding more
+	// than the index (#2475). It adds to the verdict and never moves it.
+	SnapshotFolder *capacitySnapshotFolderDTO `json:"snapshot_folder,omitempty"`
+}
+
+// capacitySnapshotFolderDTO names the folder. Its path, size and retention are
+// settings data, so a session without settings:read gets none of it (this
+// route needs only status:read) and sees the warning without this line.
+type capacitySnapshotFolderDTO struct {
+	Dir        string `json:"dir"`
+	Bytes      uint64 `json:"bytes"`
+	KeepsEvery bool   `json:"keeps_every,omitempty"`
 }
 
 // handleCapacity serves GET /api/capacity: the index disk-capacity projection
@@ -138,7 +152,56 @@ func (s *Server) handleCapacity(w http.ResponseWriter, r *http.Request) {
 		paused = &doctor.DropsPaused{Oldest: *retention.OldestHistory}
 	}
 	m := doctor.EvaluateCapacity(in, retain, retention.Known, paused, time.Now())
-	writeJSON(w, http.StatusOK, capacityResponseFrom(m, retention))
+	resp := capacityResponseFrom(m, retention)
+	resp.SnapshotFolder = s.snapshotFolderOnIndexDisk(r.Context(), m, in.FreePath)
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// snapshotFolderOnIndexDisk is the largest snapshot folder on the disk the
+// check measured, when the check says that disk is low and that folder holds
+// more than the index. Any doubt (the disk not measured, a folder elsewhere,
+// not measured yet or not answering) names nothing: the warning must not send
+// someone to a folder that is not what fills this disk. It reads the
+// measurements in the background and never touches a snapshot folder: a
+// network disk that stopped answering would hold this request forever.
+func (s *Server) snapshotFolderOnIndexDisk(ctx context.Context, m doctor.CapacityMeasurement, measured string) *capacitySnapshotFolderDTO {
+	switch m.Reason {
+	case doctor.CapacityGrowthExceedsFree, doctor.CapacityFreeUnderFloor, doctor.CapacityHeadroomLow:
+	default:
+		return nil
+	}
+	if !m.FreeKnown || measured == "" {
+		return nil
+	}
+	if pol := policyFrom(ctx); pol != nil && !pol.Allows(ext.PermSettingsRead) {
+		return nil
+	}
+	disk, ok := s.folderUsage.disk(measured)
+	if !ok {
+		return nil
+	}
+	dirs := []string{s.cm.defaultBaselineDir}
+	if s.cm.reg != nil {
+		for _, e := range s.cm.reg.List() {
+			dirs = append(dirs, e.BaselineDir)
+		}
+	}
+	read := s.folderUsage.readAll(dirs, s.folderPlan())
+	var bestDir string
+	var best folderReading
+	for _, d := range dirs {
+		r, ok := read[d]
+		if !ok || !r.Measured || !r.DiskKnown || r.Disk != disk {
+			continue
+		}
+		if r.Bytes > best.Bytes {
+			bestDir, best = d, r
+		}
+	}
+	if bestDir == "" || best.Bytes <= m.CurrentBytes {
+		return nil
+	}
+	return &capacitySnapshotFolderDTO{Dir: bestDir, Bytes: best.Bytes, KeepsEvery: best.KeepsEvery}
 }
 
 // capacityRetention resolves the window the projection runs over. On the

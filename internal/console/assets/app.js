@@ -6915,7 +6915,24 @@ function capacityBox(cap) {
   box.append(el("b", { text: head }));
   box.append(el("div", { text: body }));
   box.append(el("div", { class: "warn-line", text: help }));
+  const folderLine = capacitySnapshotFolderWords(cap);
+  if (folderLine) {
+    box.append(el("div", { class: "warn-line" }, folderLine + " ",
+      el("a", { href: "/snapshots", text: "Snapshot retention ›", onclick: (e) => { e.preventDefault(); navigate("snapshots#setup"); } })));
+  }
   return box;
+}
+
+// capacitySnapshotFolderWords says that a snapshot folder on this disk holds
+// more than the index (#2475). The server sends it only when it confirmed the
+// folder is on the measured disk. "More than the index", never "the largest":
+// other files on the disk are not measured. Without settings:read the server
+// sends none of this, and the warning reads as it does with no folder to name.
+function capacitySnapshotFolderWords(cap) {
+  const f = cap && cap.snapshot_folder;
+  if (!f || !f.bytes || !f.dir) return "";
+  return "The snapshot folder " + f.dir + " holds " + humanBytes(f.bytes) +
+    ", more than the index (" + humanBytes(cap.current_bytes) + ")" + (f.keeps_every ? ", and it keeps every snapshot." : ".");
 }
 
 // continuityBox renders the stream-continuity surface, or null when there is
@@ -8992,8 +9009,17 @@ function snapshotSetupSections(settings) {
     if (!mayEdit) out.push(sect("Current settings"));
     out.push(el("div", { class: "cards cards-plain" }, backupDaemonEditCard(editableRows, !mayEdit)));
   }
+  const daemonFolder = !broken && settings && settings.unbounded_daemon_folder;
+  if (daemonFolder) out.push(el("p", { class: "form-hint", text: unboundedDaemonFolderWords(daemonFolder) }));
   if (!broken) out.push(backupServersPanel(settings));
   return out;
+}
+
+// unboundedDaemonFolderWords is the startup folder no count can limit (#2475).
+// With an S3 location at startup, Delete by age reaches it.
+function unboundedDaemonFolderWords(f) {
+  return "DBTrail's startup folder " + f.dir + " keeps every snapshot and holds " + humanBytes(f.bytes) +
+    ". Keep by count does not apply to it. To limit it, start DBTrail with a default S3 location and set Delete by age.";
 }
 
 // What each daemon-wide key means, in words a reader who never saw the flag
@@ -9723,6 +9749,11 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
       const keepHere = w.err || w === infos[infos.length - 1];
       (keepHere ? words : wordsMore).append(el("p", { class: w.err ? "form-msg err" : (keepHere ? "form-hint keep-reach" : "form-hint"), text: w.text }));
     });
+    // What the saved folder holds (#2475), only while the form still shows
+    // what was saved: a typed count or folder makes the sentence untrue.
+    if (srv.unbounded_folder_bytes && asSaved && keepNow() === was.keep) {
+      words.append(el("p", { class: "form-hint keep-reach", text: "This folder keeps every snapshot and holds " + humanBytes(srv.unbounded_folder_bytes) + "." }));
+    }
     clear(shape);
     shape.hidden = keep.hidden;
     if (!shape.hidden) keepShapeDraw(shape, keepNow() || 0, srv.snapshot_every_minutes || 0, srv.prune_retain_minutes || 0);

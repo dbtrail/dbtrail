@@ -1476,7 +1476,9 @@ longer drawn on the page.
   save, and the save's message says so. A server
   saved with an S3 destination before this rule has no count (the one it had
   did nothing and was cleared on upgrade), so it keeps every snapshot until
-  one is set. The daemon's **Delete by age** (`--baseline-retain`) is the
+  one is set. A folder no cleanup reaches says so on its row, with how much
+  it holds, and the low-disk warning names a snapshot folder on that disk
+  when it holds more than the index (#2475). The daemon's **Delete by age** (`--baseline-retain`) is the
   old way: it still removes by age where it is set, and on a server with a
   count a snapshot goes only when it is past the count and older than the
   age.
