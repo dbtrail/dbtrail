@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -520,6 +521,9 @@ func (c hangingConn) QueryContext(ctx context.Context, q string, _ []driver.Name
 	}
 	select {
 	case <-ctx.Done():
+		c.d.mu.Lock()
+		c.d.seen = append(c.d.seen, fmt.Sprintf("DEBUG cause=%v stack=%s", context.Cause(ctx), debug.Stack()))
+		c.d.mu.Unlock()
 		select {
 		case c.d.cancelled <- struct{}{}:
 		default:
@@ -592,5 +596,6 @@ func TestPreLogin_firstModeClientHangsUpDuringAStatement(t *testing.T) {
 		t.Fatalf("the client hung up and its connection's context did not end: the statement is still running (the index server saw: %s)", idx.statements())
 	}
 	<-done
+	t.Logf("DEBUG after: %s", idx.statements())
 	placeGivenBack(t, addr, "a client hung up during its statement")
 }
