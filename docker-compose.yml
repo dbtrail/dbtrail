@@ -61,7 +61,7 @@
 # instead of leaving you to diff two files (#1529). It is passed to the
 # console service below through the YAML anchor, so there is one number to
 # bump: raise it whenever this file gains wiring a running stack would need.
-x-bintrail-compose-version: &compose_version 12
+x-bintrail-compose-version: &compose_version 13
 
 volumes:
   bintrail-index-data:    # MySQL 8.4 datadir — the forensic record (NEW volume:
@@ -815,10 +815,25 @@ services:
   #
   #   psql "host=127.0.0.1 port=5433 dbname=<server id or name> user=app sslmode=require"
   #
-  # WHO ANSWERS. The copy answers every statement, by PostgreSQL's rules, and
-  # nothing is sent to your PostgreSQL. It is read-only: a statement that is
-  # not a read is refused. Time travel (_flashback, _snapshot, AS OF for one
-  # row) is answered on the same connection.
+  # WHO ANSWERS. The copy answers reads, by PostgreSQL's rules. A server with
+  # a FORWARDING USER has the rest answered by its own PostgreSQL: a statement
+  # the copy answers differently or not at all, a transaction block a client
+  # opens, a catalog statement the copy does not answer, and a statement that
+  # is cheap on the source by its plan, which its indexes answer sooner than
+  # the copy (PG_ROUTER_COST_THRESHOLD and PG_ROUTER_SCAN_ROWS below). The
+  # forwarding user is a PostgreSQL role of its own that you create with
+  # SELECT on what applications should read, and set with `bintrail-console
+  # server forward-user`. The role DBTrail captures with is used there only
+  # when you allow it for the server (`server forward-user <server>
+  # --capture-account`), and then only for a plain SELECT on tables the copy
+  # holds. A server with neither is answered from the copy alone, and so is a
+  # server that hides tables or columns: nothing of it is sent to its source.
+  #
+  # It is READ-ONLY: a statement that is not a read is refused and never
+  # reaches the source, and the connection to the source is read-only.
+  #
+  # Time travel (_flashback, _snapshot, AS OF for one row) is answered on the
+  # same connection, from the server's index and snapshots.
   #
   # ENCRYPTION. The login is SCRAM-SHA-256, so the password never crosses the
   # network. A client that asks for TLS gets it, with a certificate made up
@@ -829,7 +844,9 @@ services:
   # BINTRAIL_PG_ROUTER_TLS_KEY to its two paths (docs/docker.md).
   #
   # It reads the servers the web interface manages and the copies on the state
-  # volume, mounted READ-ONLY here: it writes nothing there.
+  # volume, mounted READ-ONLY here: it writes nothing there. To forward it
+  # needs each server's source to be reachable from this container, as
+  # `bintrail` does.
   #
   # It is sized to fit beside capture without asking: four statements at once
   # with two threads each, 256 clients. PG_ROUTER_WORKERS,
@@ -861,6 +878,26 @@ services:
       # All interfaces INSIDE the container; the `ports` mapping above is what
       # controls exposure on the host.
       BINTRAIL_PG_ROUTER_LISTEN: 0.0.0.0:5433
+      # The same S3 access the `bintrail` service is given, as on the router
+      # above: a `_snapshot` query for a moment older than the snapshots in
+      # the local folder, or a `_flashback` one that reaches archived changes,
+      # is answered from the server's S3 destination, read by THIS process.
+      # Without access the query fails. This process only reads S3. To give it
+      # read-only keys instead of the `bintrail` service's (which also write
+      # and delete), set PG_ROUTER_AWS_ACCESS_KEY_ID and
+      # PG_ROUTER_AWS_SECRET_ACCESS_KEY in .env, and
+      # PG_ROUTER_AWS_SESSION_TOKEN when those keys are temporary; the policy
+      # is in docs/s3-iam-policy.md. Unset, it reads with the shared keys. Its
+      # own pair never carries the shared token, and half a pair is refused
+      # at start: BINTRAIL_PG_ROUTER_OWN_AWS_KEYS tells this service which
+      # PG_ROUTER_AWS_* were set, never their values.
+      AWS_ACCESS_KEY_ID: ${PG_ROUTER_AWS_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}
+      AWS_SECRET_ACCESS_KEY: ${PG_ROUTER_AWS_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}
+      AWS_SESSION_TOKEN: ${PG_ROUTER_AWS_SESSION_TOKEN:-${AWS_SESSION_TOKEN:-}}
+      BINTRAIL_PG_ROUTER_OWN_AWS_KEYS: ${PG_ROUTER_AWS_ACCESS_KEY_ID:+access_key_id,}${PG_ROUTER_AWS_SECRET_ACCESS_KEY:+secret_access_key,}${PG_ROUTER_AWS_SESSION_TOKEN:+session_token,}
+      AWS_REGION: ${AWS_REGION:-}
+      BINTRAIL_S3_ENDPOINT: ${BINTRAIL_S3_ENDPOINT:-}
+      BINTRAIL_S3_PATH_STYLE: ${BINTRAIL_S3_PATH_STYLE:-}
       BINTRAIL_CONSOLE_TOKEN: ${CONSOLE_TOKEN:-}
       # The same three paths the `bintrail` service is given: the servers it
       # answers for, and the two files a statement must never read through a
@@ -868,9 +905,10 @@ services:
       BINTRAIL_CONSOLE_SERVERS: /var/lib/bintrail/console-servers.yaml
       BINTRAIL_CONSOLE_AUTH: /var/lib/bintrail/console-auth.yaml
       BINTRAIL_CONSOLE_MCP_TOKEN_FILE: /var/lib/bintrail/console-mcp-token.yaml
-      # Memory each statement on the copy may use: the same setting as
-      # `bintrail`, from the same .env.
+      # Memory each statement on the copy may use, and the most rows one
+      # returns: the same two settings as `bintrail`, from the same .env.
       BINTRAIL_CONSOLE_SQL_MEMORY: ${SQL_MEMORY:-}
+      BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS: ${SQL_PORT_MAX_ROWS:-}
       # The status log: one line a minute per PostgreSQL server of the
       # statements the port saw and who answered them (docker compose logs -f
       # pg-router | grep msg=status). STATUS_LOG_INTERVAL in .env changes how
@@ -888,6 +926,13 @@ services:
       BINTRAIL_PG_ROUTER_WORKERS: ${PG_ROUTER_WORKERS:-}
       BINTRAIL_PG_ROUTER_THREADS: ${PG_ROUTER_THREADS:-}
       BINTRAIL_PG_ROUTER_MAX_CONNECTIONS: ${PG_ROUTER_MAX_CONNECTIONS:-}
+      # How many connections to the servers' own PostgreSQL this service holds
+      # at once, every server together (1 to 1024; 16 unless set). A client
+      # holds one while a statement the source answers, or its transaction
+      # block, runs there. Past the limit a statement waits for one to be
+      # given back, up to 30 seconds, and is then refused. Keep it below what
+      # your PostgreSQL has free in max_connections.
+      BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS: ${PG_ROUTER_MAX_SOURCE_CONNECTIONS:-}
       # With a server's forwarding user, a statement the copy can answer goes
       # to the copy only when its plan on the source costs at least
       # PG_ROUTER_COST_THRESHOLD (50000 unless set) or has a sequential scan of
@@ -912,10 +957,19 @@ services:
       # host; it asks for no password. PG_ROUTER_STATUS_ADDR= (empty) turns
       # it off.
       BINTRAIL_PG_ROUTER_STATUS_ADDR: ${PG_ROUTER_STATUS_ADDR-:9092}
+      # Off unless PG_ROUTER_STATUS_STATEMENTS=true in .env: a row per
+      # statement shape and side in that status (values blanked), with counts.
+      # It names your tables and columns, and the status address asks for no
+      # password.
+      BINTRAIL_PG_ROUTER_STATUS_STATEMENTS: ${PG_ROUTER_STATUS_STATEMENTS:-}
       # A certificate clients can verify: the two paths INSIDE this container
       # of a certificate and its key that you mount into it.
       BINTRAIL_PG_ROUTER_TLS_CERT: ${PG_ROUTER_TLS_CERT:-}
       BINTRAIL_PG_ROUTER_TLS_KEY: ${PG_ROUTER_TLS_KEY:-}
+      # The usage telemetry choice made in the web interface, read from the
+      # state volume. The mount below is read-only, so this service follows
+      # that choice and reports nothing itself. See docs/TELEMETRY.md.
+      BINTRAIL_TELEMETRY_DIR: /var/lib/bintrail/telemetry
     # 0 = no ceiling. See PG_ROUTER_MEMORY / PG_ROUTER_CPUS above.
     mem_limit: ${PG_ROUTER_MEMORY:-0}
     # Optional: a memory ceiling of its own for each statement on the copy,
@@ -1482,6 +1536,11 @@ services:
       # The interval, turned into --every by the shared command above. The
       # one-shot does not list it, so `run --rm iceberg-export` always returns.
       ICEBERG_EVERY: ${ICEBERG_EVERY:-1h}
+      # The usage telemetry choice made in the web interface, read from the
+      # state volume, as on the other services that stay up. The mount is
+      # read-only, so this service follows that choice and reports nothing
+      # itself. See docs/TELEMETRY.md.
+      BINTRAIL_TELEMETRY_DIR: /var/lib/bintrail/telemetry
 
   # ── `drill` profile: scratch MySQL for `bintrail drill` (#1195) ──────────
   # An opt-in THROWAWAY server the restore rehearsal loads into. Same pinned

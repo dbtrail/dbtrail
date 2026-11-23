@@ -486,6 +486,12 @@ func pgRouterFreshLines(forced, read string, fresh []string) string {
 
 func runPGRouter(cmd *cobra.Command, _ []string) error {
 	cli.LoadEnvFile()
+	// Before anything reads the AWS variables: this service's own S3 keys
+	// (#3142) decide which token it may carry, or refuse a mixed pair.
+	awsKeysLine, err := applyPGRouterAWSKeys()
+	if err != nil {
+		return err
+	}
 	st, err := pgRouterSettingsFrom(cmd)
 	if err != nil {
 		return err
@@ -533,6 +539,7 @@ func runPGRouter(cmd *cobra.Command, _ []string) error {
 	}
 	_, statErr := os.Stat(st.ServersFile)
 	fmt.Fprint(os.Stderr, pgRouterStartupLines(st, memory, memoryFrom, memoryErr, srv.ServerCount(), statErr == nil))
+	fmt.Fprint(os.Stderr, awsKeysLine)
 	forced, read := console.SQLModeSetting()
 	fmt.Fprint(os.Stderr, pgRouterFreshLines(forced, read, srv.FreshPostgresServerNames()))
 	if p := st.TLS.ValidityProblemFor(time.Now(), pgVerifying); p != "" {

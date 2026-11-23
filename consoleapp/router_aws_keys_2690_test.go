@@ -188,7 +188,9 @@ func TestComposeRouter_ownAWSKeysFallBackToTheShared(t *testing.T) {
 		}
 		for k, v := range svc.Environment {
 			s, _ := v.(string)
-			if k == routerOwnAWSKeysEnv || strings.Contains(s, "ROUTER_AWS_") {
+			// PG_ROUTER_AWS_* are the pg-router service's own names (#3142),
+			// not the router's.
+			if k == routerOwnAWSKeysEnv || strings.Contains(strings.ReplaceAll(s, "PG_ROUTER_AWS_", ""), "ROUTER_AWS_") {
 				t.Errorf("service %s is given %s=%v: the router's keys are the router's alone", name, k, v)
 			}
 		}

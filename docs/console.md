@@ -2037,7 +2037,13 @@ Set it in **Settings**, **MySQL clients**, under **Hidden from SQL on
 Names are compared without case. A name with a dot, a space or a backtick goes
 in backticks, as in MySQL: `` `my.db`.orders ``. The rules are saved with the
 server and apply from the next statement, on connections that are already open
-too (within a couple of seconds on a separate `bintrail-console router`). The same rules are on the API: `GET` and `PUT /api/servers/{id}/hidden`,
+too (within a couple of seconds on a separate `bintrail-console router` or
+`pg-router`). On the PostgreSQL port, two things a connection that was open
+when a rule hiding a column was saved can still see: the rest of a result it
+had already asked for and not finished reading (the rows were computed before
+the rule), and the column's name in the catalog listing (`\d`), for up to 10
+seconds; reading the column already fails
+([docs/postgres.md](postgres.md#listing-schemas-tables-and-columns-on-the-postgresql-port)). The same rules are on the API: `GET` and `PUT /api/servers/{id}/hidden`,
 with `{"tables": [...], "columns": [...]}`; empty lists remove them.
 
 **Where the rules apply.** SQL on the copy in this page, ordinary SQL on the
