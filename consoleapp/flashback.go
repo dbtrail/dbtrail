@@ -216,9 +216,13 @@ func serveFlashback(ctx context.Context, srv *console.Server, ln net.Listener, c
 	// standalone shim's --max-connections does (#3162): a place is taken
 	// here, before the goroutine starts, and given back when the connection
 	// ends however it ends, so a refused connection costs neither.
+	// A full port makes room for a new client by closing a connection that
+	// has not logged in (preLoginSet.evictOne), never one that has.
 	var connSem chan struct{}
+	var pre *preLoginSet
 	if cfg.MaxConns > 0 {
 		connSem = make(chan struct{}, cfg.MaxConns)
+		pre = newPreLoginSet()
 	}
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -241,24 +245,62 @@ func serveFlashback(ctx context.Context, srv *console.Server, ln net.Listener, c
 		}
 		backoff = 0
 		if connSem != nil {
-			select {
-			case connSem <- struct{}{}:
-			default:
+			if !takeFlashbackPlace(connSem, pre, logger) {
 				logger.Warn("flashback connection refused: the connection limit is reached",
 					"remote", conn.RemoteAddr(), "max_connections", cfg.MaxConns)
 				shim.RefuseTooManyConnections(conn)
 				_ = conn.Close()
 				continue
 			}
+			conn = pre.add(conn, time.Now())
 		}
 		wg.Add(1)
 		go func(c net.Conn) {
 			defer wg.Done()
-			if connSem != nil {
-				defer func() { <-connSem }()
+			if p, ok := c.(*preLoginConn); ok {
+				// The place first, then the word that it is back: the
+				// accept loop takes it only after this goroutine is done
+				// with the connection.
+				defer func() {
+					<-connSem
+					pre.ended(p)
+				}()
 			}
 			handleFlashbackConn(ctx, srv, c, mysrv, creds, gate, cfg, logger)
 		}(conn)
+	}
+}
+
+// takeFlashbackPlace takes one of the port's places for a new client. When
+// none is free it closes a connection that has not logged in, if there is
+// one to close (preLoginSet.evictOne), and takes the place only once that
+// connection's goroutine has ended and given it back: the closed one does
+// no more work, and no place is counted twice. Called from the accept loop
+// alone, so nothing else can take the place in between. False: the port is
+// full of clients that logged in, or of ones that connected a moment ago.
+func takeFlashbackPlace(sem chan struct{}, pre *preLoginSet, logger *slog.Logger) bool {
+	select {
+	case sem <- struct{}{}:
+		return true
+	default:
+	}
+	closed := pre.evictOne(time.Now())
+	if closed == nil {
+		return false
+	}
+	logger.Debug("flashback connection closed to make room: it had not logged in", "remote", closed.RemoteAddr(), "connected_for", time.Since(closed.since))
+	wait := time.NewTimer(flashbackEvictWait)
+	defer wait.Stop()
+	select {
+	case <-closed.gone:
+	case <-wait.C:
+		return false
+	}
+	select {
+	case sem <- struct{}{}:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -310,8 +352,16 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 	// shim.NewConn: the handshake announces autocommit (#2110).
 	mysqlConn, err := shim.NewConn(wc, mysrv, cc, proxy)
 	loginTimer.Stop()
+	if p, ok := c.(*preLoginConn); ok && err == nil && !p.loggedIn() {
+		// Closed to make room at the moment its login finished: not served.
+		return
+	}
 	if err != nil {
 		level := slog.LevelWarn
+		if p, ok := c.(*preLoginConn); ok && p.evicted() {
+			// Closed to make room: said where it was closed.
+			return
+		}
 		if loginTimedOut.Load() {
 			// One line per connection that stalls: not a WARN each, which a
 			// client that opens many would fill the log with.

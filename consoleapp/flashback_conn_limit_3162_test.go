@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -304,5 +305,302 @@ func TestRouterStartupLines_sayTheConnectionLimit(t *testing.T) {
 	want := "Router: at most 256 clients connected at once (--max-connections); one more is refused with error 1040. A client has 30s to log in.\n"
 	if !strings.Contains(got, want) {
 		t.Errorf("startup lines lack %q:\n%s", want, got)
+	}
+}
+
+// evictAfter3162 sets how long a connection must have gone without logging
+// in before it may be closed to make room, for the length of the test.
+func evictAfter3162(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := flashbackEvictAfter
+	flashbackEvictAfter = d
+	t.Cleanup(func() { flashbackEvictAfter = old })
+}
+
+// greeted3162 connects and reads the handshake, and sends nothing.
+func greeted3162(t *testing.T, addr string) net.Conn {
+	t.Helper()
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	if p, err := readPacket3162(t, c); err != nil || len(p) == 0 || p[0] == 0xff {
+		t.Fatalf("handshake: %v %x", err, p)
+	}
+	return c
+}
+
+// closed3162 reports whether the port closed c, waiting up to d.
+func closed3162(c net.Conn, d time.Duration) bool {
+	_ = c.SetReadDeadline(time.Now().Add(d))
+	var b [1]byte
+	_, err := c.Read(b[:])
+	var ne net.Error
+	return err != nil && !(errors.As(err, &ne) && ne.Timeout())
+}
+
+// A full port makes room for a new client by closing the connection that
+// has gone longest without logging in, once it has gone longer than the
+// threshold; one that has sent nothing goes before one that has.
+func TestFlashbackPort_fullPortClosesTheOldestNotLoggedIn(t *testing.T) {
+	evictAfter3162(t, 100*time.Millisecond)
+	addr := servePortFor3162(t, flashbackConfig{MaxConns: 3})
+
+	// The oldest has sent part of its reply; the two after it nothing.
+	partial := greeted3162(t, addr)
+	if _, err := partial.Write([]byte{100, 0, 0, 1, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	silentOld := greeted3162(t, addr)
+	time.Sleep(20 * time.Millisecond)
+	silentNew := greeted3162(t, addr)
+	time.Sleep(200 * time.Millisecond) // all three past the threshold
+
+	c, err := mysqlwire.Dial(addr, "no-such-server", "tok", "")
+	if err != nil {
+		t.Fatalf("a new client on a port full of connections that never logged in: %v", err)
+	}
+	defer c.Close()
+	if !closed3162(silentOld, 5*time.Second) {
+		t.Error("the older connection that sent nothing was not the one closed")
+	}
+	if closed3162(silentNew, 200*time.Millisecond) {
+		t.Error("the newer silent connection was closed too")
+	}
+	if closed3162(partial, 200*time.Millisecond) {
+		t.Error("the connection that had sent something was closed before one that had sent nothing")
+	}
+
+	// Next: the other silent one. Then the one that sent something.
+	c2, err := mysqlwire.Dial(addr, "no-such-server", "tok", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+	if !closed3162(silentNew, 5*time.Second) || closed3162(partial, 200*time.Millisecond) {
+		t.Error("the second arrival did not close the remaining silent connection alone")
+	}
+	c3, err := mysqlwire.Dial(addr, "no-such-server", "tok", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c3.Close()
+	if !closed3162(partial, 5*time.Second) {
+		t.Error("the third arrival did not close the last connection that had not logged in")
+	}
+
+	// Full of logged-in clients now: nobody is closed, the new one gets 1040.
+	if !refused3162(t, addr) {
+		t.Fatal("a port full of logged-in clients gave a handshake to one more")
+	}
+	for _, c := range []*mysqlwire.Conn{c, c2, c3} {
+		if _, err := c.Ping(); err != nil {
+			t.Fatalf("a logged-in client was closed to make room: %v", err)
+		}
+	}
+}
+
+// A connection that has not logged in for less than the threshold is not
+// closed: the new client is refused.
+func TestFlashbackPort_aRecentConnectionIsNotClosedToMakeRoom(t *testing.T) {
+	addr := servePortFor3162(t, flashbackConfig{MaxConns: 1}) // threshold: 1 second
+	recent := greeted3162(t, addr)
+	if !refused3162(t, addr) {
+		t.Fatal("a second client was taken")
+	}
+	if closed3162(recent, 200*time.Millisecond) {
+		t.Fatal("a connection younger than the threshold was closed to make room")
+	}
+	// Past the threshold it is.
+	time.Sleep(900 * time.Millisecond)
+	c := loginSoon3162(t, addr)
+	defer c.Close()
+	if !closed3162(recent, 5*time.Second) {
+		t.Fatal("past the threshold the connection was not closed")
+	}
+}
+
+// Two clients arrive at once at a full port with one connection to close:
+// one of them gets the place, the other error 1040, and the logged-in
+// client that was there stays. At the end the count is back to zero.
+func TestFlashbackPort_twoArrivalsOneConnectionToClose(t *testing.T) {
+	evictAfter3162(t, 50*time.Millisecond)
+	addr := servePortFor3162(t, flashbackConfig{MaxConns: 2})
+	stays, err := mysqlwire.Dial(addr, "no-such-server", "tok", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stays.Close()
+	silent := greeted3162(t, addr)
+	time.Sleep(150 * time.Millisecond)
+
+	var wg sync.WaitGroup
+	conns := make([]*mysqlwire.Conn, 2)
+	errs := make([]error, 2)
+	for i := range conns {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			conns[i], errs[i] = mysqlwire.Dial(addr, "no-such-server", "tok", "")
+		}()
+	}
+	wg.Wait()
+	in := 0
+	for i, c := range conns {
+		if errs[i] != nil {
+			if !strings.Contains(errs[i].Error(), "1040") {
+				t.Errorf("the arrival that found no room got %v, want error 1040", errs[i])
+			}
+			continue
+		}
+		in++
+		defer c.Close()
+		if _, err := c.Ping(); err != nil {
+			t.Errorf("the arrival that got the place is not served: %v", err)
+		}
+	}
+	if in != 1 {
+		t.Fatalf("%d of the two arrivals logged in, want exactly 1", in)
+	}
+	if !closed3162(silent, 5*time.Second) {
+		t.Error("the connection that had not logged in was not closed")
+	}
+	if _, err := stays.Ping(); err != nil {
+		t.Fatalf("the logged-in client was closed: %v", err)
+	}
+
+	// Back to zero: with everyone gone the port takes 2 again, and no more.
+	stays.Close()
+	for _, c := range conns {
+		if c != nil {
+			c.Close()
+		}
+	}
+	a, b := loginSoon3162(t, addr), loginSoon3162(t, addr)
+	defer a.Close()
+	defer b.Close()
+	if !refused3162(t, addr) {
+		t.Fatal("the port took more than its limit after the room was made: a place was counted twice")
+	}
+}
+
+// A connection that finishes its login while it is being closed to make
+// room is either served or closed, never both, and holds one place either
+// way. With a threshold of zero every connection in its handshake may be
+// closed, so two clients racing for a port of one meet at that moment.
+func TestFlashbackPort_loginRacingTheClose(t *testing.T) {
+	evictAfter3162(t, -1)
+	addr := servePortFor3162(t, flashbackConfig{MaxConns: 1})
+	for round := range 40 {
+		var wg sync.WaitGroup
+		conns := make([]*mysqlwire.Conn, 2)
+		for i := range conns {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				conns[i], _ = mysqlwire.Dial(addr, "no-such-server", "tok", "")
+			}()
+		}
+		wg.Wait()
+		served := 0
+		for _, c := range conns {
+			if c == nil {
+				continue
+			}
+			if _, err := c.Ping(); err == nil {
+				served++
+			}
+		}
+		if served > 1 {
+			t.Fatalf("round %d: %d clients are served on a port of one", round, served)
+		}
+		if served == 1 && !refused3162(t, addr) {
+			t.Fatalf("round %d: a logged-in client holds the only place and one more was taken", round)
+		}
+		for _, c := range conns {
+			if c != nil {
+				c.Close()
+			}
+		}
+		// The place comes back each round: none is lost, none counted twice.
+		loginSoon3162(t, addr).Close()
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// The decision itself: of a login that finishes and a close to make room
+// on the same connection, exactly one wins, and a connection is picked to
+// close at most once.
+func TestPreLoginSet_servedOrClosedNeverBoth(t *testing.T) {
+	evictAfter3162(t, -1)
+	for range 2000 {
+		a, b := net.Pipe()
+		defer b.Close()
+		set := newPreLoginSet()
+		p := set.add(a, time.Now())
+		var served bool
+		var picked [2]*preLoginConn
+		var wg sync.WaitGroup
+		wg.Add(3)
+		go func() { defer wg.Done(); served = p.loggedIn() }()
+		for i := range picked {
+			go func() { defer wg.Done(); picked[i] = set.evictOne(time.Now()) }()
+		}
+		wg.Wait()
+		closes := 0
+		for _, c := range picked {
+			if c != nil {
+				closes++
+			}
+		}
+		if served && closes != 0 || !served && closes != 1 {
+			t.Fatalf("served=%v and picked to close %d times", served, closes)
+		}
+		if served == p.evicted() {
+			t.Fatalf("served=%v evicted=%v", served, p.evicted())
+		}
+		set.ended(p)
+		if len(set.waiting) != 0 {
+			t.Fatalf("%d connections still counted as not logged in", len(set.waiting))
+		}
+	}
+}
+
+// Who is picked: nobody under the threshold, nobody who logged in; a silent
+// one before one that sent; the oldest first.
+func TestPreLoginSet_whoIsClosed(t *testing.T) {
+	now := time.Now()
+	mk := func(set *preLoginSet, age time.Duration, sent bool) *preLoginConn {
+		a, b := net.Pipe()
+		t.Cleanup(func() { a.Close(); b.Close() })
+		p := set.add(a, now.Add(-age))
+		p.sent.Store(sent)
+		return p
+	}
+	set := newPreLoginSet()
+	if set.evictOne(now) != nil {
+		t.Fatal("picked from an empty port")
+	}
+	young := mk(set, 500*time.Millisecond, false)
+	exact := mk(set, time.Second, false)
+	in := mk(set, time.Hour, false)
+	if !in.loggedIn() {
+		t.Fatal("login refused")
+	}
+	if got := set.evictOne(now); got != nil {
+		t.Fatalf("picked a connection at or under one second, or one that logged in (young=%v exact=%v in=%v)", got == young, got == exact, got == in)
+	}
+	sentOldest := mk(set, time.Minute, true)
+	silentOld := mk(set, 10*time.Second, false)
+	silentNewer := mk(set, 5*time.Second, false)
+	for i, want := range []*preLoginConn{silentOld, silentNewer, sentOldest, nil} {
+		if got := set.evictOne(now); got != want {
+			t.Fatalf("pick %d is not the expected connection", i+1)
+		}
+	}
+	if in.evicted() {
+		t.Fatal("a logged-in connection was closed")
 	}
 }

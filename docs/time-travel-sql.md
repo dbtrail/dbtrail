@@ -2912,8 +2912,10 @@ as the router applies it:
   `environment:`). A pool in front of the router (ProxySQL, an application's
   own) should be given a maximum at or under this number.
 - **30 seconds to log in.** A client that connects and does not finish
-  logging in within 30 seconds is disconnected, so connections that never
-  log in cannot use up the limit above. This is not a firewall: the port
+  logging in within 30 seconds is disconnected. When the port is full and
+  a new client arrives, the connection that has gone longest without
+  logging in is closed to make room, if it has gone more than one second;
+  a client that logged in is never closed for this. This is not a firewall: the port
   forwards statements to your MySQL, so keep it on `127.0.0.1` or on a
   network only your applications reach.
 - **What else ends a wait.** The client disconnecting: the statement leaves
