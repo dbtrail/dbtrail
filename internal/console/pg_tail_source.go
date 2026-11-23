@@ -10,6 +10,7 @@ import (
 	"math"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -761,10 +762,11 @@ func (x *pgTailSource) Since(ctx context.Context, tables []views.BaselineTable, 
 func pgSkipTables(tables []views.BaselineTable) string {
 	keys := make([]string, len(tables))
 	for i, t := range tables {
-		keys[i] = tailKey(t.Schema, t.Table)
+		// Quoted: no table's name can read as two tables.
+		keys[i] = strconv.Quote(tailKey(t.Schema, t.Table))
 	}
 	slices.Sort(keys)
-	return strings.Join(slices.Compact(keys), "\x01")
+	return strings.Join(slices.Compact(keys), ",")
 }
 
 // nextToHand is the first event after id after, up to upTo, whose LSN is
