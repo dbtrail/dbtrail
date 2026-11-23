@@ -18633,7 +18633,7 @@ function buildServerForm(offered, familyLine) {
   // behind the button. A session that may not change servers sees the box
   // and cannot change it.
   const mayWrite = sessionMay("servers:write");
-  mon.append(tagFlavor(el("div", { id: "pg-forward" },
+  mon.append(tagFlavor(el("div", { id: "pg-forward", style: "margin-top:10px" },
     el("label", { class: "check" }, el("input", { type: "checkbox", name: "forward_capture", disabled: !mayWrite }), el("span", { text: PG_FORWARD_ASK })),
     mayWrite ? null : el("p", { class: "form-hint", text: "Changing it needs permission to change servers." }),
     el("p", { class: "form-hint", text: PG_FORWARD_HINT }),
