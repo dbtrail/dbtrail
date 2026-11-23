@@ -13479,7 +13479,10 @@ function backupSQLLane(cur, b, sqlSt) {
   const usable = backupSnapshotsFor(b, reads);
   if (!usable.length) return null;
   const st = sqlSt && sqlSt.sql_export;
-  const lane = backupLane("To load into MySQL",
+  // A PostgreSQL server's build is the SQL files psql loads, one per table
+  // (#3157); every other server's is a mydumper-format dump.
+  const pgServer = cur.flavor === "postgres";
+  const lane = backupLane(pgServer ? "To load into PostgreSQL" : "To load into MySQL",
     [{ name: ".sql files", cap: "your tables" }],
     mayCreate ? ", built for whatever moment you pick." : ", built for a moment someone picks.", "file");
   const body = el("div", { class: "bk-restore-body" });
@@ -13492,7 +13495,7 @@ function backupSQLLane(cur, b, sqlSt) {
     return lane;
   }
   if (mayCreate) body.append(el("p", { class: "form-hint", text:
-    "Plain SQL in mydumper format. Your database is never touched." }));
+    (pgServer ? "Plain SQL, one file per table, that psql loads." : "Plain SQL in mydumper format.") + " Your database is never touched." }));
   const moment = momentField((usable[0] && usable[0].time) || "");
   const input = moment.input;
   const go = el("button", { class: "btn", type: "button", text: "Build" });

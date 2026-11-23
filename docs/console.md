@@ -320,7 +320,10 @@ and searching events:
    discoverable snapshot in the same store, and **Build a .sql backup for
    any moment**, which folds a chosen instant into a mydumper-format dump
    downloaded as one `.tar.gz` — load it with `myloader`, nothing from
-   bintrail needed on the restore side; the build is a full plaintext copy
+   bintrail needed on the restore side (for a PostgreSQL server the archive
+   holds one `<schema>.<table>.sql` file per table instead, each loaded with
+   `psql -v ON_ERROR_STOP=1 -f <file>`; [postgres.md](./postgres.md#full-table-snapshots)
+   says what such a file makes and what it leaves out); the build is a full plaintext copy
    of every row, staged on the daemon's disk in the working folder, which
    is beside DBTrail's own data unless `BINTRAIL_CONSOLE_BASELINE_STAGING`
    or a folder saved in the web interface by 0.85 to 0.88 says otherwise; [capacity.md](./capacity.md) has
