@@ -158,7 +158,7 @@ func TestStageReread_refusesWhatCannotBeReadAlone(t *testing.T) {
 		{"a comma in a table name", baseline.LockModeFTWRL, false, "", []string{"shop.orders", "shop.a,b"}, true, `"shop.a,b"`},
 		{"a comma in a schema name", baseline.LockModeFTWRL, false, "", []string{"sh,op.orders"}, true, `"sh,op.orders"`},
 		{"a dot in a table name", baseline.LockModeFTWRL, false, "", []string{"shop.v1.2"}, true, `"shop.v1.2"`},
-		{"a PostgreSQL server",baseline.LockModeFTWRL, false, console.FlavorPostgres, []string{"public.orders"}, true, "PostgreSQL"},
+		{"a PostgreSQL server", baseline.LockModeFTWRL, false, console.FlavorPostgres, []string{"public.orders"}, true, "PostgreSQL"},
 		{"no table", baseline.LockModeFTWRL, false, "", nil, false, "no table"},
 		{"an empty list", baseline.LockModeFTWRL, false, "", []string{}, false, "no table"},
 		{"a name with no schema", baseline.LockModeFTWRL, false, "", []string{"orders"}, false, `"orders"`},
