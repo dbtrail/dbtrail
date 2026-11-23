@@ -44,7 +44,8 @@ import (
 // A client picks its server with the database name (dbname=<server id or
 // name>); the password is the one the MySQL port takes. A username that is a
 // server's application login opens that server alone, with that login's
-// password or the port's, whatever database it names. With the server's
+// password or the port's; a database name that is another server is refused
+// (#3087), any other is not read. With the server's
 // forwarding account (#2771), each statement is answered by the copy only
 // when the copy is known to answer it as PostgreSQL does, and by the source
 // otherwise (#2770, pgshim route.go); a transaction block the client opens
@@ -260,6 +261,9 @@ func pgRouterSettingsFrom(cmd *cobra.Command) (pgRouterSettings, error) {
 	if st.Cost, err = pgRouterCostFrom(cmd); err != nil {
 		return st, err
 	}
+	// The copy refuses a result of more rows than this: a statement whose
+	// plan says it returns more is the source's (pgshim.CostPolicy.RowCap).
+	st.Cost.RowCap = int64(st.SQLPortMaxRows)
 	st.StatusStatements, _ = f.GetBool("status-statements")
 	if !f.Changed("status-statements") {
 		if v := os.Getenv("BINTRAIL_PG_ROUTER_STATUS_STATEMENTS"); v != "" {
@@ -486,6 +490,12 @@ func pgRouterFreshLines(forced, read string, fresh []string) string {
 
 func runPGRouter(cmd *cobra.Command, _ []string) error {
 	cli.LoadEnvFile()
+	// Before anything reads the AWS variables: this service's own S3 keys
+	// (#3142) decide which token it may carry, or refuse a mixed pair.
+	awsKeysLine, err := applyPGRouterAWSKeys()
+	if err != nil {
+		return err
+	}
 	st, err := pgRouterSettingsFrom(cmd)
 	if err != nil {
 		return err
@@ -533,6 +543,7 @@ func runPGRouter(cmd *cobra.Command, _ []string) error {
 	}
 	_, statErr := os.Stat(st.ServersFile)
 	fmt.Fprint(os.Stderr, pgRouterStartupLines(st, memory, memoryFrom, memoryErr, srv.ServerCount(), statErr == nil))
+	fmt.Fprint(os.Stderr, awsKeysLine)
 	forced, read := console.SQLModeSetting()
 	fmt.Fprint(os.Stderr, pgRouterFreshLines(forced, read, srv.FreshPostgresServerNames()))
 	if p := st.TLS.ValidityProblemFor(time.Now(), pgVerifying); p != "" {
@@ -544,17 +555,35 @@ func runPGRouter(cmd *cobra.Command, _ []string) error {
 	// One line a minute per server in this service's log (pgrouter_statuslog.go).
 	startPGPortStatusLog(ctx, func() map[string]pgRouterServerNumbers { return routes.doc(st.Listen).Servers }, srv.ServerName)
 	if st.StatusAddr != "" {
-		stopStatus, err := streamrun.StartMetricsServerWith(st.StatusAddr, map[string]http.Handler{
+		defer startPGRouterStatus(st.StatusAddr, map[string]http.Handler{
 			"GET " + routerStatusPath: pgRouterStatusHandler(routes, st.Listen),
-		})
-		if err != nil {
-			return fmt.Errorf("the PostgreSQL router cannot serve its status on %s: %w", st.StatusAddr, err)
-		}
-		defer stopStatus()
+		}, os.Stderr)()
 	}
 	port := &pgRouterPort{srv: srv, addr: st.Listen, maxConns: st.MaxConns, poll: console.DefaultFollowInterval, out: os.Stderr, tls: served.Config,
 		sources: newPGSourceSlots(st.MaxSourceConns), routes: routes, cost: &st.Cost}
 	return port.serve(ctx)
+}
+
+// pgRouterStatusOffLine says that the router's status could not be served on
+// addr, and that the PostgreSQL port is served all the same.
+func pgRouterStatusOffLine(addr string, err error) string {
+	return fmt.Sprintf("WARNING: the PostgreSQL router's status and metrics are OFF: %s could not be opened (%v). The PostgreSQL port is served without them, and the web interface cannot say which mode the router answers each server in. Free that address or set another (BINTRAIL_PG_ROUTER_STATUS_ADDR or --status-addr, and the same in BINTRAIL_CONSOLE_PG_ROUTER_URL where the web interface runs), then restart the router.\n", addr, err)
+}
+
+// startPGRouterStatus serves the router's status on addr and returns what
+// stops it. An address that cannot be opened is said on out and in the log,
+// and is not a reason to leave the PostgreSQL port closed (#3119): the
+// status is an extra, and its address may simply be taken. The MySQL router
+// does the same with its numbers.
+func startPGRouterStatus(addr string, handlers map[string]http.Handler, out io.Writer) (stop func()) {
+	stop, err := streamrun.StartMetricsServerWith(addr, handlers)
+	if err != nil {
+		fmt.Fprint(out, pgRouterStatusOffLine(addr, err))
+		// In the log as well: the startup lines are plain text on stderr.
+		slog.Warn("PostgreSQL router: its status and metrics are off, the address could not be opened; the port is served without them", "addr", addr, "error", err)
+		return func() {}
+	}
+	return stop
 }
 
 // newPGRouterConsole is newRouterConsole for the PostgreSQL router: the same
@@ -912,6 +941,32 @@ func servePGPortRouted(ctx context.Context, srv *console.Server, ln net.Listener
 	return pgshim.Serve(ctx, ln, pgshim.Config{Login: pgPortLogin(srv, pgRouterQueryTimeout, gate, logger, sources, routes, cost), Logger: logger, MaxConns: maxConns, ResultBudget: budget, TLS: tlsConfig})
 }
 
+// pgLoginOtherServer is the refusal of a connection opened with the
+// application login of server loginServer that names another server as its
+// database, nil for any other connection: no application login, the login's
+// own server by its id or its name, or a name that selects no server.
+func pgLoginOtherServer(srv *console.Server, user, database, loginServer string) *pgshim.Error {
+	if loginServer == "" {
+		return nil
+	}
+	// The login's own server first, by its id or by its name: a name two
+	// servers share (a servers file edited by hand) is the login's own
+	// before it is anyone else's.
+	own := srv.PGPortServerName(loginServer)
+	if database == loginServer || database == own {
+		return nil
+	}
+	other, ok := srv.PGPortDatabaseServer(database)
+	if !ok || other == loginServer {
+		return nil
+	}
+	// Only the login's own server is named: an id is not turned into the
+	// name of a server the login has nothing to do with.
+	return &pgshim.Error{Code: "28000", Message: fmt.Sprintf(
+		"user %q is the application login of server %q and opens that server only, and database %q is another server; connect with dbname=%s, or use the other server's login",
+		user, own, database, own)}
+}
+
 // pgPortLogin is the port's login: the port's passwords, then the server.
 //
 // The password is checked before anything is said about the server, and a
@@ -961,6 +1016,16 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		}
 		if !password.Matches(passwords) {
 			return nil, &pgshim.Error{Code: "28P01", Message: fmt.Sprintf("password authentication failed for user %q", user)}
+		}
+		// An application login opens its own server. A database name that
+		// is another server is refused (#3087): the connection would be to
+		// the login's server, and nothing on it would say so to someone who
+		// meant the other. Said after the password passed, like every other
+		// fact about a server. A name that is no server at all is left as it
+		// was: a proxy in front of the port passes on whatever database its
+		// client named.
+		if refusal := pgLoginOtherServer(srv, user, database, loginServer); refusal != nil {
+			return nil, refusal
 		}
 		var tgt console.FlashbackTarget
 		var err error

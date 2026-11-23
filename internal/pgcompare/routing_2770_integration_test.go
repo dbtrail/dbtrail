@@ -76,6 +76,9 @@ func checkRouting(t *testing.T, ctx context.Context, cp *SnapshotCopy, rep *Repo
 				}
 			}
 		}
+		if want[i].stay && veto != "" {
+			t.Errorf("the port sends to the source (%s) a statement the copy answers the same, which it must leave to the copy: %s", veto, r.Statement)
+		}
 		t.Logf("%-13s -> %s: %s (%s)", r.Verdict, side, r.Statement, want[i].why)
 	}
 	// 66 EQUAL lines stay on the copy now. The count only goes down when the

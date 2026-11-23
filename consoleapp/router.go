@@ -75,6 +75,15 @@ Example:
 // that serves it.
 const defaultRouterListen = "127.0.0.1:3309"
 
+// How many clients may be connected to the MySQL port at once (#3162): the
+// PostgreSQL router's numbers (defaultPGRouterMaxConns), since both are the
+// port applications connect to. A connected client that runs nothing costs
+// a goroutine; what runs at once is the pool's business, not this limit's.
+const (
+	defaultRouterMaxConns = 256
+	maxRouterMaxConns     = 1024
+)
+
 func init() {
 	addRouterFlags(routerCmd)
 	rootCmd.AddCommand(routerCmd)
@@ -92,6 +101,7 @@ func addRouterFlags(cmd *cobra.Command) {
 	f.String("sql-memory", "", "Memory each statement on the copy may use, e.g. 4GB; default 2GB, at least 512MB. Fewer statements run at once when each may use more, unless --concurrency sets the number. Unset, the memory saved in the web interface (Settings, MySQL clients) is used, read when the router starts: a change there takes effect when the router is restarted, since how many statements run at once was worked out from it. Env BINTRAIL_CONSOLE_SQL_MEMORY.")
 	f.String("concurrency", "", "How many statements run on the copy at once, 1 to 64, like innodb_thread_concurrency on a MySQL server. Empty or 0: worked out from the cores and the memory this process may use (one statement per two cores). A number above that is taken as said: each statement gets fewer threads, down to one, and the startup lines warn when the number can ask for more memory than there is. A higher number also divides the temporary disk statements may use past their memory into more shares, and keeps that many idle worker processes ready. The rest wait their turn. Env BINTRAIL_ROUTER_CONCURRENCY.")
 	f.String("max-wait", "", "How long a statement waits for its turn on the copy when every worker is busy, e.g. 30s or 2m; past it the client gets an error (1040 on a routed connection, 1203 on one that is not). Empty or 0: no limit, it waits for as long as its client stays connected. Env BINTRAIL_ROUTER_MAX_WAIT.")
+	f.Int("max-connections", defaultRouterMaxConns, fmt.Sprintf("How many clients may be connected at once, 1 to %d; one more is refused with error 1040 (Too many connections), as a MySQL server at its max_connections does. Env BINTRAIL_ROUTER_MAX_CONNECTIONS.", maxRouterMaxConns))
 	f.Int("sql-port-max-rows", console.DefaultSQLPortMaxRows, "Most rows one statement returns; a result with more is refused with error 1104, not cut. Env BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS.")
 	f.Bool("statement-table", false, "Keep a table of every statement shape each side answered, with how many times, how long and how many failed (values blanked, table and column names kept), and publish it on --metrics-addr /status, which asks for no password: whoever reaches that address then reads the names of the tables and columns your clients query. The web interface shows it only to sessions with no data profile. Env BINTRAIL_ROUTER_STATEMENT_TABLE.")
 	f.String("tls-cert", "", "Certificate file (PEM, its chain after it if it has one) the MySQL port offers to clients that ask for encryption, so they can verify it (--ssl-mode=VERIFY_CA or VERIFY_IDENTITY). Requires --tls-key. Unset, the port still encrypts for a client that asks, with a certificate made up at start that no client can verify. Read when the router starts: restart it to serve a renewed certificate. Env BINTRAIL_ROUTER_TLS_CERT.")
@@ -117,7 +127,9 @@ type routerSettings struct {
 	Concurrency int
 	// MaxWait is how long a statement waits for a worker of the copy:
 	// sqlsandbox.NoMaxWait unless a bound was given.
-	MaxWait  time.Duration
+	MaxWait time.Duration
+	// MaxConns is how many clients may be connected at once (#3162).
+	MaxConns int
 	Policy   readrouter.Policy
 	ReadOnly bool
 	// StatementTable keeps and publishes the per-statement table (#2360).
@@ -168,6 +180,19 @@ func routerSettingsFrom(cmd *cobra.Command) (routerSettings, error) {
 	}
 	if st.MaxWait, err = parseRouterMaxWait(str("max-wait", "BINTRAIL_ROUTER_MAX_WAIT")); err != nil {
 		return st, err
+	}
+	st.MaxConns, _ = f.GetInt("max-connections")
+	connsName := "--max-connections"
+	if !f.Changed("max-connections") {
+		if v := os.Getenv("BINTRAIL_ROUTER_MAX_CONNECTIONS"); v != "" {
+			connsName = "BINTRAIL_ROUTER_MAX_CONNECTIONS"
+			if st.MaxConns, err = strconv.Atoi(strings.TrimSpace(v)); err != nil {
+				return st, fmt.Errorf("%s=%q is not a whole number: it is how many clients may be connected at once", connsName, v)
+			}
+		}
+	}
+	if st.MaxConns < 1 || st.MaxConns > maxRouterMaxConns {
+		return st, fmt.Errorf("%s must be between 1 and %d: it is how many clients may be connected at once", connsName, maxRouterMaxConns)
 	}
 	st.SQLPortMaxRows, _ = f.GetInt("sql-port-max-rows")
 	rowsName := "--sql-port-max-rows"
@@ -288,6 +313,7 @@ func routerFlashbackConfig(st routerSettings) flashbackConfig {
 		RouteStatus:         true,
 		FailedBindFailsPing: true,
 		TLS:                 st.TLS,
+		MaxConns:            st.MaxConns,
 	}
 }
 
@@ -853,6 +879,9 @@ func routerStartupLines(u routerStartup) string {
 		fmt.Fprintf(&b, "Router: %s from %s, read again when it changes.\n", countOfServers(u.Servers), u.ServersFile)
 	}
 	fmt.Fprintf(&b, "Router: %s on the copy at once, %s and up to %s of memory each: %s.\n", countOfStatements(u.Pool.Workers), countOfThreads(u.Pool.Threads), u.MemoryLimit, u.Pool.Why)
+	if u.Cfg.MaxConns > 0 {
+		fmt.Fprintf(&b, "Router: at most %d clients connected at once (--max-connections); one more is refused with error 1040. A client has %s to log in.\n", u.Cfg.MaxConns, flashbackLoginTimeout)
+	}
 	if u.Pool.Warning != "" {
 		fmt.Fprintf(&b, "Router: WARNING: %s.\n", u.Pool.Warning)
 	}

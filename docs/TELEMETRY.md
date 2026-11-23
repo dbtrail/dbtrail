@@ -333,13 +333,15 @@ once more after that upgrade.** The earlier choice was inside the container
 that the upgrade replaces, so there is nothing to carry over; from then on it
 is kept.
 
-Each container has its own home directory, so in the bundled file the three
-long-lived services (`bintrail`, `router`, and `shim` from the `flashback`
-profile) are all given the same folder. `router` and `shim` mount the volume
-read-only: they follow the choice and report nothing themselves. With a file
-older than version 5 they read their own empty home directory, so the toggle
-in the web interface does not reach them. The one-shot services (`baseline`,
-`iceberg-export`) do not read that folder either; `BINTRAIL_TELEMETRY=off` or
+Each container has its own home directory, so in the bundled file the
+long-lived services (`bintrail`, `router`, `pg-router`, `shim` from the
+`flashback` profile and `iceberg-export-loop` from its own) are all given the
+same folder. All but `bintrail` mount the volume read-only: they follow the
+choice and report nothing themselves. With a file older than version 5 they
+read their own empty home directory, so the toggle in the web interface does
+not reach them; `pg-router` and `iceberg-export-loop` are given the folder
+from file version 13. The one-shot services (`baseline`, `iceberg-export`) do
+not read that folder either; `BINTRAIL_TELEMETRY=off` or
 `DO_NOT_TRACK=1` in their environment is the way to turn it off there.
 
 `bintrail telemetry status` names the folder in use, and says so when

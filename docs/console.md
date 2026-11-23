@@ -320,7 +320,10 @@ and searching events:
    discoverable snapshot in the same store, and **Build a .sql backup for
    any moment**, which folds a chosen instant into a mydumper-format dump
    downloaded as one `.tar.gz` — load it with `myloader`, nothing from
-   bintrail needed on the restore side; the build is a full plaintext copy
+   bintrail needed on the restore side (for a PostgreSQL server the archive
+   holds one `<schema>.<table>.sql` file per table instead, each loaded with
+   `psql -v ON_ERROR_STOP=1 -f <file>`; [postgres.md](./postgres.md#full-table-snapshots)
+   says what such a file makes and what it leaves out); the build is a full plaintext copy
    of every row, staged on the daemon's disk in the working folder, which
    is beside DBTrail's own data unless `BINTRAIL_CONSOLE_BASELINE_STAGING`
    or a folder saved in the web interface by 0.85 to 0.88 says otherwise; [capacity.md](./capacity.md) has
@@ -1476,7 +1479,9 @@ longer drawn on the page.
   save, and the save's message says so. A server
   saved with an S3 destination before this rule has no count (the one it had
   did nothing and was cleared on upgrade), so it keeps every snapshot until
-  one is set. The daemon's **Delete by age** (`--baseline-retain`) is the
+  one is set. A folder no cleanup reaches says so on its row, with how much
+  it holds, and the low-disk warning names a snapshot folder on that disk
+  when it holds more than the index (#2475). The daemon's **Delete by age** (`--baseline-retain`) is the
   old way: it still removes by age where it is set, and on a server with a
   count a snapshot goes only when it is past the count and older than the
   age.
@@ -2037,7 +2042,13 @@ Set it in **Settings**, **MySQL clients**, under **Hidden from SQL on
 Names are compared without case. A name with a dot, a space or a backtick goes
 in backticks, as in MySQL: `` `my.db`.orders ``. The rules are saved with the
 server and apply from the next statement, on connections that are already open
-too (within a couple of seconds on a separate `bintrail-console router`). The same rules are on the API: `GET` and `PUT /api/servers/{id}/hidden`,
+too (within a couple of seconds on a separate `bintrail-console router` or
+`pg-router`). On the PostgreSQL port, two things a connection that was open
+when a rule hiding a column was saved can still see: the rest of a result it
+had already asked for and not finished reading (the rows were computed before
+the rule), and the column's name in the catalog listing (`\d`), for up to 10
+seconds; reading the column already fails
+([docs/postgres.md](postgres.md#listing-schemas-tables-and-columns-on-the-postgresql-port)). The same rules are on the API: `GET` and `PUT /api/servers/{id}/hidden`,
 with `{"tables": [...], "columns": [...]}`; empty lists remove them.
 
 **Where the rules apply.** SQL on the copy in this page, ordinary SQL on the
