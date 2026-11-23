@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -95,8 +96,13 @@ type pgTailSource struct {
 	// next read from the same event starts after to. The keeper's own
 	// position moves only with a row handed to it, and a long run of rows
 	// left out (what a crash in the middle of a large transaction leaves)
-	// would otherwise be read again at every refresh.
-	skipped struct{ from, to uint64 }
+	// would otherwise be read again at every refresh. tables is which tables
+	// that read was over (pgSkipTables): nothing of them says nothing of
+	// another table, whose build catches up from the same event.
+	skipped struct {
+		from, to uint64
+		tables   string
+	}
 	// started is, by tailKey, the tail Start built last, until its Fill
 	// begins (pg_tail_copy.go).
 	started map[string]pgStarted
@@ -689,8 +695,9 @@ func (x *pgTailSource) Since(ctx context.Context, tables []views.BaselineTable, 
 	// read up to was the beginning of a transaction that has to come again
 	// whole, and that whole delivery is above it.
 	cur := from
+	over := pgSkipTables(tables)
 	x.mu.Lock()
-	if x.skipped.from == from && x.skipped.to > cur {
+	if x.skipped.from == from && x.skipped.tables == over && x.skipped.to > cur {
 		cur = min(x.skipped.to, upTo)
 	}
 	x.mu.Unlock()
@@ -742,12 +749,22 @@ func (x *pgTailSource) Since(ctx context.Context, tables []views.BaselineTable, 
 	}
 	x.mu.Lock()
 	if handedAny {
-		x.skipped.from, x.skipped.to = 0, 0
+		x.skipped.from, x.skipped.to, x.skipped.tables = 0, 0, ""
 	} else {
-		x.skipped.from, x.skipped.to = from, cur
+		x.skipped.from, x.skipped.to, x.skipped.tables = from, cur, over
 	}
 	x.mu.Unlock()
 	return nil
+}
+
+// pgSkipTables names a set of tables, in any order, exactly.
+func pgSkipTables(tables []views.BaselineTable) string {
+	keys := make([]string, len(tables))
+	for i, t := range tables {
+		keys[i] = tailKey(t.Schema, t.Table)
+	}
+	slices.Sort(keys)
+	return strings.Join(slices.Compact(keys), "\x01")
 }
 
 // nextToHand is the first event after id after, up to upTo, whose LSN is

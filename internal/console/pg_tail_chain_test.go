@@ -358,6 +358,26 @@ func TestPGTailChain_aMergeNeverSpansAPrune(t *testing.T) {
 	}
 }
 
+func TestPGSkipTables(t *testing.T) {
+	tb := func(schema, table string) views.BaselineTable { return views.BaselineTable{Schema: schema, Table: table} }
+	ab := pgSkipTables([]views.BaselineTable{tb("s", "a"), tb("s", "b")})
+	if got := pgSkipTables([]views.BaselineTable{tb("s", "b"), tb("s", "a"), tb("s", "b")}); got != ab {
+		t.Errorf("the same tables in another order: %q, %q", got, ab)
+	}
+	for name, other := range map[string][]views.BaselineTable{
+		"fewer":             {tb("s", "a")},
+		"more":              {tb("s", "a"), tb("s", "b"), tb("s", "c")},
+		"another case":      {tb("s", "a"), tb("s", "B")},
+		"another schema":    {tb("s", "a"), tb("t", "b")},
+		"a name that joins": {tb("s", "a\x01s\x00b")},
+		"none":              nil,
+	} {
+		if pgSkipTables(other) == ab {
+			t.Errorf("%s reads as the same tables", name)
+		}
+	}
+}
+
 // costTail counts what a real tail writes and why it wrote it whole.
 type costTail struct {
 	*reconstruct.PGTail
