@@ -1756,7 +1756,16 @@ The source answers:
 - **Text sorted or compared by order** (`ORDER BY` a text column, `min()` of
   one, `name > 'B'`): PostgreSQL orders text by the database's collation, the
   copy by bytes. Text compared for equality, grouped or matched with `LIKE`
-  stays on the copy. A name the statement gives a value itself (`SUM(x) AS
+  stays on the copy. The port finds the text by what the statement names,
+  and reads three ways of sorting text that name none: a position behind a
+  `*` (`SELECT * FROM t ORDER BY 2` goes to the source when the second
+  column of `t` is text, and stays on the copy when it is a number or a
+  date; where the port cannot tell which column the position is, as over a
+  join or a `WITH`, it goes to the source unless the rows hold no text at
+  all), a name the statement gives a value that is also a column's name
+  (`SELECT name AS name ... ORDER BY name`, `min(name) AS name`; a name
+  given to a number, `sum(qty) AS qty`, stays), and a text column named
+  like a word of `ORDER BY` (`ORDER BY last`, `ORDER BY first DESC`). A name the statement gives a value itself (`SUM(x) AS
   units`, a column of a `WITH` or a subquery, read as `s.units`) is judged by
   what it stands for: a count, a sum, an average, a rank, arithmetic, a
   `CASE` that answers only numbers, or a number column renamed is not text;
