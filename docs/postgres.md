@@ -1781,10 +1781,18 @@ The source answers:
   a(i, x)`) go to the source as well. So a comparison (`=`, `<>`, `<`, `BETWEEN`,
   `IN`, `LIKE`, `IS DISTINCT FROM`, `IS NULL`), a join's condition or
   `USING`, `GROUP BY`, `ORDER BY`, a function, `||`, a cast, a `CASE` or an
-  aggregate of such a column goes to the source, and so does a `*` that
-  stands for it anywhere but as a whole item of that one select list
-  (`SELECT * FROM t WHERE id = 7` stays on the copy; `SELECT count(*) FROM
-  (SELECT * FROM t) s` does not). The rule is by where the column stands,
+  aggregate of such a column goes to the source. A `*` stays on the copy as
+  a whole item of that one select list (`SELECT * FROM t WHERE id = 7`), and
+  inside a `WITH` or a subquery in `FROM` when nothing goes on to read the
+  `char(n)` column (`SELECT count(*) FROM (SELECT * FROM t) s`, `WITH x AS
+  (SELECT * FROM t) SELECT id FROM x`). It goes to the source when the column
+  is then named, when another `*` hands it to the client, when the row is
+  used whole, when the block with the `*` has `DISTINCT`, `GROUP BY`, `ORDER
+  BY` or a window, in a set operation, in a subquery used as a value, and in
+  any shape the port does not follow. A `char(n)` column named in the last
+  `SELECT` of a `WITH` goes to the source even when returned as it is: the
+  bytes match, but the port would announce it as `text`, not `bpchar(n)`.
+  The rule is by where the column stands,
   not by what it would give: `WHERE code IS NULL` answers the same on both
   sides and goes to the source all the same. Only the tables the statement
   reads count, so a table without a `char(n)` column is answered as before,

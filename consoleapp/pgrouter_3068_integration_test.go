@@ -175,6 +175,9 @@ func TestIntegrationPGRouterCharPadding_3068(t *testing.T) {
 			{"SELECT code FROM " + table + " WHERE id = 1", "ab   "},
 			{"SELECT * FROM " + table + " WHERE id = 3", "3|abcde|abcde|2"},
 			{"SELECT count(*) FROM " + table + " WHERE label = 'ab'", "2"},
+			// A star over the char(5) column that nothing goes on to read.
+			{"SELECT count(*) FROM (SELECT * FROM " + table + ") s", "4"},
+			{"WITH x AS (SELECT * FROM " + table + ") SELECT id FROM x WHERE id = 3", "3"},
 		} {
 			if got := pgRows(t, c, tc.stmt); got != tc.want {
 				t.Errorf("%s: %q, want %q", tc.stmt, got, tc.want)
@@ -184,7 +187,7 @@ func TestIntegrationPGRouterCharPadding_3068(t *testing.T) {
 			"SELECT count(*) FROM " + table + " WHERE code = 'ab'",
 			"SELECT id, length(code) FROM " + table,
 			"SELECT id, code || 'x' FROM " + table,
-			"SELECT count(*) FROM (SELECT * FROM " + table + ") s",
+			"SELECT count(*) FROM (SELECT * FROM " + table + ") s WHERE s.code = 'ab'",
 		} {
 			got := pgRows(t, c, stmt)
 			if !strings.HasPrefix(got, "error 0A000") || !strings.Contains(got, "char(n)") || !strings.Contains(got, "refused rather than answered with other rows") {

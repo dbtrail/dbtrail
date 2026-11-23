@@ -96,6 +96,9 @@ func screenTypes(tables []CatalogTable, read func(*CatalogTable) bool) map[strin
 	out := map[string][]string{}
 	for i := range tables {
 		t := &tables[i]
+		// The table is in the catalog, by name and by schema.name (paddedExempt).
+		out[listedKey+strings.ToLower(t.Name)] = []string{relType}
+		out[listedKey+strings.ToLower(t.Schema+"."+t.Name)] = []string{relType}
 		for _, c := range t.Columns {
 			n := strings.ToLower(c.Name)
 			typ := strings.ToUpper(c.Type)
@@ -226,6 +229,9 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 	if !anyPadded {
 		return ""
 	}
+
+	// The stars whose padded columns the statement never reads (padded_star.go).
+	exempt := paddedExempt(toks, types)
 
 	// One SELECT and nothing else, and where its select list's items are.
 	selects, sel := 0, -1
@@ -423,6 +429,9 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 			}
 			if isOpTok(toks, i-1, "(") && isOpTok(toks, i+1, ")") && at(i-2).kind == rtWord && at(i-2).text == "count" && !isOpTok(toks, i-3, ".") {
 				// count(*) counts rows, whatever they hold.
+				continue
+			}
+			if exempt[i] {
 				continue
 			}
 			if whole, _ := wholeItem(i); !whole {

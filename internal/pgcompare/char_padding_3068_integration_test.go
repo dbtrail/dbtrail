@@ -134,6 +134,21 @@ func charCases() []charCase {
 		stays(`SELECT id, u FROM ` + x + ` ORDER BY id`),
 		stays(`SELECT id, arr FROM ` + x + ` ORDER BY id`),
 		stays(`SELECT a.id, a.c, b.c FROM ` + x + ` a JOIN ` + p + ` b ON a.id = b.id ORDER BY a.id`),
+		// A star over the padded columns that nothing goes on to read.
+		stays(`SELECT count(*) FROM (SELECT * FROM ` + x + `) s`),
+		stays(`SELECT s.id, s.k FROM (SELECT * FROM ` + x + `) s ORDER BY s.id`),
+		stays(`WITH y AS (SELECT * FROM ` + x + `) SELECT id, t FROM y ORDER BY id`),
+		stays(`WITH y AS (SELECT * FROM ` + x + `), z AS (SELECT * FROM y) SELECT id FROM z WHERE k > 2 ORDER BY id`),
+		stays(`WITH y AS (SELECT a.* FROM ` + x + ` a WHERE a.k > 1) SELECT y.id, length(y.t) FROM y ORDER BY y.id`),
+		stays(`WITH y AS (SELECT id, k FROM ` + x + `) SELECT * FROM y ORDER BY id`),
+		// Returned whole by a WITH: the same bytes, announced as another type.
+		sent(`WITH y AS (SELECT id, sum(k) AS n FROM ` + p + ` GROUP BY id), r AS (SELECT y.*, rank() OVER (ORDER BY y.n DESC, y.id) AS rn FROM y) SELECT r.id, a.c, r.n FROM r JOIN ` + x + ` a ON a.id = r.id ORDER BY r.id`),
+		sent(`WITH y AS (SELECT * FROM ` + x + `) SELECT y.id, y.c, y.u FROM y ORDER BY y.id`),
+		// The same shapes, once the padded value is read.
+		differs(`WITH y AS (SELECT * FROM ` + x + `) SELECT id FROM y WHERE c = 'ab' ORDER BY id`),
+		differs(`WITH y AS (SELECT * FROM ` + x + `) SELECT id, length(c) FROM y ORDER BY id`),
+		differs(`WITH y AS (SELECT * FROM ` + x + `) SELECT id, c || 'x' FROM y ORDER BY id`),
+		differs(`SELECT s.id FROM (SELECT * FROM ` + x + `) s JOIN ` + p + ` b ON s.c = b.t ORDER BY s.id, b.id`),
 		// Nothing of the padded columns.
 		stays(`SELECT count(*) FROM ` + x),
 		stays(`SELECT id FROM ` + x + ` WHERE t = 'ab' ORDER BY id`),
