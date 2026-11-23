@@ -359,7 +359,9 @@ func TestPGTailChain_aMergeNeverSpansAPrune(t *testing.T) {
 }
 
 func TestPGSkipTables(t *testing.T) {
-	tb := func(schema, table string) views.BaselineTable { return views.BaselineTable{Schema: schema, Table: table} }
+	tb := func(schema, table string) views.BaselineTable {
+		return views.BaselineTable{Schema: schema, Table: table}
+	}
 	ab := pgSkipTables([]views.BaselineTable{tb("s", "a"), tb("s", "b")})
 	if got := pgSkipTables([]views.BaselineTable{tb("s", "b"), tb("s", "a"), tb("s", "b")}); got != ab {
 		t.Errorf("the same tables in another order: %q, %q", got, ab)
