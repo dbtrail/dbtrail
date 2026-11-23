@@ -217,7 +217,7 @@ func TestPadded_toTheSource(t *testing.T) {
 		`SELECT count(DISTINCT codes) FROM codes`,
 		`SELECT count(DISTINCT c) FROM codes c`,
 		`SELECT a.id FROM codes a JOIN codes AS b ON a = b`,
-		`SELECT id FROM plain, codes`,
+		`SELECT k, codes FROM codes`,
 		// A table whose snapshot records no types.
 		`SELECT id FROM legacy WHERE word = 'x'`,
 		`SELECT id, length(word) FROM legacy`,

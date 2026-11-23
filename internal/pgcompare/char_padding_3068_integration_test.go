@@ -125,6 +125,20 @@ func charCases() []charCase {
 		sent(`SELECT id FROM ` + x + ` WHERE c IS NULL ORDER BY id`),
 		sent(`SELECT c, count(*) FROM ` + x + ` GROUP BY c`),
 		sent(`SELECT count(DISTINCT c), count(c) FROM ` + x),
+		// A table with a char(n) as a later item of a FROM list written with
+		// commas (#3219): the join compares what its WHERE compares.
+		stays(`SELECT b.id, b.k, a.k FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id AND a.k > 1 ORDER BY b.id`),
+		stays(`SELECT a.id, a.c FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id ORDER BY a.id`),
+		stays(`SELECT b.k, count(*), sum(a.k) FROM ` + p + ` b, ` + x + ` a, ` + p + ` d WHERE a.id = b.id AND d.id = a.id GROUP BY b.k ORDER BY b.k`),
+		differs(`SELECT a.id, b.id FROM ` + p + ` b, ` + x + ` a WHERE a.c = b.c ORDER BY a.id, b.id`),
+		differs(`SELECT a.id FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id AND a.c = 'ab' ORDER BY a.id`),
+		// EXISTS and NOT EXISTS with a star (#3219): the list is not read.
+		stays(`SELECT b.id FROM ` + p + ` b WHERE EXISTS (SELECT * FROM ` + x + ` a WHERE a.id = b.id AND a.k > 2) ORDER BY b.id`),
+		stays(`SELECT b.id FROM ` + p + ` b WHERE NOT EXISTS (SELECT * FROM ` + x + ` a WHERE a.id = b.id AND a.k > 2) ORDER BY b.id`),
+		stays(`SELECT b.k, count(*) FROM ` + p + ` b WHERE EXISTS (SELECT * FROM ` + x + ` a, ` + p + ` d WHERE a.id = b.id AND d.k = a.k) GROUP BY b.k ORDER BY b.k`),
+		differs(`SELECT b.id FROM ` + p + ` b WHERE EXISTS (SELECT * FROM ` + x + ` a WHERE a.c = b.c) ORDER BY b.id`),
+		// Any other subquery reads the star's values: the source's.
+		differs(`SELECT b.id FROM ` + p + ` b WHERE (b.id, b.c, b.t, b.k) IN (SELECT id, c, t, k FROM ` + x + `) ORDER BY b.id`),
 		// A plain select list: both sides write the padded value.
 		stays(`SELECT id, c FROM ` + x + ` ORDER BY id`),
 		stays(`SELECT a.id, a.c AS code FROM ` + x + ` a WHERE a.k > 2 ORDER BY a.id`),

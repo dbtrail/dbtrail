@@ -400,7 +400,7 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 				// A table that holds a padded column, not before a dot: named
 				// in FROM (its alias is noted), or written as a value.
 				p := at(i - 1)
-				if !(p.kind == rtWord && (p.text == "from" || p.text == "join" || p.text == "table") || isOpTok(toks, i-1, ".")) {
+				if !(p.kind == rtWord && (p.text == "from" || p.text == "join" || p.text == "table") || isOpTok(toks, i-1, ".") || fromListItem(toks, i)) {
 					return fmt.Sprintf("the table %q, which holds a char(n) column, written where a value or a second table of a list stands", n) + otherRows
 				}
 				j := i + 1
@@ -434,7 +434,7 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 				// count(*) counts rows, whatever they hold.
 				continue
 			}
-			if exempt[i] {
+			if exempt[i] || existsStar(toks, i) {
 				continue
 			}
 			if whole, _ := wholeItem(i); !whole {
