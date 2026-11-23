@@ -90,13 +90,6 @@ type pgTailSource struct {
 	// leaves such a row out and Broken ends the table's tail, so one bad row
 	// costs one table its tail and not the server every tail.
 	unordered map[string]string
-	// skipped remembers a read by Since that handed nothing: from the event
-	// from, everything up to the event to was read and left out, so the
-	// next read from the same event starts after to. The keeper's own
-	// position moves only with a row handed to it, and a long run of rows
-	// left out (what a crash in the middle of a large transaction leaves)
-	// would otherwise be read again at every refresh.
-	skipped struct{ from, to uint64 }
 	// started is, by tailKey, the tail Start built last, until its Fill
 	// begins (pg_tail_copy.go).
 	started map[string]pgStarted
@@ -663,24 +656,18 @@ func (x *pgTailSource) Since(ctx context.Context, tables []views.BaselineTable, 
 	for i, t := range tables {
 		refs[i] = query.SchemaTable{Schema: t.Schema, Table: t.Table}
 	}
-	// Where the last read from this same event stopped, having handed
-	// nothing. What it left out stays left out: a row then past the LSN
-	// read up to was the beginning of a transaction that has to come again
-	// whole, and that whole delivery is above it.
+	// Always from the event asked for. A read that found nothing for some
+	// tables says nothing of another's, whose build catches up from the same
+	// event, so nothing is remembered between reads. The keeper's cursor
+	// moves past a read that finished having handed nothing, and nextToHand
+	// passes a long run of rows left out without reading them.
 	cur := from
-	x.mu.Lock()
-	if x.skipped.from == from && x.skipped.to > cur {
-		cur = min(x.skipped.to, upTo)
-	}
-	x.mu.Unlock()
-	handedAny := false
 	for cur < upTo {
 		rows, err := query.FetchEventRange(ctx, x.b.db, refs, cur, upTo, x.pageSize)
 		if err != nil {
 			return err
 		}
 		if len(rows) == 0 {
-			cur = upTo
 			break
 		}
 		kept, bad := pgTailPage(rows, upTo, through, handed)
@@ -698,10 +685,8 @@ func (x *pgTailSource) Since(ctx context.Context, tables []views.BaselineTable, 
 			if err := page(ordered); err != nil {
 				return err
 			}
-			handedAny = true
 		}
 		if len(rows) < x.pageSize {
-			cur = upTo
 			break
 		}
 		cur = rows[len(rows)-1].EventID
@@ -713,19 +698,11 @@ func (x *pgTailSource) Since(ctx context.Context, tables []views.BaselineTable, 
 				return err
 			}
 			if !found {
-				cur = upTo
 				break
 			}
 			cur = next - 1
 		}
 	}
-	x.mu.Lock()
-	if handedAny {
-		x.skipped.from, x.skipped.to = 0, 0
-	} else {
-		x.skipped.from, x.skipped.to = from, cur
-	}
-	x.mu.Unlock()
 	return nil
 }
 
