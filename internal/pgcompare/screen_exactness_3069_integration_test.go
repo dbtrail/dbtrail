@@ -30,8 +30,10 @@ func screenExactness() []expectation {
 		// PostgreSQL divides the whole product: sum of a bigint is a numeric
 		// there (13.5) and a whole number on the copy (13).
 		differs("rows", leftSide, `SELECT qty, sum(id) * qty / 2 FROM pgcmp_orders WHERE qty = 3 GROUP BY qty`),
-		differs("precision", leftSide, `SELECT qty, amount * qty / 2 FROM pgcmp_orders WHERE id = 1`),
-		differs("precision", leftSide, `SELECT (amount + 1) * qty / 2 FROM pgcmp_orders WHERE id = 1`),
+		// A numeric on the left is the macro's quotient since #3238: for
+		// these PostgreSQL's own text.
+		stay(`SELECT qty, amount * qty / 2 FROM pgcmp_orders WHERE id = 1`),
+		stay(`SELECT (amount + 1) * qty / 2 FROM pgcmp_orders WHERE id = 1`),
 		differs("precision", leftSide, `WITH c(qty) AS (SELECT amount FROM pgcmp_orders WHERE id = 1) SELECT qty / 2 FROM c`),
 		stay(`SELECT id, qty / 2, -qty / 2, 2 * qty / 3, qty * qty / 2, qty * id / 7, o.qty / 2, ratio * qty / 4 FROM pgcmp_orders o ORDER BY id`),
 		// --- #3071: substring ---------------------------------------------

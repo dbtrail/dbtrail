@@ -102,7 +102,26 @@ package sqlsandbox
 //     averages as a double precision too. Of a numeric or a whole number
 //     PostgreSQL writes as many decimals as the quotient needs, from 16 to
 //     20 and more (500.0000000000000000, 0.50000000000000000000), which is
-//     not one type the copy can give a column: refused.
+//     not one type the copy can give a column: refused. It is the avg of a
+//     connection the copy answers alone, and of a float everywhere.
+//   - avg(x) of numerics or whole numbers on a connection that can reach
+//     its source is _bintrail_pg_avgn (pgshim.retypeForCopy, #3219), and
+//     n / d on its own is _bintrail_pg_div (pgshim.rewriteDivisions): the
+//     exact quotient, of the exact sum over the count for the avg, rounded
+//     once, half away from zero, to 16 decimals, a DECIMAL(38,16). It is
+//     worked out in whole numbers of 128 bits, each side without its
+//     decimal point (_bintrail_pg_uns), so a quotient that ends within 16
+//     decimals is exact (0.3 / 3 is 0.1000000000000000). PostgreSQL writes
+//     the same quotient with 16 significant digits or more: the same text
+//     from 1 to 9999, 12 decimals above and 20 below. A divisor of zero is
+//     PostgreSQL's error, where the engine answers NULL, and NULL over zero
+//     is NULL, as on PostgreSQL. Two whole numbers, which PostgreSQL divides
+//     as whole numbers, and a float are refused; the port's screen sends
+//     both to the source before the copy is asked. A quotient or a side
+//     past what 128 bits hold fails, and the source answers, and so does a
+//     quotient under 0.000001 that is not zero: 16 decimals would keep too
+//     few of its digits, or round it to zero and change which rows a
+//     comparison finds.
 //
 // round(x, k) and round(x, -k) refuse a float: round(double precision, k)
 // does not exist on PostgreSQL, and a float here may stand for a numeric
@@ -246,6 +265,33 @@ CREATE OR REPLACE TEMP MACRO _bintrail_pg_round_whole(x) AS (
 CREATE OR REPLACE TEMP MACRO _bintrail_pg_avg(x) AS (
   CASE WHEN typeof(min(x)) IN ('DOUBLE', 'FLOAT') THEN avg(x)
   ELSE error('the copy cannot write avg() of this as PostgreSQL does: of a numeric or a whole number PostgreSQL writes as many decimals as each average needs; round(avg(x), k) the copy answers') END
+);
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_uns(x) AS (
+  CAST(x * _bintrail_pg_pow10(_bintrail_pg_scale(x)) AS HUGEINT)
+);
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_q16(xn, sn, xd, sd) AS (
+  CASE WHEN xn <> 0 AND abs(xn) * _bintrail_pg_pow10(sd + 6) < abs(xd) * _bintrail_pg_pow10(sn)
+    THEN error('the copy cannot divide this as PostgreSQL does: a quotient under 0.000001, of which 16 decimals keep too few digits')
+  ELSE sign(xn) * sign(xd) * ((2 * (abs(xn) * _bintrail_pg_pow10(sd + 16)) + abs(xd) * _bintrail_pg_pow10(sn)) // (2 * (abs(xd) * _bintrail_pg_pow10(sn)))) END
+);
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_div(n, d) AS (
+  CAST(CASE
+    WHEN NOT (_bintrail_pg_exact(n) AND _bintrail_pg_exact(d))
+      THEN error('the copy cannot divide this as PostgreSQL does: a side of the division is not a numeric or a whole number')
+    WHEN typeof(n) NOT LIKE 'DECIMAL(%' AND typeof(d) NOT LIKE 'DECIMAL(%'
+      THEN error('the copy cannot divide this as PostgreSQL does: both sides of the division are whole numbers')
+    WHEN n IS NULL OR d IS NULL THEN NULL
+    WHEN d = 0 THEN error('division by zero')
+    ELSE _bintrail_pg_q16(_bintrail_pg_uns(n), _bintrail_pg_scale(n), _bintrail_pg_uns(d), _bintrail_pg_scale(d))
+  END AS DECIMAL(38,0)) * CAST(0.0000000000000001 AS DECIMAL(16,16))
+);
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_avgn(x) AS (
+  CAST(CASE
+    WHEN NOT _bintrail_pg_exact(min(x))
+      THEN error('the copy cannot write avg() of this as PostgreSQL does: it is not a numeric or a whole number')
+    WHEN count(x) = 0 THEN NULL
+    ELSE _bintrail_pg_q16(_bintrail_pg_uns(sum(x)), _bintrail_pg_scale(sum(x)), count(x), 0)
+  END AS DECIMAL(38,0)) * CAST(0.0000000000000001 AS DECIMAL(16,16))
 );
 CREATE OR REPLACE TEMP MACRO _bintrail_pg_tscale(t) AS (
   CASE WHEN t LIKE 'DECIMAL(%' THEN CAST(regexp_extract(t, ',([0-9]+)[)]$', 1) AS INTEGER)

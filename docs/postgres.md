@@ -1286,7 +1286,13 @@ listener, its own workers, its own memory.
   written PostgreSQL's way on every connection (see
   [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port)):
   `round(avg(amount), 2)` of a `numeric` is `500.00`, as on the source, not
-  `500`. Without a forwarding user, a `round()` or an `avg()` the copy would
+  `500`. A division or an `avg()` of a `numeric` written without a `round()`
+  is the one place where the copy's text is not always the source's: the
+  copy answers the same quotient, a `numeric`, with 16 decimals, where
+  PostgreSQL writes 12 for a quotient of 10000 and more and 20 for one
+  below 1 (see
+  [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port)).
+  Without a forwarding user, a `round()` or an `avg()` the copy would
   write otherwise (`avg()` of a `numeric`, `round()` of a `double precision`,
   a `round()` beside a `UNION`) is refused with error `0A000`, never answered
   with other digits. A statement that is not a
@@ -1326,8 +1332,10 @@ listener, its own workers, its own memory.
   An expression's type is the one the copy computes it with, which is not
   always PostgreSQL's: a `round()` the copy answers is PostgreSQL's
   `numeric`, with exactly the decimals PostgreSQL writes, on every
-  connection (`avg()` of a `numeric` or of whole numbers, which PostgreSQL
-  writes with 16 to 20 decimals, is refused on the copy), and an aggregate or a literal of a `numeric` keeps its
+  connection (`avg()` of a `numeric` or of whole numbers and a division of a
+  `numeric`, which PostgreSQL writes with 12 to 20 decimals, are a `numeric`
+  of 16 decimals on the copy; without a forwarding user such an `avg()` is
+  refused), and an aggregate or a literal of a `numeric` keeps its
   precision and scale here (`numeric(10,2)`) where PostgreSQL reports none. A
   `numeric` declared without precision is a `numeric(38,18)` here and is
   written with its 18 decimals (`12345.678000000000000000` where the source
@@ -1763,6 +1771,31 @@ The source answers:
   value (PostgreSQL writes `CASE WHEN c THEN round(x, 2) ELSE 0 END` as `0`
   where the copy would write `0.00`, so a row that takes the `0` sends the
   statement to the source);
+  a division `a / b` and `avg(x)` written without a `round()`, of numerics
+  and whole numbers: the exact quotient rounded to 16 decimals, a `numeric`
+  as PostgreSQL's is. PostgreSQL writes its own with 16 significant digits or
+  more, so the two are the same number with other decimals. The copy always
+  writes 16; PostgreSQL's count depends on the value and on both sides: often
+  16 for a quotient from 1 to 9999 (`7.5000000000000000`, the same text), 12
+  for a larger one, 20 for a smaller one (`0.3333333333333333` for
+  `0.33333333333333333333`), and 20 for `2.00 / 2`. A quotient that ends
+  within 16 decimals is exact (`0.3 / 3` is `0.1000000000000000`). A quotient
+  under 0.000001 that is not zero is answered by the source, because 16
+  decimals would keep too few of its digits. A quotient that does not end is
+  cut at the sixteenth decimal here and later on PostgreSQL, and what is
+  worked out from it carries that: a comparison, a sort, a `sum` or a
+  `GROUP BY` that turns on a digit past the sixteenth can come out otherwise
+  on the copy. `amount / 3 = 33333.333333333333` can match a row on one side
+  and not on the other, `a / b * b = a` can be true on one and false on the
+  other, and a `GROUP BY a / b` of two quotients that differ only past the
+  sixteenth decimal can be one group on one side and two on the other. Write `round(a / b, k)` or
+  `round(avg(x), k)` for PostgreSQL's text exactly. The copy answers when
+  the statement shows each side to be a `numeric` or a whole number:
+  numbers, columns of whole numbers or of a `numeric` of at most 20 digits
+  and 8 decimals, `+`, `-`, `*`, parentheses, `count`,
+  `sum`, `min`, `max`, `abs`, `coalesce`, `nullif`, `greatest`, `least` and
+  `length` over them. A divisor of zero is PostgreSQL's error, from the
+  source;
   `floor(a / b)` of numerics, as PostgreSQL takes it (`95`, not `95.0`);
   `ntile(n)`; `extract(epoch from x)` of a timestamp (a `numeric` with six
   decimals, as on PostgreSQL 14 and later) and `to_timestamp(n)` of a whole
@@ -1782,8 +1815,17 @@ The source answers:
   this rule; joins, `GROUP BY`, `HAVING`, `DISTINCT [ON]`, `UNION`,
   `INTERSECT`, `EXCEPT`, `WITH`, window functions, `FILTER`, `LIMIT` and
   `OFFSET`. Anything else goes to the source. Some of what the harness found
-  answering otherwise, and why each one goes there: `avg()` and division of a
-  `numeric` outside that `round` (PostgreSQL keeps more decimals), a `round`
+  answering otherwise, and why each one goes there: a division of two whole
+  numbers other than a column over a number (`sum(qty) / count(*)`:
+  PostgreSQL divides them as whole numbers, and the copy's division answers
+  a `numeric`), a division or an `avg()` with a side the statement does not
+  show to be a `numeric` or a whole number (a `double precision` or a
+  `real`, a `numeric` without precision or past 20 digits or 8 decimals, a name from a subquery or a `WITH`, `sum()` of a `bigint`, which
+  PostgreSQL sums to a `numeric`, a function not in the list above, a
+  `CASE`, a cast, a parameter), a division more than two deep in others
+  (`a / b / c / d`), a division in `LIMIT` or `OFFSET` or inside `ceil` or
+  `trunc` (the quotient could fall on the other side of the cut),
+  `avg(DISTINCT x)` and an `avg` with `FILTER` or `OVER`, a `round`
   of a division of two whole numbers (PostgreSQL divides them as whole
   numbers), a `round` whose quotient lands so close to a half that
   PostgreSQL's own rounding of the division could reach it (the copy refuses
@@ -1791,8 +1833,8 @@ The source answers:
   `double precision` (it rounds a half to even) and of a whole number (a
   `double precision` on PostgreSQL), a `round` beside other values in one
   column (`UNION`, `VALUES`, `ARRAY`, `greatest`, `least`, `nullif`: PostgreSQL keeps each
-  value's own decimals), a division by a column or by
-  zero (the copy answers NULL where PostgreSQL fails), `~` and `SIMILAR TO`
+  value's own decimals), a division by a zero written in the statement
+  (PostgreSQL fails it), `~` and `SIMILAR TO`
   (the copy matched no row), `->` and `->>` (PostgreSQL answers `json`, and
   writes a nested value with spaces), a number with an exponent (a `numeric`
   on PostgreSQL), `::text` of a

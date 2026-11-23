@@ -20,8 +20,24 @@ import (
 func (s *session) copyText(text string) (string, error) {
 	if s.forwarding() {
 		out := RewriteForCopy(text)
-		if s.screened != "" && !writtenAsScreened(RewriteForCopy(s.screened), out) {
-			return "", &Error{Code: "0A000", Message: "the copy does not answer this as PostgreSQL would: with this argument the statement is not written for the copy as it was when the port chose the copy for it (an argument inside round(), avg(), floor(), extract() or to_timestamp(), or one that leaves the statement's text unread)"}
+		screened := ""
+		if s.screened != "" {
+			screened = RewriteForCopy(s.screened)
+		}
+		if needsTypes(out) || needsTypes(screened) {
+			// A division or an avg: which macro answers it is decided by the
+			// columns' types (retypeForCopy), the ones the screen read a
+			// moment ago (screenTyped). When they cannot be read now, the
+			// text would reach the copy as the screen did not see it, a
+			// numeric column divided by the engine: the source answers.
+			types, unread := s.columnTypes(out)
+			if unread {
+				return "", &Error{Code: "0A000", Message: "the copy does not answer this as PostgreSQL would: a division or an avg(), written for the copy by its columns' types, which could not be read now"}
+			}
+			out, screened = retypeForCopy(out, types), retypeForCopy(screened, types)
+		}
+		if s.screened != "" && !writtenAsScreened(screened, out) {
+			return "", &Error{Code: "0A000", Message: "the copy does not answer this as PostgreSQL would: with this argument the statement is not written for the copy as it was when the port chose the copy for it (an argument inside round(), avg(), floor(), extract() or to_timestamp() or beside a division, or one that leaves the statement's text unread)"}
 		}
 		return out, nil
 	}
@@ -52,10 +68,20 @@ func rewrittenNames(text string) (names string, read bool) {
 		return "", false
 	}
 	var out []string
-	for _, t := range toks {
+	raw := 0
+	for i, t := range toks {
 		if t.kind == rtWord && strings.HasPrefix(t.text, "_bintrail_pg_") {
 			out = append(out, t.text)
 		}
+		if isOpTok(toks, i, "/") {
+			raw++
+		}
+	}
+	if raw > 0 {
+		// The divisions left as written count too: a division is the
+		// macro's or the engine's by how its sides are written
+		// (rewriteDivisions).
+		out = append(out, strconv.Itoa(raw)+" as written")
 	}
 	return strings.Join(out, " "), true
 }
@@ -79,6 +105,10 @@ func writtenAsScreened(screened, out string) bool {
 // pgRoundMacros), which answers as PostgreSQL does or refuses, and so do
 // floor(a / b), extract(epoch from x) and to_timestamp(n); a CASE or a
 // COALESCE around one of them is checked value by value (packMixedScale).
+// A division on its own becomes the copy's macro for it too
+// (rewriteDivisions, division_3219.go): only here, as floor's, because the
+// macro refuses a divisor of zero, and a refusal needs a source to go to.
+// What a column's type decides is written after it (retypeForCopy).
 // The rest of the text is left as written, byte for byte, and so is a round
 // of any other shape: the screen then sends it to the source (round is not
 // among copyFuncs). Every statement such a connection hands the copy goes
@@ -86,7 +116,7 @@ func writtenAsScreened(screened, out string) bool {
 // screened is what runs.
 func RewriteForCopy(stmt string) string {
 	out, _ := rewriteRounds(quoteCopyWords(stmt), true)
-	return packMixedScale(out)
+	return packMixedScale(rewriteDivisions(out, nil))
 }
 
 // RewriteForCopyAlone is RewriteForCopy for a connection whose statements
@@ -582,7 +612,7 @@ func scaleMacro(t rtToken) bool {
 		return false
 	}
 	switch t.text {
-	case pgAvg, pgToTimestampMacro, pgPack, pgPackN:
+	case pgAvg, pgAvgN, pgDiv, pgToTimestampMacro, pgPack, pgPackN:
 		return false
 	}
 	return true
