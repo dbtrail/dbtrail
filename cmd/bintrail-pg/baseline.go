@@ -168,6 +168,12 @@ func runPGBaseline(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  tables     : %d\n", stats.TablesProcessed)
 	fmt.Printf("  rows       : %d\n", stats.RowsWritten)
 	fmt.Printf("  files      : %d\n", stats.FilesWritten)
+	if len(stats.TablesLeftOut) > 0 {
+		fmt.Printf("  left out   : %d table(s) whose name cannot be stored in a snapshot:\n", len(stats.TablesLeftOut))
+		for _, l := range stats.TablesLeftOut {
+			fmt.Printf("    %s: %s\n", l.Table, l.Reason)
+		}
+	}
 	fmt.Printf("  anchor LSN : %d\n", stats.AnchorLSN)
 	fmt.Printf("  delta start LSN: %d (embedded metadata; the safe replay floor — see MetaKeyLSN)\n", stats.DeltaStartLSN)
 	fmt.Printf("  snapshot   : %s\n", stats.SnapshotTime.Format("2006-01-02T15:04:05Z07:00"))

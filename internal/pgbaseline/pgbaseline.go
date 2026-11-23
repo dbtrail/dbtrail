@@ -151,6 +151,9 @@ type Stats struct {
 	// SlotWaited is how long the run waited for a slot that was still being
 	// created to have its position; zero when it had one at once.
 	SlotWaited time.Duration
+	// TablesLeftOut are the published tables this snapshot does not hold
+	// because a schema or table name cannot be a file path in it (#3113).
+	TablesLeftOut []baseline.LeftOutTable
 }
 
 // Run takes a consistent baseline snapshot of every table the publication
@@ -190,6 +193,10 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	// with nothing created (#3022).
 	if err := refuseUnreadable(ctx, conn, cfg.Publication, cfg.Filters, logger); err != nil {
 		return Stats{}, err
+	}
+	// Nor is a slot made for a run with no table it can store (#3113).
+	if left, err := refuseAllUnstorable(ctx, conn, cfg.Publication, cfg.Filters, logger); err != nil {
+		return Stats{TablesLeftOut: left}, err
 	}
 
 	// The slot exists AND has its position BEFORE the snapshot transaction
@@ -279,6 +286,12 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		// Time-travel silently reconstructing from an older snapshot.
 		return Stats{}, fmt.Errorf("pgbaseline: publication %q streams no tables matching the filters — the baseline would be empty; check the publication's table list and the --schemas/--tables filters", cfg.Publication)
 	}
+	// Before anything is read or created: a name that is not one path
+	// component never reaches a file path (#3113).
+	tables, leftOut := splitStorable(tables, logger)
+	if len(tables) == 0 {
+		return Stats{TablesLeftOut: leftOut}, allLeftOutError(leftOut)
+	}
 	// The catalog's expressions and type names are read with an empty
 	// search_path, so every name in them comes back schema-qualified (as
 	// pg_dump reads them): a CREATE TABLE made from them binds to the same
@@ -356,7 +369,7 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		return Stats{}, fmt.Errorf("pgbaseline: could not write incomplete-snapshot marker in %s (refusing to copy without the crash-safety marker): %w", snapDir, err)
 	}
 
-	stats := Stats{AnchorLSN: uint64(anchorLSN), DeltaStartLSN: uint64(deltaStartLSN), SnapshotTime: snapshotTime, SlotCreated: created, SlotWaited: slotAnchor.Waited}
+	stats := Stats{AnchorLSN: uint64(anchorLSN), DeltaStartLSN: uint64(deltaStartLSN), SnapshotTime: snapshotTime, SlotCreated: created, SlotWaited: slotAnchor.Waited, TablesLeftOut: leftOut}
 
 	var (
 		mu   sync.Mutex
