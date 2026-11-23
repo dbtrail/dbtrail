@@ -1092,12 +1092,10 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 			return why
 		}
 	}
-	if !untyped {
-		// A position behind a star, which names nothing (star_position.go).
-		if why := starByPosition(in, types); why != "" {
-			return why
-		}
-	}
+	// A position of ORDER BY may be a text column that a * put there, which
+	// nothing in the statement names (star_position.go). Not asked without
+	// the columns' own types.
+	starText := !untyped && starMayBeText(in, types)
 	types = withAliasTypes(in, types, untyped)
 	// A typed literal (DATE '...', '...'::date) is one value, never text:
 	// its string is folded into one token.
@@ -1284,8 +1282,18 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 				return true
 			}
 		}
-		if len(core) == 1 && (core[0].kind == rtNumber || unknownWord(core[0])) {
-			// A position or an alias: it may be any column of the answer.
+		// A position, written with parentheses or without (PostgreSQL reads
+		// ORDER BY (2) as ORDER BY 2): it may be any column of the answer,
+		// one a * stands for included.
+		inner := core
+		for len(inner) >= 3 && isOpTok(inner, 0, "(") && isOpTok(inner, len(inner)-1, ")") {
+			inner = inner[1 : len(inner)-1]
+		}
+		if len(inner) == 1 && inner[0].kind == rtNumber {
+			return anyText || starText
+		}
+		if len(core) == 1 && unknownWord(core[0]) {
+			// An alias: it may be any column of the answer.
 			return anyText
 		}
 		for _, t := range core {
@@ -1398,8 +1406,10 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 		case rtNumber:
 			return !strings.ContainsAny(t.text, ".eE")
 		case rtWord:
+			// A name that only may be text (maybeTextType) is not known to
+			// write the same on both sides: it may be a float.
 			return all(t.text, func(ty string) bool {
-				return typeIsText(ty) || typeIsInteger(ty) || ty == "DATE"
+				return ty != maybeTextType && (typeIsText(ty) || typeIsInteger(ty) || ty == "DATE")
 			})
 		}
 		return false
@@ -1776,7 +1786,11 @@ var aliasStop = map[string]bool{
 func aliases(toks []rtToken) (names map[string]bool, at map[int]bool) {
 	names, at = map[string]bool{}, map[int]bool{}
 	for i, t := range toks {
-		if t.kind != rtWord || aliasStop[t.text] || i == 0 {
+		// A quoted alias is one too (AS "amount"): written in small
+		// letters it is the same name as amount. One with capitals is
+		// another name on PostgreSQL, and the screen sends it to the source.
+		quoted := t.kind == rtQuoted && strings.ToLower(t.text) == t.text
+		if !quoted && (t.kind != rtWord || aliasStop[t.text]) || i == 0 {
 			continue
 		}
 		prev := toks[i-1]

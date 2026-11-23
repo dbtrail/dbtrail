@@ -145,56 +145,83 @@ func TestCopyScreen_columnNamedLikeAnOrderWord(t *testing.T) {
 	}
 }
 
-// ORDER BY a position, in a SELECT whose list has a *.
+// ORDER BY a position, in a statement with a * in a select list.
 func TestStarByPosition(t *testing.T) {
-	// plain is (id, code text, name, status, qty); codes (id, code char(5),
-	// label, tags, free, one, kind, k).
-	for q, want := range map[string]string{
-		`SELECT * FROM plain ORDER BY 2`:                                    starTextPositionVeto,
-		`SELECT * FROM plain ORDER BY 1, 3 DESC NULLS LAST`:                 starTextPositionVeto,
-		`SELECT * FROM plain p WHERE qty > 1 ORDER BY 4 LIMIT 3`:            starTextPositionVeto,
-		`SELECT * FROM public.plain AS p ORDER BY 2`:                        starTextPositionVeto,
-		`SELECT * FROM nums n, plain p WHERE p.id = n.id ORDER BY 5`:        starUnknownPositionVeto,
-		`SELECT * FROM plain ORDER BY 9`:                                    starUnknownPositionVeto,
-		`SELECT * FROM plain ORDER BY 0`:                                    starUnknownPositionVeto,
-		`SELECT * FROM plain, nums WHERE nums.id = plain.id ORDER BY 3`:     starUnknownPositionVeto,
-		`SELECT * FROM plain p JOIN nums c ON c.id = p.id ORDER BY 1`:       starUnknownPositionVeto,
-		`SELECT p.* FROM plain p ORDER BY 2`:                                starUnknownPositionVeto,
-		`SELECT *, qty FROM plain ORDER BY 2`:                               starUnknownPositionVeto,
-		`SELECT * FROM (SELECT * FROM plain) s ORDER BY 2`:                  starUnknownPositionVeto,
-		`SELECT * FROM (SELECT id, name FROM plain) s ORDER BY 2`:           starUnknownPositionVeto,
-		`SELECT * FROM (SELECT id, 'x' AS tag FROM plain) s ORDER BY 2`:     starUnknownPositionVeto,
-		`WITH x AS (SELECT id, qty FROM plain) SELECT * FROM x ORDER BY 2`:  starUnknownPositionVeto,
-		`SELECT * FROM nowhere ORDER BY 1`:                                  starUnknownPositionVeto,
-		`SELECT id FROM plain WHERE id IN (SELECT * FROM plain ORDER BY 2)`: starTextPositionVeto,
-		`SELECT * FROM plain UNION ALL SELECT * FROM plain ORDER BY 2`:      starUnknownPositionVeto,
+	// plain is (id, code text, name, status, qty); nums (id, k, at).
+	for _, q := range []string{
+		`SELECT * FROM plain ORDER BY 2`,
+		`SELECT * FROM plain ORDER BY 1, 3 DESC NULLS LAST`,
+		`SELECT * FROM plain p WHERE qty > 1 ORDER BY 4 LIMIT 3`,
+		`SELECT * FROM public.plain AS p ORDER BY 2`,
+		`SELECT * FROM plain ORDER BY 9`,
+		`SELECT * FROM plain ORDER BY 0`,
+		`SELECT * FROM plain, nums WHERE nums.id = plain.id ORDER BY 3`,
+		`SELECT * FROM nums n, plain p WHERE p.id = n.id ORDER BY 5`,
+		`SELECT * FROM plain p JOIN nums c ON c.id = p.id ORDER BY 1`,
+		`SELECT p.* FROM plain p ORDER BY 2`,
+		`SELECT *, qty FROM plain ORDER BY 2`,
+		`SELECT * FROM (SELECT * FROM plain) s ORDER BY 2`,
+		`SELECT * FROM (SELECT id, name FROM plain) s ORDER BY 2`,
+		`SELECT * FROM (SELECT id, 'x' AS tag FROM plain) s ORDER BY 2`,
+		`WITH x AS (SELECT id, qty FROM plain) SELECT * FROM x ORDER BY 2`,
+		`SELECT * FROM nowhere ORDER BY 1`,
+		`SELECT id FROM plain WHERE id IN (SELECT * FROM plain ORDER BY 2)`,
+		`SELECT * FROM plain UNION ALL SELECT * FROM plain ORDER BY 2`,
+		// However the ORDER BY is written, and wherever it stands.
+		`(SELECT * FROM plain) ORDER BY 2`,
+		`(SELECT * FROM plain) UNION ALL (SELECT * FROM plain) ORDER BY 2`,
+		`SELECT * FROM plain ORDER BY (2)`,
+		`SELECT * FROM plain ORDER BY ((2)) DESC NULLS LAST`,
+		`SELECT * FROM plain UNION ALL SELECT id, NULL, NULL, NULL, k FROM nums ORDER BY 2`,
+		`SELECT id, NULL, NULL, NULL, k FROM nums UNION ALL SELECT * FROM plain ORDER BY 2`,
+		`SELECT * FROM (plain p JOIN nums n ON n.id = p.id) ORDER BY 2`,
+		`SELECT * FROM (nums n JOIN plain p ON n.id = p.id) ORDER BY 5`,
+		`WITH c AS (SELECT * FROM plain) SELECT * FROM (SELECT * FROM c) s ORDER BY 2`,
+		`WITH c AS (SELECT id, name FROM plain) SELECT * FROM (SELECT * FROM c) s ORDER BY 2`,
+		`SELECT DISTINCT ON (2) * FROM plain ORDER BY 2`,
+		`SELECT DISTINCT * FROM plain ORDER BY 2`,
+		`SELECT ALL * FROM plain ORDER BY 2`,
+		`SELECT * FROM plain ORDER BY 2;`,
+		`SELECT * FROM plain ORDER BY 1, 2 LIMIT 5 OFFSET 1`,
+		`SELECT n.*, p.* FROM nums n, plain p ORDER BY 5`,
+		`SELECT * FROM plain WHERE id IN (SELECT id FROM nums) ORDER BY 2`,
 	} {
-		if got := orderedScreen(q); got != want {
-			t.Errorf("%s:\n  got %q\n  want %q", q, got, want)
+		if got := orderedScreen(q); !strings.Contains(got, "ORDER BY") {
+			t.Errorf("%s:\n  got %q, want it sent to the source for the text it sorts", q, got)
 		}
 	}
 	for _, q := range []string{
 		// A whole number at that position: sorted the same on both sides.
 		`SELECT * FROM plain ORDER BY 1`,
 		`SELECT * FROM plain ORDER BY 5 DESC, 1`,
+		`SELECT * FROM plain ORDER BY (1), ((5)) DESC NULLS LAST`,
 		`SELECT * FROM plain p WHERE qty > 1 ORDER BY 1 LIMIT 3`,
 		`SELECT * FROM public.plain ORDER BY 1`,
 		`SELECT * FROM nums ORDER BY 1`,
 		`SELECT * FROM nums ORDER BY 3 DESC NULLS LAST, 2, 1`,
-		`SELECT * FROM nums a, nums b WHERE b.id = a.k ORDER BY 1, 4`,
-		`SELECT * FROM nums a JOIN (SELECT id, qty FROM plain) p ON p.id = a.id ORDER BY 5`,
+		`(SELECT * FROM nums) ORDER BY 2`,
+		`SELECT * FROM nums UNION ALL SELECT * FROM nums ORDER BY 2`,
+		`SELECT DISTINCT ON (2) * FROM nums ORDER BY 2`,
 		// Rows with no text in them.
+		`SELECT * FROM nums a, nums b WHERE b.id = a.k ORDER BY 1, 4`,
+		`SELECT * FROM (nums a JOIN nums b ON b.id = a.k) ORDER BY 2`,
+		`SELECT * FROM nums a JOIN (SELECT id, qty FROM plain) p ON p.id = a.id ORDER BY 5`,
 		`SELECT * FROM (SELECT id, k FROM nums) s ORDER BY 1`,
 		`SELECT s.* FROM (SELECT id, qty FROM plain) s ORDER BY 2`,
-		// No position, or no star: the other rules'.
+		// No position: a statement with a star is read as before.
 		`SELECT * FROM plain ORDER BY id`,
 		`SELECT * FROM plain`,
+		`SELECT * FROM plain p JOIN nums n ON n.id = p.id WHERE (n.k) > 5`,
+		`SELECT * FROM plain p, nums n WHERE n.id = p.id AND n.k BETWEEN 1 AND (5)`,
+		`SELECT * FROM (SELECT * FROM plain) s WHERE qty > 1`,
+		`SELECT count(*) FROM (SELECT * FROM plain) s GROUP BY (s.qty)`,
+		// No star: the other rules'.
 		`SELECT id, qty FROM plain ORDER BY 2`,
 		`SELECT id, count(*) FROM plain GROUP BY 1 ORDER BY 2`,
 		`SELECT id, sum(qty) AS units FROM plain GROUP BY 1 ORDER BY 2 DESC, 1`,
-		`SELECT id, row_number() OVER (ORDER BY 1) FROM (SELECT * FROM plain) s`,
 		`SELECT count(*) FROM plain ORDER BY 1`,
 		`SELECT id * 2 FROM plain ORDER BY 1`,
+		`SELECT id, qty * 2, count(*) FROM plain GROUP BY 1, 2 ORDER BY 1, 2`,
 	} {
 		if veto := orderedScreen(q); veto != "" {
 			t.Errorf("%s: sent to the source (%s), want the copy", q, veto)
@@ -214,12 +241,78 @@ func TestStarByPosition(t *testing.T) {
 		t.Errorf("one table: %q", why)
 	}
 	SetColumnOrder(types, "t", []string{"VARCHAR"})
-	if why := CopyScreen(`SELECT * FROM t ORDER BY 1`, types); why != starUnknownPositionVeto {
-		t.Errorf("a name two schemas share: %q", why)
+	if why := CopyScreen(`SELECT * FROM t ORDER BY 1`, types); why == "" {
+		t.Error("a name two schemas share: a position behind a star left to the copy")
 	}
 	// Without the copy's types nothing is listed: any column may be text.
 	if why := CopyScreen(`SELECT * FROM t ORDER BY 1`, nil); why == "" {
 		t.Error("no types: a position behind a star left to the copy")
+	}
+}
+
+// A quoted alias is an alias: the name it gives is no longer the column of
+// that name.
+func TestCopyScreen_quotedAlias(t *testing.T) {
+	for _, q := range []string{
+		`SELECT name AS "amount" FROM people ORDER BY amount`,
+		`SELECT name AS "amount" FROM people ORDER BY "amount"`,
+		`SELECT name "amount" FROM people ORDER BY amount`,
+		`SELECT amount AS amount FROM (SELECT name AS "amount" FROM people) s ORDER BY amount`,
+		`SELECT min(name) AS "age" FROM people`,
+		`SELECT name AS "age" FROM people WHERE id > 0 ORDER BY age DESC`,
+	} {
+		if why := CopyScreen(q, peopleTypes); why == "" {
+			t.Errorf("%s: left to the copy, want the source (text by order under a quoted name)", q)
+		}
+	}
+	for _, q := range []string{
+		`SELECT age AS "years", id FROM people ORDER BY years`,
+		`SELECT sum(amount) AS "total" FROM people ORDER BY total`,
+		`SELECT id AS "key", amount AS "amount" FROM people ORDER BY amount DESC, "key"`,
+	} {
+		if why := CopyScreen(q, peopleTypes); why != "" {
+			t.Errorf("%s:\n  sent to the source (%s), want the copy", q, why)
+		}
+	}
+}
+
+// A name that only may be text is not concatenated as text: it may be a
+// float, which the copy writes otherwise.
+func TestCopyScreen_maybeTextIsNotConcatenated(t *testing.T) {
+	types := map[string][]string{"id": {"INTEGER"}, "name": {"VARCHAR"}, "price": {"DOUBLE"}, "qty": {"INTEGER"}}
+	for _, q := range []string{
+		`SELECT name || '!' FROM (SELECT "price" AS name FROM items) s`,
+		`SELECT name || '!' FROM (SELECT min(DISTINCT price) AS name FROM items) s`,
+		`SELECT name || '!' FROM (SELECT public.items.price AS name FROM items) s`,
+		`SELECT concat(name, '!') FROM (SELECT "price" AS name FROM items) s`,
+	} {
+		if why := CopyScreen(q, types); why == "" {
+			t.Errorf("%s: left to the copy, want the source", q)
+		}
+	}
+	// The text column itself concatenates as before.
+	if why := CopyScreen(`SELECT name || '!' FROM items`, types); why != "" {
+		t.Errorf("a text column concatenated: sent to the source (%s)", why)
+	}
+}
+
+// The mark of a name that may be text is put only where a text column has
+// that name and the name stands for a value: a table's alias, and a name
+// over columns that are not text, change nothing of the statement.
+func TestCopyScreen_noTextFromANameThatIsNoValue(t *testing.T) {
+	// A sysbench-like copy: c is a text column, k a whole number.
+	types := map[string][]string{"id": {"INTEGER"}, "k": {"INTEGER"}, "c": {"VARCHAR"}, "pad": {"VARCHAR"}, "d": {"DATE"}, "born": {"TIMESTAMP"}}
+	for _, q := range []string{
+		`SELECT c.id, c.k FROM sbtest1 AS c ORDER BY 1`,
+		`SELECT c.id, count(*) AS n FROM sbtest1 c GROUP BY 1 ORDER BY 2 DESC NULLS LAST`,
+		`SELECT a.id, b.k FROM sbtest1 c, sbtest2 pad WHERE pad.id = c.id ORDER BY 1`,
+		`SELECT born::date AS d, count(*) FROM sbtest1 GROUP BY 1 ORDER BY 1`,
+		`SELECT id AS k, k AS id FROM sbtest1 ORDER BY 1, 2`,
+		`SELECT s.k FROM (SELECT id AS k FROM sbtest1) s WHERE s.k > 5 ORDER BY s.k`,
+	} {
+		if why := CopyScreen(q, types); why != "" {
+			t.Errorf("%s:\n  sent to the source (%s), want the copy", q, why)
+		}
 	}
 }
 
@@ -236,6 +329,7 @@ func TestStarByPosition_bounded(t *testing.T) {
 		"subqueries in FROM":             "SELECT * FROM " + strings.Repeat("(SELECT * FROM ", (1<<20)/15) + "plain ORDER BY 1",
 		"open parentheses":               "SELECT * FROM plain ORDER BY " + strings.Repeat("( ", 1<<19),
 		"stars":                          "SELECT " + strings.Repeat("*, ", (1<<20)/3) + "1 FROM plain ORDER BY 1",
+		"stars over subqueries":          "SELECT * FROM " + strings.Repeat("(SELECT * FROM nums) s, ", (1<<20)/24) + "nums ORDER BY 1",
 	} {
 		toks, why := lexSQL(q)
 		if why != "" {
@@ -243,7 +337,7 @@ func TestStarByPosition_bounded(t *testing.T) {
 		}
 		done := make(chan struct{})
 		start := time.Now()
-		go func() { starByPosition(toks, types); close(done) }()
+		go func() { starMayBeText(toks, types); close(done) }()
 		select {
 		case <-done:
 		case <-time.After(10 * time.Second):

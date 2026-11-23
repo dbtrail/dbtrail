@@ -77,11 +77,12 @@ func withAliasTypes(toks []rtToken, types map[string][]string, untyped bool) map
 // they stand for. A defined name known not to be text (notText) keeps the
 // types of the columns of that name and gains notTextType. Any other
 // defined name may stand for text: when no column has its name it is of
-// unknown type (absent), as it always was; when a column has, it keeps that
-// column's types and gains maybeTextType, so that it is never read as
-// "not text" for sharing a name with a column that is not, and never loses
-// the text of a column that is (SELECT name AS name ... ORDER BY name sorts
-// text, and so does min(name) AS name).
+// unknown type (absent), as it always was, and so it is when the columns of
+// its name are not text (the rules already take an unknown name for possibly
+// text where that matters) and when it is a table's alias. When a text
+// column has its name it keeps that column's types and gains maybeTextType,
+// so that it never loses the text of the column it stands for (SELECT name
+// AS name ... ORDER BY name sorts text, and so does min(name) AS name).
 //
 // untyped: the types are not the columns' own (screenUntyped), every name
 // is a whole number there, and a defined name is of unknown type as before:
@@ -94,11 +95,11 @@ func mergeAliasTypes(types map[string][]string, defs map[string][][]rtToken, not
 		}
 	}
 	for name := range defs {
-		column, isColumn := types[name]
+		column := types[name]
 		switch {
 		case notText[name]:
 			out[name] = append(append([]string(nil), column...), notTextType)
-		case isColumn && !untyped:
+		case !untyped && anyTextType(column) && defined(defs[name]):
 			out[name] = append(append([]string(nil), column...), maybeTextType)
 		}
 	}
@@ -106,9 +107,32 @@ func mergeAliasTypes(types map[string][]string, defs map[string][][]rtToken, not
 }
 
 // maybeTextType is the type a defined name gains when it shares its name
-// with a column and is not known to stand for something that is not text.
-// typeIsText must take it for text: TestMaybeTextType pins it.
-const maybeTextType = "VARCHAR"
+// with a text column and is not known to stand for something that is not
+// text. typeIsText must take it for text (TestMaybeTextType pins it), and it
+// is no column's type, so that a rule that asks what a value is, and not
+// only whether it may be text, can tell it (concatOK).
+const maybeTextType = "MAYBE TEXT"
+
+// anyTextType reports whether one of a name's columns is text.
+func anyTextType(types []string) bool {
+	for _, ty := range types {
+		if typeIsText(ty) {
+			return true
+		}
+	}
+	return false
+}
+
+// defined reports whether a name stands for an expression somewhere: a
+// table's alias (FROM t AS c) has only empty definitions, and is no value.
+func defined(exprs [][]rtToken) bool {
+	for _, e := range exprs {
+		if len(e) > 0 {
+			return true
+		}
+	}
+	return false
+}
 
 // columnList reports whether the statement names columns in a list: a FROM
 // item's (AS b(n), ) b(n)) or a WITH's (c(n) AS (...)).
