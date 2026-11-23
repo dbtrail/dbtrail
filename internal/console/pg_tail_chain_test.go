@@ -2,6 +2,7 @@ package console
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/event"
+	"github.com/dbtrail/dbtrail/internal/pgdelta"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/views"
@@ -540,6 +542,30 @@ func (f *scaleIndex) Since(_ context.Context, _ []views.BaselineTable, from, upT
 	return f.hand(from, upTo, page)
 }
 
+// scaleReadChain is how long a statement takes to read the table through v.
+func scaleReadChain(t *testing.T, tbl views.BaselineTable, v tailView) time.Duration {
+	t.Helper()
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	q := pgdelta.StateSQL(tbl.Path, nil, nil)
+	if len(v.Paths) > 0 {
+		segs := make([]string, len(v.Paths))
+		for i, p := range v.Paths {
+			segs[i] = "'" + p + "'"
+		}
+		q = baseline.TableTailChainStateSQL(q, segs, v.PK, "")
+	}
+	start := time.Now()
+	var n int64
+	if err := db.QueryRow("SELECT count(*), max(status) FROM (" + q + ")").Scan(&n, new(sql.NullString)); err != nil {
+		t.Fatalf("%v\n%s", err, q)
+	}
+	return time.Since(start)
+}
+
 type scaleChainIndex struct{ *scaleIndex }
 
 func (f *scaleChainIndex) KeepsChainOver(_, _ views.BaselineTable) bool { return true }
@@ -569,7 +595,8 @@ func TestPGTailChainCostAtScale(t *testing.T) {
 		settled(t, ctx, kp, cut)
 		var locked, worst time.Duration
 		var over3s, files int
-		var peakKeys int
+		var peakKeys, reads int
+		var readTotal, readWorst time.Duration
 		for c := 1; c <= cycles; c++ {
 			idx.newest += perCycle
 			if c%every == 0 {
@@ -578,7 +605,8 @@ func TestPGTailChainCostAtScale(t *testing.T) {
 				idx.floors[cut.Path] = floor
 			}
 			start := time.Now()
-			if _, err := kp.refresh(ctx, []views.BaselineTable{cut}); err != nil {
+			got, err := kp.refresh(ctx, []views.BaselineTable{cut})
+			if err != nil {
 				t.Fatal(err)
 			}
 			d := time.Since(start)
@@ -587,6 +615,12 @@ func TestPGTailChainCostAtScale(t *testing.T) {
 			if d >= 3*time.Second {
 				over3s++
 			}
+			if v, ok := got[tailKey("public", "orders")]; ok && c%25 == 0 {
+				took := scaleReadChain(t, cut, v)
+				readTotal += took
+				readWorst = max(readWorst, took)
+				reads++
+			}
 			if e := kp.tables[tailKey("public", "orders")]; e != nil && e.tail != nil {
 				files += len(e.segs)
 				peakKeys = max(peakKeys, e.tail.Keys())
@@ -594,8 +628,9 @@ func TestPGTailChainCostAtScale(t *testing.T) {
 		}
 		kp.close()
 		changes := cycles * perCycle
-		t.Logf("RESULT keep_chain=%v changes=%d peak_keys=%d rows_per_change=%.2f largest_write=%d whole_by_cause first=%d prune=%d eight=%d ratio=%d merges=%d lock_total=%s lock_worst=%s updates_over_3s=%d avg_files_read=%.1f",
+		t.Logf("RESULT keep_chain=%v changes=%d peak_keys=%d rows_per_change=%.2f largest_write=%d whole_by_cause first=%d prune=%d eight=%d ratio=%d merges=%d lock_total=%s lock_worst=%s updates_over_3s=%d avg_files_read=%.1f statement_read_avg=%s statement_read_worst=%s",
 			keep, changes, peakKeys, float64(costs.wholeRows+costs.deltaRows+costs.mergeRows)/float64(changes), costs.largest,
-			costs.first, costs.prune, costs.eight, costs.ratio, costs.merges, locked.Round(time.Millisecond), worst.Round(time.Millisecond), over3s, float64(files)/cycles)
+			costs.first, costs.prune, costs.eight, costs.ratio, costs.merges, locked.Round(time.Millisecond), worst.Round(time.Millisecond), over3s, float64(files)/cycles,
+			(readTotal / time.Duration(max(reads, 1))).Round(time.Millisecond), readWorst.Round(time.Millisecond))
 	}
 }
