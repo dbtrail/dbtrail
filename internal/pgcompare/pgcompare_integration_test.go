@@ -32,6 +32,7 @@ const (
 	itWords     = "pgcmp_words"
 	itEpoch     = "pgcmp_epoch"
 	itExact     = "pgcmp_exact"
+	itPeople    = "pgcmp_people"
 	itPub       = "pgcmp_pub"
 	itSlot      = "pgcmp_slot"
 )
@@ -74,7 +75,7 @@ func TestIntegrationPGCompare(t *testing.T) {
 	dropAll := func() {
 		bg := context.Background()
 		_, _ = setup.Exec(bg, "DROP PUBLICATION IF EXISTS "+itPub)
-		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS "+itOrders+", "+itCustomers+", "+itOdd+", "+itArrays+", "+itTimes+", "+itRound+", "+itWords+", "+itEpoch+", "+itExact+", pivot")
+		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS "+itOrders+", "+itCustomers+", "+itOdd+", "+itArrays+", "+itTimes+", "+itRound+", "+itWords+", "+itEpoch+", "+itExact+", "+itPeople+", pivot")
 		_, _ = setup.Exec(bg, "SELECT pg_drop_replication_slot($1) WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)", itSlot)
 	}
 	dropAll()
@@ -130,6 +131,7 @@ func TestIntegrationPGCompare(t *testing.T) {
 
 	want := append(append(expectations(), numericForward()...), zoneAndBetween()...)
 	want = append(want, screenExactness()...)
+	want = append(want, textOrderHoles()...)
 	stmts := make([]string, len(want))
 	for i, e := range want {
 		stmts[i] = e.stmt
@@ -284,7 +286,12 @@ func seedSQL() []string {
 			(3, 3,    3,    4.25,  0.0001,  -2,   '',      '2026-01-06', '2026-01-06 00:00:00',        '00:00:00'),
 			(4, NULL, NULL, NULL,  NULL,    NULL, NULL,    NULL,         NULL,                         NULL),
 			(5, 0.1,  0.1,  0.00,  0.0000,  0,    'fig',   '2026-12-31', '2026-12-31 23:59:59.5',      '12:00:00')`,
-		`CREATE PUBLICATION ` + itPub + ` FOR TABLE ` + itCustomers + `, ` + itOrders + `, ` + itOdd + `, ` + itArrays + `, ` + itTimes + `, ` + itRound + `, ` + itWords + `, ` + itEpoch + `, ` + itExact + `, pivot`,
+		// Text columns named like words of ORDER BY (first, last), with
+		// names in mixed case: the source's collation sorts Ana, bruno,
+		// Carla, Dario; bytes sort the capitals first.
+		`CREATE TABLE ` + itPeople + ` (id int PRIMARY KEY, first text, last text, age int)`,
+		`INSERT INTO ` + itPeople + ` VALUES (1, 'Ana', 'dario', 40), (2, 'bruno', 'Carla', 30), (3, 'Carla', 'bruno', 20), (4, 'Dario', 'Ana', 10)`,
+		`CREATE PUBLICATION ` + itPub + ` FOR TABLE ` + itCustomers + `, ` + itOrders + `, ` + itOdd + `, ` + itArrays + `, ` + itTimes + `, ` + itRound + `, ` + itWords + `, ` + itEpoch + `, ` + itExact + `, ` + itPeople + `, pivot`,
 	}
 }
 
