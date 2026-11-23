@@ -610,7 +610,13 @@ func (s *session) describeWith(st *preparedStatement, untyped string) (cols []sq
 	}
 	// On lines of their own: a statement that ends in a -- comment must not
 	// comment out the closing parenthesis.
+	// Held to the statement as the screen read it, as its portals are
+	// (copyText): a typed NULL inside a round() makes it one the port leaves
+	// as written, whose type is the engine's and not PostgreSQL's. The source
+	// describes such a statement, and answers it.
+	s.screened = st.query
 	cols, err = s.columnsOf("SELECT * FROM (\n" + body + "\n) AS dbtrail_describe LIMIT 0")
+	s.screened = ""
 	return cols, nil, err
 }
 
@@ -741,8 +747,12 @@ func (s *session) runPortal(p *portal) *pgErr {
 		return busyRefusal(p.route.reason)
 	}
 	s.fallback, s.busyRefused = "", ""
+	// The statement as the screen read it, for copyText: the portal's text
+	// must be written for the copy the same way (rewrittenNames).
+	s.screened = p.stmt.query
 	s.argsBound = len(p.stmt.paramOIDs) > 0
 	cols, types, rows, tag, perr := s.run(p.text)
+	s.screened = ""
 	s.argsBound = false
 	if why := s.takeBusyRefused(); why != "" && perr != nil && p.route.side == RouteCopy {
 		// The copy was busy (#3109, route.go): refused, and counted so.

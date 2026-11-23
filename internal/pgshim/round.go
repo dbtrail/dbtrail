@@ -19,9 +19,58 @@ import (
 // refuses, an error the client sees, never another number.
 func (s *session) copyText(text string) (string, error) {
 	if s.forwarding() {
-		return RewriteForCopy(text), nil
+		out := RewriteForCopy(text)
+		if s.screened != "" && !writtenAsScreened(RewriteForCopy(s.screened), out) {
+			return "", &Error{Code: "0A000", Message: "the copy does not answer this as PostgreSQL would: with this argument the statement is not written for the copy as it was when the port chose the copy for it (an argument inside round(), avg(), floor(), extract() or to_timestamp(), or one that leaves the statement's text unread)"}
+		}
+		return out, nil
 	}
 	return RewriteForCopyAlone(text)
+}
+
+// rewrittenNames is the macros RewriteForCopy wrote into text, in order.
+//
+// A prepared statement is screened as the client wrote it, with $1, and run
+// with each argument written in its place (params.go). What is screened must
+// be what runs (RewriteForCopy), and an argument can break that: written as
+// a cast (a NULL of a declared type, a float, a date), it makes a round()
+// around it one RewriteForCopy leaves as written (holdsCast), and the copy
+// would answer that round() its own way, 10.50 for PostgreSQL's 10.5000; a
+// text the port's lexer refuses is left as written whole. So a portal's text
+// must be written with the same macros as its statement's (session.screened),
+// or the source answers it. A connection the copy answers alone refuses the
+// same texts in RewriteForCopyAlone (aloneRefusal).
+//
+// The names are the words of the text as the port reads it: a string that
+// spells a macro's name is not one, and must not stand in for a round() the
+// rewrite left as written. read is false for a text the port does not read,
+// which has no words to tell: it is written as its statement only when the
+// statement has no macro at all (writtenAsScreened).
+func rewrittenNames(text string) (names string, read bool) {
+	toks, why := lexSQL(text)
+	if why != "" {
+		return "", false
+	}
+	var out []string
+	for _, t := range toks {
+		if t.kind == rtWord && strings.HasPrefix(t.text, "_bintrail_pg_") {
+			out = append(out, t.text)
+		}
+	}
+	return strings.Join(out, " "), true
+}
+
+// writtenAsScreened reports whether out, a portal's text as RewriteForCopy
+// wrote it, holds the macros of screened, its statement's text as the screen
+// read it and RewriteForCopy wrote it. A text the port does not read was not
+// rewritten: it is the statement's only when there was nothing to rewrite.
+func writtenAsScreened(screened, out string) bool {
+	want, _ := rewrittenNames(screened)
+	got, read := rewrittenNames(out)
+	if !read {
+		return want == ""
+	}
+	return want == got
 }
 
 // RewriteForCopy writes stmt for the copy of a PostgreSQL source, on a
@@ -383,6 +432,7 @@ func avgCall(q string, toks []rtToken, spans [][2]int, from, to int, full bool) 
 	x, _ := rewriteRounds(q[spans[from][0]:spans[to-1][1]], full)
 	return pgAvg + "(" + x + ")", true
 }
+
 // floorCall is the macro call for floor(<toks[from:to]>) of a division,
 // false for any other floor: floor(x) of a numeric is already PostgreSQL's
 // on the copy, but floor of a float or a column is not something this
