@@ -253,6 +253,27 @@ func TestStageReread_aTableLeftOutIsNotCalledDropped(t *testing.T) {
 	}
 }
 
+// mydumper could not look a table up by name (its unquoted SHOW TABLES under
+// lock-all): the caller is told to take a full read.
+func TestStageReread_aLookupFailureSendsToAFullRead(t *testing.T) {
+	stage := t.TempDir()
+	stubRereadDump(t, func(int, rereadDumpCall) error {
+		return errors.New("mydumper failed: exit status 1; output: CRITICAL: Error showing tables in: café - ERROR 1064")
+	})
+	s := newBaselineSupervisor(context.Background(), stage, baseline.LockModeLockAll)
+	s.lockModeChosen = true
+	got, err := s.stageReread(rereadReq(nil), []string{"café.t"})
+	if !errors.Is(err, errRereadUnavailable) || !strings.Contains(err.Error(), "ERROR 1064") {
+		t.Fatalf("err = %v, want a refusal for a full read that keeps mydumper's words", err)
+	}
+	if len(got.files) != 0 {
+		t.Fatalf("files = %v", got.files)
+	}
+	if left := rereadLeft(t, stage); len(left) != 0 {
+		t.Fatalf("the working folder holds %v", left)
+	}
+}
+
 // Free space that cannot be measured is not reported as none: the failure
 // keeps its own words and still reads as a full disk.
 func TestStageReread_aFullDiskThatCannotBeMeasured(t *testing.T) {

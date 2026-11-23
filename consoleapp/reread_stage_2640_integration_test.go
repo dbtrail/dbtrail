@@ -102,7 +102,7 @@ func TestIntegrationStageReread_realMydumperNames_2640(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			for st, rows := range map[string]int{emptied: 0, accented: 1, accentedSchema + ".t": 2} {
+			for st, rows := range map[string]int{emptied: 0, accented: 1} {
 				one, err := s.stageReread(req, []string{st})
 				if err != nil {
 					t.Fatalf("stageReread(%s): %v", st, err)
@@ -110,6 +110,22 @@ func TestIntegrationStageReread_realMydumperNames_2640(t *testing.T) {
 				var n int
 				if err := ddb.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM parquet_scan('%s')", strings.ReplaceAll(one.files[st], "'", "''"))).Scan(&n); err != nil || n != rows {
 					t.Fatalf("%s: %d rows, %v; want %d", st, n, err, rows)
+				}
+				if err := one.discard(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// A schema that needs quoting: ftwrl reads it. Under lock-all
+			// mydumper sends its name unquoted and fails, which sends the
+			// caller to a full read.
+			one, err := s.stageReread(req, []string{accentedSchema + ".t"})
+			if mode == baseline.LockModeLockAll {
+				if !errors.Is(err, errRereadUnavailable) {
+					t.Fatalf("err = %v, want a refusal that sends the caller to a full read", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("stageReread(%s.t): %v", accentedSchema, err)
 				}
 				if err := one.discard(); err != nil {
 					t.Fatal(err)

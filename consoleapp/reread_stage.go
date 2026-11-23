@@ -44,6 +44,13 @@ var errRereadUnavailable = errors.New("these tables cannot be read again alone")
 // not match its name. Nothing is handed out for the other tables either.
 var errRereadTableMissing = errors.New("the read of some tables alone ended without a table it was asked for")
 
+// mydumperShowTablesFailed is how mydumper reports that it could not look up a
+// table of a --tables-list. Measured with 1.0.3-1 under lock-all: it sends
+// SHOW TABLES FROM <schema> with the schema unquoted, so a schema name that
+// needs quoting (one with "ñ" was measured) is a syntax error. A full read
+// does not go through that query.
+const mydumperShowTablesFailed = "Error showing tables in"
+
 // rereadDirPrefix names the folder of a staged read in the working folder.
 // It is one of stagingNamePrefixes: a start after a kill removes the folder
 // whole, finished or not.
@@ -192,6 +199,9 @@ func (s *baselineSupervisor) stageReread(req console.BaselineRequest, tables []s
 	}
 	att, err := s.dumpAnchored(req, lockMode, src, want)
 	if err != nil {
+		if strings.Contains(err.Error(), mydumperShowTablesFailed) {
+			return stagedReread{}, fmt.Errorf("%w: mydumper could not look these tables up by name: %w", errRereadUnavailable, err)
+		}
 		return stagedReread{}, err
 	}
 	defer func() {
