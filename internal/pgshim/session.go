@@ -89,6 +89,9 @@ type session struct {
 	// costVerdicts are the source's plans' verdicts this connection
 	// remembers, by statement shape (route_cost.go).
 	costVerdicts map[string]costVerdict
+	// pendingSide is a plan's verdict for the copy on the statement being
+	// answered, remembered once the copy answers it (settleCostSide).
+	pendingSide *pendingCostSide
 	// sourceAnsweredAt is when the source last answered a statement of this
 	// connection: the copy may not answer it with data older than that
 	// (copyOlderThanSource). Zero when the source never answered one.
@@ -840,9 +843,9 @@ func (s *session) errorResponse(code, msg string) {
 // failure — after a ParameterStatus for each reported parameter the
 // statements before it changed.
 func (s *session) readyFlush() error {
-	// A connection to the source nothing of the client's lives on goes back
-	// to the port (forward.go).
-	s.releaseIdleSource()
+	// A connection to the source nothing of the client's lives on is kept
+	// for the client's next statement, or goes back to the port (forward.go).
+	s.parkIdleSource()
 	s.reportChanges()
 	s.be.Send(&pgproto3.ReadyForQuery{TxStatus: s.txStatus()})
 	return s.be.Flush()

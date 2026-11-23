@@ -347,6 +347,10 @@ func commandLoop(be *pgproto3.Backend, sess *session) {
 			}
 			return // client disconnect / read error
 		}
+		// A connection to the source kept since the last answer is the
+		// session's again before anything of this message is done
+		// (forward.go parkIdleSource).
+		sess.claimSource()
 		if sess.ext.skip {
 			// PostgreSQL's extended-query error rule: after an error every
 			// message up to the client's Sync is discarded, a simple query
