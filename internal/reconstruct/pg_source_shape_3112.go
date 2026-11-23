@@ -68,11 +68,11 @@ func checkPGSourceShape(ctx context.Context, schema, table string, rel baseline.
 	}
 	name := schema + "." + table
 	if now.OID != rel.OID {
-		return fmt.Errorf("%s: the table on the source (OID %d) is not the one the snapshot was read from (OID %d): it was dropped and created again, and no change of it was captured since; %s",
+		return fmt.Errorf("%s: the table on the source (OID %d) is not the one the snapshot was read from (OID %d): it was dropped and created again; %s",
 			name, now.OID, rel.OID, pgRebaseline)
 	}
 	if diff := pgSourceShapeDiff(rel.Columns, now.Columns); diff != "" {
-		return fmt.Errorf("%s: the table's columns on the source are not the snapshot's (%s), and no change of the table was captured since they changed; %s",
+		return fmt.Errorf("%s: the table's columns on the source are not the snapshot's (%s); %s",
 			name, diff, pgRebaseline)
 	}
 	return nil
