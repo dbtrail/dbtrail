@@ -1133,6 +1133,16 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		// The system catalog's statements are answered from the copy's own
 		// tables (#2769), read in UTC and in the port's schema: what the
 		// catalog lists does not depend on the session.
+		// The capture gate's list: the copy's views by name, as the catalog
+		// lists them, with no worker of the copy.
+		bound.CopyTableNames = func(ctx context.Context) ([][2]string, error) {
+			if timeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, timeout)
+				defer cancel()
+			}
+			return copySQL.PGCopyViewNames(ctx)
+		}
 		bound.Catalog = func(ctx context.Context) ([]pgshim.CatalogTable, error) {
 			if timeout > 0 {
 				var cancel context.CancelFunc

@@ -649,7 +649,9 @@ func TestPadded_route(t *testing.T) {
 		`SELECT id FROM legacy WHERE word = 'x'`:                 {RouteSource, ReasonVeto},
 		`SELECT id FROM legacy WHERE id = 1`:                     {RouteCopy, ReasonAnswersTheSame},
 	} {
-		if got := s.route(s.classify(stmt), stmt); got != want {
+		// What depends on the types is asked of a statement headed for the
+		// copy, once the plan sent it there.
+		if got := s.screenTyped(stmt, s.route(s.classify(stmt), stmt)); got != want {
 			t.Errorf("%s: %+v, want %+v", stmt, got, want)
 		}
 	}

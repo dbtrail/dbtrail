@@ -540,6 +540,9 @@ type costLogin struct {
 	// of 7 when it is not nil; catalogErr the same for its catalog.
 	copyErr    func(st string) error
 	catalogErr func() error
+	// captureAccount is Forward.CaptureAccount, names Binding.CopyTableNames.
+	captureAccount bool
+	names          func() [][2]string
 	// tailsPending is a copy whose tables' recent changes are not ready: a
 	// statement asked to have them (RunOptions.NeedTails) is refused before
 	// it runs, as the host's copy refuses it (#3086); any other runs from
@@ -631,7 +634,7 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 		l.notes = append(l.notes, n)
 	}}
 	if l.src != nil {
-		b.Forward = &Forward{DSN: l.src.dsn(), Limit: 4, Cost: l.cost, Barred: l.barred, Sides: l.sides, Acquire: func(ctx context.Context) (func(), bool) {
+		b.Forward = &Forward{DSN: l.src.dsn(), Limit: 4, CaptureAccount: l.captureAccount, Cost: l.cost, Barred: l.barred, Sides: l.sides, Acquire: func(ctx context.Context) (func(), bool) {
 			if l.refuse {
 				return nil, false
 			}
@@ -659,6 +662,9 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 	}
 	if l.src != nil && l.keep != nil {
 		b.Forward.Park = l.keep.park
+	}
+	if l.names != nil {
+		b.CopyTableNames = func(context.Context) ([][2]string, error) { return l.names(), nil }
 	}
 	b.RunAge = l.age
 	if l.catalog != nil {
