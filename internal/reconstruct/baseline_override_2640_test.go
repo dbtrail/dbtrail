@@ -132,10 +132,10 @@ func TestBaselineOverride_refusals(t *testing.T) {
 		}
 	}
 	cases := []struct {
-		name  string
+		name   string
 		break_ func(t *testing.T, s *setup)
-		want  error
-		says  string
+		want   error
+		says   string
 	}{
 		{"the accepted shape", func(*testing.T, *setup) {}, nil, ""},
 		{"a run that writes a dump", func(_ *testing.T, s *setup) { s.cfg.OutputFormat = OutputFormatMydumper }, ErrBaselineOverride, "writes a snapshot"},
@@ -206,11 +206,11 @@ func TestBaselineOverride_refusals(t *testing.T) {
 			posdel, upserts := baseline.TableDeltaPaths(s.path, 1)
 			mustWrite(t, posdel)
 			mustWrite(t, upserts)
-		}, ErrBaselineOverride, "table delta beside it"},
+		}, ErrBaselineOverride, "so it is not a read from the source"},
 		{"half a table delta beside the file", func(t *testing.T, s *setup) {
 			_, upserts := baseline.TableDeltaPaths(s.path, 1)
 			mustWrite(t, upserts)
-		}, ErrBaselineOverride, "table delta beside it"},
+		}, ErrBaselineOverride, "cannot tell whether"},
 		// The read finished after the point the run was asked for.
 		{"read after the run's target", func(_ *testing.T, s *setup) { s.cfg.At = base.Add(-time.Second) }, ErrBaselineOverrideAhead, "after this run's target"},
 	}
