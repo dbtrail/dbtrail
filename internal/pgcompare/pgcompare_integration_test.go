@@ -46,6 +46,9 @@ type expectation struct {
 	// says is a piece of the copy's refusal, for NOT_ON_COPY: a statement
 	// refused for another reason is another finding.
 	says string
+	// stay: the port's screen must leave this statement to the copy
+	// (checkRouting). For a rule's other side: what it must not send away.
+	stay bool
 }
 
 // TestIntegrationPGCompare takes a snapshot of a PostgreSQL source the way
@@ -123,6 +126,7 @@ func TestIntegrationPGCompare(t *testing.T) {
 	t.Cleanup(func() { src.Close(context.Background()) })
 
 	want := append(append(expectations(), numericForward()...), zoneAndBetween()...)
+	want = append(want, reportShapes()...)
 	stmts := make([]string, len(want))
 	for i, e := range want {
 		stmts[i] = e.stmt

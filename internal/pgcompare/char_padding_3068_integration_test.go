@@ -123,7 +123,19 @@ func charCases() []charCase {
 		sent(`SELECT id, concat(c, '|') FROM ` + x + ` ORDER BY id`),
 		sent(`SELECT id FROM ` + x + ` WHERE c LIKE 'ab%' ORDER BY id`),
 		sent(`SELECT id FROM ` + x + ` WHERE c IS NULL ORDER BY id`),
-		sent(`SELECT c, count(*) FROM ` + x + ` GROUP BY c`),
+		// Sorted, a char(n) is text: the source sorts it by its collation.
+		sent(`SELECT c, count(*) FROM ` + x + ` GROUP BY c ORDER BY c`),
+		// A whole key of GROUP BY (#3219): every value of a char(n) has the
+		// same length, so both sides make the same groups.
+		stays(`SELECT c, count(*) FROM ` + x + ` GROUP BY c`),
+		stays(`SELECT count(*), sum(k) FROM ` + x + ` GROUP BY c`),
+		stays(`SELECT a.c, count(*) AS n, sum(b.k) FROM ` + x + ` a JOIN ` + p + ` b ON b.id = a.id GROUP BY a.c`),
+		stays(`SELECT c, k, count(*) FROM ` + x + ` WHERE k < 6 GROUP BY c, k HAVING count(*) >= 1`),
+		// A bpchar without a length keeps each value's own blanks: two
+		// groups on the copy where PostgreSQL makes one.
+		differs(`SELECT u, count(*) FROM ` + x + ` GROUP BY u`),
+		// The key used again, or inside an expression: the source's.
+		sent(`SELECT c, count(*) FROM ` + x + ` GROUP BY c HAVING c IS NOT NULL`),
 		sent(`SELECT count(DISTINCT c), count(c) FROM ` + x),
 		// A plain select list: both sides write the padded value.
 		stays(`SELECT id, c FROM ` + x + ` ORDER BY id`),

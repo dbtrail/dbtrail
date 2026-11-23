@@ -1238,6 +1238,12 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 				return true
 			}
 		}
+		// One call of a function whose answer is never text, whatever stands
+		// elsewhere in the statement: ORDER BY sum(amount) DESC, count(*)
+		// (#3219).
+		if len(core) >= 3 && core[0].kind == rtWord && neverText[core[0].text] && isOpTok(core, 1, "(") && closingParen(core, 1) == len(core)-1 {
+			return false
+		}
 		if len(core) == 1 && (core[0].kind == rtNumber || unknownWord(core[0])) {
 			// A position or an alias: it may be any column of the answer.
 			return anyText
@@ -1551,9 +1557,24 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 					}
 				case "date_trunc":
 					// On a date PostgreSQL answers a timestamp with time zone,
-					// the copy a timestamp: only a timestamp column is measured.
-					if len(a) != 2 || len(a[0]) != 1 || a[0][0].kind != rtString || !dateFields[strings.ToLower(a[0][0].text)] ||
-						len(a[1]) != 1 || a[1][0].kind != rtWord || !untyped && !all(a[1][0].text, func(ty string) bool { return ty == "TIMESTAMP" }) {
+					// the copy a timestamp: only a timestamp column is measured,
+					// with or without a time zone (#3219). With one, where a day
+					// starts is the session's time zone: the copy answers in UTC
+					// alone (routeFree sends a session in any other zone to the
+					// source), and so does this. The column may be written with
+					// its table (o.placed_at).
+					ok := len(a) == 2 && len(a[0]) == 1 && a[0][0].kind == rtString && dateFields[strings.ToLower(a[0][0].text)] && len(a[1])%2 == 1
+					for j := 0; ok && j < len(a[1]); j++ {
+						if j%2 == 1 {
+							ok = isOpTok(a[1], j, ".")
+						} else {
+							ok = a[1][j].kind == rtWord
+						}
+					}
+					if ok && !untyped {
+						ok = all(a[1][len(a[1])-1].text, func(ty string) bool { return ty == "TIMESTAMP" || ty == "TIMESTAMP WITH TIME ZONE" })
+					}
+					if !ok {
 						return "date_trunc() other than of year, month or day of a timestamp column"
 					}
 				case "concat":
