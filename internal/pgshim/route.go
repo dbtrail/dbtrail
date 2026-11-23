@@ -1814,6 +1814,19 @@ func aliasInOrderKey(toks []rtToken, names map[string]bool) string {
 	word := func(i int, w string) bool {
 		return i >= 0 && i < len(toks) && toks[i].kind == rtWord && toks[i].text == w
 	}
+	// A name after AS is an alias even when it is spelled like a word the
+	// screen stops at (qty AS last), which aliases leaves out. Not the type
+	// of a CAST, which a closing or an opening parenthesis follows.
+	all := make(map[string]bool, len(names))
+	for n := range names {
+		all[n] = true
+	}
+	for i := 1; i < len(toks); i++ {
+		if word(i-1, "as") && (toks[i].kind == rtWord || toks[i].kind == rtQuoted) && !isOpTok(toks, i+1, ")") && !isOpTok(toks, i+1, "(") {
+			all[toks[i].text] = true
+		}
+	}
+	names = all
 	key := func(lo, hi int) string {
 		if hi-lo >= 3 && word(hi-2, "nulls") && (word(hi-1, "first") || word(hi-1, "last")) {
 			hi -= 2
@@ -1870,7 +1883,6 @@ func aliasInOrderKey(toks []rtToken, names map[string]bool) string {
 var orderKeysEnd = map[string]bool{
 	"limit": true, "offset": true, "fetch": true, "for": true,
 	"union": true, "intersect": true, "except": true,
-	"rows": true, "range": true, "groups": true,
 }
 
 // compareOps compare two values.
@@ -1956,11 +1968,11 @@ func aliases(toks []rtToken) (names map[string]bool, at map[int]bool) {
 // a dot is a column of what it qualifies.
 func aliasUse(toks []rtToken) string {
 	names, at := aliases(toks)
-	if len(names) == 0 {
-		return ""
-	}
 	if why := aliasInOrderKey(toks, names); why != "" {
 		return why
+	}
+	if len(names) == 0 {
+		return ""
 	}
 	clause := ""
 	for i, t := range toks {

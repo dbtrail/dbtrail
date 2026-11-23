@@ -148,6 +148,11 @@ func TestAliasInOrderKey(t *testing.T) {
 		`SELECT id, qty AS q FROM t ORDER BY id, abs(q) DESC NULLS LAST`,
 		`SELECT id, qty AS q FROM t ORDER BY (q + 1) * 2 LIMIT 3`,
 		`SELECT id, qty AS "q" FROM t ORDER BY abs("q")`,
+		// Spelled like a word the screen stops at.
+		`SELECT id, name, qty AS last FROM t ORDER BY abs(last)`,
+		`SELECT id, qty AS first FROM t ORDER BY first + 1`,
+		// A column named like a word of a window's frame does not end the key.
+		`SELECT id, 1 AS q FROM t ORDER BY id + rows + q`,
 	} {
 		if veto := CopyScreen(q, types); !strings.Contains(veto, "inside an expression of ORDER BY") {
 			t.Errorf("%s: %q, want it sent to the source for the alias", q, veto)
@@ -159,6 +164,10 @@ func TestAliasInOrderKey(t *testing.T) {
 		`SELECT id, count(*) AS count FROM t GROUP BY id ORDER BY count(*) DESC`,
 		`SELECT id, sum(qty) AS sum FROM t GROUP BY id ORDER BY sum(qty), id`,
 		`SELECT t.id, t.qty AS q FROM t ORDER BY abs(t.qty)`,
+		`SELECT id, CAST(qty AS bigint) FROM t ORDER BY abs(qty)`,
+		`SELECT id, CAST(qty AS numeric(10,2)) FROM t ORDER BY abs(qty)`,
+		`SELECT id, qty AS last FROM t ORDER BY last`,
+		`SELECT id, qty AS q FROM t ORDER BY id NULLS LAST`,
 	} {
 		if veto := CopyScreen(q, types); strings.Contains(veto, "ORDER BY") {
 			t.Errorf("%s: sent to the source (%s), want the copy", q, veto)
