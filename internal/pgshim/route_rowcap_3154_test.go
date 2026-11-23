@@ -148,16 +148,16 @@ func TestCostPolicy_overRowCap(t *testing.T) {
 // rowCapPlans are the source's plans for the statements below. Each
 // expensive one costs 90,000, over the cost threshold.
 var rowCapPlans = map[string]string{
-	"FROM whole":     plan(`{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}`),
-	"FROM atcap":     plan(`{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 1000}`),
-	"FROM bounded":   plan(`{"Node Type": "Limit", "Total Cost": 90000, "Plan Rows": 500, "Plans": [{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}`),
-	"FROM filtered":  plan(`{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 221203, "Filter": "(note = 'rare')"}`),
-	"FROM summed":    plan(`{"Node Type": "Aggregate", "Total Cost": 98367, "Plan Rows": 1, "Plans": [{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}`),
-	"FROM grouped":   plan(`{"Node Type": "Aggregate", "Total Cost": 98367, "Plan Rows": 200000, "Plans": [{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}`),
-	"FROM joined":    plan(`{"Node Type": "Hash Join", "Total Cost": 98367, "Plan Rows": 2400000, "Plans": [{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}, {"Node Type": "Seq Scan", "Total Cost": 1, "Plan Rows": 10}]}`),
-	"FROM small":     plan(`{"Node Type": "Seq Scan", "Total Cost": 40, "Plan Rows": 2000}`),
-	"FROM ranged":    plan(`{"Node Type": "Index Scan", "Total Cost": 60000, "Plan Rows": 246857, "Index Cond": "(id > $1)"}`),
-	"FROM scanwide":  plan(`{"Node Type": "Seq Scan", "Total Cost": 30000, "Plan Rows": 1200000}`),
+	"FROM whole":    plan(`{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}`),
+	"FROM atcap":    plan(`{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 1000}`),
+	"FROM bounded":  plan(`{"Node Type": "Limit", "Total Cost": 90000, "Plan Rows": 500, "Plans": [{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}`),
+	"FROM filtered": plan(`{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 221203, "Filter": "(note = 'rare')"}`),
+	"FROM summed":   plan(`{"Node Type": "Aggregate", "Total Cost": 98367, "Plan Rows": 1, "Plans": [{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}`),
+	"FROM grouped":  plan(`{"Node Type": "Aggregate", "Total Cost": 98367, "Plan Rows": 200000, "Plans": [{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}`),
+	"FROM joined":   plan(`{"Node Type": "Hash Join", "Total Cost": 98367, "Plan Rows": 2400000, "Plans": [{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}, {"Node Type": "Seq Scan", "Total Cost": 1, "Plan Rows": 10}]}`),
+	"FROM small":    plan(`{"Node Type": "Seq Scan", "Total Cost": 40, "Plan Rows": 2000}`),
+	"FROM ranged":   plan(`{"Node Type": "Index Scan", "Total Cost": 60000, "Plan Rows": 246857, "Index Cond": "(id > $1)"}`),
+	"FROM scanwide": plan(`{"Node Type": "Seq Scan", "Total Cost": 30000, "Plan Rows": 1200000}`),
 }
 
 func TestRouteByCost_resultOverRowCap(t *testing.T) {
