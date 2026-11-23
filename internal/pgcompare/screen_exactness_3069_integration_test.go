@@ -20,11 +20,20 @@ func screenExactness() []expectation {
 		return expectation{stmt: stmt, verdict: sqlcompare.Different, kind: kind, why: why}
 	}
 	const (
-		sub    = "#3071: the copy counts a start of zero or below otherwise"
-		lit    = "#3072: the copy reads this date or time literal otherwise"
-		asReal = "#3069: PostgreSQL computes a real as a double precision, and sums it as a real"
+		sub      = "#3071: the copy counts a start of zero or below otherwise"
+		lit      = "#3072: the copy reads this date or time literal otherwise"
+		leftSide = "the left side of a division is the whole product, and PostgreSQL divides it as what it is"
+		asReal   = "#3069: PostgreSQL computes a real as a double precision, and sums it as a real"
 	)
 	return []expectation{
+		// --- a division whose left side is a product ------------------------
+		// PostgreSQL divides the whole product: sum of a bigint is a numeric
+		// there (13.5) and a whole number on the copy (13).
+		differs("rows", leftSide, `SELECT qty, sum(id) * qty / 2 FROM pgcmp_orders WHERE qty = 3 GROUP BY qty`),
+		differs("precision", leftSide, `SELECT qty, amount * qty / 2 FROM pgcmp_orders WHERE id = 1`),
+		differs("precision", leftSide, `SELECT (amount + 1) * qty / 2 FROM pgcmp_orders WHERE id = 1`),
+		differs("precision", leftSide, `WITH c(qty) AS (SELECT amount FROM pgcmp_orders WHERE id = 1) SELECT qty / 2 FROM c`),
+		stay(`SELECT id, qty / 2, -qty / 2, 2 * qty / 3, qty * qty / 2, qty * id / 7, o.qty / 2, ratio * qty / 4 FROM pgcmp_orders o ORDER BY id`),
 		// --- #3071: substring ---------------------------------------------
 		differs("rows", sub, `SELECT substring('apple', -1, 3)`),
 		differs("text", sub, `SELECT id, substring(word, -1, 3) FROM `+x+` ORDER BY id`),
