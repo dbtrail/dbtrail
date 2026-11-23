@@ -18655,7 +18655,7 @@ function buildServerForm(offered, familyLine) {
       onclick: () => { form.dataset.routeOwn = "1"; applyFlavor(form); form.elements.route_user.focus(); } })), "postgres"));
   mon.append(tagFlavor(el("div", { id: "route-extra" }), "mysql mariadb postgres"));
   mon.append(tagFlavor(el("p", { class: "form-hint", text: FORWARDING_HINT }), "mysql mariadb"));
-  mon.append(tagFlavor(el("div", {}, el("p", { class: "form-hint", text: FORWARDING_HINT_PG }),
+  mon.append(tagFlavor(el("div", { class: "pg-forward" }, el("p", { class: "form-hint", text: FORWARDING_HINT_PG }),
     docsMore("guides/query-with-a-postgres-client", "with-a-forwarding-user-of-its-own", "a forwarding user of its own")), "postgres-own"));
   mon.append(el("p", { class: "form-hint", text: "Leave the S3 fields blank for AWS. They apply to the Archive and Snapshots locations set on this server, for uploads and reads alike, not to the default Snapshots location DBTrail was started with. A bucket has one store and one pair of keys, so two servers sharing a bucket must agree. Clearing the access key removes both keys." }));
   // The source user is the #1 friction point — spell out the grant inline,

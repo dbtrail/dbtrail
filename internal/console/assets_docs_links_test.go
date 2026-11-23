@@ -43,9 +43,9 @@ var expectedDocsPages = map[string]string{
 // here deliberately, one line each, so the site check below fetches them: a
 // slug typed only in a docsMore call would otherwise be a link nobody checks.
 var expectedDocsMoreSlugs = map[string]string{
-	"settings/backups":  "the site documents the snapshot settings on a page of their own; in the console they are a section of Snapshots",
-	"guides/verify":     "the verify guide was the Verification page's header link; the Checks section links to it now, and this keeps the site check fetching it",
-	"guides/dashboards": "the Overview's dashboards card links the guide from its panel (#1950); no page header names it",
+	"settings/backups":                    "the site documents the snapshot settings on a page of their own; in the console they are a section of Snapshots",
+	"guides/verify":                       "the verify guide was the Verification page's header link; the Checks section links to it now, and this keeps the site check fetching it",
+	"guides/dashboards":                   "the Overview's dashboards card links the guide from its panel (#1950); no page header names it",
 	"guides/query-with-a-postgres-client": "a PostgreSQL server's form links its two sections on forwarding, as the source user and as a user of its own (#3054); the header of the clients page names the MySQL guide",
 }
 
