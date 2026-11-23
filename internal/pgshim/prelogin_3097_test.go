@@ -467,13 +467,14 @@ func TestPreLogin_firstModeClientLeavesDuringTheLogin(t *testing.T) {
 	placeGivenBack(t, addr, "a client left during its login")
 }
 
-// hangingIndex is an index server whose every statement waits for its
-// context to end.
+// hangingIndex is an index server whose read of the events never answers:
+// it waits for the statement's context to end. Its partitions are none, and
+// anything else it is asked fails at once (the engine goes on without the
+// schema snapshots).
 type hangingIndex struct {
 	entered, cancelled chan struct{}
 	release            chan struct{}
-	// seen is each statement that reached it, and whether its context can
-	// end, for a failure's message.
+	// seen is each statement that reached it, for a failure's message.
 	mu   sync.Mutex
 	seen []string
 }
@@ -495,10 +496,16 @@ func (c hangingConn) Close() error                        { return nil }
 func (c hangingConn) Begin() (driver.Tx, error)           { return nil, errors.New("not used") }
 func (c hangingConn) Ping(context.Context) error          { return nil }
 
-func (c hangingConn) wait(ctx context.Context, what string) error {
+func (c hangingConn) QueryContext(ctx context.Context, q string, _ []driver.NamedValue) (driver.Rows, error) {
 	c.d.mu.Lock()
-	c.d.seen = append(c.d.seen, fmt.Sprintf("%.80q (its context can end: %v)", what, ctx.Done() != nil))
+	c.d.seen = append(c.d.seen, fmt.Sprintf("%.60q", strings.Join(strings.Fields(q), " ")))
 	c.d.mu.Unlock()
+	switch {
+	case strings.Contains(q, "information_schema.PARTITIONS"):
+		return noRows{"PARTITION_NAME", "PARTITION_DESCRIPTION"}, nil
+	case !strings.Contains(q, "binlog_events"):
+		return nil, errors.New("this index server holds nothing but events")
+	}
 	select {
 	case c.d.entered <- struct{}{}:
 	default:
@@ -509,23 +516,18 @@ func (c hangingConn) wait(ctx context.Context, what string) error {
 		case c.d.cancelled <- struct{}{}:
 		default:
 		}
-		return ctx.Err()
+		return nil, ctx.Err()
 	case <-c.d.release:
-		return errors.New("the test ended")
+		return nil, errors.New("the test ended")
 	}
 }
 
-func (c hangingConn) QueryContext(ctx context.Context, q string, _ []driver.NamedValue) (driver.Rows, error) {
-	return nil, c.wait(ctx, q)
-}
+// noRows is an empty result with these columns.
+type noRows []string
 
-func (c hangingConn) ExecContext(ctx context.Context, q string, _ []driver.NamedValue) (driver.Result, error) {
-	return nil, c.wait(ctx, q)
-}
-
-func (c hangingConn) BeginTx(ctx context.Context, _ driver.TxOptions) (driver.Tx, error) {
-	return nil, c.wait(ctx, "BEGIN")
-}
+func (r noRows) Columns() []string         { return r }
+func (r noRows) Close() error              { return nil }
+func (r noRows) Next([]driver.Value) error { return io.EOF }
 
 // A client that hangs up in the middle of a statement, in the first mode:
 // the socket is watched while the statement runs (shim.WatchConn), so the
@@ -555,7 +557,7 @@ func TestPreLogin_firstModeClientHangsUpDuringAStatement(t *testing.T) {
 	select {
 	case <-idx.entered:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the statement did not reach the index server")
+		t.Fatalf("the statement did not reach the index server's events (it saw: %s)", idx.statements())
 	}
 	// The client is gone, with its statement still running.
 	_ = c.Conn().Close()
