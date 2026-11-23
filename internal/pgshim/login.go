@@ -200,7 +200,7 @@ func (s *session) runOptions() RunOptions {
 }
 
 // handleLoginConn runs one connection of a port with a login of its own.
-func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, cancels *cancelRegistry, logger *slog.Logger) {
+func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, cancels *cancelRegistry, logger *slog.Logger, place *connPlace) {
 	// The first defer, so the last to run: one connection's panic is logged
 	// with its stack and ends that connection, not the process the port
 	// shares with every other one.
@@ -252,11 +252,21 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, c
 	if database == "" {
 		database = user
 	}
+	place.spoke.Store(true)
 	password, err := scramExchange(be, encrypted, pt.bindingData())
 	if err != nil {
 		// Debug: psql itself closes here once, to ask for the password and
 		// connect again. A malformed exchange was told why.
 		logger.Debug("pgshim: no password was proved", "err", err, "user", user, "remote", c.RemoteAddr())
+		return
+	}
+	// The client's proof reached the port: it has done its part of the login
+	// and keeps its place from here, while the proof is checked and its
+	// server is opened, however long that takes (prelogin.go). Unless its
+	// place went to a newer connection first: its socket is closed, and its
+	// proof is not checked, so nothing is logged as a wrong password.
+	if !place.loggedIn() {
+		logger.Info("pgshim: "+errLostPlace.Error(), "user", user, "database", database, "remote", c.RemoteAddr())
 		return
 	}
 	bound, refused := cfg.Login(connCtx, user, database, password, func() { _ = c.Close() })

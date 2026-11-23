@@ -75,6 +75,16 @@ setup](#postgresql-side-setup) below first, then:
    failure, and the server is not added until it is fixed). Capture resumes
    automatically on restart.
 
+The form also holds one box, unticked: **Let the PostgreSQL port send to this
+PostgreSQL, read-only and as the source user above, a SELECT the copy does not
+answer**. It is the question `server add` asks on a terminal
+([forwarding with the capture account](#forwarding-with-the-capture-account)),
+and nothing is sent to your PostgreSQL until somebody ticks it. Tick it when
+adding the server, or later (**Servers**, **Edit**); unticking takes it back.
+No second role is needed for it. A forwarding user of its own, for a port that
+should send more than that, is behind **Advanced: use a separate forwarding
+user** in the same form.
+
 From a terminal, the same thing is one command (the publication is the one
 you created above; the slot is created for you and named `bintrail_<database>`
 unless you give `--slot`):
@@ -1165,8 +1175,9 @@ listener, its own workers, its own memory.
 - **Who answers depends on what the server forwards with.** `server add` asks
   once whether the port may forward as the user DBTrail connects with;
   `--forward-user`, or `[dbtrail-forward]` in the option file, names a
-  forwarding user of its own instead, and the web interface's form has that
-  user's two fields. With the capture account, a `SELECT` whose every table
+  forwarding user of its own instead. The web interface's form has a box for
+  the first, unticked until somebody ticks it, and the user's two fields
+  behind **Advanced: use a separate forwarding user**. With the capture account, a `SELECT` whose every table
   is a table of the copy, and that the copy is not known to answer as
   PostgreSQL does, runs on your PostgreSQL, read-only
   ([forwarding with the capture account](#forwarding-with-the-capture-account)).
@@ -1181,8 +1192,8 @@ listener, its own workers, its own memory.
   [compared, measured or concatenated](#which-side-answers-a-statement-on-the-postgresql-port),
   refused with `0A000`), until one is set
   (`bintrail-console server forward-user <server> --capture-account`, or
-  `-u <user> -p` for a user of its own, or the server's Forwarding user in the
-  web interface).
+  `-u <user> -p` for a user of its own, or the box and the Forwarding user on
+  the server's form in the web interface).
 - **Fresh or fast, per server, as on the MySQL port.** In fresh mode, the
   default, each table's newest changes captured from PostgreSQL are laid over
   its snapshot, so a row written a moment ago shows without waiting for the
@@ -1352,6 +1363,25 @@ listener, its own workers, its own memory.
   TLS the port also offers SCRAM-SHA-256-PLUS, which binds the login to the
   certificate the client saw, so a client with `channel_binding=require`
   refuses anything that relays between it and the port.
+- **Before the login.** A connection holds one of the port's places
+  (`--max-connections`) from the moment it is accepted. It has **30 seconds**
+  to finish logging in, and then it is closed. Until it has logged in, one
+  message from it may be at most **64 KB** (a larger one ends the
+  connection); after the login a statement may be up to 16 MB. When every
+  place is taken and a new connection arrives, the port looks for a
+  connection that has held its place for **more than 1 second without
+  sending its proof of the password**: the one that has waited longest loses
+  its place to the newcomer (one that sent nothing at all before one that
+  started its login), and is closed without a word. A client that was only
+  slow connects again. A connection whose proof reached the port keeps its
+  place while the proof is checked and its server is opened, and a
+  connection that has logged in is never closed to make room: when every
+  place is a client's, the newcomer gets `53300` (the limit is reached), as
+  before. The port still belongs behind a firewall or a proxy that limits
+  who may connect. Closing the connection that waited longest protects the
+  port from connections that sit idle; it does not protect it from a client
+  that connects again as fast as it is closed, and it is not a limit per
+  address.
 - **TLS with the MySQL port's certificate.** Give the same files the MySQL port
   takes (`router --tls-cert`) with `--tls-cert` and `--tls-key`, and a client
   that trusts their CA connects with `sslmode=verify-ca`, or
@@ -1499,7 +1529,8 @@ To set or change it on a server that is already added:
 bintrail-console server forward-user <server> -u app_ro -p
 ```
 
-or in the web interface, edit the server (Forwarding user and password). It is
+or in the web interface, edit the server (**Advanced: use a separate forwarding
+user**, then Forwarding user and password). It is
 laid over the source's own address, database and parameters (`sslmode`
 included), and must be another user than the one DBTrail captures with: the
 port never runs anything as that one, which holds `REPLICATION` and reads every
@@ -1616,9 +1647,30 @@ bintrail-console server forward-user <server> --capture-account
 bintrail-console server forward-user <server> --no-capture-account   # takes it back
 ```
 
+In the web interface it is the box on the server's form (**Servers**,
+**Edit**, or the form a PostgreSQL is added with): **Let the PostgreSQL port
+send to this PostgreSQL, read-only and as the source user above, a SELECT the
+copy does not answer**. It saves the same answer the two commands do. A
+session that may not change servers sees the box and cannot change it, and
+the SQL clients page says, for the server picked in the sidebar, what the port
+sends to its PostgreSQL.
+
 It is saved on the server and off until somebody says yes: a server added
 before this existed, or one nobody answered for, does not forward with it. A
-forwarding user of its own, when the server has one, is used instead.
+forwarding user of its own, when the server has one, is used instead. An edit
+that points the source at another user or address takes the yes back, and the
+form says so: the box has to be ticked again for the new one.
+
+Removing the forwarding user is not the same in the two places. In the web
+interface, **Remove the forwarding account** says the port then stops
+forwarding for the server, so it also takes the yes back, before the user is
+removed: nothing is sent to your PostgreSQL afterwards, and the save says so
+from what DBTrail answered. To forward as the source user instead, tick the
+box once the removal is saved. On a terminal, `server forward-user <server>
+--remove` removes the user alone: with a yes saved, the source user takes its
+place, and the command says so and names `--no-capture-account`. A server
+that hides tables or columns sends nothing to your PostgreSQL whatever is
+saved, and both the form and the SQL clients page say that for it.
 
 That role can read more than the copy holds (it can be the database owner, or
 the master user on a managed service, and read the system catalog), so with
