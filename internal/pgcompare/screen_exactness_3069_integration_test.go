@@ -28,22 +28,27 @@ func screenExactness() []expectation {
 	return []expectation{
 		// --- #3071: substring ---------------------------------------------
 		differs("rows", sub, `SELECT substring('apple', -1, 3)`),
-		differs("rows", sub, `SELECT id, substring(word, -1, 3) FROM `+x+` ORDER BY id`),
-		differs("rows", sub, `SELECT id, substring(word, 0, 3) FROM `+x+` ORDER BY id`),
-		differs("rows", sub, `SELECT id, substring(word FROM -2 FOR 4) FROM `+x+` ORDER BY id`),
-		differs("rows", sub, `SELECT id, substring(word, whole, 2) FROM `+x+` ORDER BY id`),
-		differs("rows", sub, `SELECT id, substring(word, -2) FROM `+x+` ORDER BY id`),
+		differs("text", sub, `SELECT id, substring(word, -1, 3) FROM `+x+` ORDER BY id`),
+		differs("text", sub, `SELECT id, substring(word FROM -2 FOR 4) FROM `+x+` ORDER BY id`),
+		differs("text", sub, `SELECT id, substring(word, -2) FROM `+x+` ORDER BY id`),
+		differs("text", sub, `SELECT id, substring(word, 1 - whole, 3) FROM `+x+` ORDER BY id`),
+		// A start of zero agrees, and so does a start read from a column on
+		// these rows (the one below zero cuts an empty text): the screen
+		// sends both to the source all the same, since only a start written
+		// as a positive number is known before the statement runs.
+		eq(`SELECT id, substring(word, 0, 3) FROM `+x+` ORDER BY id`),
+		eq(`SELECT id, substring(word, whole, 2) FROM `+x+` ORDER BY id`),
 		{stmt: `SELECT id, substring(word, 2, -1) FROM ` + x + ` ORDER BY id`, verdict: sqlcompare.SourceError},
 		stay(`SELECT id, substring(word, 1, 3), substring(word, 2), substring(word, 4, 100) FROM `+x+` ORDER BY id`),
 		stay(`SELECT id, substring(word FROM 2 FOR 3), substring(word FROM 3) FROM `+x+` ORDER BY id`),
 		stay(`SELECT substring('apple', 2, 3), substring('apple' FROM 5)`),
 		// substr, left, right and overlay were never the copy's: the screen
 		// sends each to the source, whatever it is given.
-		differs("rows", sub, `SELECT id, substr(word, -1, 3) FROM `+x+` ORDER BY id`),
+		differs("text", sub, `SELECT id, substr(word, -1, 3) FROM `+x+` ORDER BY id`),
 		eq(`SELECT id, substr(word, 2, 3) FROM `+x+` ORDER BY id`),
 		eq(`SELECT id, left(word, 2), right(word, 2) FROM `+x+` ORDER BY id`),
 		eq(`SELECT id, left(word, -2), right(word, -2) FROM `+x+` ORDER BY id`),
-		eq(`SELECT id, overlay(word placing 'XX' from 2 for 1) FROM `+x+` ORDER BY id`),
+		{stmt: `SELECT id, overlay(word placing 'XX' from 2 for 1) FROM ` + x + ` ORDER BY id`, verdict: sqlcompare.NotOnCopy, says: "overlay", why: "the copy has no overlay()"},
 
 		// --- #3072: date and time literals --------------------------------
 		differs("rows", lit, `SELECT '26-01-05'::date`),
@@ -55,11 +60,13 @@ func screenExactness() []expectation {
 		differs("rows", lit, `SELECT id FROM `+x+` WHERE day IN ('26-01-05', '2026-02-10')`),
 		differs("rows", lit, `SELECT id FROM `+x+` WHERE day BETWEEN '26-01-01' AND '26-12-31'`),
 		differs("rows", lit, `SELECT id FROM `+x+` WHERE stamp = '2026-01-05 10:30:00.1234567'`),
-		differs("rows", lit, `SELECT id FROM `+x+` WHERE clock < '24:00:00'`),
+		// Compared with a time column the copy answers the same; the screen
+		// holds a string to the form of a literal all the same.
+		eq(`SELECT id FROM `+x+` WHERE clock < '24:00:00'`),
 		// Other spellings outside the strict form, as they measure.
 		eq(`SELECT DATE '2026-1-5'`),
 		eq(`SELECT DATE '2026-01-05 10:30:00'`),
-		eq(`SELECT TIME '23:59:60'`),
+		{stmt: `SELECT TIME '23:59:60'`, verdict: sqlcompare.NotOnCopy, says: "out of range", why: "a leap second is 24:00:00 on PostgreSQL; the copy refuses it"},
 		eq(`SELECT DATE 'epoch'`),
 		stay(`SELECT DATE '2026-01-05', '2026-01-05'::date, CAST('2026-01-05' AS date)`),
 		stay(`SELECT TIMESTAMP '2026-01-05 10:30:00.123456', TIMESTAMP '2026-01-05 23:59:59', TIMESTAMP '2026-01-05', TIMESTAMP '2026-01-05T10:30:00'`),
@@ -75,7 +82,8 @@ func screenExactness() []expectation {
 		differs("precision", scale, `SELECT id, greatest(amt, amt4), least(amt, amt4) FROM `+x+` ORDER BY id`),
 		differs("precision", scale, `SELECT coalesce(max(amt), 0) FROM `+x+` WHERE id < 0`),
 		differs("precision", scale, `SELECT id, coalesce(amt, 0) FROM `+x+` ORDER BY id`),
-		differs("precision", scale, `SELECT id, coalesce(amt, whole) FROM `+x+` ORDER BY id`),
+		differs("precision", scale, `SELECT id, CASE WHEN id = 2 THEN whole ELSE amt END FROM `+x+` ORDER BY id`),
+		differs("precision", scale, `SELECT id, coalesce(amt, whole) FROM (SELECT id, CASE WHEN id < 5 THEN amt END AS amt, 7 AS whole FROM `+x+`) s ORDER BY id`),
 		differs("precision", scale, `SELECT CASE WHEN true THEN 1.5 ELSE 0 END, CASE WHEN false THEN 1.5 ELSE 0 END`),
 		differs("precision", scale, `SELECT id, CASE WHEN whole > 0 THEN amt * whole ELSE 0 END FROM `+x+` ORDER BY id`),
 		differs("precision", scale, `SELECT coalesce(t.total, 0) FROM (SELECT sum(amt) AS total FROM `+x+` WHERE id < 0) t`),
@@ -93,16 +101,23 @@ func screenExactness() []expectation {
 
 		// --- #3069: a real computed with, and summed ----------------------
 		differs("precision", asReal, `SELECT id, rl + 1 FROM `+x+` ORDER BY id`),
-		differs("precision", asReal, `SELECT sum(rl) FROM `+x),
+		differs("precision", asReal, `SELECT sum(rl) FROM `+x+` WHERE id <= 3`),
 		differs("precision", asReal, `SELECT id, rl * 2, rl / 2 FROM `+x+` ORDER BY id`),
 		differs("precision", asReal, `SELECT id, rl * whole, rl + amt, rl - 1 FROM `+x+` ORDER BY id`),
 		differs("precision", asReal, `SELECT id, (rl) + 1, abs(rl) * 2, 1 + rl FROM `+x+` ORDER BY id`),
-		differs("precision", asReal, `SELECT max(rl) - min(rl) FROM `+x),
 		differs("precision", asReal, `SELECT s.id, s.v + 1 FROM (SELECT id, rl AS v FROM `+x+`) s ORDER BY s.id`),
 		differs("precision", asReal, `SELECT id, sum(rl) OVER (ORDER BY id) FROM `+x+` ORDER BY id`),
-		differs("precision", asReal, `SELECT id, coalesce(rl, 0), greatest(rl, 1) FROM `+x+` ORDER BY id`),
-		differs("precision", asReal, `SELECT id, rl + dbl FROM `+x+` ORDER BY id`),
+		// A real with another real, with a double precision, or with its
+		// sign turned, agrees on these rows. The rule is by the column's type
+		// and sends them to the source with the rest.
+		eq(`SELECT max(rl) - min(rl) FROM `+x),
+		eq(`SELECT id, rl + dbl FROM `+x+` ORDER BY id`),
 		eq(`SELECT id, -rl FROM `+x+` ORDER BY id`),
+		eq(`SELECT sum(rl) FROM `+x),
+		// Beside another value in a COALESCE or a GREATEST the answer is a
+		// real or a double precision on both sides.
+		stay(`SELECT id, coalesce(rl, 0), greatest(rl, 1), least(rl, dbl), CASE WHEN whole > 0 THEN rl ELSE 0 END FROM `+x+` ORDER BY id`),
+		stay(`SELECT id, coalesce(rl, amt), greatest(rl, amt) FROM `+x+` ORDER BY id`),
 		stay(`SELECT id, rl, dbl FROM `+x+` ORDER BY id`),
 		stay(`SELECT min(rl), max(rl), count(rl) FROM `+x),
 		stay(`SELECT id, abs(rl) FROM `+x+` ORDER BY id`),

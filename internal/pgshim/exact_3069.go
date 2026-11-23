@@ -340,10 +340,7 @@ func (r *numReader) holds(toks []rtToken) numValue {
 
 // --- #3070: CASE, COALESCE, GREATEST and LEAST over numbers --------------------
 
-const (
-	numericMixVeto = " over numbers of different decimals, which PostgreSQL writes with each value's own (0 where the copy writes 0.00)"
-	realMixVeto    = " over a real column beside another value (PostgreSQL widens it to a double precision)"
-)
+const numericMixVeto = " over numbers of different decimals, which PostgreSQL writes with each value's own (0 where the copy writes 0.00)"
 
 // caseValues are the values of the CASE at toks[i:end+1], as [from, to)
 // token spans: from after each THEN or ELSE of this CASE (not of one inside
@@ -419,8 +416,9 @@ func callArgs(toks []rtToken, open, end int) [][2]int {
 // greatest(n, n4) is 10.50 there and 10.5000 here). It stays on the copy
 // when every value that is not NULL is known to have the same number of
 // decimals (a numeric(12,2) beside 0.00, whole numbers beside whole numbers),
-// when a value is a double precision (both sides answer a double precision
-// then), and when no value is known to be a numeric with decimals. One that
+// when a value is a double precision or a real (both sides answer a float
+// then, which has no decimals to keep), and when no value is known to be a
+// numeric with decimals. One that
 // holds a rewritten round is checked value by value where it runs instead
 // (packMixedScale, scaleMixRisk).
 //
@@ -458,7 +456,7 @@ func numericMix(toks []rtToken, types map[string][]string, literalsOnly bool) st
 			r = newNumReader(toks, types)
 		}
 		scales := map[int]bool{}
-		count, anyScale, unknown, double, hasReal, macro := 0, 0, 0, false, false, false
+		count, anyScale, unknown, float, macro := 0, 0, 0, false, false
 		for _, v := range values {
 			if v[1] <= v[0] {
 				continue
@@ -488,10 +486,8 @@ func numericMix(toks []rtToken, types map[string][]string, literalsOnly bool) st
 				scales[k.scale] = true
 			case numAnyScale:
 				anyScale++
-			case numDouble:
-				double = true
-			case numReal:
-				hasReal = true
+			case numDouble, numReal:
+				float = true
 			case numUnknown:
 				unknown++
 			}
@@ -506,9 +502,7 @@ func numericMix(toks []rtToken, types map[string][]string, literalsOnly bool) st
 			}
 		}
 		switch {
-		case hasReal:
-			return what + realMixVeto
-		case double:
+		case float:
 			continue
 		case len(scales) >= 2,
 			anyScale > 0 && (len(scales) > 0 || anyScale > 1 || unknown > 0),
