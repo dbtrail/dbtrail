@@ -1,8 +1,10 @@
 package pgshim
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The screen's rules of #3069, #3070, #3071 and #3072. What a test says
@@ -408,5 +410,97 @@ func TestCopyScreen_realArithmetic(t *testing.T) {
 	// Types not known: as before, arithmetic stays.
 	if why := CopyScreen(`SELECT a + 1, sum(a) FROM t`, nil); why != "" {
 		t.Errorf("no types: sent to the source (%s)", why)
+	}
+}
+
+// --- the reader's bounds ---------------------------------------------------------
+
+// chained is a statement of n names, each defined from the one before it
+// used twice (a2 is a1 + a1), read at the end by tail: without a memory of
+// what each name was read as, reading the last costs 2^n readings of the
+// first.
+func chained(n int, column, tail string) string {
+	from := "(SELECT " + column + " + " + column + " AS a1 FROM pgcmp_exact) s1"
+	for i := 2; i <= n; i++ {
+		from = fmt.Sprintf("(SELECT a%d + a%d AS a%d FROM %s) s%d", i-1, i-1, i, from, i)
+	}
+	return "SELECT " + fmt.Sprintf(tail, n) + " FROM " + from
+}
+
+// screenWithin runs the screen and fails the test when it takes longer than
+// a statement of this size may.
+func screenWithin(t *testing.T, name, q string, types map[string][]string) string {
+	t.Helper()
+	done := make(chan string, 1)
+	go func() { done <- CopyScreen(q, types) }()
+	select {
+	case why := <-done:
+		return why
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s: the screen did not answer in 5 s", name)
+		return ""
+	}
+}
+
+func TestNumReader_bounded(t *testing.T) {
+	// Forty names in a chain: each is read once, and the last is what the
+	// first is, a numeric of decimals not worked out, or a real.
+	if why := screenWithin(t, "40 names over a numeric", chained(40, "amt", "coalesce(a%d, 0)"), exactTypes); !strings.Contains(why, "different decimals") {
+		t.Errorf("40 chained names over a numeric beside 0: %q", why)
+	}
+	if why := screenWithin(t, "40 names over a real", chained(40, "rl", "a%d * 2"), exactTypes); why != realArithmeticVeto {
+		t.Errorf("40 chained names over a real, multiplied: %q", why)
+	}
+	if why := screenWithin(t, "40 names over a real, summed", chained(40, "rl", "sum(a%d)"), exactTypes); why != realArithmeticVeto {
+		// The first + of the chain is over the real column itself.
+		t.Errorf("40 chained names over a real, summed: %q", why)
+	}
+	// Whole numbers all the way: nothing to send to the source for, and
+	// still read once each.
+	if why := screenWithin(t, "40 names over a whole number", chained(40, "whole", "coalesce(a%d, 0)"), exactTypes); why != "" {
+		t.Errorf("40 chained names over a whole number beside 0: sent to the source (%s)", why)
+	}
+	// A chain deeper than the reader follows is not judged: the source
+	// answers.
+	if why := screenWithin(t, "300 names", chained(300, "amt", "coalesce(a%d, 0.00)"), exactTypes); why != numReadVeto {
+		t.Errorf("300 chained names: %q, want the reader's own veto", why)
+	}
+	// Names that define each other end: each is read inside the other as a
+	// column, of which there is none.
+	loop := `SELECT coalesce(a, 0.5), coalesce(b, 0.5) FROM (SELECT b + 1 AS a, a + 1 AS b FROM pgcmp_exact) s`
+	if why := screenWithin(t, "two names in a circle", loop, exactTypes); why == numReadVeto {
+		t.Errorf("two names in a circle: %q", why)
+	}
+	// Parentheses nested by the thousand around a real, each level computed
+	// with: the work is bounded, and the statement goes to the source either
+	// for the real or for its size.
+	deep := "SELECT " + strings.Repeat("(", 20000) + "dbl" + strings.Repeat(" + 1)", 20000) + " FROM pgcmp_exact"
+	if why := screenWithin(t, "20,000 parentheses", deep, exactTypes); why == "" {
+		t.Error("20,000 nested parentheses computed with: left to the copy")
+	}
+	nested := "SELECT " + strings.Repeat("CASE WHEN id > 1 THEN ", 20000) + "amt" + strings.Repeat(" ELSE 0.00 END", 20000) + " FROM pgcmp_exact"
+	if why := screenWithin(t, "20,000 CASEs", nested, exactTypes); why == "" {
+		t.Error("20,000 nested CASEs: left to the copy")
+	}
+
+	// The memory itself: a name is worked out once.
+	toks, _ := lexSQL(chained(40, "amt", "coalesce(a%d, 0)"))
+	r := newNumReader(toks, exactTypes)
+	if v := r.name("a40"); v.kind != numAnyScale || r.over {
+		t.Errorf("a40: %+v, over=%v", v, r.over)
+	}
+	first := r.steps
+	if first > 2000 {
+		t.Errorf("reading 40 chained names cost %d steps", first)
+	}
+	if r.name("a40"); r.steps != first {
+		t.Errorf("reading a40 again cost %d more steps", r.steps-first)
+	}
+	// A name read inside its own definition is the column of that name, and
+	// what is kept is what it stands for.
+	toks, _ = lexSQL(`SELECT coalesce(t.amt, 0.00) FROM (SELECT sum(amt) AS amt FROM pgcmp_exact) t`)
+	r = newNumReader(toks, exactTypes)
+	if v := r.name("amt"); v != (numValue{kind: numScaled, scale: 2}) {
+		t.Errorf("sum(amt) AS amt: %+v", v)
 	}
 }

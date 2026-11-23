@@ -149,11 +149,42 @@ type numReader struct {
 	// listed: the statement names columns in a list (AS t(a, b)), which the
 	// definitions do not read: no defined name is known then.
 	listed bool
-	busy   map[string]bool
+	// known is what each name was read as, kept for the statement: a
+	// definition is worked out once, however many times its name is used.
+	// busy are the names being worked out now: one used inside its own
+	// definition is read there as the column of that name alone.
+	known map[string]numValue
+	busy  map[string]bool
+	// steps is the work done so far, in tokens read, and depth how many
+	// definitions deep the reading is. Past numReadSteps or numReadDepth the
+	// reader gives up (over): the statement is not one it can judge, and the
+	// screen sends it to the source.
+	steps, depth int
+	over         bool
 }
 
+// The most a statement's reading may cost. A report of a few thousand tokens
+// with a dozen names costs a few thousand steps; these bound a statement
+// written to cost more (names defined from names in a long chain,
+// parentheses nested by the thousand).
+const (
+	numReadSteps = 200000
+	numReadDepth = 64
+)
+
+const numReadVeto = "a statement whose names and parentheses nest deeper than the port reads to tell its numbers apart"
+
 func newNumReader(toks []rtToken, types map[string][]string) *numReader {
-	return &numReader{types: types, defs: aliasDefinitions(toks), listed: columnList(toks), busy: map[string]bool{}}
+	return &numReader{types: types, defs: aliasDefinitions(toks), listed: columnList(toks), known: map[string]numValue{}, busy: map[string]bool{}}
+}
+
+// spend counts n tokens of work, and reports whether the reader may go on.
+func (r *numReader) spend(n int) bool {
+	r.steps += n + 1
+	if r.steps > numReadSteps {
+		r.over = true
+	}
+	return !r.over
 }
 
 var decimalType = regexp.MustCompile(`^(DECIMAL|NUMERIC)\((\d+),(\d+)\)$`)
@@ -219,21 +250,39 @@ func together(vals []numValue) numValue {
 // name is the kind of what a name stands for: every column of that name, and
 // every expression the statement defines it as.
 func (r *numReader) name(n string) numValue {
+	if v, ok := r.known[n]; ok {
+		return v
+	}
 	var vals []numValue
-	if exprs, defined := r.defs[n]; defined && !r.busy[n] {
+	exprs, defined := r.defs[n]
+	inside := r.busy[n]
+	if defined && !inside {
 		if r.listed {
+			r.known[n] = numValue{}
+			return numValue{}
+		}
+		if r.depth >= numReadDepth {
+			r.over = true
 			return numValue{}
 		}
 		r.busy[n] = true
+		r.depth++
 		for _, e := range exprs {
 			vals = append(vals, r.value(e))
 		}
+		r.depth--
 		delete(r.busy, n)
 	}
 	for _, ty := range r.types[n] {
 		vals = append(vals, typeNum(ty))
 	}
-	return together(vals)
+	v := together(vals)
+	if !inside && !r.over {
+		// Inside its own definition the name was read as the column alone,
+		// which is not what it stands for elsewhere: not kept.
+		r.known[n] = v
+	}
+	return v
 }
 
 // tokenName is the name a token writes, "" for a token that is not one.
@@ -251,8 +300,14 @@ func tokenName(t rtToken) string {
 // without its table's name), count, min, max or sum of one, or, for anything
 // else, the most careful kind of what it names (holds).
 func (r *numReader) value(toks []rtToken) numValue {
+	if !r.spend(len(toks)) {
+		return numValue{}
+	}
 	for len(toks) >= 2 && isOpTok(toks, 0, "(") && closingParen(toks, 0) == len(toks)-1 {
 		toks = toks[1 : len(toks)-1]
+		if !r.spend(len(toks)) {
+			return numValue{}
+		}
 	}
 	if len(toks) == 2 && toks[0].kind == rtOp && (toks[0].text == "-" || toks[0].text == "+") {
 		toks = toks[1:]
@@ -318,6 +373,9 @@ func (r *numReader) value(toks []rtToken) numValue {
 // values.
 func (r *numReader) holds(toks []rtToken) numValue {
 	out := numValue{}
+	if !r.spend(len(toks)) {
+		return out
+	}
 	for j, t := range toks {
 		var v numValue
 		switch {
@@ -426,8 +484,11 @@ func callArgs(toks []rtToken, open, end int) [][2]int {
 // (screenUntyped): only numbers written in the statement are judged there,
 // which no column's type can change.
 func numericMix(toks []rtToken, types map[string][]string, literalsOnly bool) string {
-	var r *numReader
+	r := newNumReader(toks, types)
 	for i, t := range toks {
+		if r.over {
+			return numReadVeto
+		}
 		if t.kind != rtWord || isOpTok(toks, i-1, ".") {
 			continue
 		}
@@ -439,6 +500,9 @@ func numericMix(toks []rtToken, types map[string][]string, literalsOnly bool) st
 			if end < 0 {
 				continue
 			}
+			if !r.spend(end - i) {
+				return numReadVeto
+			}
 			values, what = caseValues(toks, i, end), "CASE"
 		case "coalesce", "greatest", "least":
 			if !isOpTok(toks, i+1, "(") {
@@ -448,12 +512,12 @@ func numericMix(toks []rtToken, types map[string][]string, literalsOnly bool) st
 			if end < 0 {
 				continue
 			}
+			if !r.spend(end - i) {
+				return numReadVeto
+			}
 			values, what = callArgs(toks, i+1, end), t.text+"()"
 		default:
 			continue
-		}
-		if r == nil {
-			r = newNumReader(toks, types)
 		}
 		scales := map[int]bool{}
 		count, anyScale, unknown, float, macro := 0, 0, 0, false, false
@@ -492,6 +556,9 @@ func numericMix(toks []rtToken, types map[string][]string, literalsOnly bool) st
 				unknown++
 			}
 		}
+		if r.over {
+			return numReadVeto
+		}
 		if macro || count < 2 {
 			continue
 		}
@@ -509,6 +576,9 @@ func numericMix(toks []rtToken, types map[string][]string, literalsOnly bool) st
 			decimalsKnown && unknown > 0:
 			return what + numericMixVeto
 		}
+	}
+	if r.over {
+		return numReadVeto
 	}
 	return ""
 }
@@ -564,6 +634,9 @@ func realUse(toks []rtToken, types map[string][]string) string {
 	}
 	r := newNumReader(toks, types)
 	for i, t := range toks {
+		if r.over {
+			return numReadVeto
+		}
 		switch {
 		case t.kind == rtWord && t.text == "sum" && isOpTok(toks, i+1, "(") && !isOpTok(toks, i-1, "."):
 			if end := closingParen(toks, i+1); end > 0 && r.holds(toks[i+2:end]).kind == numReal {
@@ -575,7 +648,9 @@ func realUse(toks []rtToken, types map[string][]string) string {
 			if i > 0 {
 				from := i - 1
 				if isOpTok(toks, from, ")") {
-					if open := openingParen(toks, from); open >= 0 {
+					open := openingParen(toks, from)
+					r.spend(from - max(open, 0))
+					if open >= 0 {
 						from = open
 						if open > 0 && toks[open-1].kind == rtWord {
 							from = open - 1
@@ -612,6 +687,9 @@ func realUse(toks []rtToken, types map[string][]string) string {
 				return realArithmeticVeto
 			}
 		}
+	}
+	if r.over {
+		return numReadVeto
 	}
 	return ""
 }
