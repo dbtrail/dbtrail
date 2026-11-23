@@ -18,6 +18,23 @@ package pgshim
 // Nothing here follows a subquery handed to anything but EXISTS (IN, = ANY,
 // a scalar subquery, a row comparison): those read the star's values.
 
+// listsProven reports whether the two exemptions here may be used at all, by
+// the rule the stars of padded_star.go go by: every column of the tables read
+// is of a built-in type (a domain over char(n) carries no mark, so naming it
+// would not be vetoed), and nothing in the text gives a value the padded type
+// (a cast to char(n), an argument).
+func listsProven(toks []rtToken, types map[string][]string) bool {
+	if _, unproven := types[starUnprovenKey]; unproven {
+		return false
+	}
+	for _, t := range toks {
+		if paddedTypeWritten(t) {
+			return false
+		}
+	}
+	return true
+}
+
 // fromListReach is how many tokens back from a name its FROM is looked for.
 const fromListReach = 4096
 
@@ -123,10 +140,7 @@ var existsBarred = map[string]bool{
 }
 
 func (e *existsStars) star(toks []rtToken, i int) bool {
-	word := func(j int, w string) bool {
-		return j >= 0 && j < len(toks) && toks[j].kind == rtWord && toks[j].text == w
-	}
-	if !(word(i-1, "select") && isOpTok(toks, i-2, "(") && word(i-3, "exists") && word(i+1, "from")) || isOpTok(toks, i-4, ".") {
+	if !existsListStar(toks, i) || i+1 >= len(toks) || toks[i+1].kind != rtWord || toks[i+1].text != "from" {
 		return false
 	}
 	if !e.ready {

@@ -36,7 +36,7 @@ func TestPaddedLists_leftToTheCopy(t *testing.T) {
 		`SELECT p.id FROM plain p WHERE EXISTS (SELECT * FROM codes c, plain q WHERE c.id = p.id AND q.id = c.id)`,
 		`SELECT p.id FROM plain p WHERE EXISTS (SELECT * FROM codes) AND NOT EXISTS (SELECT * FROM codes c WHERE c.k = p.qty)`,
 	} {
-		if veto := paddedScreen(q); veto != "" {
+		if veto := paddedStarScreen(q); veto != "" {
 			t.Errorf("%s: sent to the source (%s), want the copy", q, veto)
 		}
 	}
@@ -218,7 +218,7 @@ func TestPaddedLists_noAliasBeforeAClause(t *testing.T) {
 		`SELECT c.id FROM codes AS c WHERE c.k > 1`,
 		`SELECT c.id FROM codes c OFFSET 2`,
 	} {
-		if veto := paddedScreen(q); veto != "" {
+		if veto := paddedStarScreen(q); veto != "" {
 			t.Errorf("%s: sent to the source (%s), want the copy", q, veto)
 		}
 	}
@@ -259,6 +259,74 @@ func TestPaddedLists_bounded(t *testing.T) {
 		}
 		if took := time.Since(start); took > 3*time.Second {
 			t.Errorf("a megabyte of %s took %v", name, took)
+		}
+	}
+}
+
+// The two exemptions follow the rules of the star's: a table with a column
+// of a user type gets neither, and neither does a statement that writes the
+// padded type or holds an argument.
+func TestPaddedLists_theStarsRules(t *testing.T) {
+	const domain = 16500
+	withDomain := append(paddedStarCatalog(), CatalogTable{Schema: "public", Name: "dom", Columns: []CatalogColumn{
+		{Name: "id", Type: "INTEGER", SourceType: oidInt4, SourceTypeMod: -1},
+		{Name: "other", Type: "VARCHAR", SourceType: oidBpchar, SourceTypeMod: 6},
+		{Name: "dc", Type: "VARCHAR", SourceType: domain, SourceTypeMod: -1},
+	}})
+	for _, q := range []string{
+		`SELECT p.id FROM plain p WHERE EXISTS (SELECT * FROM dom)`,
+		`SELECT p.id FROM plain p WHERE EXISTS (SELECT * FROM dom d WHERE d.dc = 'ab')`,
+		`SELECT p.id FROM plain p, dom d WHERE d.id = p.id`,
+		`SELECT p.id FROM plain p, dom d WHERE d.dc = 'ab'`,
+	} {
+		if veto := CopyScreenFor(q, withDomain); !isPaddedVeto(veto) {
+			t.Errorf("%s: %q, want it sent to the source", q, veto)
+		}
+	}
+	for _, q := range []string{
+		`SELECT p.id FROM plain p WHERE EXISTS (SELECT * FROM codes c WHERE 'ab '::char(3) = 'ab')`,
+		`SELECT p.id FROM plain p WHERE EXISTS (SELECT * FROM codes c WHERE CAST('ab ' AS character(3)) = 'ab')`,
+		`SELECT p.id FROM plain p WHERE EXISTS (SELECT * FROM codes c WHERE 'ab '::bpchar = 'ab')`,
+		`SELECT p.id FROM plain p WHERE EXISTS (SELECT * FROM codes c WHERE 'ab '::"char" = 'a')`,
+		`SELECT p.id FROM plain p WHERE EXISTS (SELECT * FROM codes c WHERE c.id = $1)`,
+		`SELECT p.id FROM plain p, codes c WHERE c.id = p.id AND 'ab '::char(3) = 'ab'`,
+		`SELECT p.id FROM plain p, codes c WHERE c.id = p.id AND p.name = CHAR 'ab '`,
+		`SELECT p.id FROM plain p, codes c WHERE c.id = $1`,
+	} {
+		if veto := paddedStarScreen(q); !isPaddedVeto(veto) {
+			t.Errorf("%s: %q, want it sent to the source", q, veto)
+		}
+	}
+}
+
+// A connection with no source to fall back on: what passes only by one of
+// the two exemptions passes the whole screen too, or is refused.
+func TestPaddedLists_noSourcePassesTheWholeScreen(t *testing.T) {
+	tables := paddedStarCatalog()
+	read := func(q string) ([]rtToken, map[string][]string) {
+		toks, _ := lexSQL(q)
+		return toks, withColumnOrder(screenTypes(tables, tablesRead(q, tables)), tables)
+	}
+	for _, q := range []string{
+		`SELECT p.name FROM plain p, codes c WHERE c.id = p.id ORDER BY p.name`,
+		`SELECT * FROM plain p, codes c WHERE c.id = p.id ORDER BY 2`,
+		`SELECT p.name FROM plain p WHERE EXISTS (SELECT * FROM codes c WHERE c.id = p.id) ORDER BY p.name`,
+	} {
+		toks, types := read(q)
+		if paddedUse(toks, types) != "" {
+			t.Fatalf("%s: paddedUse vetoes it, so this case does not reach the rule", q)
+		}
+		if veto := paddedForNoSource(toks, types); veto == "" {
+			t.Errorf("%s: left to a copy with no source, which sorts text by bytes", q)
+		}
+	}
+	for _, q := range []string{
+		`SELECT p.id FROM plain p, codes c WHERE c.id = p.id ORDER BY p.id`,
+		`SELECT p.id FROM plain p WHERE EXISTS (SELECT * FROM codes c WHERE c.id = p.id) ORDER BY p.id`,
+	} {
+		toks, types := read(q)
+		if veto := paddedForNoSource(toks, types); veto != "" {
+			t.Errorf("%s: refused (%s), want the copy", q, veto)
 		}
 	}
 }
