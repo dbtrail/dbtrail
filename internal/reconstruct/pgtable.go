@@ -121,6 +121,11 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 	if err != nil {
 		return nil, "", err
 	}
+	// The source's columns now, when the caller read them (#3112): before
+	// every way this table can be published, the carried-forward ones too.
+	if err := checkPGSourceShape(ctx, schema, table, rel); err != nil {
+		return nil, "", err
+	}
 	since, from, _, err := PGDeltaWindow(bmeta, p.snapshotTime)
 	if err != nil {
 		return nil, "", fmt.Errorf("%s.%s: %w", schema, table, err)
