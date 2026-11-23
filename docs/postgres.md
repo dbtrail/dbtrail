@@ -960,7 +960,9 @@ What to know:
   the loaded rows. Not made: other indexes and constraints, collations,
   comments, grants, and any type or sequence a default refers to that the table
   does not own; a snapshot taken before these facts were recorded is refused
-  (take a new one). `--output-format mydumper` is refused.
+  (take a new one). `--output-format mydumper` is refused. The web
+  interface's **Build a .sql backup for any moment** on a PostgreSQL server
+  builds these same files, and its download is one `.tar.gz` of them.
 - **A change to the table's columns or primary key refuses**, a type-only
   change included: the fold compares the shape the snapshot recorded with every
   shape the stream saw up to the point, and the key the changes were captured
