@@ -1147,11 +1147,14 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 				schema = pgPortSchema
 			}
 			sess := sqlsandbox.Session{PostgresRules: true, PostgresNames: true, TimeZone: opts.TimeZone}
-			res, err := copySQL.Run(pgRunContext(ctx, opts), statement, schema, sess)
+			// How far the snapshot files it reads reach (#3125), for an
+			// answer that reads a table without its recent changes.
+			var snapshot console.PGSnapshotAge
+			res, err := copySQL.Run(console.WithPGSnapshotAge(pgRunContext(ctx, opts), &snapshot), statement, schema, sess)
 			if err == nil && !opts.Probe {
 				// How old what it read was, for /status (#2756), kept once
 				// the port says the client got it (bound.Routed).
-				ages.stash(copySQL.LastRunAge())
+				ages.stash(snapshot.Place(copySQL.LastRunAge()))
 			}
 			return res, err
 		}

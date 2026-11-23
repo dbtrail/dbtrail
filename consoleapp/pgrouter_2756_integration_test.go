@@ -205,8 +205,10 @@ func TestIntegrationPGRouterFreshMode_2756(t *testing.T) {
 	if got := read(); got != snapshot {
 		t.Fatalf("fast mode again: %s, want the snapshot %s", got, snapshot)
 	}
-	if n := ages.doc("").Servers[e.ID]; n.DataAgeUnknownReason == "" || n.DataAgeSeconds != nil || n.DataAgeMaxSeconds == nil || n.DataAgeUnknown == 0 {
-		t.Fatalf("the age after a fast answer: age=%v max=%v why=%q", n.DataAgeSeconds, n.DataAgeMaxSeconds, n.DataAgeUnknownReason)
+	// The snapshot alone has an age too (#3125): the bound its file
+	// records, a minute before the full read began.
+	if n := ages.doc("").Servers[e.ID]; n.DataAgeUnknownReason != "" || n.DataAgeSeconds == nil || *n.DataAgeSeconds < 60 || *n.DataAgeSeconds > 600 || n.DataAgeMaxSeconds == nil || n.DataAgeUnknown != 0 {
+		t.Fatalf("the age after a fast answer: age=%v max=%v unknown=%d why=%q", n.DataAgeSeconds, n.DataAgeMaxSeconds, n.DataAgeUnknown, n.DataAgeUnknownReason)
 	}
 	if n := takeNotices(); len(n) != 1 || !strings.Contains(n[0], "can be older than an earlier answer of the copy on this connection") {
 		t.Fatalf("notices after the switch to fast: %q, want the one that says the answer can be older", n)

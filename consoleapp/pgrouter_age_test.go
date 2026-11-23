@@ -102,3 +102,36 @@ func TestPGConnAgesKeepOnlyTheCopysAnswers(t *testing.T) {
 	}
 	none.agesFor("p").stash(fresh(0, 0)) // no panic
 }
+
+// An answer read from the snapshot alone has an age when its files say how
+// far they reach (#3125): it is the last answer's age and counts toward the
+// worst, and it is not counted among the answers with none. One whose files
+// do not say stays unknown, with the reason.
+func TestPGRouterStatusSnapshotAge(t *testing.T) {
+	r := newPGRouteStats(time.Now(), false)
+	placed := console.CopyRunAge{Ran: ageRan, Through: ageRan.Add(-90 * time.Second), Snapshot: true}
+	r.age("p", placed)
+	n := r.doc("").Servers["p"]
+	if n.DataAsOf != "2026-11-17T11:58:30Z" || n.DataAgeSeconds == nil || *n.DataAgeSeconds != 90 || n.DataAgeMaxSeconds == nil || *n.DataAgeMaxSeconds != 90 ||
+		n.DataAgeUnknown != 0 || n.DataAgeUnknownReason != "" {
+		t.Fatalf("a snapshot answer whose files say how far they reach: %+v", n)
+	}
+	r.age("p", console.CopyRunAge{Ran: ageRan.Add(time.Second), Snapshot: true})
+	n = r.doc("").Servers["p"]
+	if n.DataAgeSeconds != nil || n.DataAgeUnknown != 1 || !strings.Contains(n.DataAgeUnknownReason, "does not record how far it reaches") || *n.DataAgeMaxSeconds != 90 {
+		t.Fatalf("a snapshot answer whose files do not say: %+v", n)
+	}
+	// A through on an answer whose files cannot be told is not an age.
+	if pgAgeKnown(console.CopyRunAge{Ran: ageRan, Through: ageRan, Unknown: true}) || pgAgeKnown(console.CopyRunAge{}) {
+		t.Fatal("an answer with no table, or with files that cannot be told, has an age")
+	}
+
+	rows := pgLastAgeRows(placed)
+	if len(rows) != 2 || rows[0] != [2]string{"last_answer_indexed_through", "2026-11-17T11:58:30Z"} || rows[1] != [2]string{"last_answer_age_seconds", "90"} {
+		t.Fatalf("SHOW dbtrail.router_status after a placed snapshot answer: %v", rows)
+	}
+	rows = pgLastAgeRows(console.CopyRunAge{Ran: ageRan, Snapshot: true})
+	if len(rows) != 3 || rows[1] != [2]string{"last_answer_age_seconds", "unknown"} || !strings.Contains(rows[2][1], "does not record how far it reaches") {
+		t.Fatalf("SHOW dbtrail.router_status after a snapshot answer with no bound: %v", rows)
+	}
+}
