@@ -27,11 +27,12 @@ import (
 // and the port would all have to learn the encoding, and a real table could
 // then be named like another table's encoded form.
 //
-// The refusal is narrower than the MySQL read's, on purpose. A table named
-// "." or ".." is the file "..parquet" or "...parquet", and a "\" is an
-// ordinary byte in a Linux file name: those files stay in their folder and
-// the readers open them, so leaving them out would take away a table that
-// works.
+// A "\" is refused too, though it is an ordinary byte in a Linux file name:
+// the file is uploaded with it in its S3 key, and the local mirror of a
+// snapshot in S3 refuses such a key and with it the whole snapshot
+// (copymirror.safeRel), so one table would stop the server's copy from being
+// updated. A table named "." or ".." stays: its file is "..parquet" or
+// "...parquet", one ordinary name that every reader and the mirror take.
 
 // longestFileSuffix is the longest thing appended to a table's name to make a
 // file name in a snapshot: a PostgreSQL delta file while it is being written,
@@ -70,10 +71,21 @@ func unstorableComponent(name string) error {
 		return errors.New("the name is empty")
 	case strings.ContainsRune(name, '/'):
 		return errors.New(`the name holds a "/", which a snapshot cannot store as a file name`)
+	case strings.ContainsRune(name, '\\'):
+		return errors.New(`the name holds a "\", which the local mirror of a snapshot in S3 refuses, and that would stop the whole snapshot from being mirrored`)
 	case strings.ContainsRune(name, 0):
 		return errors.New("the name holds a NUL byte")
 	}
 	return nil
+}
+
+// UnstorableTable says why a snapshot cannot hold this table, nil when it
+// can: the rule a full read applies to each table it is about to copy.
+func UnstorableTable(schema, table string) error {
+	if err := unstorableSchema(schema); err != nil {
+		return err
+	}
+	return unstorableTable(table)
 }
 
 // unstorableTable says why a table name cannot be a file name in a snapshot,
@@ -174,5 +186,5 @@ func displayName(schema, table string) string {
 // also serves to sessions with a data profile, and splitStorable has already
 // logged each table with its reason.
 func allLeftOutError(left []baseline.LeftOutTable) error {
-	return fmt.Errorf(`pgbaseline: none of the publication's %d table(s) can be stored in a snapshot because of their schema or table names (a "/", a schema named "." or "..", or a name the snapshot keeps for its own files); this run's log names each one`, len(left))
+	return fmt.Errorf(`pgbaseline: none of the publication's %d table(s) can be stored in a snapshot because of their schema or table names (a "/" or "\", a schema named "." or "..", or a name the snapshot keeps for its own files); this run's log names each one`, len(left))
 }

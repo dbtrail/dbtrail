@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/pgbaseline"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/testutil"
@@ -67,10 +69,10 @@ func TestPGBaseline_UnstorableNames_3113(t *testing.T) {
 		{"_MANIFEST", "t", false},
 		{"views.sql", "t", false},
 		{"public", ".views.sql.tmp3113", false},
-		{"public", `a\b`, true},
+		{"public", `a\b`, false},
 		{"public", "..", true},
 		{"public", ".", true},
-		{`s\3113`, "t", true},
+		{`s\3113`, "t", false},
 		{"public", " sp ace 3113 ", true},
 		{"public", "Ñandú3113", true},
 		{"public", "UPPER3113", true},
@@ -104,6 +106,14 @@ func TestPGBaseline_UnstorableNames_3113(t *testing.T) {
 				if _, err := pg.Exec(ctx, q); err != nil {
 					t.Fatalf("%s: %v", q, err)
 				}
+			}
+			// The update's question and the read agree on this table.
+			next, err := pgbaseline.TablesOfNextRun(ctx, dsn, pub, event.Filters{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := slices.Contains(next, c.schema+"."+c.table); got != c.stored {
+				t.Fatalf("TablesOfNextRun lists it: %v, want %v (%q)", got, c.stored, next)
 			}
 			root := t.TempDir()
 			out := filepath.Join(root, "l1", "l2", "out")
@@ -193,7 +203,8 @@ func TestPGBaseline_EveryTableUnstorable_3113(t *testing.T) {
 	}
 }
 
-// A file of an earlier version under an odd name is still found and read.
+// A file of an earlier version under an odd name is still found and read,
+// including one with a "\" a new read leaves out.
 func TestExistingSnapshotWithOddNameStillFound_3113(t *testing.T) {
 	root := t.TempDir()
 	at := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
