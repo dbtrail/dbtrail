@@ -1147,7 +1147,13 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 				schema = pgPortSchema
 			}
 			sess := sqlsandbox.Session{PostgresRules: true, PostgresNames: true, TimeZone: opts.TimeZone}
-			res, err := copySQL.Run(pgRunContext(ctx, opts), statement, schema, sess)
+			run := copySQL.Run
+			if opts.Probe {
+				// The check of a SET reads no table: it must not wait for an
+				// update of the tails to end.
+				run = copySQL.RunPGCatalog
+			}
+			res, err := run(pgRunContext(ctx, opts), statement, schema, sess)
 			if err == nil && !opts.Probe {
 				// How old what it read was, for /status (#2756), kept once
 				// the port says the client got it (bound.Routed).
@@ -1158,6 +1164,8 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		// The system catalog's statements are answered from the copy's own
 		// tables (#2769), read in UTC and in the port's schema: what the
 		// catalog lists does not depend on the session.
+		// Read with no tails (RunPGCatalog): a list of columns must not wait
+		// for an update of the tails to end.
 		// The capture gate's list: the copy's views by name, as the catalog
 		// lists them, with no worker of the copy.
 		bound.CopyTableNames = func(ctx context.Context) ([][2]string, error) {
@@ -1175,7 +1183,7 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 				defer cancel()
 			}
 			return pgCopyCatalog(ctx, copySQL, func(ctx context.Context, statement string) (sqlsandbox.Result, error) {
-				return copySQL.Run(ctx, statement, pgPortSchema, sqlsandbox.Session{PostgresRules: true, PostgresNames: true})
+				return copySQL.RunPGCatalog(ctx, statement, pgPortSchema, sqlsandbox.Session{PostgresRules: true, PostgresNames: true})
 			})
 		}
 		return bound, nil
