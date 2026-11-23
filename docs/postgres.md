@@ -1306,6 +1306,36 @@ listener, its own workers, its own memory.
   TLS the port also offers SCRAM-SHA-256-PLUS, which binds the login to the
   certificate the client saw, so a client with `channel_binding=require`
   refuses anything that relays between it and the port.
+- **Before the login.** A connection holds one of the port's places
+  (`--max-connections`) from the moment it is accepted. It has **30 seconds**
+  to finish logging in, and then it is closed. Until it has logged in, one
+  message from it may be at most **64 KB** (a larger one ends the
+  connection); after the login a statement may be up to 16 MB. When every
+  place is taken and a new connection arrives, the port looks for a
+  connection that has held its place for **more than 1 second without
+  sending its proof of the password**: the one that has waited longest loses
+  its place to the newcomer (one that sent nothing at all before one that
+  started its login), and is closed without a word. A client that was only
+  slow connects again. A connection whose proof reached the port keeps its
+  place while the proof is checked and its server is opened, and a
+  connection that has logged in is never closed to make room: when every
+  place is a client's, the newcomer gets `53300` (the limit is reached), as
+  before. The port still belongs behind a firewall or a proxy that limits
+  who may connect: these bounds keep a few idle connections from locking
+  everyone out, they are not a limit per address.
+- **A salt for each username.** The SCRAM salt the port sends is worked out
+  from the username and a secret the process makes up when it starts. The
+  same username gets the same salt until the process restarts, a username
+  nobody has gets one made the same way, and no two usernames share one. The
+  first login under a username after a start (or after any of the port's
+  passwords changed) takes a few tens of milliseconds more, while its keys
+  are derived; the same for every username, whether it exists or not. The
+  port keeps the keys of the usernames a login succeeded under apart from
+  those of every other name, each up to 1,024 names; it derives for at most
+  4 logins at once, lets 64 more wait their turn, and answers a login past
+  that with `53300` and "the port is checking as many logins as it takes at
+  once; try again in a moment", which is not a wrong password: the client
+  tries again.
 - **TLS with the MySQL port's certificate.** Give the same files the MySQL port
   takes (`router --tls-cert`) with `--tls-cert` and `--tls-key`, and a client
   that trusts their CA connects with `sslmode=verify-ca`, or
