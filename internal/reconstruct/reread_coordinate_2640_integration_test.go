@@ -377,9 +377,22 @@ func indexBinlogsFrom(t *testing.T, sourceDB, indexDB *sql.DB, res *metadata.Res
 	idx := indexer.New(indexDB, 1000)
 	p := parser.New(tmpDir, res, parser.Filters{Schemas: map[string]bool{schema: true}}, nil)
 	for _, f := range files {
-		cp := exec.Command("docker", "cp", mysqlContainer()+":"+binlogDir+"/"+f, filepath.Join(tmpDir, f))
-		if out, err := cp.CombinedOutput(); err != nil {
-			t.Fatalf("docker cp %s: %v\n%s", f, err, out)
+		// `docker exec cat`, not `docker cp`: cp cannot read a data directory
+		// kept on a tmpfs mount.
+		dst, err := os.Create(filepath.Join(tmpDir, f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cat := exec.Command("docker", "exec", mysqlContainer(), "cat", binlogDir+"/"+f)
+		cat.Stdout = dst
+		var stderr strings.Builder
+		cat.Stderr = &stderr
+		err = cat.Run()
+		if cerr := dst.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			t.Fatalf("copy %s out of the server: %v\n%s", f, err, stderr.String())
 		}
 		evCh := make(chan event.Event, 1000)
 		parseErr := make(chan error, 1)
