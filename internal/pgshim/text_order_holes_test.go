@@ -305,7 +305,7 @@ func TestCopyScreen_noTextFromANameThatIsNoValue(t *testing.T) {
 	for _, q := range []string{
 		`SELECT c.id, c.k FROM sbtest1 AS c ORDER BY 1`,
 		`SELECT c.id, count(*) AS n FROM sbtest1 c GROUP BY 1 ORDER BY 2 DESC NULLS LAST`,
-		`SELECT a.id, b.k FROM sbtest1 c, sbtest2 pad WHERE pad.id = c.id ORDER BY 1`,
+		`SELECT c.id, k.k FROM sbtest1 c, sbtest2 k WHERE k.id = c.id ORDER BY 1`,
 		`SELECT born::date AS d, count(*) FROM sbtest1 GROUP BY 1 ORDER BY 1`,
 		`SELECT id AS k, k AS id FROM sbtest1 ORDER BY 1, 2`,
 		`SELECT s.k FROM (SELECT id AS k FROM sbtest1) s WHERE s.k > 5 ORDER BY s.k`,

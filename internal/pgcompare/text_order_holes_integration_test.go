@@ -34,7 +34,7 @@ func textOrderHoles() []expectation {
 		differs("order", `SELECT name AS "qty" FROM `+c+` ORDER BY "qty"`),
 		// A float under the name of a text column, concatenated: the copy
 		// writes a float otherwise as text.
-		{stmt: `SELECT name || '!' FROM (SELECT ratio AS name FROM ` + o + ` WHERE id = 6) s`, verdict: sqlcompare.Different, kind: "text", why: "a float written as text"},
+		{stmt: `SELECT name || '!' FROM (SELECT ratio AS name FROM ` + o + ` WHERE id = 6) s`, verdict: sqlcompare.Different, kind: "rows", why: "a float written as text"},
 		// The same name over a column that is not text, and a name of its
 		// own: the copy's.
 		stay(`SELECT id AS id, signup AS signup FROM ` + c + ` ORDER BY signup NULLS LAST, id`),
@@ -57,7 +57,9 @@ func textOrderHoles() []expectation {
 		differs("order", `SELECT * FROM (`+c+` a JOIN `+pe+` b ON b.id = a.id) ORDER BY 2`),
 		differs("order", `WITH w AS (SELECT * FROM `+c+`) SELECT * FROM (SELECT * FROM w) s ORDER BY 2`),
 		differs("order", `SELECT DISTINCT ON (2) * FROM `+c+` ORDER BY 2`),
-		stay(`(SELECT * FROM `+c+`) ORDER BY 1`),
+		// Outside the one statement read exactly, a position behind a star
+		// over rows with text goes to the source, whichever column it is.
+		{stmt: `(SELECT * FROM ` + c + `) ORDER BY 1`, verdict: sqlcompare.Equal},
 		stay(`SELECT * FROM `+c+` ORDER BY (1)`),
 		stay(`SELECT * FROM ` + c + ` ORDER BY 1`),
 		stay(`SELECT * FROM ` + c + ` ORDER BY 5 NULLS LAST, 1 DESC`),

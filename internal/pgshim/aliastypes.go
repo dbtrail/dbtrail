@@ -1,5 +1,7 @@
 package pgshim
 
+import "strings"
+
 // notTextType is the type the screen gives a name the statement defines
 // (an alias of a select list, a column of a WITH or a subquery) whose every
 // definition is known not to be text: a count, a sum, a number, a numeric
@@ -79,7 +81,8 @@ func withAliasTypes(toks []rtToken, types map[string][]string, untyped bool) map
 // defined name may stand for text: when no column has its name it is of
 // unknown type (absent), as it always was, and so it is when the columns of
 // its name are not text (the rules already take an unknown name for possibly
-// text where that matters) and when it is a table's alias. When a text
+// text where that matters) and when none of its definitions reads text (a
+// table's alias). When a text
 // column has its name it keeps that column's types and gains maybeTextType,
 // so that it never loses the text of the column it stands for (SELECT name
 // AS name ... ORDER BY name sorts text, and so does min(name) AS name).
@@ -99,7 +102,7 @@ func mergeAliasTypes(types map[string][]string, defs map[string][][]rtToken, not
 		switch {
 		case notText[name]:
 			out[name] = append(append([]string(nil), column...), notTextType)
-		case !untyped && anyTextType(column) && defined(defs[name]):
+		case !untyped && anyTextType(column) && readsText(defs[name], types):
 			out[name] = append(append([]string(nil), column...), maybeTextType)
 		}
 	}
@@ -123,12 +126,30 @@ func anyTextType(types []string) bool {
 	return false
 }
 
-// defined reports whether a name stands for an expression somewhere: a
-// table's alias (FROM t AS c) has only empty definitions, and is no value.
-func defined(exprs [][]rtToken) bool {
+// readsText reports whether one of a name's definitions reads something
+// that is text: a text column, a string, a function that makes text, ||. A
+// table's alias (FROM t AS c, whose definition is the table's name) reads
+// none, and neither does a name given to something the screen knows nothing
+// of; both stay of unknown type.
+func readsText(exprs [][]rtToken, types map[string][]string) bool {
 	for _, e := range exprs {
-		if len(e) > 0 {
-			return true
+		for _, t := range e {
+			switch t.kind {
+			case rtString:
+				return true
+			case rtOp:
+				if t.text == "||" {
+					return true
+				}
+			case rtWord:
+				if textMakers[t.text] || anyTextType(types[t.text]) {
+					return true
+				}
+			case rtQuoted:
+				if anyTextType(types[strings.ToLower(t.text)]) {
+					return true
+				}
+			}
 		}
 	}
 	return false
