@@ -80,8 +80,10 @@ func TestPGTailChain_aPruneKeepsTheChain(t *testing.T) {
 	settled(t, ctx, k, cut)
 	f.update("orders", 0x800, "3", "tres", "t") // pending at the prune
 
-	next := pgChainNextCut(t, f, root, "snap2", 0x750,
-		[3]string{"1", "uno", "u"}, [3]string{"2", "paid", "p"}, [3]string{"3", "three", "n3"})
+	// The cut is before key 1's change: that key stays in memory and in its
+	// file, so a whole write would take 2 rows and the pending delta takes 1.
+	next := pgChainNextCut(t, f, root, "snap2", 0x650,
+		[3]string{"1", "one", "n1"}, [3]string{"2", "paid", "p"}, [3]string{"3", "three", "n3"})
 	before := k.rowsWritten
 	got, err := k.refresh(ctx, []views.BaselineTable{next})
 	if err != nil {
@@ -95,7 +97,7 @@ func TestPGTailChain_aPruneKeepsTheChain(t *testing.T) {
 		t.Fatalf("the prune wrote %d rows, want the 1 pending", n)
 	}
 	e := k.tables[key]
-	if e.fileCut != tailCutOf(next) || e.tail.Keys() != 1 {
+	if e.fileCut != tailCutOf(next) || e.tail.Keys() != 2 {
 		t.Fatalf("after the prune: fileCut %q, %d keys", e.fileCut, e.tail.Keys())
 	}
 	want := []string{"1=uno/u", "2=paid/p", "3=tres/t"}
