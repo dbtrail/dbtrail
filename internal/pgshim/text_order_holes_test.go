@@ -50,19 +50,19 @@ func TestMaybeTextType(t *testing.T) {
 // A name the statement gives a value, that is also a column's name.
 func TestCopyScreen_aliasNamedLikeItsColumn(t *testing.T) {
 	toSource := map[string]string{
-		`SELECT name AS name FROM people ORDER BY name`:                               "ORDER BY",
-		`SELECT p.name AS name FROM people p ORDER BY p.name`:                         "ORDER BY",
-		`SELECT name name FROM people ORDER BY name`:                                  "ORDER BY",
-		`SELECT min(name) AS name FROM people`:                                        "min()",
-		`SELECT max(name) AS name, id FROM people GROUP BY id`:                        "max()",
-		`SELECT id AS name FROM people ORDER BY name`:                                 "ORDER BY",
-		`SELECT name AS id FROM people ORDER BY id`:                                   "ORDER BY",
-		`SELECT name AS age FROM people WHERE id > 1 ORDER BY age`:                    "ORDER BY",
+		`SELECT name AS name FROM people ORDER BY name`:                                "ORDER BY",
+		`SELECT p.name AS name FROM people p ORDER BY p.name`:                          "ORDER BY",
+		`SELECT name name FROM people ORDER BY name`:                                   "ORDER BY",
+		`SELECT min(name) AS name FROM people`:                                         "min()",
+		`SELECT max(name) AS name, id FROM people GROUP BY id`:                         "max()",
+		`SELECT id AS name FROM people ORDER BY name`:                                  "ORDER BY",
+		`SELECT name AS id FROM people ORDER BY id`:                                    "ORDER BY",
+		`SELECT name AS age FROM people WHERE id > 1 ORDER BY age`:                     "ORDER BY",
 		`WITH s AS (SELECT name AS name FROM people) SELECT name FROM s ORDER BY name`: "ORDER BY",
-		`SELECT s.name FROM (SELECT name AS name, id FROM people) s ORDER BY s.name`:  "ORDER BY",
-		`SELECT greatest(name, last) AS name FROM people`:                             "greatest()",
-		`SELECT name AS name, count(*) FROM people GROUP BY name ORDER BY 1`:          "ORDER BY",
-		`SELECT last AS first, first AS last FROM people ORDER BY first`:              "ORDER BY",
+		`SELECT s.name FROM (SELECT name AS name, id FROM people) s ORDER BY s.name`:   "ORDER BY",
+		`SELECT greatest(name, last) AS name FROM people`:                              "greatest()",
+		`SELECT name AS name, count(*) FROM people GROUP BY name ORDER BY 1`:           "ORDER BY",
+		`SELECT last AS first, first AS last FROM people ORDER BY first`:               "ORDER BY",
 	}
 	for q, want := range toSource {
 		if why := CopyScreen(q, peopleTypes); !strings.Contains(why, want) {
@@ -154,7 +154,7 @@ func TestStarByPosition(t *testing.T) {
 		`SELECT * FROM plain ORDER BY 1, 3 DESC NULLS LAST`:                 starTextPositionVeto,
 		`SELECT * FROM plain p WHERE qty > 1 ORDER BY 4 LIMIT 3`:            starTextPositionVeto,
 		`SELECT * FROM public.plain AS p ORDER BY 2`:                        starTextPositionVeto,
-				`SELECT * FROM nums n, plain p WHERE p.id = n.id ORDER BY 5`:       starUnknownPositionVeto,
+		`SELECT * FROM nums n, plain p WHERE p.id = n.id ORDER BY 5`:        starUnknownPositionVeto,
 		`SELECT * FROM plain ORDER BY 9`:                                    starUnknownPositionVeto,
 		`SELECT * FROM plain ORDER BY 0`:                                    starUnknownPositionVeto,
 		`SELECT * FROM plain, nums WHERE nums.id = plain.id ORDER BY 3`:     starUnknownPositionVeto,

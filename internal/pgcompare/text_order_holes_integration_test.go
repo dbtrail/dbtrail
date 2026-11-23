@@ -30,11 +30,11 @@ func textOrderHoles() []expectation {
 		{stmt: `SELECT id FROM (SELECT name AS name, id FROM ` + c + `) s WHERE name > 'B'`, verdict: sqlcompare.Equal},
 		// The same name over a column that is not text, and a name of its
 		// own: the copy's.
-		stay(`SELECT id AS id, signup AS signup FROM `+c+` ORDER BY signup NULLS LAST, id`),
-		stay(`SELECT o.qty AS qty, o.amount AS amount FROM `+o+` o ORDER BY amount DESC NULLS LAST, qty`),
-		stay(`SELECT customer_id AS customer_id, sum(qty) AS qty FROM `+o+` GROUP BY customer_id ORDER BY qty DESC, customer_id`),
-		stay(`SELECT customer_id, sum(amount) AS total FROM `+o+` GROUP BY customer_id ORDER BY total DESC NULLS LAST`),
-		stay(`SELECT name AS name, id FROM `+c+` ORDER BY id`),
+		stay(`SELECT id AS id, signup AS signup FROM ` + c + ` ORDER BY signup NULLS LAST, id`),
+		stay(`SELECT o.qty AS qty, o.amount AS amount FROM ` + o + ` o ORDER BY amount DESC NULLS LAST, qty`),
+		stay(`SELECT customer_id AS customer_id, sum(qty) AS qty FROM ` + o + ` GROUP BY customer_id ORDER BY qty DESC, customer_id`),
+		stay(`SELECT customer_id, sum(amount) AS total FROM ` + o + ` GROUP BY customer_id ORDER BY total DESC NULLS LAST`),
+		stay(`SELECT name AS name, id FROM ` + c + ` ORDER BY id`),
 
 		// A position behind a star.
 		differs("order", `SELECT * FROM `+c+` ORDER BY 2`),
@@ -42,12 +42,12 @@ func textOrderHoles() []expectation {
 		differs("order", `SELECT * FROM `+pe+` p ORDER BY 3`),
 		differs("order", `SELECT * FROM (SELECT * FROM `+c+`) s ORDER BY 2`),
 		differs("order", `SELECT x.*, 1 AS one FROM `+c+` x ORDER BY 2`),
-		stay(`SELECT * FROM `+c+` ORDER BY 1`),
-		stay(`SELECT * FROM `+c+` ORDER BY 5 NULLS LAST, 1 DESC`),
-		stay(`SELECT * FROM `+pe+` WHERE age > 10 ORDER BY 4, 1`),
-		stay(`SELECT * FROM (SELECT id, qty, placed_at FROM `+o+`) s ORDER BY 3 NULLS LAST, 1`),
-		stay(`SELECT customer_id, count(*) FROM `+o+` GROUP BY 1 ORDER BY 1`),
-		stay(`SELECT customer_id, sum(qty) AS units FROM `+o+` GROUP BY 1 ORDER BY 2 DESC NULLS LAST, 1`),
+		stay(`SELECT * FROM ` + c + ` ORDER BY 1`),
+		stay(`SELECT * FROM ` + c + ` ORDER BY 5 NULLS LAST, 1 DESC`),
+		stay(`SELECT * FROM ` + pe + ` WHERE age > 10 ORDER BY 4, 1`),
+		stay(`SELECT * FROM (SELECT id, qty, placed_at FROM ` + o + `) s ORDER BY 3 NULLS LAST, 1`),
+		stay(`SELECT customer_id, count(*) FROM ` + o + ` GROUP BY 1 ORDER BY 1`),
+		stay(`SELECT customer_id, sum(qty) AS units FROM ` + o + ` GROUP BY 1 ORDER BY 2 DESC NULLS LAST, 1`),
 
 		// A text column named like a word of ORDER BY.
 		differs("order", `SELECT first, last FROM `+pe+` ORDER BY last`),
@@ -56,9 +56,9 @@ func textOrderHoles() []expectation {
 		differs("order", `SELECT p.id FROM `+pe+` p ORDER BY p.first`),
 		differs("rows", `SELECT min(first), max(first), min(last), max(last) FROM `+pe),
 		differs("rows", `SELECT id FROM `+pe+` WHERE last > 'C' ORDER BY id`),
-		stay(`SELECT id, first, last FROM `+pe+` ORDER BY id DESC NULLS LAST`),
-		stay(`SELECT id, first FROM `+pe+` ORDER BY age DESC NULLS FIRST, id ASC`),
-		stay(`SELECT age, count(*) FROM `+pe+` GROUP BY age ORDER BY count(*) DESC, age`),
-		stay(`SELECT id FROM `+pe+` WHERE first = 'Ana' OR last IN ('Ana', 'bruno') ORDER BY id`),
+		stay(`SELECT id, first, last FROM ` + pe + ` ORDER BY id DESC NULLS LAST`),
+		stay(`SELECT id, first FROM ` + pe + ` ORDER BY age DESC NULLS FIRST, id ASC`),
+		stay(`SELECT age, count(*) FROM ` + pe + ` GROUP BY age ORDER BY count(*) DESC, age`),
+		stay(`SELECT id FROM ` + pe + ` WHERE first = 'Ana' OR last IN ('Ana', 'bruno') ORDER BY id`),
 	}
 }
