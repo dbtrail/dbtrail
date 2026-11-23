@@ -741,7 +741,9 @@ func (s *session) runPortal(p *portal) *pgErr {
 		return busyRefusal(p.route.reason)
 	}
 	s.fallback, s.busyRefused = "", ""
+	s.argsBound = len(p.stmt.paramOIDs) > 0
 	cols, types, rows, tag, perr := s.run(p.text)
+	s.argsBound = false
 	if why := s.takeBusyRefused(); why != "" && perr != nil && p.route.side == RouteCopy {
 		// The copy was busy (#3109, route.go): refused, and counted so.
 		p.route = routeDecision{RouteRefused, why}

@@ -106,6 +106,9 @@ func screenTypes(tables []CatalogTable, read func(*CatalogTable) bool) map[strin
 				typ = m
 			}
 			out[n] = append(out[n], typ)
+			if !provenNotPadded(c) && (read == nil || read(t)) {
+				out[starUnprovenKey] = []string{relType}
+			}
 			if paddedType(typ) {
 				// The table itself: its name, or its alias, written as a
 				// value stands for every column of it (paddedUse).

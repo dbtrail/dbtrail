@@ -22,6 +22,11 @@ const (
 	pgStarOrders   = "pgstar_orders"
 	pgStarLines    = "pgstar_order_line"
 	pgStarFlags    = "pgstar_flags"
+	pgStarDomain   = "pgstar_domain"
+	pgStarCode     = "pgstar_code"
+	pgStarU        = "pgstar_u"
+	pgStarV        = "pgstar_v"
+	pgStarBare     = "pgstar_bare"
 )
 
 func pgStarSetup() []string {
@@ -32,6 +37,16 @@ func pgStarSetup() []string {
 			PRIMARY KEY (o_w_id, o_d_id, o_id))`,
 		`CREATE TABLE ` + pgStarLines + ` (ol_o_id int, ol_d_id int, ol_w_id int, ol_number int, ol_amount numeric(6,2), ol_dist_info char(24),
 			PRIMARY KEY (ol_w_id, ol_d_id, ol_o_id, ol_number))`,
+		`DROP DOMAIN IF EXISTS ` + pgStarCode + ` CASCADE`,
+		`CREATE DOMAIN ` + pgStarCode + ` AS char(4)`,
+		`CREATE TABLE ` + pgStarDomain + ` (id int PRIMARY KEY, dc ` + pgStarCode + `, other char(2))`,
+		`INSERT INTO ` + pgStarDomain + ` SELECT i, 'a', 'b' FROM generate_series(1, 9) i`,
+		`CREATE TABLE ` + pgStarU + ` (id int PRIMARY KEY, "limit" int)`,
+		`INSERT INTO ` + pgStarU + ` VALUES (1, 1)`,
+		`CREATE TABLE ` + pgStarV + ` (id int PRIMARY KEY)`,
+		`INSERT INTO ` + pgStarV + ` VALUES (1)`,
+		`CREATE TABLE ` + pgStarBare + ` (k int, c bpchar)`,
+		`INSERT INTO ` + pgStarBare + ` VALUES (1, 'a'), (1, 'a ')`,
 		`CREATE TABLE ` + pgStarFlags + ` (code char(5) PRIMARY KEY)`,
 		`INSERT INTO ` + pgStarFlags + ` VALUES ('ab')`,
 		// Values shorter than n, empty, all blanks, NULL and multibyte.
@@ -80,11 +95,17 @@ func pgStarRead(ctx context.Context, c *pgconn.PgConn, stmt string, extended boo
 	return b.String()
 }
 
+// pgStarDotted joins a bpchar table after a condition on a column named with
+// a keyword: PostgreSQL's DISTINCT finds 'a' and 'a ' one value.
+func pgStarDotted() string {
+	return `SELECT count(*) FROM (SELECT DISTINCT * FROM ` + pgStarU + ` u JOIN ` + pgStarV + ` v ON u.limit = v.id JOIN ` + pgStarBare + ` t ON t.k = u.id) s`
+}
+
 func TestIntegrationPGRouterCharStar(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	cu, or, li := pgStarCustomer, pgStarOrders, pgStarLines
-	env := startPGPortFor(t, ctx, nil, pgPortFixture{table: cu + ", " + or + ", " + li + ", " + pgStarFlags, slot: "pgstar_slot", pub: "pgstar_pub", setup: pgStarSetup()})
+	env := startPGPortFor(t, ctx, nil, pgPortFixture{table: cu + ", " + or + ", " + li + ", " + pgStarFlags + ", " + pgStarDomain + ", " + pgStarU + ", " + pgStarV + ", " + pgStarBare, slot: "pgstar_slot", pub: "pgstar_pub", setup: pgStarSetup()})
 	source, err := pgconn.Connect(ctx, env.sourceDSN)
 	if err != nil {
 		t.Fatal(err)
@@ -93,7 +114,23 @@ func TestIntegrationPGRouterCharStar(t *testing.T) {
 	if _, err := source.Exec(ctx, "SET TimeZone = 'UTC'").ReadAll(); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		_, _ = source.Exec(context.Background(), "DROP DOMAIN IF EXISTS "+pgStarCode+" CASCADE").ReadAll()
+	})
 	port := pgClient(t, ctx, env.portDSN(), nil)
+
+	// What PostgreSQL answers for the shapes refused below: the copy, which
+	// counts the blanks, would answer 0, 36 and false.
+	for stmt, want := range map[string]string{
+		"SELECT count(*) FROM (SELECT * FROM " + pgStarDomain + ") s WHERE dc = 'a'": "9",
+		"SELECT sum(length(dc)) FROM (SELECT * FROM " + pgStarDomain + ") s":         "9",
+		"SELECT 'a '::char(3) = 'a' FROM (SELECT * FROM " + pgStarFlags + ") s":      "t",
+		pgStarDotted(): "1",
+	} {
+		if got := pgRows(t, source, stmt); got != want {
+			t.Fatalf("PostgreSQL itself: %s: %q, want %q: the test's premise", stmt, got, want)
+		}
+	}
 
 	q08 := `WITH early AS (
   SELECT o_w_id AS w_id, o_d_id AS d_id, o_c_id AS c_id, COUNT(*) AS orders
@@ -160,8 +197,29 @@ WHERE r.rnk <= 3 ORDER BY r.w_id, r.d_id, r.rnk LIMIT 500`
 		{"DISTINCT on the star", `WITH y AS (SELECT DISTINCT * FROM ` + cu + `) SELECT c_id FROM y`},
 		{"the whole row", `WITH y AS (SELECT * FROM ` + cu + `) SELECT to_json(y) FROM y`},
 		{"IS DISTINCT FROM a star", `SELECT 'ab' IS DISTINCT FROM (SELECT * FROM ` + pgStarFlags + ` LIMIT 1) AS differs`},
+		{"a domain over char(n), compared", `SELECT count(*) FROM (SELECT * FROM ` + pgStarDomain + `) s WHERE dc = 'a'`},
+		{"a domain over char(n), measured", `SELECT sum(length(dc)) FROM (SELECT * FROM ` + pgStarDomain + `) s`},
+		{"a literal cast to char(n)", `SELECT 'a '::char(3) = 'a' FROM (SELECT * FROM ` + pgStarFlags + `) s`},
+		{"a keyword after a dot", pgStarDotted()},
 		{"a set operation", `WITH y AS (SELECT * FROM ` + cu + ` UNION SELECT * FROM ` + cu + `) SELECT c_id FROM y`},
 	}
+	// An argument declared bpchar compares without its trailing blank, which
+	// the text the copy is handed no longer shows: refused when it runs,
+	// unnamed and prepared.
+	argStmt := `SELECT s.c_id FROM (SELECT * FROM ` + cu + `) s WHERE s.c_first = $1`
+	if r := source.ExecParams(ctx, argStmt, [][]byte{[]byte("f1 ")}, []uint32{1042}, nil, nil).Read(); r.Err != nil || len(r.Rows) != 1 {
+		t.Fatalf("PostgreSQL itself, an argument declared bpchar: %d rows, %v: the test's premise", len(r.Rows), r.Err)
+	}
+	if r := port.ExecParams(ctx, argStmt, [][]byte{[]byte("f1 ")}, []uint32{1042}, nil, nil).Read(); r.Err == nil || !strings.HasPrefix("error "+pgCode(r.Err), "error 0A000") {
+		t.Errorf("an argument declared bpchar: %d rows, %v, want it refused (0A000)", len(r.Rows), r.Err)
+	}
+	if _, err := port.Prepare(ctx, "pgstar_arg", argStmt, []uint32{1042}); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if r := port.ExecPrepared(ctx, "pgstar_arg", [][]byte{[]byte("f1 ")}, nil, nil).Read(); r.Err == nil || !strings.HasPrefix(pgCode(r.Err), "0A000") {
+		t.Errorf("a prepared statement with an argument declared bpchar: %d rows, %v, want it refused (0A000)", len(r.Rows), r.Err)
+	}
+
 	for _, extended := range []bool{false, true} {
 		how := "simple"
 		if extended {

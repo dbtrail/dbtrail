@@ -1789,7 +1789,9 @@ The source answers:
   is then named, when another `*` hands it to the client, when the row is
   used whole, when the block with the `*` has `DISTINCT`, `GROUP BY`, `ORDER
   BY` or a window, in a set operation, in a subquery used as a value, and in
-  any shape the port does not follow. A `char(n)` column named in the last
+  any shape the port does not follow. It also goes there when the statement
+  casts to `char(n)`, takes arguments, or reads a table with a column of a
+  domain, an enum or another type that is not built in. A `char(n)` column named in the last
   `SELECT` of a `WITH` goes to the source even when returned as it is: the
   bytes match, but the port would announce it as `text`, not `bpchar(n)`.
   The rule is by where the column stands,

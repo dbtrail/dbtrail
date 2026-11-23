@@ -8,6 +8,22 @@ import (
 // A star that stands for a char(n) column vetoes only if the statement can
 // read that column; anything the analysis cannot follow keeps the veto.
 
+// starCatalog is paddedCatalog with every column of codes of a built-in type:
+// its enum column alone would keep every star over codes on the source.
+func starCatalog() []CatalogTable {
+	tables := paddedCatalog()
+	var cols []CatalogColumn
+	for _, c := range tables[0].Columns {
+		if c.Name != "kind" {
+			cols = append(cols, c)
+		}
+	}
+	tables[0].Columns = cols
+	return tables
+}
+
+func starScreen(stmt string) string { return CopyScreenFor(stmt, starCatalog()) }
+
 func TestPaddedStar_leftToTheCopy(t *testing.T) {
 	for _, q := range []string{
 		// A star over a char(n) table, read only by other columns.
@@ -29,7 +45,7 @@ func TestPaddedStar_leftToTheCopy(t *testing.T) {
 		`SELECT DISTINCT s.* FROM (SELECT id, k FROM codes) s`,
 		`SELECT * FROM plain WHERE id IN (SELECT id FROM codes)`,
 	} {
-		if veto := paddedScreen(q); veto != "" {
+		if veto := starScreen(q); veto != "" {
 			t.Errorf("%s: sent to the source (%s), want the copy", q, veto)
 		}
 	}
@@ -92,6 +108,18 @@ func TestPaddedStar_toTheSource(t *testing.T) {
 		`SELECT $1 IS DISTINCT FROM (SELECT * FROM codes LIMIT 1) AS d`,
 		`SELECT * FROM (SELECT 'ab' IS DISTINCT FROM (SELECT * FROM codes LIMIT 1) AS d) s`,
 		`WITH x AS (SELECT id FROM plain) SELECT 'ab' IS DISTINCT FROM (SELECT * FROM codes LIMIT 1) AS d`,
+		// A literal cast to a padded type compares without its blanks.
+		`SELECT 'a '::char(3) = 'a' FROM (SELECT * FROM codes) s`,
+		`SELECT 'a '::character(3) = 'a' FROM (SELECT * FROM codes) s`,
+		`SELECT 'a '::bpchar = 'a' FROM (SELECT * FROM codes) s`,
+		`SELECT 'a '::"bpchar" = 'a' FROM (SELECT * FROM codes) s`,
+		`SELECT 'a '::pg_catalog.bpchar = 'a' FROM (SELECT * FROM codes) s`,
+		`SELECT 'a '::nchar(3) = 'a' FROM (SELECT * FROM codes) s`,
+		`SELECT 'a '::nchar = 'a' FROM (SELECT * FROM codes) s`,
+		`SELECT CAST('a ' AS char(3)) = 'a' FROM (SELECT * FROM codes) s`,
+		`SELECT char 'a ' = 'a' FROM (SELECT * FROM codes) s`,
+		`SELECT 'a '::national character(3) = 'a' FROM (SELECT * FROM codes) s`,
+		`SELECT * FROM (SELECT id, k FROM codes) s WHERE 'a '::char(3) = 'a'`,
 		// What the analysis does not follow.
 		`WITH RECURSIVE x AS (SELECT * FROM codes) SELECT id FROM x`,
 		`WITH x(a, b) AS (SELECT * FROM codes) SELECT a FROM x`,
@@ -127,14 +155,95 @@ func TestPaddedStar_toTheSource(t *testing.T) {
 		// Pinned by #3068, without a WITH.
 		`SELECT code FROM codes WHERE id IN (SELECT id FROM plain)`,
 	} {
-		if veto := paddedScreen(q); !isPaddedVeto(veto) {
+		if veto := starScreen(q); !isPaddedVeto(veto) {
 			t.Errorf("%s: %q, want it sent to the source for its padded column", q, veto)
 		}
 	}
 }
 
+// A keyword after a dot is a column: read as a clause, it would end the FROM
+// early and hide the table joined after it.
+func TestPaddedStar_aDottedKeyword(t *testing.T) {
+	for _, w := range []string{"where", "group", "having", "order", "limit", "offset", "window", "fetch", "for", "from", "distinct", "on", "join", "left", "cross"} {
+		q := `WITH x AS (SELECT * FROM plain u JOIN plain v ON u.` + w + ` = v.id JOIN codes t ON t.k = u.id) SELECT count(*) FROM x`
+		if veto := starScreen(q); !isPaddedVeto(veto) {
+			t.Errorf("%s: %q, want it sent to the source", q, veto)
+		}
+	}
+}
+
+// A keyword after AS is a label: read as FROM, it would make the real table
+// the alias of a table named "from".
+func TestPaddedStar_aKeywordAsLabel(t *testing.T) {
+	tables := append(starCatalog(), CatalogTable{Schema: "public", Name: "from", Columns: []CatalogColumn{
+		{Name: "id", Type: "INTEGER", SourceType: oidInt4, SourceTypeMod: -1},
+	}})
+	for _, q := range []string{
+		`WITH x AS (SELECT DISTINCT *, 1 AS from FROM codes) SELECT count(*) FROM x`,
+		`SELECT * FROM (SELECT *, 1 AS from FROM codes) s`,
+	} {
+		if veto := CopyScreenFor(q, tables); !isPaddedVeto(veto) {
+			t.Errorf("%s: %q, want it sent to the source", q, veto)
+		}
+	}
+}
+
+// An argument's declared type is not in the text.
+func TestPaddedStar_anArgument(t *testing.T) {
+	for _, q := range []string{
+		`SELECT s.id FROM (SELECT * FROM codes) s WHERE s.label = $1`,
+		`WITH x AS (SELECT * FROM codes) SELECT id FROM x WHERE id = $1`,
+	} {
+		if veto := starScreen(q); !isPaddedVeto(veto) {
+			t.Errorf("%s: %q, want it sent to the source", q, veto)
+		}
+	}
+}
+
+// A table with a column of a type not known to be free of padding gets no
+// exemption: a domain over char(n) is recorded under its own type and carries
+// no mark, so the veto of the star is what keeps it from the copy.
+func TestPaddedStar_aTypeNotProven(t *testing.T) {
+	const domain = 16500
+	base := func(extra CatalogColumn) []CatalogTable {
+		return append(starCatalog(), CatalogTable{Schema: "public", Name: "dom", Columns: []CatalogColumn{
+			{Name: "id", Type: "INTEGER", SourceType: oidInt4, SourceTypeMod: -1},
+			{Name: "other", Type: "VARCHAR", SourceType: oidBpchar, SourceTypeMod: 6},
+			extra,
+		}})
+	}
+	for name, extra := range map[string]CatalogColumn{
+		"a domain over char(n)": {Name: "dc", Type: "VARCHAR", SourceType: domain, SourceTypeMod: -1},
+		"an enum":               {Name: "dc", Type: "VARCHAR", SourceType: domain + 1, SourceTypeMod: -1},
+		"a domain over int":     {Name: "dc", Type: "INTEGER", SourceType: domain + 2, SourceTypeMod: -1},
+		"no recorded type":      {Name: "dc", Type: "INTEGER"},
+	} {
+		tables := base(extra)
+		for _, q := range []string{
+			`SELECT count(*) FROM (SELECT * FROM dom) s WHERE dc = 'a'`,
+			`SELECT sum(length(dc)) FROM (SELECT * FROM dom) s`,
+			`SELECT count(*) FROM (SELECT * FROM dom) s`,
+			`WITH x AS (SELECT * FROM dom) SELECT id FROM x`,
+			`SELECT * FROM (SELECT id, dc FROM dom) s WHERE dc = 'a'`,
+			`SELECT * FROM plain WHERE code IN (SELECT dc FROM dom)`,
+		} {
+			if veto := CopyScreenFor(q, tables); !isPaddedVeto(veto) {
+				t.Errorf("%s: %s: %q, want it sent to the source", name, q, veto)
+			}
+		}
+		// A table the statement does not read says nothing of it.
+		if q := `WITH x AS (SELECT * FROM codes) SELECT id FROM x`; CopyScreenFor(q, tables) != "" {
+			t.Errorf("%s: %s: sent to the source for a table it does not read", name, q)
+		}
+	}
+	// The plain paths do not change: an enum stays on the copy.
+	if q := `SELECT id FROM codes WHERE kind = 'new'`; paddedScreen(q) != "" {
+		t.Errorf("%s: sent to the source", q)
+	}
+}
+
 // The three reports of the TPROC-C report set, on HammerDB's schema, whose
-// customer and order_line tables hold char(n) columns.
+// customer and order_line tables hold char(n) columns (HammerDB 6.0's DDL).
 var tprocReports = map[string]string{
 	"Q07": `WITH spend AS (
   SELECT o.o_w_id                                              AS w_id,
@@ -220,20 +329,25 @@ func tprocCatalog() []CatalogTable {
 	col := func(name, typ string, oid uint32, mod int32) CatalogColumn {
 		return CatalogColumn{Name: name, Type: typ, SourceType: oid, SourceTypeMod: mod}
 	}
-	ints := func(names ...string) (out []CatalogColumn) {
+	whole := func(oid uint32, typ string, names ...string) (out []CatalogColumn) {
 		for _, n := range names {
-			out = append(out, col(n, "INTEGER", oidInt4, -1))
+			out = append(out, col(n, typ, oid, -1))
 		}
 		return out
 	}
-	customer := append(ints("c_id", "c_d_id", "c_w_id"),
+	const zoned = "TIMESTAMP WITH TIME ZONE"
+	customer := append(whole(oidInt4, "INTEGER", "c_id", "c_w_id"), whole(oidInt2, "SMALLINT", "c_d_id", "c_payment_cnt", "c_delivery_cnt")...)
+	customer = append(customer, col("c_since", zoned, oidTimestamptz, -1),
 		col("c_first", "VARCHAR", oidVarchar, 20), col("c_middle", "VARCHAR", oidBpchar, 6),
-		col("c_last", "VARCHAR", oidVarchar, 20), col("c_state", "VARCHAR", oidBpchar, 6),
-		col("c_zip", "VARCHAR", oidBpchar, 13), col("c_phone", "VARCHAR", oidBpchar, 20),
-		col("c_credit", "VARCHAR", oidBpchar, 6), col("c_balance", "DECIMAL(12,2)", oidNumeric, -1))
-	orders := append(ints("o_id", "o_d_id", "o_w_id", "o_c_id", "o_ol_cnt", "o_all_local"),
-		col("o_entry_d", "TIMESTAMP", oidTimestamp, -1))
-	lines := append(ints("ol_o_id", "ol_d_id", "ol_w_id", "ol_number"),
+		col("c_last", "VARCHAR", oidVarchar, 20), col("c_street_1", "VARCHAR", oidVarchar, 24),
+		col("c_street_2", "VARCHAR", oidVarchar, 24), col("c_city", "VARCHAR", oidVarchar, 24),
+		col("c_state", "VARCHAR", oidBpchar, 6), col("c_zip", "VARCHAR", oidBpchar, 13),
+		col("c_phone", "VARCHAR", oidBpchar, 20), col("c_credit", "VARCHAR", oidBpchar, 6),
+		col("c_balance", "DECIMAL(12,2)", oidNumeric, -1))
+	orders := append(whole(oidInt4, "INTEGER", "o_id", "o_w_id", "o_c_id"), whole(oidInt2, "SMALLINT", "o_d_id", "o_carrier_id", "o_ol_cnt", "o_all_local")...)
+	orders = append(orders, col("o_entry_d", zoned, oidTimestamptz, -1))
+	lines := append(whole(oidInt4, "INTEGER", "ol_o_id", "ol_w_id", "ol_i_id", "ol_supply_w_id"), whole(oidInt2, "SMALLINT", "ol_d_id", "ol_number", "ol_quantity")...)
+	lines = append(lines, col("ol_delivery_d", zoned, oidTimestamptz, -1),
 		col("ol_amount", "DECIMAL(6,2)", oidNumeric, -1), col("ol_dist_info", "VARCHAR", oidBpchar, 28))
 	return []CatalogTable{
 		{Schema: "public", Name: "customer", Columns: customer},

@@ -27,6 +27,28 @@ import "strings"
 // column (screenTypes). No name a statement writes starts with it.
 const listedKey = relKey + relKey
 
+// starUnprovenKey is present in the screen's types when a table the statement
+// reads has a column whose type is not known to be free of padding. A domain
+// over char(n) is recorded under the domain's own type, so it carries no mark:
+// paddedUse's veto of the star is then all that keeps such a column from the
+// copy, and no star is exempted.
+const starUnprovenKey = listedKey + relKey
+
+// firstUserOID is the first OID PostgreSQL gives an object made after initdb.
+const firstUserOID = 16384
+
+// provenNotPadded reports whether a column's type on the source is a built-in
+// one, so that sourceMark tells for certain whether it is a char(n). A domain,
+// an enum, a composite, an extension's type, or a type the snapshot does not
+// record is not proven.
+func provenNotPadded(c CatalogColumn) bool {
+	return c.SourceType != 0 && c.SourceType < firstUserOID
+}
+
+// starPaddedTypes are the names of the padded type: a literal cast to one
+// compares without its trailing blanks on PostgreSQL, whatever the columns.
+var starPaddedTypes = map[string]bool{"char": true, "character": true, "bpchar": true, "nchar": true}
+
 // starUnfollowed are words that put a statement outside what paddedExempt
 // follows.
 var starUnfollowed = map[string]bool{
@@ -69,14 +91,30 @@ func paddedExempt(toks []rtToken, types map[string][]string) map[int]bool {
 	if n == 0 {
 		return nil
 	}
+	if _, unproven := types[starUnprovenKey]; unproven {
+		return nil
+	}
 	for i, t := range toks[:n] {
 		if t.kind == rtOp && t.text == ";" {
+			return nil
+		}
+		if t.kind == rtQuoted && strings.EqualFold(t.text, "bpchar") {
+			return nil
+		}
+		// An argument's type is not in the text: declared bpchar, it compares
+		// without its trailing blanks.
+		if t.kind == rtParam {
 			return nil
 		}
 		if t.kind != rtWord {
 			continue
 		}
-		if starUnfollowed[t.text] || t.text == "with" && i != 0 {
+		// A keyword after a dot is a column (u.limit), and after AS a label
+		// (1 AS from), not the clause the reading below would take it for.
+		if i > 0 && (isOpTok(toks, i-1, ".") || toks[i-1].kind == rtWord && toks[i-1].text == "as") && (aliasStop[t.text] || starFromEnd[t.text] || starJoinWords[t.text]) {
+			return nil
+		}
+		if starPaddedTypes[t.text] || starUnfollowed[t.text] || t.text == "with" && i != 0 {
 			return nil
 		}
 		if t.text == "by" && i+1 < n && toks[i+1].kind == rtWord && toks[i+1].text == "all" {
