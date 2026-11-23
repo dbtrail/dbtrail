@@ -27,7 +27,7 @@ func TestIntegrationForwarder_readOnlySession_3093(t *testing.T) {
 	for _, q := range []string{
 		"CREATE TABLE t (a INT NOT NULL PRIMARY KEY)",
 		"INSERT INTO t VALUES (1),(2),(3)",
-		"CREATE FUNCTION writes_a_row() RETURNS INT MODIFIES SQL DATA BEGIN INSERT INTO t SELECT max(a) + 100 FROM t; RETURN 1; END",
+		"CREATE FUNCTION writes_a_row() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN INSERT INTO t SELECT max(a) + 100 FROM t; RETURN 1; END",
 	} {
 		if _, err := db.Exec(q); err != nil {
 			t.Fatalf("%.60s: %v", q, err)

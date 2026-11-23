@@ -2621,10 +2621,22 @@ What this is and is not:
     reason a client that asks for such a character set when it connects
     does not get it on a read-only port: its session stays under
     `utf8mb4_0900_ai_ci`, and the log says so.
+  - **The session on your MySQL is read-only too.** On a read-only port
+    every connection the router opens to the source starts with `SET
+    SESSION TRANSACTION READ ONLY`, before anything of the client's. From
+    then on MySQL itself refuses a write, with its own error 1792, whatever
+    the statement's text was. The port refuses what would take that back:
+    `START TRANSACTION READ WRITE`, `SET TRANSACTION READ WRITE` and a `SET`
+    of `transaction_read_only` (`tx_read_only`). If the source refuses
+    that first statement, the connection to it is not opened and the client
+    gets the error, rather than a session that is not protected.
   - **What it cannot see.** The check reads the statement's text. A
     `SELECT` that calls a stored function, or reads a view built on one,
-    looks like a read and is forwarded; if the function writes, MySQL runs
-    it. The mode screens by statement class; the grants of the account the
+    looks like a read and is forwarded; if the function writes, MySQL
+    refuses it (error 1792), because the session is read-only there. A
+    read-only transaction still lets a function do what is not a write to
+    a table: take a named lock, sleep, or write to the session's own
+    temporary tables. The grants of the account the
     port forwards with are what bounds the rest, which is what the
     forwarding account above is for. Refusals are counted as
     `route="refused"`, `reason="read_only"`, and the **Connect a SQL

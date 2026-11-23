@@ -34,9 +34,9 @@ func TestForwarder_readOnlySessionIsMarkedFirst_3093(t *testing.T) {
 		if _, err := f.Forward(ctx, "DO 1", &BufferSink{}); err != nil {
 			t.Fatal(err)
 		}
-		want := []string{"SELECT @@collation_connection", "DO 1"}
+		want := []string{"DO 1"}
 		if readOnly {
-			want = []string{"SELECT @@collation_connection", ReadOnlySessionSet, "DO 1"}
+			want = []string{ReadOnlySessionSet, "DO 1"}
 		}
 		if got := src.statements(); !reflect.DeepEqual(got, want) {
 			t.Errorf("read-only %v: the source saw %q, want %q", readOnly, got, want)

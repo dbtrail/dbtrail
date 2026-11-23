@@ -151,7 +151,7 @@ func TestIntegrationFlashbackReadOnly(t *testing.T) {
 	// #3093: a write the screen cannot see, because it is inside a stored
 	// function a SELECT calls. The port forwards the SELECT, and the SOURCE
 	// refuses the write: the session is read-only there.
-	if _, err := srcDB.Exec("CREATE FUNCTION writes_a_row() RETURNS INT MODIFIES SQL DATA BEGIN INSERT INTO orders SELECT max(id) + 100, 'by function' FROM orders; RETURN 1; END"); err != nil {
+	if _, err := srcDB.Exec("CREATE FUNCTION writes_a_row() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN INSERT INTO orders SELECT max(id) + 100, 'by function' FROM orders; RETURN 1; END"); err != nil {
 		t.Fatalf("create the function: %v", err)
 	}
 	for _, q := range []string{"SELECT writes_a_row()", "SELECT id, writes_a_row() FROM orders WHERE id = 1"} {
