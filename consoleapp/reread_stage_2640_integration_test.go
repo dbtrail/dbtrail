@@ -40,6 +40,13 @@ func TestIntegrationStageReread_realMydumperNames_2640(t *testing.T) {
 		testutil.MustExec(t, db, "CREATE TABLE "+q+" (id INT PRIMARY KEY, label VARCHAR(20))")
 		testutil.MustExec(t, db, "INSERT INTO "+q+" VALUES (1, 'uno'), (2, 'dos'), (3, 'tres')")
 	}
+	// A table with no rows, as a TRUNCATE leaves it, and one with a name
+	// mydumper writes to disk under a made-up file name.
+	emptied := name + ".emptied"
+	accented := name + ".Órdenes"
+	testutil.MustExec(t, db, "CREATE TABLE emptied (id INT PRIMARY KEY, label VARCHAR(20))")
+	testutil.MustExec(t, db, "CREATE TABLE `Órdenes` (id INT PRIMARY KEY, label VARCHAR(20))")
+	testutil.MustExec(t, db, "INSERT INTO `Órdenes` VALUES (1, 'uno')")
 	// A table that is not asked for: it must not be read.
 	testutil.MustExec(t, db, "CREATE TABLE bystander (id INT PRIMARY KEY)")
 	ddb, err := sql.Open("duckdb", "")
@@ -87,6 +94,24 @@ func TestIntegrationStageReread_realMydumperNames_2640(t *testing.T) {
 			}
 			if err := read.discard(); err != nil {
 				t.Fatal(err)
+			}
+
+			for st, rows := range map[string]int{emptied: 0, accented: 1} {
+				one, err := s.stageReread(req, []string{st})
+				if err != nil {
+					t.Fatalf("stageReread(%s): %v", st, err)
+				}
+				var n int
+				if err := ddb.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM parquet_scan('%s')", strings.ReplaceAll(one.files[st], "'", "''"))).Scan(&n); err != nil || n != rows {
+					t.Fatalf("%s: %d rows, %v; want %d", st, n, err, rows)
+				}
+				if err := one.discard(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The only table asked for is not there: named, not "no tables found".
+			if _, err := s.stageReread(req, []string{name + ".gone"}); !errors.Is(err, errRereadTableMissing) {
+				t.Fatalf("err = %v, want the table the source does not hold named", err)
 			}
 
 			if _, err := s.stageReread(req, []string{name + ".orders", dotted}); !errors.Is(err, errRereadUnavailable) {

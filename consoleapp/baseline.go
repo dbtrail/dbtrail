@@ -1297,7 +1297,7 @@ func (s *baselineSupervisor) dumpAttemptOf(req console.BaselineRequest, lockMode
 			slog.Warn("console snapshot: could not remove the folder of a failed dump", "path", dir, "error", rmErr)
 		}
 		if filled {
-			err = &workingFolderFullError{err: err, folder: s.stagingDir, free: free, dumpDir: dir, rmErr: rmErr}
+			err = &workingFolderFullError{err: err, folder: s.stagingDir, free: free, dumpDir: dir, rmErr: rmErr, someTables: len(tables) > 0}
 		}
 		return dumpAttempt{}, fmt.Errorf("dump: %w", err)
 	}
@@ -1358,6 +1358,16 @@ type workingFolderFullError struct {
 	free    uint64
 	dumpDir string
 	rmErr   error
+	// someTables is a read of some tables alone (#2640), not a full read.
+	someTables bool
+}
+
+// readName is what the messages call the read that stopped.
+func (e *workingFolderFullError) readName() string {
+	if e.someTables {
+		return "read of some tables"
+	}
+	return "full read"
 }
 
 // Error says the cause first, on one line, so the status and the run history
@@ -1368,9 +1378,9 @@ func (e *workingFolderFullError) Error() string {
 	if e.rmErr != nil {
 		left = fmt.Sprintf("The partial dump at %s could not be removed (%s); it still takes room there.", e.dumpDir, firstLineOf(e.rmErr.Error()))
 	}
-	return fmt.Sprintf("%s: the working folder %s filled up during the full read (%s free when the dump stopped). "+
+	return fmt.Sprintf("%s: the working folder %s filled up during the %s (%s free when the dump stopped). "+
 		"No new snapshot was made, and earlier snapshots are unchanged. %s %s\n%s",
-		errFoldDiskFull, e.folder, humanSize(int64(e.free)), left, moveStagingHint, e.err)
+		errFoldDiskFull, e.folder, e.readName(), humanSize(int64(e.free)), left, moveStagingHint, e.err)
 }
 
 func (e *workingFolderFullError) Unwrap() []error { return []error{errFoldDiskFull, e.err} }
@@ -1380,9 +1390,9 @@ func (e *workingFolderFullError) Unwrap() []error { return []error{errFoldDiskFu
 // runes, which lands inside the fix, and after the lock-all retry the ftwrl
 // refusal comes first and can take the whole line.
 func (e *workingFolderFullError) summary() string {
-	s := fmt.Sprintf("The working folder %s filled up during the full read (%s free when the dump stopped). "+
+	s := fmt.Sprintf("The working folder %s filled up during the %s (%s free when the dump stopped). "+
 		"Free space there, or move it to a bigger disk: set "+stagingSetWith+", and restart DBTrail.",
-		e.folder, humanSize(int64(e.free)))
+		e.folder, e.readName(), humanSize(int64(e.free)))
 	if e.rmErr != nil {
 		// The one thing still taking that room is ours, and nothing else
 		// will remove it or say where it is.

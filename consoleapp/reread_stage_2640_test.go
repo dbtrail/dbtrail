@@ -213,6 +213,65 @@ func TestStageReread_aTableTheDumpDoesNotHoldFailsTheWholeRead(t *testing.T) {
 	}
 }
 
+// The only table asked for is gone: the dump holds no table at all, and the
+// failure still says which table, not the conversion's "no tables found".
+func TestStageReread_theOnlyTableIsGone(t *testing.T) {
+	stage := t.TempDir()
+	stubRereadDump(t, func(_ int, c rereadDumpCall) error { writeRereadDump(t, c.dir, nil); return nil })
+	s := newBaselineSupervisor(context.Background(), stage, baseline.LockModeFTWRL)
+	got, err := s.stageReread(rereadReq(nil), []string{"shop.gone"})
+	if !errors.Is(err, errRereadTableMissing) || !strings.Contains(err.Error(), "shop.gone") {
+		t.Fatalf("err = %v, want the missing table named", err)
+	}
+	if len(got.files) != 0 || got.root != "" {
+		t.Fatalf("returned %+v", got)
+	}
+	if left := rereadLeft(t, stage); len(left) != 0 {
+		t.Fatalf("the working folder holds %v", left)
+	}
+}
+
+// A table emptied by a TRUNCATE, the usual reason to read one again: mydumper
+// writes its definition and no data file. It is a table with no rows, not a
+// table that is gone.
+func TestStageReread_anEmptyTableIsStaged(t *testing.T) {
+	stage := t.TempDir()
+	stubRereadDump(t, func(_ int, c rereadDumpCall) error {
+		writeRereadDump(t, c.dir, c.tables)
+		return os.Remove(filepath.Join(c.dir, "shop.emptied.00000.sql"))
+	})
+	s := newBaselineSupervisor(context.Background(), stage, baseline.LockModeFTWRL)
+	got, err := s.stageReread(rereadReq(nil), []string{"shop.emptied"})
+	if err != nil {
+		t.Fatalf("stageReread: %v", err)
+	}
+	t.Cleanup(func() { _ = got.discard() })
+	meta, err := baseline.ReadParquetMetadata(got.files["shop.emptied"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Producer != baseline.ProducerDump || meta.BinlogPos != 839 {
+		t.Fatalf("footer %+v, want a read from the source with its position", meta)
+	}
+}
+
+// The message of a read of some tables does not call it a full read, and the
+// one of a full read keeps its words.
+func TestWorkingFolderFullError_namesTheRead(t *testing.T) {
+	some := &workingFolderFullError{err: errors.New("x"), folder: "/w", someTables: true}
+	full := &workingFolderFullError{err: errors.New("x"), folder: "/w"}
+	for _, m := range []string{some.Error(), some.summary()} {
+		if strings.Contains(m, "full read") || !strings.Contains(m, "during the read of some tables") {
+			t.Fatalf("message of a read of some tables: %q", m)
+		}
+	}
+	for _, m := range []string{full.Error(), full.summary()} {
+		if !strings.Contains(m, "filled up during the full read") {
+			t.Fatalf("message of a full read: %q", m)
+		}
+	}
+}
+
 // Two tables and the second one's data cut short: the conversion fails, and
 // the first table's finished file goes with the folder.
 func TestStageReread_aFailedConversionLeavesNothing(t *testing.T) {
