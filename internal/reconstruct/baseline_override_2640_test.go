@@ -203,12 +203,12 @@ func TestBaselineOverride_refusals(t *testing.T) {
 			s.cfg.OutputDir = s.staging
 		}, ErrBaselineOverride, "inside the snapshots root"},
 		{"a table delta beside the file", func(t *testing.T, s *setup) {
-			posdel, upserts := baseline.TableDeltaPaths(s.path, 1)
+			posdel, upserts := baseline.TableDeltaPaths(s.path, 0)
 			mustWrite(t, posdel)
 			mustWrite(t, upserts)
 		}, ErrBaselineOverride, "so it is not a read from the source"},
 		{"half a table delta beside the file", func(t *testing.T, s *setup) {
-			_, upserts := baseline.TableDeltaPaths(s.path, 1)
+			_, upserts := baseline.TableDeltaPaths(s.path, 0)
 			mustWrite(t, upserts)
 		}, ErrBaselineOverride, "cannot tell whether"},
 		// The read finished after the point the run was asked for.
