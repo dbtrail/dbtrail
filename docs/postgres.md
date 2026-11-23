@@ -325,9 +325,14 @@ Instead:
   The snapshot pages still count it among the tables reused unchanged, and
   show it as `reused unchanged`. Fresh mode leaves it out, and statements on it read the
   copy as of that file (a server's lag limit, `max_behind_source_seconds`,
-  sends them to the source when that is too old); with #3191, which ships
-  with this, the PostgreSQL port sends them to the source
-  (`table_not_captured`).
+  sends them to the source when that is too old); with a forwarding user the
+  PostgreSQL port sends them to the source (`table_not_captured`).
+  This rests on the capture's record of dropped changes, which is saved with
+  its checkpoint. Until the next checkpoint (0.3 s on a healthy capture, in
+  one measurement) a table can still read as current. A capture that has
+  saved its state and then cannot save it again leaves later drops
+  unrecorded, so the port can keep answering that table from its copy with
+  no notice ([#3202](https://github.com/dbtrail/dbtrail/issues/3202)).
   Where the file cannot be published again as it is (a snapshot read from S3,
   or with `--baseline-carry-forward-unchanged` off), the update is refused for all the
   tables (`refused-gap`, naming the table). A full read brings the copy up to
