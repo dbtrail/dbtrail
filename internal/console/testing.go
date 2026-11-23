@@ -2,6 +2,7 @@ package console
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
@@ -25,4 +26,19 @@ func SetNewestSnapshotForTest(fn func(ctx context.Context, source string) (time.
 	prev := newestSnapshot
 	newestSnapshot = fn
 	return func() { newestSnapshot = prev }
+}
+
+// HoldTailKeeperForTest takes the lock of server id's tail keeper, as an
+// update of its tails holds it for most of its length, until release is called.
+// ok is false when the server has no keeper.
+// Test helper ONLY, for another package's tests; no shipped code may call it.
+func (s *Server) HoldTailKeeperForTest(id string) (release func(), ok bool) {
+	s.tails.mu.Lock()
+	k := s.tails.by[id]
+	s.tails.mu.Unlock()
+	if k == nil {
+		return nil, false
+	}
+	k.mu.Lock()
+	return sync.OnceFunc(k.mu.Unlock), true
 }

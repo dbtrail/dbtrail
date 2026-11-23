@@ -72,6 +72,9 @@ func TestBcryptCostHookIsTestOnly(t *testing.T) {
 		if strings.Contains(src, "SetNewestSnapshotForTest") {
 			t.Errorf("%s names SetNewestSnapshotForTest: shipped code must list snapshots through reconstruct.NewestSnapshot", path)
 		}
+		if strings.Contains(src, "HoldTailKeeperForTest") {
+			t.Errorf("%s names HoldTailKeeperForTest: only tests may hold a tail keeper's lock", path)
+		}
 		for _, line := range strings.Split(src, "\n") {
 			l := strings.TrimSpace(line)
 			if strings.HasPrefix(l, "bcryptCost =") || strings.HasPrefix(l, "bcryptCost=") {
