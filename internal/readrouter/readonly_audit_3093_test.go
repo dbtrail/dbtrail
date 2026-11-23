@@ -74,7 +74,7 @@ func TestReadOnlyScreen_audit_3093(t *testing.T) {
 		{"quotes", `SELECT "INTO OUTFILE"`, no},
 		{"quotes", "SELECT `into` FROM t", no},
 		{"quotes", "SELECT `a``; DELETE FROM t -- `", no}, // one quoted name
-		{"quotes", `SELECT 1 "; DELETE FROM t; -- "`, no},  // one string or one name
+		{"quotes", `SELECT 1 "; DELETE FROM t; -- "`, no}, // one string or one name
 		{"quotes", `SELECT 'a\'b'`, no},
 		{"quotes", `SELECT 'it''s'`, no},
 		{"quotes", `SELECT '\\'`, no},

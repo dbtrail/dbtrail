@@ -54,7 +54,7 @@ var (
 	// READ WRITE in START TRANSACTION or SET TRANSACTION: it would take back
 	// the read-only mark the port puts on the session at the source.
 	roReadWrite = regexp.MustCompile(`(?:^|[^a-z_$])read\s+write(?:$|[^a-z0-9_$])`)
-	roAnalyze = regexp.MustCompile(`(?:^|[^a-z_$])analyze(?:$|[^a-z0-9_$])`)
+	roAnalyze   = regexp.MustCompile(`(?:^|[^a-z_$])analyze(?:$|[^a-z0-9_$])`)
 
 	roIdent       = "(?:``|[\\w$\\p{L}]+)"
 	roBegin       = regexp.MustCompile(`^begin(\s+work)?$`)
