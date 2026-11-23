@@ -413,6 +413,27 @@ func (x *pgTailSource) BaseFile(t views.BaselineTable) string {
 	return "pgshape:" + hex.EncodeToString(sum[:16])
 }
 
+// KeepsChainOver says a tail read over old's cut may keep its files across a
+// prune to t's (pg_tail_chain.go): only when both files descend from the same
+// read of the source, which a fold keeps (baseline.SourceReadOf). Then the
+// newer cut is the older one plus recorded changes, the same changes the
+// tail's files hold. A newer full read is not: it also reflects what capture
+// did not record as a row (a TRUNCATE, a change it dropped), so a row in the
+// chain from before it could bring back a row the source no longer has, even
+// with a table delta on top of that read. Not known is no.
+func (x *pgTailSource) KeepsChainOver(old, t views.BaselineTable) bool {
+	was, err := x.s.copyCuts.footer(old.Path)
+	if err != nil {
+		return false
+	}
+	now, err := x.s.copyCuts.footer(t.Path)
+	if err != nil {
+		return false
+	}
+	a, b := baseline.SourceReadOf(was).At, baseline.SourceReadOf(now).At
+	return !a.IsZero() && a.Equal(b)
+}
+
 // maxSnapshotID is the newest schema snapshot the index holds, 0 for none.
 func (x *pgTailSource) maxSnapshotID(ctx context.Context) (int64, error) {
 	var id int64

@@ -108,6 +108,9 @@ type PGTail struct {
 	// of them had and found too small, 0 for none: see DeferCopy.
 	copyDeferred int
 	copyRoom     int64
+	// writtenHigh is the highest commit LSN among the rows of the last file
+	// written (WrittenHigh).
+	writtenHigh uint64
 }
 
 // pgPackedRow is the row of one change, put away. of is the change it is
@@ -380,6 +383,17 @@ func (t *PGTail) Apply(page []query.ResultRow) error {
 // A dropped key's record of its last transaction goes with it: the cut holds
 // that transaction, and a change of the key after it starts a new one.
 func (t *PGTail) PruneThrough(anchor query.BinlogPos, afterID uint64) (int, error) {
+	n, err := t.dropThrough(anchor, afterID)
+	if err != nil {
+		return 0, err
+	}
+	t.needFull = true
+	return n, nil
+}
+
+// dropThrough is the drop of PruneThrough and PruneKeepingChain: nothing is
+// dropped when it fails.
+func (t *PGTail) dropThrough(anchor query.BinlogPos, afterID uint64) (int, error) {
 	if anchor.File != PGTailLog || anchor.Pos == 0 {
 		return 0, fmt.Errorf("%s.%s: the cut's position %q:%d is not a PostgreSQL tail's", t.schema, t.table, anchor.File, anchor.Pos)
 	}
@@ -402,7 +416,6 @@ func (t *PGTail) PruneThrough(anchor query.BinlogPos, afterID uint64) (int, erro
 		delete(t.packed, k)
 		delete(t.wants, k)
 	}
-	t.needFull = true
 	return len(drop), nil
 }
 
@@ -520,10 +533,16 @@ func (t *PGTail) write(path string, keys []string) (rows int64, retErr error) {
 	// .tmp, a name no statement is ever handed, which is removed, and the keys
 	// stay changed because only a file in place clears them.
 	sort.Strings(keys)
+	var high uint64
 	for _, k := range keys {
 		row, rerr := t.tailRow(k, t.fold.Changes[k])
 		if rerr != nil {
 			return 0, rerr
+		}
+		// A change with no LSN never gets this far (Apply refuses it); 0 would
+		// read as "unknown" and keep the file (PGChainFilesToRetire).
+		if lsn, ok := pgRowLSN(t.fold.Changes[k]); ok {
+			high = max(high, lsn)
 		}
 		if err := w.WriteRow(row, t.schema, t.table); err != nil {
 			return 0, err
@@ -536,6 +555,7 @@ func (t *PGTail) write(path string, keys []string) (rows int64, retErr error) {
 		return 0, fmt.Errorf("publish the tail of %s.%s: %w", t.schema, t.table, err)
 	}
 	clear(t.dirty)
+	t.writtenHigh = high
 	return w.Rows(), nil
 }
 
@@ -651,4 +671,40 @@ func pgKeyParts(key string, n int) ([]string, error) {
 		return nil, fmt.Errorf("the key %q does not read as %d key column(s)", key, n)
 	}
 	return parts, nil
+}
+
+// PruneKeepingChain is PruneThrough for a tail whose files stay (#3081): the
+// keys a newer cut holds leave memory and the next file may still be a delta.
+//
+// It holds only while every key's last change is in a file, so it refuses
+// while any key is changed and not written: once dropped, nothing would ever
+// write that change, and an older row of the key in the chain would be laid
+// over the newer cut. It refuses too after a PruneThrough no whole file has
+// followed: that chain already lacks what it would have to hold.
+func (t *PGTail) PruneKeepingChain(anchor query.BinlogPos, afterID uint64) (int, error) {
+	if len(t.dirty) > 0 {
+		return 0, fmt.Errorf("internal: %s.%s has %d changed keys in no file, so its chain cannot be kept across a prune", t.schema, t.table, len(t.dirty))
+	}
+	if t.needFull {
+		return 0, fmt.Errorf("internal: the chain of %s.%s ended at an earlier prune", t.schema, t.table)
+	}
+	return t.dropThrough(anchor, afterID)
+}
+
+// WrittenHigh is the highest commit LSN among the rows of the last file
+// written, 0 before the first or for a file with no rows.
+func (t *PGTail) WrittenHigh() uint64 { return t.writtenHigh }
+
+// PGChainFilesToRetire is how many of a chain's first files a cut at floor
+// makes useless, given each file's highest LSN, oldest first (0: not known).
+// Only a prefix: a later file below the floor may be what covers an older row
+// of its key in an earlier file above it, and without it that older row would
+// be read.
+func PGChainFilesToRetire(highs []uint64, floor uint64) int {
+	for i, h := range highs {
+		if h == 0 || h >= floor {
+			return i
+		}
+	}
+	return len(highs)
 }
