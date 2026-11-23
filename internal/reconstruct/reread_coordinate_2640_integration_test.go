@@ -84,7 +84,11 @@ func measureRereadCoordinate(t *testing.T, mydumper string, mode baseline.LockMo
 	ctx := context.Background()
 	sourceDB, sourceName := testutil.CreateTestDB(t)
 	indexDB, indexName := testutil.CreateTestDB(t)
-	testutil.InitIndexTables(t, indexDB)
+	// Hourly partitions around now, as `bintrail init` lays them: the planner
+	// reads an hour with no partition as a coverage gap.
+	if err := indexer.CreateIndexTables(ctx, indexDB, 48, false, nil); err != nil {
+		t.Fatalf("CreateIndexTables: %v", err)
+	}
 	if err := indexer.EnsureSchema(indexDB); err != nil {
 		t.Fatalf("EnsureSchema: %v", err)
 	}
