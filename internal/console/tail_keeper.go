@@ -206,6 +206,9 @@ type tailEntry struct {
 	// segHigh is, for a PostgreSQL tail only, the highest position and the
 	// rows of each file of segs (pg_tail_chain.go); nil for any other.
 	segHigh map[string]pgSegment
+	// pgPruned is, for a PostgreSQL tail, how many leading files of segs are
+	// from before its last prune: no merge takes them in.
+	pgPruned int
 	// old are the earlier versions, kept while a statement may still read
 	// them.
 	old []tailOldFile
@@ -1135,6 +1138,10 @@ func (k *tailKeeper) write(t views.BaselineTable, e *tailEntry) error {
 	}
 	k.written++
 	path := filepath.Join(k.dir, fmt.Sprintf("%d-%s.%s.parquet", k.written, url.PathEscape(t.Schema), url.PathEscape(t.Table)))
+	// A PostgreSQL tail only (pg_tail_chain.go); for any other, no step.
+	if merged, err := k.pgMergeNewest(e, path); merged {
+		return err
+	}
 	if !whole {
 		n, err := e.tail.WriteDelta(path)
 		if err != nil {

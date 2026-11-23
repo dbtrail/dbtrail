@@ -691,6 +691,32 @@ func (t *PGTail) PruneKeepingChain(anchor query.BinlogPos, afterID uint64) (int,
 	return t.dropThrough(anchor, afterID)
 }
 
+// WriteSince writes every key whose last change has an id above afterID, and
+// every key changed since the last file (#3081): the file that replaces the
+// files of a chain written after the one whose LastEventID was afterID. Events
+// reach a written tail in id order past everything it has folded, so a key
+// those files hold has such a change, or one an earlier file holds already.
+//
+// Never over a file from before a prune: a key the prune dropped is in memory
+// no more, and would be lost with that file. That is the caller's to keep to.
+func (t *PGTail) WriteSince(path string, afterID uint64) (int64, error) {
+	if t.needFull {
+		return 0, fmt.Errorf("internal: the tail of %s.%s was pruned to a newer cut, so its next file must be whole", t.schema, t.table)
+	}
+	keys := make([]string, 0, len(t.dirty))
+	for k, ev := range t.fold.Changes {
+		if _, dirty := t.dirty[k]; dirty || ev.EventID > afterID {
+			keys = append(keys, k)
+		}
+	}
+	for k := range t.dirty {
+		if _, ok := t.fold.Changes[k]; !ok {
+			return 0, fmt.Errorf("internal: key %q of %s.%s changed but the tail no longer holds it", k, t.schema, t.table)
+		}
+	}
+	return t.write(path, keys)
+}
+
 // WrittenHigh is the highest commit LSN among the rows of the last file
 // written, 0 before the first or for a file with no rows.
 func (t *PGTail) WrittenHigh() uint64 { return t.writtenHigh }

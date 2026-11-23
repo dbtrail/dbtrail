@@ -82,6 +82,41 @@ func TestPGTailPruneKeepingChain_refusals(t *testing.T) {
 	}
 }
 
+func TestPGTailWriteSince(t *testing.T) {
+	dir := t.TempDir()
+	_, md := writePGTailBase(t, dir, nil, [2]string{"1", "one"})
+	tail := newTestPGTail(t, md)
+	if err := tail.Apply([]query.ResultRow{pgIns(1, 0x600, "a", "1"), pgIns(2, 0x610, "b", "2")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tail.WriteFile(filepath.Join(dir, "w.parquet")); err != nil {
+		t.Fatal(err)
+	}
+	after := tail.LastEventID()
+	if err := tail.Apply([]query.ResultRow{pgIns(3, 0x620, "c", "3")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tail.WriteDelta(filepath.Join(dir, "d.parquet")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tail.Apply([]query.ResultRow{pgIns(4, 0x630, "d", "4")}); err != nil {
+		t.Fatal(err)
+	}
+	n, err := tail.WriteSince(filepath.Join(dir, "m.parquet"), after)
+	if err != nil || n != 2 {
+		t.Fatalf("the merge wrote %d rows, %v: want c and d", n, err)
+	}
+	if tail.Dirty() != 0 {
+		t.Fatalf("%d keys still count as changed", tail.Dirty())
+	}
+	if _, err := tail.PruneThrough(PGTailPos(0x700), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tail.WriteSince(filepath.Join(dir, "x.parquet"), 0); err == nil {
+		t.Fatal("a merge was written over a chain a prune ended")
+	}
+}
+
 func TestPGTailKeepChain_randomHistories(t *testing.T) {
 	for seed := int64(1); seed <= 40; seed++ {
 		r := rand.New(rand.NewSource(seed))
@@ -94,6 +129,8 @@ func TestPGTailKeepChain_randomHistories(t *testing.T) {
 		exists := map[string]bool{"1": true, "2": true, "3": true, "4": true, "5": true, "6": true}
 		tail := newTestPGTail(t, md)
 		var segs []pgSpillSeg
+		var ids []uint64 // the last event id folded when each file was written
+		pruned := 0      // the leading files from before the last prune
 		var all []query.ResultRow
 		cut := uint64(0)
 		lsn, id, files := uint64(0x1000), uint64(0), 0
@@ -104,11 +141,11 @@ func TestPGTailKeepChain_randomHistories(t *testing.T) {
 			var err error
 			if whole {
 				if tail.Keys() == 0 {
-					segs = nil
+					segs, ids, pruned = nil, nil, 0
 					return
 				}
 				_, err = tail.WriteFile(file)
-				segs = nil
+				segs, ids, pruned = nil, nil, 0
 			} else {
 				_, err = tail.WriteDelta(file)
 			}
@@ -116,6 +153,27 @@ func TestPGTailKeepChain_randomHistories(t *testing.T) {
 				t.Fatalf("seed %d cycle %d: %v", seed, cycle, err)
 			}
 			segs = append(segs, pgSpillSeg{path: file, hi: tail.WrittenHigh()})
+			ids = append(ids, tail.LastEventID())
+		}
+		// merge replaces the files from i on, none from before a prune, by
+		// one holding every key changed since the file before them.
+		merge := func(cycle int) {
+			t.Helper()
+			if len(segs)-pruned < 2 {
+				return
+			}
+			i := pruned + r.Intn(len(segs)-pruned-1)
+			var after uint64
+			if i > 0 {
+				after = ids[i-1]
+			}
+			files++
+			file := filepath.Join(root, fmt.Sprintf("merged-%d.parquet", files))
+			if _, err := tail.WriteSince(file, after); err != nil {
+				t.Fatalf("seed %d cycle %d: %v", seed, cycle, err)
+			}
+			segs = append(segs[:i:i], pgSpillSeg{path: file, hi: tail.WrittenHigh()})
+			ids = append(ids[:i:i], tail.LastEventID())
 		}
 		check := func(when string, cycle int) {
 			t.Helper()
@@ -168,6 +226,12 @@ func TestPGTailKeepChain_randomHistories(t *testing.T) {
 					check("after a write", cycle)
 				}
 			}
+			if r.Intn(2) == 0 {
+				merge(cycle)
+				if tail.Dirty() == 0 {
+					check("after a merge", cycle)
+				}
+			}
 			if r.Intn(3) != 0 {
 				continue
 			}
@@ -201,7 +265,9 @@ func TestPGTailKeepChain_randomHistories(t *testing.T) {
 			for i, s := range segs {
 				highs[i] = s.hi
 			}
-			segs = segs[PGChainFilesToRetire(highs, cut):]
+			gone := PGChainFilesToRetire(highs, cut)
+			segs, ids = segs[gone:], ids[gone:]
+			pruned = len(segs)
 			check("after a prune that kept the chain", cycle)
 		}
 	}

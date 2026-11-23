@@ -3,6 +3,7 @@ package console
 import (
 	"errors"
 	"log/slog"
+	"slices"
 
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
@@ -36,12 +37,16 @@ type pgChainTail interface {
 	tailTable
 	PruneKeepingChain(anchor query.BinlogPos, afterID uint64) (int, error)
 	WrittenHigh() uint64
+	WriteSince(path string, afterID uint64) (int64, error)
+	LastEventID() uint64
 }
 
 // pgSegment is what the keeper remembers of one file of a PostgreSQL chain.
 type pgSegment struct {
 	high uint64
 	rows int64
+	// lastID is the tail's last event id when the file was written.
+	lastID uint64
 }
 
 // pgNoteSegment records the file just written at the end of e's chain. No
@@ -64,8 +69,12 @@ func (k *tailKeeper) pgNoteSegment(e *tailEntry, path string, rows int64) {
 		// (0 reads as "not known").
 		high = 1
 	}
-	kept[path] = pgSegment{high: high, rows: rows}
+	kept[path] = pgSegment{high: high, rows: rows, lastID: tail.LastEventID()}
 	e.segHigh = kept
+	if len(e.segs) == 1 {
+		// A whole file: nothing is left from before a prune.
+		e.pgPruned = 0
+	}
 }
 
 // pgPruneKeepingChain moves e to t's newer cut at to with its files kept, and
@@ -115,8 +124,62 @@ func (k *tailKeeper) pgPruneKeepingChain(e *tailEntry, t views.BaselineTable, cu
 	}
 	// A new slice: the version a statement was handed keeps its own.
 	e.segs = append([]string(nil), e.segs[gone:]...)
+	e.pgPruned = len(e.segs)
 	e.table, e.cut, e.from, e.fileCut, e.dirty = t, cut, &to, cut, false
 	slog.Debug("Engine Routing: a table's tail was pruned to its newer snapshot with its files kept", "table", t.Schema+"."+t.Table,
 		"dropped", n, "keys", e.tail.Keys(), "files", len(e.segs), "files_retired", gone)
 	return true
+}
+
+// pgMergeNewest is the write of a chain at tailMaxSegments files: instead of
+// the whole tail, one file replaces the newest files of similar size, so a
+// key is written about log2(files) times and not once per eight writes. It
+// says whether it took the write (with the write's error, nothing changed on
+// one). Not when the chain is not this cut's, when its files are mostly
+// overridden rows (the whole write is what shrinks them), or when fewer than
+// two files were written since the last prune: a merge never takes in a file
+// from before a prune, whose dropped keys no later write holds.
+func (k *tailKeeper) pgMergeNewest(e *tailEntry, path string) (bool, error) {
+	if _, ok := k.src.(pgChainSource); !ok {
+		return false, nil
+	}
+	tail, ok := e.tail.(pgChainTail)
+	if !ok || e.fileCut != e.cut || len(e.segs) < tailMaxSegments ||
+		e.segRows > int64(tailMergeRatio)*int64(e.tail.Keys()) || len(e.segs)-e.pgPruned < 2 {
+		return false, nil
+	}
+	for _, p := range e.segs[e.pgPruned:] {
+		if _, known := e.segHigh[p]; !known {
+			return false, nil
+		}
+	}
+	from := len(e.segs) - 2
+	rows := e.segHigh[e.segs[from]].rows + e.segHigh[e.segs[from+1]].rows
+	for from > e.pgPruned && e.segHigh[e.segs[from-1]].rows <= 2*rows {
+		from--
+		rows += e.segHigh[e.segs[from]].rows
+	}
+	var after uint64
+	if from > 0 {
+		s, known := e.segHigh[e.segs[from-1]]
+		if !known {
+			return false, nil
+		}
+		after = s.lastID
+	}
+	n, err := tail.WriteSince(path, after)
+	if err != nil {
+		return true, err
+	}
+	k.rowsWritten += n
+	for _, p := range e.segs[from:] {
+		e.old = append(e.old, tailOldFile{p, k.now()})
+		delete(e.segHigh, p)
+	}
+	// A new slice: the version a statement was handed keeps its own.
+	e.segs = append(slices.Clone(e.segs[:from]), path)
+	e.segRows += n - rows
+	e.dirty = false
+	k.pgNoteSegment(e, path, n)
+	return true, nil
 }

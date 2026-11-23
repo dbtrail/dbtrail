@@ -2,7 +2,6 @@ package console
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -148,8 +147,7 @@ func TestPGTailChain_aFlushThatFailsTakesTodaysPath(t *testing.T) {
 	f, k, _, root := newPGChainRig(t)
 	key := tailKey("public", "orders")
 	f.update("orders", 0x800, "1", pgCopyUnsent, "u")
-	failed := errors.New("the copy cannot be read now")
-	f.hook(func(context.Context, views.BaselineTable) error { return failed })
+	f.hook(func(context.Context, views.BaselineTable) error { return errPGCopyReadLater })
 	next := pgChainNextCut(t, f, root, "snap2", 0x700,
 		[3]string{"1", "one", "n1"}, [3]string{"2", "paid", "p"}, [3]string{"3", "three", "n3"})
 	if _, err := k.refresh(ctx, []views.BaselineTable{next}); err != nil {
@@ -256,6 +254,88 @@ func pgCopyCutMeta(t *testing.T, dir string, floor uint64, mutate func(map[strin
 	return views.BaselineTable{Schema: "public", Table: "orders", Path: path}
 }
 
+// At eight files the newest ones are merged: nothing is written whole, the
+// chain stays short, and the answer is the same.
+func TestPGTailChain_eightFilesMergeTheNewest(t *testing.T) {
+	ctx := context.Background()
+	f, k, cut, _ := newPGChainRig(t)
+	key := tailKey("public", "orders")
+	lsn := uint64(0x700)
+	var got map[string]tailView
+	for i := range 30 {
+		lsn += 0x10
+		f.update("orders", lsn, fmt.Sprint(10+i%12), fmt.Sprintf("v%d", i), "n")
+		var err error
+		if got, err = k.refresh(ctx, []views.BaselineTable{cut}); err != nil {
+			t.Fatal(err)
+		}
+		if n := len(k.tables[key].segs); n > tailMaxSegments {
+			t.Fatalf("write %d: %d files", i, n)
+		}
+	}
+	e := k.tables[key]
+	var sum int64
+	for _, p := range e.segs {
+		sum += e.segHigh[p].rows
+	}
+	if sum != e.segRows {
+		t.Fatalf("the chain's rows are %d by file and %d in all", sum, e.segRows)
+	}
+	want := map[string]string{"1": "1=one/n1", "2": "2=paid/p", "3": "3=three/n3"}
+	for i := range 30 {
+		want[fmt.Sprint(10+i%12)] = fmt.Sprintf("%d=v%d/n", 10+i%12, i)
+	}
+	state := pgCopyState(t, cut, got[key])
+	if len(state) != len(want) {
+		t.Fatalf("%d rows, want %d: %v", len(state), len(want), state)
+	}
+	for _, line := range state {
+		id, _, _ := strings.Cut(line, "=")
+		if want[id] != line {
+			t.Fatalf("key %s reads %q, want %q", id, line, want[id])
+		}
+	}
+}
+
+// A merge never takes in a file from before a prune: the keys that prune
+// dropped are in no later write, and would be lost with the file.
+func TestPGTailChain_aMergeNeverSpansAPrune(t *testing.T) {
+	ctx := context.Background()
+	f, k, cut, root := newPGChainRig(t)
+	key := tailKey("public", "orders")
+	f.update("orders", 0x700, "1", "uno", "u")
+	f.update("orders", 0x900, "3", "tres", "t")
+	settled(t, ctx, k, cut)
+	// The cut holds key 1's change and not key 3's, so the file that holds
+	// both stays, and key 1 leaves memory.
+	next := pgChainNextCut(t, f, root, "snap2", 0x800,
+		[3]string{"1", "uno", "u"}, [3]string{"2", "paid", "p"}, [3]string{"3", "three", "n3"})
+	if _, err := k.refresh(ctx, []views.BaselineTable{next}); err != nil {
+		t.Fatal(err)
+	}
+	e := k.tables[key]
+	if e.pgPruned != len(e.segs) || e.pgPruned == 0 {
+		t.Fatalf("%d files before the last prune of %d", e.pgPruned, len(e.segs))
+	}
+	first := e.segs[0]
+	lsn := uint64(0xA00)
+	var got map[string]tailView
+	for i := range 20 {
+		lsn += 0x10
+		f.update("orders", lsn, "2", fmt.Sprintf("d%d", i), "n")
+		var err error
+		if got, err = k.refresh(ctx, []views.BaselineTable{next}); err != nil {
+			t.Fatal(err)
+		}
+		if e.pgPruned > 0 && e.segs[0] != first {
+			t.Fatalf("write %d: a merge took a file from before the prune", i)
+		}
+	}
+	if s, want := pgCopyState(t, next, got[key]), []string{"1=uno/u", "2=d19/n", "3=tres/t"}; !reflect.DeepEqual(s, want) {
+		t.Fatalf("%v, want %v", s, want)
+	}
+}
+
 // costTail counts what a real tail writes and why it wrote it whole.
 type costTail struct {
 	*reconstruct.PGTail
@@ -265,7 +345,14 @@ type costTail struct {
 }
 
 type tailCosts struct {
-	first, prune, eight, ratio, deltaRows, wholeRows int64
+	first, prune, eight, ratio, merges, deltaRows, wholeRows, mergeRows int64
+}
+
+func (c *costTail) WriteSince(path string, afterID uint64) (int64, error) {
+	n, err := c.PGTail.WriteSince(path, afterID)
+	c.costs.merges++
+	c.costs.mergeRows += n
+	return n, err
 }
 
 func (c *costTail) WriteFile(path string) (int64, error) {
@@ -357,8 +444,8 @@ func TestPGTailChainCost(t *testing.T) {
 			locked += d
 			worst = max(worst, d)
 		}
-		t.Logf("RESULT keep_chain=%v changes=%d rows_per_change=%.2f whole_rows=%d delta_rows=%d whole_by_cause first=%d prune=%d eight=%d ratio=%d lock_total=%s lock_worst=%s",
-			keep, changes, float64(costs.wholeRows+costs.deltaRows)/float64(changes), costs.wholeRows, costs.deltaRows,
+		t.Logf("RESULT keep_chain=%v changes=%d rows_per_change=%.2f whole_rows=%d delta_rows=%d merge_rows=%d merges=%d whole_by_cause first=%d prune=%d eight=%d ratio=%d lock_total=%s lock_worst=%s",
+			keep, changes, float64(costs.wholeRows+costs.deltaRows+costs.mergeRows)/float64(changes), costs.wholeRows, costs.deltaRows, costs.mergeRows, costs.merges,
 			costs.first, costs.prune, costs.eight, costs.ratio, locked.Round(time.Millisecond), worst.Round(time.Millisecond))
 	}
 }
