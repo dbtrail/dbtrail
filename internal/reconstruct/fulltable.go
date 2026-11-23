@@ -175,6 +175,24 @@ type FullTableConfig struct {
 	// baselines root and is never signed.
 	WriterID string
 
+	// BaselineOverride gives a table a base other than the snapshot the run
+	// would find for it (#2640): "schema.table", spelled as in Tables, to the
+	// absolute local path of a table file read again from the source,
+	// <folder>/<schema>/<table>.parquet, where <folder> is named after the
+	// time of that read like a snapshot directory, carries its _SUCCESS
+	// marker, and is OUTSIDE BaselineSrc and OutputDir. The table is folded
+	// from that file to the run's cut like any other, so a statement that
+	// refuses the snapshot's file and ran before the read no longer does.
+	// OutputFormatParquet only, MySQL and MariaDB only.
+	//
+	// An entry that cannot be used refuses (ErrBaselineOverride), and one
+	// read past the point the run reaches refuses with
+	// ErrBaselineOverrideAhead; the table is never folded from the snapshot
+	// instead. The caller keeps the folder until the run returns: nothing
+	// here holds it against a cleanup, and nothing here removes it. Nil, the
+	// zero value: every table is folded from the snapshot found for it.
+	BaselineOverride map[string]string
+
 	// snapshotDir and cut are per-run state ReconstructTables resolves once and
 	// hands to each ReconstructTable goroutine. Unexported because they are
 	// derived, not configured: setting them from outside would let a caller
@@ -846,6 +864,9 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 			return nil, err
 		}
 	}
+	if err := checkBaselineOverrides(ctx, cfg); err != nil {
+		return nil, err
+	}
 	// A dump folder's earlier files are removed before any table is looked
 	// up (removeTableLeftovers below), and the lookup is what reads the
 	// snapshot location, per table. A location that cannot be read at all (a
@@ -1374,12 +1395,37 @@ func ReconstructTable(
 	// FindBaseline already logs a stale-fallback warning (#466) server-side.
 	// Held against the cleanup of any process until this table is written
 	// (#2675): `bintrail reconstruct` is a process of its own.
-	baselinePath, snapshotTime, _, releaseBaseline, err := FindBaselineHeld(ctx, cfg.BaselineSrc, schema, table, cfg.At)
-	defer releaseBaseline()
-	if err == nil {
-		rep.SourceSnapshotDir = localSnapshotDir(baselinePath)
-		rep.SourceSnapshot = snapshotOfTable(baselinePath)
+	//
+	// A table read again alone (#2640) is folded from that read instead, and
+	// the snapshot is not looked up: a refusal of the read must never end in
+	// a fold from the snapshot it replaces.
+	override, overridden, err := baselineOverrideFor(ctx, cfg, schema, table)
+	if err != nil {
+		return nil, err
 	}
+	var (
+		baselinePath    string
+		snapshotTime    time.Time
+		releaseBaseline = func() {}
+	)
+	if overridden {
+		baselinePath, snapshotTime = override.path, override.at
+		// The manifest writer may take the file's digest from the read's own
+		// manifest. SourceSnapshot stays empty: the skipped views are carried
+		// from the newest snapshot the run's tables came from
+		// (carryViewsSkipped), and a read of some tables is not a snapshot
+		// that looked for views.
+		rep.SourceSnapshotDir = override.dir
+		slog.Info("table folded from a read of its own instead of its snapshot",
+			"schema", schema, "table", table, "path", baselinePath, "read_at", snapshotTime.UTC().Format(time.RFC3339))
+	} else {
+		baselinePath, snapshotTime, _, releaseBaseline, err = FindBaselineHeld(ctx, cfg.BaselineSrc, schema, table, cfg.At)
+		if err == nil {
+			rep.SourceSnapshotDir = localSnapshotDir(baselinePath)
+			rep.SourceSnapshot = snapshotOfTable(baselinePath)
+		}
+	}
+	defer releaseBaseline()
 	if err != nil {
 		if !errors.Is(err, ErrNoBaseline) {
 			return nil, fmt.Errorf("find baseline: %w", err)
@@ -1447,6 +1493,13 @@ func ReconstructTable(
 	// refuses with the remedy), BEFORE the MySQL-only CreateTableSQL check so a
 	// genuine MySQL baseline missing that metadata still gets the "re-run
 	// `bintrail baseline`" guidance.
+	// Before either path: the read must be one the run's cut has reached, and
+	// a PostgreSQL table takes none.
+	if overridden {
+		if err := checkOverrideReached(schema, table, bmeta, query.SourceFlavor(db) == "postgres", cfg.cut); err != nil {
+			return nil, err
+		}
+	}
 	if bmeta.LSN != 0 || query.SourceFlavor(db) == "postgres" {
 		switch {
 		case cfg.OutputFormat != OutputFormatParquet && cfg.OutputFormat != OutputFormatPsql:
