@@ -70,8 +70,8 @@ func TestCopyScreen_aliasNamedLikeItsColumn(t *testing.T) {
 		`SELECT v AS name FROM (SELECT u AS v FROM (SELECT name AS u FROM people) a) b ORDER BY name`: "ORDER BY",
 		`SELECT u AS last FROM (SELECT first AS u FROM people) s ORDER BY last`:                       "ORDER BY",
 		`SELECT u AS "name" FROM (SELECT name AS "u" FROM people) s ORDER BY name`:                    "ORDER BY",
-		`SELECT name AS name, count(*) FROM people GROUP BY name ORDER BY 1`:           "ORDER BY",
-		`SELECT last AS first, first AS last FROM people ORDER BY first`:               "ORDER BY",
+		`SELECT name AS name, count(*) FROM people GROUP BY name ORDER BY 1`:                          "ORDER BY",
+		`SELECT last AS first, first AS last FROM people ORDER BY first`:                              "ORDER BY",
 	}
 	for q, want := range toSource {
 		if why := CopyScreen(q, peopleTypes); !strings.Contains(why, want) {

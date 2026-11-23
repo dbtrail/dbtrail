@@ -49,10 +49,10 @@ func textOrderHoles() []expectation {
 		stay(`SELECT customer_id AS customer_id, sum(qty) AS qty FROM ` + o + ` GROUP BY customer_id ORDER BY qty DESC, customer_id`),
 		stay(`SELECT customer_id, sum(amount) AS total FROM ` + o + ` GROUP BY customer_id ORDER BY total DESC NULLS LAST`),
 		stay(`SELECT name AS name, id FROM ` + c + ` ORDER BY id`),
-		stay(`SELECT u AS total FROM (SELECT sum(qty) AS u FROM `+o+`) s ORDER BY total`),
-		stay(`SELECT u AS qty FROM (SELECT qty AS u FROM `+o+`) s ORDER BY qty NULLS LAST`),
+		stay(`SELECT u AS total FROM (SELECT sum(qty) AS u FROM ` + o + `) s ORDER BY total`),
+		stay(`SELECT u AS qty FROM (SELECT qty AS u FROM ` + o + `) s ORDER BY qty NULLS LAST`),
 		// The star of an EXISTS puts no column in the answer.
-		stay(`SELECT customer_id, count(*) FROM `+o+` o WHERE EXISTS (SELECT * FROM `+c+` x WHERE x.id = o.customer_id) GROUP BY 1 ORDER BY 2 DESC, 1`),
+		stay(`SELECT customer_id, count(*) FROM ` + o + ` o WHERE EXISTS (SELECT * FROM ` + c + ` x WHERE x.id = o.customer_id) GROUP BY 1 ORDER BY 2 DESC, 1`),
 
 		// A position behind a star.
 		differs("order", `SELECT * FROM `+c+` ORDER BY 2`),
