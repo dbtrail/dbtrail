@@ -920,6 +920,12 @@ takes one full read of the source to bring it into the copy, as it does for a
 new table on a MySQL source: where the schedule may take full reads, and no
 more than a few times for the same table.
 
+A full read copies tables in parallel, each on a connection of its own to the
+source. One started by DBTrail itself (the Create button, a schedule,
+`snapshot run`) copies four tables at once, as a MySQL full read does, so at
+most four connections to the source copy tables at a time. `bintrail-pg baseline` takes its number from `--parallelism`, one per
+CPU of the machine it runs on unless set.
+
 A full read starts from the replication slot's position, so it needs the slot
 to have one. On a busy source capture can take a while to get its slot:
 PostgreSQL finishes creating a slot only when every write transaction that was

@@ -1600,8 +1600,18 @@ func pgBaselineConfig(req console.BaselineRequest, outputDir string) (pgbaseline
 		OutputDir:   outputDir,
 		Compression: "zstd",
 		WriterID:    snapshotWriterID(req),
+		Parallelism: pgFullReadTables,
 	}, nil
 }
+
+// pgFullReadTables is how many tables a PostgreSQL full read started by the
+// daemon copies at once, each on a connection of its own to the source
+// (#3115): four, as the MySQL full read's mydumper runs four threads. Left
+// unset, the read took one per CPU of the machine DBTrail runs on, so a
+// 32-core host opened 32 connections on the source at once: a load the source
+// did not size for, and a failure where its connection limit is lower.
+// `bintrail-pg baseline --parallelism` keeps its own number.
+const pgFullReadTables = 4
 
 // mydumperPlan is what the mydumper on this host can do for one lock mode
 // (#1688). The console used to pass --sync-thread-lock-mode unconditionally, so
