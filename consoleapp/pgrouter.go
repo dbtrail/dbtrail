@@ -1178,7 +1178,10 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 				defer cancel()
 			}
 			return pgCopyCatalog(ctx, copySQL, func(ctx context.Context, statement string) (sqlsandbox.Result, error) {
-				return copySQL.Run(ctx, statement, pgPortSchema, sqlsandbox.Session{PostgresRules: true, PostgresNames: true})
+				// Not held to the server's lag limit (#3125): it lists
+				// columns, and the screen cannot send a statement to the
+				// copy, or say why not, without it.
+				return copySQL.Run(console.WithPGCatalogRead(ctx), statement, pgPortSchema, sqlsandbox.Session{PostgresRules: true, PostgresNames: true})
 			})
 		}
 		return bound, nil

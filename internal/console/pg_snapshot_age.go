@@ -164,6 +164,9 @@ func (s *Server) pgReadThrough(read []views.BaselineTable) (time.Time, string) {
 // reads a table from its snapshot alone is as far behind as the oldest
 // pgTableThrough is old, by this machine's clock: capture's state is not
 // asked, so a quiet source never reads as caught up here.
+//
+// The port's own listing of the copy's columns (WithPGCatalogRead) is not
+// held to the limit: it reads which columns the copy has, not their rows.
 func (s *Server) statementBehindFor(ctx context.Context, b *bundle, id string, in views.Input, read []views.BaselineTable,
 	tailThrough time.Time, tailThroughID uint64, allTailed bool) (time.Duration, string) {
 	if pgCatalogRead(ctx) {
@@ -181,6 +184,24 @@ func (s *Server) statementBehindFor(ctx context.Context, b *bundle, id string, i
 		return 0, copyAgeWhyNotPlaced
 	}
 	return copyAgeOf(time.Now(), olderOf(cut, tailThrough)), ""
+}
+
+type pgCatalogReadKey struct{}
+
+// WithPGCatalogRead is ctx for the PostgreSQL port's own listing of the
+// copy's columns, which its screen needs before it can send any statement to
+// the copy. It is not a statement of the client's and returns no row of a
+// table, so the server's lag limit does not hold it: held to it, a copy past
+// the limit (or one whose age cannot be told) refused the listing, and every
+// statement was then sent to the source as one the screen could not read
+// (veto) and never as what it was, a copy behind its limit.
+func WithPGCatalogRead(ctx context.Context) context.Context {
+	return context.WithValue(ctx, pgCatalogReadKey{}, true)
+}
+
+func pgCatalogRead(ctx context.Context) bool {
+	v, _ := ctx.Value(pgCatalogReadKey{}).(bool)
+	return v
 }
 
 // PGSnapshotAge receives, for one run on the copy, the instant the snapshot

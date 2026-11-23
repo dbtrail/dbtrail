@@ -201,6 +201,11 @@ func TestStatementBehindForPostgresSnapshot(t *testing.T) {
 	if _, why := behind(now.Add(-time.Second), true, recent); why != copyAgeWhyNoIndex {
 		t.Errorf("every table tailed: %q, want the tails' own path", why)
 	}
+	// The port's own listing of the copy's columns is not held to the limit,
+	// whatever the files say.
+	if got, why := srv.statementBehindFor(WithPGCatalogRead(ctx), pg, bootServerID, views.Input{}, []views.BaselineTable{recent, carried, old}, time.Time{}, 0, false); why != "" || got != 0 {
+		t.Errorf("the port's listing of the copy's columns: %v %q, want not held", got, why)
+	}
 	// A MySQL server is not measured by PostgreSQL footers.
 	srv.cm.mu.Lock()
 	srv.cm.boot = &bundle{}
