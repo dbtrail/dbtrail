@@ -634,6 +634,8 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 		// none outside the character sets its screen reads safely.
 		fw.ClientCollation, fw.GlobalSession = proxy.collation, proxy.globalSession
 		fw.SafeCharsetsOnly = cfg.RouteReadOnly
+		// And the source itself refuses a write the screen did not see.
+		fw.ReadOnlySession = cfg.RouteReadOnly
 	}
 	if fw == nil && cfg.RouteStatus {
 		// SHOW ROUTER STATUS on a connection the copy answers alone: the
@@ -840,6 +842,11 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 				if err == nil {
 					srv.RecordRouteAccountOK(id, gen)
 					return
+				}
+				if errors.Is(err, readrouter.ErrReadOnlyMarkRefused) {
+					// The client gets error 2006 on every statement; the
+					// cause is said here (#3093).
+					logger.Warn("Engine Routing: the source refused to mark the session read-only, so this read-only port forwards nothing to it on this connection", "server", user, "error", err)
 				}
 				if _, refused := readrouter.AccountRefused(err); refused {
 					text := accountRefusedText(account, err)
