@@ -581,11 +581,11 @@ func TestSCRAM_aConnectionThatEndedDerivesNothing(t *testing.T) {
 		t.Errorf("an ended connection: %v, %d keys derived", err, derived.Load())
 	}
 	// Ended while waiting for its turn: every slot is taken.
-	for range scramDeriveSlots {
+	for range cap(scramSlots) {
 		scramSlots <- struct{}{}
 	}
 	free := func() {
-		for range scramDeriveSlots {
+		for range cap(scramSlots) {
 			<-scramSlots
 		}
 	}
@@ -748,8 +748,8 @@ func TestSCRAM_derivationsAtOnceAreBounded(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if most := d.most.Load(); most > scramDeriveSlots {
-		t.Errorf("%d derivations ran at once, more than %d", most, scramDeriveSlots)
+	if most := d.most.Load(); most > int64(cap(scramSlots)) {
+		t.Errorf("%d derivations ran at once, more than %d", most, cap(scramSlots))
 	}
 	if got := d.total.Load(); got != 40*scramDerivations {
 		t.Errorf("40 new names derived %d keys, want %d", got, 40*scramDerivations)
@@ -780,5 +780,121 @@ func TestWarmPasswords_forgetsOnAChange(t *testing.T) {
 		if derived.Load() != scramDerivations {
 			t.Errorf("after the set changed to %q: %d keys derived, want %d", changed, derived.Load(), scramDerivations)
 		}
+	}
+}
+
+// In this package's tests a refusal waits a moment, not the port's quarter
+// of a second: the tests that are about that wait set their own.
+func init() { failedLoginFloor = 5 * time.Millisecond }
+
+// The slots for deriving are half the machine's cores, between 1 and 4.
+func TestScramSlotCount(t *testing.T) {
+	for cores, want := range map[int]int{0: 1, 1: 1, 2: 1, 3: 1, 4: 2, 6: 3, 8: 4, 16: 4, 96: 4} {
+		if got := scramSlotCount(cores); got != want {
+			t.Errorf("%d cores: %d logins derive at once, want %d", cores, got, want)
+		}
+	}
+	if n := cap(scramSlots); n < 1 || n > scramDeriveSlots {
+		t.Errorf("this machine derives for %d logins at once", n)
+	}
+}
+
+// A wrong password under a username the port has in memory and under one it
+// has never seen: the same answer, and neither sooner than the floor. With
+// the line for deriving full, both are told the port is busy. A right
+// password is not held back.
+func TestSCRAM_aSeenNameAndANewOneAnswerAlike(t *testing.T) {
+	WarmPasswords([]string{"a set for the floor"})
+	const floor = 300 * time.Millisecond
+	old := failedLoginFloor
+	failedLoginFloor = floor
+	t.Cleanup(func() { failedLoginFloor = old })
+	addr := serveAddrCfg(t, Config{Login: appLogins})
+	timed := func(user string) (string, time.Duration) {
+		start := time.Now()
+		code := wrongLogin(t, addr, user)
+		return code, time.Since(start)
+	}
+	// "app1" is put in memory by a first attempt; each "fresh" name is new.
+	timed("app1")
+	for i := range 3 {
+		seenCode, seen := timed("app1")
+		newCode, fresh := timed(fmt.Sprintf("fresh-%d", i))
+		if seenCode != "28P01" || newCode != "28P01" {
+			t.Errorf("a wrong password: %q under a name in memory, %q under a new one", seenCode, newCode)
+		}
+		if seen < floor || fresh < floor {
+			t.Errorf("refused after %v (in memory) and %v (new): one came sooner than the floor of %v", seen, fresh, floor)
+		}
+		if d := (seen - fresh).Abs(); d > 200*time.Millisecond {
+			t.Errorf("refused after %v (in memory) and %v (new): %v apart", seen, fresh, d)
+		}
+	}
+	// The line full: a new name is not checked, and a name in memory that
+	// fails says the same thing, no sooner.
+	scramWaiting.Store(scramWaitMax)
+	seenCode, seen := timed("app1")
+	newCode, fresh := timed("fresh-when-full")
+	scramWaiting.Store(0)
+	if seenCode != "53300" || newCode != "53300" {
+		t.Errorf("with the line full: %q under a name in memory, %q under a new one, want 53300 for both", seenCode, newCode)
+	}
+	if seen < floor || fresh < floor {
+		t.Errorf("with the line full: refused after %v and %v, sooner than %v", seen, fresh, floor)
+	}
+	// The right password, from memory: let in at once, line full or not.
+	host, port, _ := net.SplitHostPort(addr)
+	dsn := fmt.Sprintf("host=%s port=%s user=app1 password=app1-own dbname=orders sslmode=disable", host, port)
+	c, err := pgconn.Connect(context.Background(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Close(context.Background())
+	scramWaiting.Store(scramWaitMax)
+	start := time.Now()
+	c, err = pgconn.Connect(context.Background(), dsn)
+	took := time.Since(start)
+	scramWaiting.Store(0)
+	if err != nil {
+		t.Fatalf("the right password with the line full: %v", err)
+	}
+	_ = c.Close(context.Background())
+	if took >= floor {
+		t.Errorf("the right password was held back %v", took)
+	}
+}
+
+// Many logins under one name at once, none in memory (a pool that connects
+// again after a restart): the name's keys are derived once, nobody is told
+// the port is busy, and every one is let in.
+func TestSCRAM_oneDerivationForANameAtOnce(t *testing.T) {
+	WarmPasswords([]string{"a set for the pool"})
+	d := countDerivations(t)
+	addr := serveAddrCfg(t, Config{Login: appLogins})
+	host, port, _ := net.SplitHostPort(addr)
+	const clients = 3 * scramWaitMax
+	var wg sync.WaitGroup
+	var in atomic.Int32
+	for range clients {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			c, err := pgconn.Connect(ctx, fmt.Sprintf("host=%s port=%s user=pool password=%s dbname=orders sslmode=disable", host, port, portPassword))
+			if err != nil {
+				t.Errorf("a client of the pool: %v", err)
+				return
+			}
+			in.Add(1)
+			_ = c.Close(ctx)
+		}()
+	}
+	wg.Wait()
+	if in.Load() != clients {
+		t.Errorf("%d of %d clients were let in", in.Load(), clients)
+	}
+	if got := d.total.Load(); got != scramDerivations {
+		t.Errorf("%d clients under one name derived %d keys, want %d: once for the name", clients, got, scramDerivations)
 	}
 }

@@ -1321,21 +1321,34 @@ listener, its own workers, its own memory.
   connection that has logged in is never closed to make room: when every
   place is a client's, the newcomer gets `53300` (the limit is reached), as
   before. The port still belongs behind a firewall or a proxy that limits
-  who may connect: these bounds keep a few idle connections from locking
-  everyone out, they are not a limit per address.
+  who may connect. Closing the connection that waited longest protects the
+  port from connections that sit idle; it does not protect it from a client
+  that connects again as fast as it is closed, and it is not a limit per
+  address.
 - **A salt for each username.** The SCRAM salt the port sends is worked out
   from the username and a secret the process makes up when it starts. The
   same username gets the same salt until the process restarts, a username
-  nobody has gets one made the same way, and no two usernames share one. The
-  first login under a username after a start (or after any of the port's
-  passwords changed) takes a few tens of milliseconds more, while its keys
-  are derived; the same for every username, whether it exists or not. The
-  port keeps the keys of the usernames a login succeeded under apart from
-  those of every other name, each up to 1,024 names; it derives for at most
-  4 logins at once, lets 64 more wait their turn, and answers a login past
-  that with `53300` and "the port is checking as many logins as it takes at
-  once; try again in a moment", which is not a wrong password: the client
-  tries again.
+  nobody has gets one made the same way, and no two usernames share one. Any
+  username opens the port with the port's password, so the port cannot work
+  the keys out ahead for every name: it derives a username's keys the first
+  time someone logs in under it after a start, or after one of the port's
+  passwords changed, and keeps them. What bounds that:
+  - **A login that fails is never answered sooner than 250 ms** after its
+    proof reached the port, whether the port had the username's keys or had
+    to derive them, so how fast a refusal comes does not say whether the
+    username is in use. A login that succeeds is not held back.
+  - Logins under the same username that arrive together derive its keys
+    once: a pool that connects again after a restart waits for that one
+    derivation.
+  - The port derives for a few logins at once (half the machine's cores, at
+    least 1 and at most 4) and lets 64 more wait their turn. A login past
+    that is answered `53300`, "the port is checking as many logins as it
+    takes at once; try again in a moment", and so is any login that fails
+    while the line is that full. It is not a wrong password: the client
+    tries again. A client that holds no password can keep those few cores
+    busy and no more.
+  - The keys of the usernames a login succeeded under are kept apart from
+    those of every other name, up to 1,024 names each.
 - **TLS with the MySQL port's certificate.** Give the same files the MySQL port
   takes (`router --tls-cert`) with `--tls-cert` and `--tls-key`, and a client
   that trusts their CA connects with `sslmode=verify-ca`, or

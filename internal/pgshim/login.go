@@ -270,8 +270,20 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, c
 		}
 		bound, refused = nil, &Error{Code: "28P01", Message: fmt.Sprintf("password authentication failed for user %q", user)}
 	}
+	if password.lostPlace && bound == nil {
+		// Not a wrong password: the port closed this connection to make
+		// room, and its proof was never checked.
+		logger.Info("pgshim: "+errLostPlace.Error(), "user", user, "database", database, "remote", c.RemoteAddr())
+		return
+	}
+	if bound == nil && !password.matched() {
+		// No refusal of a proof comes sooner than the floor, whatever the
+		// port had in memory for the username.
+		password.holdFailure()
+	}
 	if password.busy && bound == nil {
-		// The proof was not checked: not a wrong password.
+		// The proof was not checked, or failed while the port had no room
+		// to check a new one: not said as a wrong password.
 		refused = &Error{Code: busyLoginCode, Message: busyLoginMessage}
 	}
 	if refused != nil || bound == nil {

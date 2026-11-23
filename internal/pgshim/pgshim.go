@@ -250,8 +250,11 @@ func handleConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, cancel
 	defer c.Close()
 
 	// Per-connection context: cancelling it aborts an in-flight resolve
-	// (QueryTimeout is the other backstop).
-	connCtx, cancel := context.WithCancel(ctx)
+	// (QueryTimeout is the other backstop). The socket is read on a
+	// goroutine of its own (shim.WatchConn), as on the port with a login of
+	// its own, so a client that hangs up ends connCtx at once: its login
+	// stops waiting to be checked, and its statement stops.
+	wc, connCtx, cancel := shim.WatchConn(ctx, c)
 	defer cancel()
 
 	// A blocking be.Receive() / ReceiveStartupMessage() is a ctx-unaware socket
@@ -271,7 +274,7 @@ func handleConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, cancel
 	loginTimer := time.AfterFunc(loginTimeout, func() { _ = c.Close() })
 	defer loginTimer.Stop()
 
-	conn, encrypted, err := negotiate(connCtx, c, pt)
+	conn, encrypted, err := negotiate(connCtx, wc, pt)
 	if err != nil {
 		logNegotiateFailure(logger, err, c.RemoteAddr())
 		return
@@ -464,6 +467,11 @@ func authenticate(ctx context.Context, be *pgproto3.Backend, auth shim.TenantAut
 		candidates = []string{expected}
 	}
 	if !password.Matches(candidates) {
+		if password.lostPlace {
+			// Nothing to say: the port closed this connection to make room.
+			return nil, errLostPlace
+		}
+		password.holdFailure()
 		if password.busy {
 			sendFatal(be, busyLoginCode, busyLoginMessage)
 			return nil, fmt.Errorf("the login of user %q was not checked: %w", user, errScramBusy)
@@ -473,6 +481,10 @@ func authenticate(ctx context.Context, be *pgproto3.Backend, auth shim.TenantAut
 	}
 	return password, nil
 }
+
+// errLostPlace is a login that was not checked: the connection's place went
+// to a newer one while it logged in.
+var errLostPlace = errors.New("the port was full and this connection had not logged in; its place went to a newer one")
 
 // What a client is told when the port has too many logins to check at once
 // (scramWaitMax): the code of a full port, which a client reads as "try

@@ -15,10 +15,12 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 	"golang.org/x/text/secure/precis"
@@ -88,7 +90,8 @@ const (
 	// scramNameFormsMax is how many derived keys one username keeps; past it
 	// they are forgotten together.
 	scramNameFormsMax = 4 * scramDerivations
-	// scramDeriveSlots is how many logins derive keys at once, and
+	// scramDeriveSlots is the most logins that derive keys at once (fewer
+	// on a small machine, scramSlotCount), and
 	// scramWaitMax how many may wait for their turn: one more is refused as
 	// busy, without waiting.
 	scramDeriveSlots = 4
@@ -177,9 +180,32 @@ var scramCache = struct {
 // counts the ones waiting for a slot: past scramWaitMax a login does not
 // wait, it is refused as busy.
 var (
-	scramSlots   = make(chan struct{}, scramDeriveSlots)
+	scramSlots   = make(chan struct{}, scramSlotCount(runtime.NumCPU()))
 	scramWaiting atomic.Int64
 )
+
+// scramSlotCount is how many logins derive at once on a machine of cores
+// cores: half of them, at least 1 and at most scramDeriveSlots, so that
+// deriving for clients that hold no password never takes the whole machine.
+func scramSlotCount(cores int) int {
+	return min(scramDeriveSlots, max(1, cores/2))
+}
+
+// scramFlights are the names whose keys are being derived now: a second
+// login under the same name waits for that one and reads what it derived,
+// without a turn of its own. A pool that connects again all at once after a
+// restart derives its user's keys once.
+var scramFlights = struct {
+	mu sync.Mutex
+	m  map[[scramSaltLen]byte]chan struct{}
+}{m: map[[scramSaltLen]byte]chan struct{}{}}
+
+// failedLoginFloor is the least time between a client's proof reaching the
+// port and the port's refusal of it, whatever the reason and whatever the
+// port had in memory: a refusal that came sooner for a username seen before
+// than for a new one would say which usernames are in use. A variable so a
+// test can shorten it.
+var failedLoginFloor = 250 * time.Millisecond
 
 // errScramBusy is a login whose keys were not derived: too many logins were
 // already waiting to derive theirs.
@@ -225,33 +251,58 @@ func WarmPasswords(passwords []string) {
 func scramKeys(ctx context.Context, salt []byte, forms []string) (map[string][]byte, error) {
 	var id [scramSaltLen]byte
 	copy(id[:], salt)
-	out := make(map[string][]byte, len(forms))
-	scramCache.mu.Lock()
-	n := scramCache.proven.get(id)
-	if n == nil {
-		n = scramCache.others.get(id)
-	}
-	if n != nil {
-		for _, f := range forms {
-			if k, ok := n.keys[f]; ok {
-				out[f] = k
+	var out map[string][]byte
+	var missing []string
+	for {
+		out, missing = make(map[string][]byte, len(forms)), nil
+		scramCache.mu.Lock()
+		n := scramCache.proven.get(id)
+		if n == nil {
+			n = scramCache.others.get(id)
+		}
+		if n != nil {
+			for _, f := range forms {
+				if k, ok := n.keys[f]; ok {
+					out[f] = k
+				}
 			}
 		}
-	}
-	scramCache.mu.Unlock()
-	var missing []string
-	for _, f := range forms {
-		if _, ok := out[f]; !ok {
-			// Marked, so a form asked for twice is derived once.
-			missing = append(missing, f)
-			out[f] = nil
+		scramCache.mu.Unlock()
+		for _, f := range forms {
+			if _, ok := out[f]; !ok {
+				// Marked, so a form asked for twice is derived once.
+				missing = append(missing, f)
+				out[f] = nil
+			}
 		}
-	}
-	if len(missing) == 0 {
-		return out, nil
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
+		if len(missing) == 0 {
+			return out, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		// One login derives a name's keys; the others under that name wait
+		// for it, then read again.
+		scramFlights.mu.Lock()
+		other, flying := scramFlights.m[id]
+		if !flying {
+			mine := make(chan struct{})
+			scramFlights.m[id] = mine
+			scramFlights.mu.Unlock()
+			defer func() {
+				scramFlights.mu.Lock()
+				delete(scramFlights.m, id)
+				scramFlights.mu.Unlock()
+				close(mine)
+			}()
+			break
+		}
+		scramFlights.mu.Unlock()
+		select {
+		case <-other:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	if scramWaiting.Add(1) > scramWaitMax {
 		scramWaiting.Add(-1)
@@ -280,7 +331,7 @@ func scramKeys(ctx context.Context, salt []byte, forms []string) (map[string][]b
 
 	scramCache.mu.Lock()
 	defer scramCache.mu.Unlock()
-	n = scramCache.proven.get(id)
+	n := scramCache.proven.get(id)
 	if n == nil {
 		n = scramCache.others.get(id)
 	}
@@ -329,8 +380,14 @@ type Password struct {
 	// the check: the connection lost its place in the port (prelogin.go).
 	ctx  context.Context
 	gate func() bool
-	// busy: the proof was not checked, the port had too many to check.
-	busy bool
+	// busy: the proof was not checked, the port had too many to check, or
+	// it failed while the port had too many to check (a failure is answered
+	// the same then whether the name's keys were in memory or not).
+	// lostPlace: it was not checked because the connection's place went to
+	// another. since is when the proof reached the port.
+	busy      bool
+	lostPlace bool
+	since     time.Time
 	// salted is the derived password that matched, kept to sign the
 	// server's last message; nil until one matched.
 	salted []byte
@@ -369,6 +426,7 @@ func (p *Password) Matches(candidates []string) bool {
 		}
 	}
 	if p.gate != nil && !p.gate() {
+		p.lostPlace = true
 		return false
 	}
 	ctx := p.ctx
@@ -391,6 +449,10 @@ func (p *Password) Matches(candidates []string) bool {
 	p.salted = hit
 	if hit != nil {
 		scramProven(p.salt)
+	} else if scramWaiting.Load() >= scramWaitMax {
+		// With the line full a login under a new name is refused as busy
+		// unchecked: one under a name in memory that fails says the same.
+		p.busy = true
 	}
 	return hit != nil
 }
@@ -406,6 +468,29 @@ func (p *Password) proves(salted []byte) bool {
 	subtle.XORBytes(recovered, p.proof, signature)
 	got := sha256.Sum256(recovered)
 	return subtle.ConstantTimeCompare(got[:], stored[:]) == 1
+}
+
+// holdFailure waits until failedLoginFloor has passed since the proof
+// reached the port, or the connection ended: called before a login that did
+// not prove its password is refused.
+func (p *Password) holdFailure() {
+	if p == nil || p.matched() || p.since.IsZero() {
+		return
+	}
+	wait := failedLoginFloor - time.Since(p.since)
+	if wait <= 0 {
+		return
+	}
+	ctx := p.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-ctx.Done():
+	}
 }
 
 // matched says whether Matches found the password.
@@ -500,6 +585,7 @@ func malformedSCRAM(what string) *scramError {
 func scramExchange(ctx context.Context, be *pgproto3.Backend, user string, encrypted bool, endPoint []byte, place *connPlace) (*Password, error) {
 	pw, err := scramSteps(be, user, encrypted, endPoint)
 	if pw != nil {
+		pw.since = time.Now()
 		pw.ctx = ctx
 		if place != nil {
 			// A connection whose proof is about to be checked has done its
