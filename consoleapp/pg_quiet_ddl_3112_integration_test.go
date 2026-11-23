@@ -246,6 +246,12 @@ func pgQdScenario(t *testing.T, tables []pgQdTable, columns map[string]string, a
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The schedule's own tick records that it saw this server before a slot
+	// fires; a full read in place of a refused update is taken only for a
+	// schedule that is still observed.
+	b.mu.Lock()
+	b.seen[e.ID] = seenSlot{identity: e.BackupSchedule.Identity()}
+	b.mu.Unlock()
 	b.fire(e, p, time.Now().UTC())
 	pgTestWait(t, "the scheduled job", 3*time.Minute, func() (bool, string) {
 		st := b.ScheduleState(e.ID)
