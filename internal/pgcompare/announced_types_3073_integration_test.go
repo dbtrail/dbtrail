@@ -22,6 +22,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/pgbaseline"
 	"github.com/dbtrail/dbtrail/internal/pgshim"
 	"github.com/dbtrail/dbtrail/internal/snapshotdir"
+	"github.com/dbtrail/dbtrail/internal/sqlcompare"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -72,7 +73,7 @@ func tySame() []tyList {
 			// sum of a smallint or an integer is a bigint, of a bigint a
 			// numeric: the port said numeric for all three.
 			"sum(s)", "sum(i)", "sum(b)", "sum(n)", "sum(f)",
-			"SUM(i)", "sum(DISTINCT i)", "sum(i) FILTER (WHERE id > 1)", "sum(" + tyVals + ".i)", "sum(i) AS total",
+			"SUM(i)", "sum(DISTINCT i)", "sum(i) FILTER (WHERE id > 1)", "sum(i) FILTER (WHERE id > 99)", "sum(" + tyVals + ".i)", "sum(i) AS total",
 			"sum(i) + 1", "coalesce(sum(i), 0)", "sum(i + 1)", "sum(i - s)", "sum(-i)", "sum(abs(s))",
 			"sum(CASE WHEN id > 1 THEN 1 ELSE 0 END)", "sum(i::bigint)", "sum(s::int)", "sum(length(t))", "sum(2)",
 			"count(*)", "count(i)", "min(s)", "max(i)", "max(b)", "min(n)", "max(f)", "min(d)", "max(t)", "bool_and(id > 0)",
@@ -102,7 +103,7 @@ func tySame() []tyList {
 		}},
 		{"ORDER BY id", []string{
 			"id", "s", "i", "b", "n", "r", "f", "d", "ts", "tz", "t", "by",
-			"i + 1", "i - s", "b + 1", "i + b", "-i", "n + 1", "n * 2", "f + 1", "f * r", "i + 1.5",
+			"i + 1", "i - s", "s - s", "b + 1", "i + b", "-i", "n + 1", "n * 2", "f + 1", "f * r", "i + 1.5",
 			"d + 1", "d - 1", "id > 2", "t || 'x'", "coalesce(t, 'none')", "nullif(i, 10)",
 			"CASE WHEN id > 2 THEN i ELSE 0 END", "i::bigint", "s::int", "i::text", "n::int",
 			"1", "1.5", "'a'", "true", "NULL::int", "1 + 1", "3000000000", "DATE '2026-01-01'",
@@ -143,12 +144,24 @@ type tyOther struct {
 	why      string
 }
 
+// tyForwarded are statements RewriteForCopy writes macros into, for a
+// connection that can reach its source: the casts go around what it wrote,
+// and the values stay PostgreSQL's.
+func tyForwarded() []string {
+	v := tyVals
+	return []string{
+		`SELECT round(sum(n), 2), round(avg(n), 2), sum(i), sum(s), length(max(t)) FROM ` + v,
+		`SELECT id, extract(epoch from ts), extract(year from ts), floor(extract(epoch from ts) / 600), date_part('month', d), length(t) FROM ` + v + ` ORDER BY id`,
+		`SELECT id % 2, coalesce(round(avg(n), 2), 0.00), sum(i), count(*) FROM ` + v + ` GROUP BY 1 ORDER BY 1`,
+		`SELECT id, round(n, 1), sum(i) OVER (ORDER BY id), ntile(2) OVER (ORDER BY id), NULL FROM ` + v + ` ORDER BY id`,
+	}
+}
+
 func tyDifferent() []tyOther {
 	v := tyVals
 	return []tyOther{
 		{`SELECT d - e FROM ` + v + ` ORDER BY id`, 0, 23, 20, "a date less a date is a bigint on the copy"},
 		{`SELECT s + 1 FROM ` + v + ` ORDER BY id`, 0, 23, 21, "a smallint with a literal stays a smallint on the copy"},
-		{`SELECT s - s FROM ` + v + ` ORDER BY id`, 0, 21, 21, "listed to hold the line above to its cause: two smallints are a smallint on both"},
 		{`SELECT sum(l) FROM (SELECT length(t) AS l FROM ` + v + `) x`, 0, 20, 1700, "the sum of a name the statement defines: its type is not read"},
 		{`SELECT sum(id) FROM (SELECT i AS id FROM ` + v + `) x`, 0, 20, 1700, "the same, under the name of a column"},
 		{`SELECT x FROM (SELECT NULL AS x) q`, 0, 25, 23, "a NULL named in a subquery"},
@@ -450,5 +463,26 @@ func TestIntegrationPGCompareAnnouncedTypes3073(t *testing.T) {
 			}
 		}
 	}
+	// As a connection that can reach its source hands them to the copy.
+	types := map[string][]string{}
+	for _, c := range catalog[0].Columns {
+		types[strings.ToLower(c.Name)] = []string{strings.ToUpper(c.Type)}
+	}
+	cp.Rewrite = func(s string) string { return pgshim.AsPostgresTypes(pgshim.RewriteForCopy(s), types) }
+	src, err := OpenSource(ctx, baseDSN, "public")
+	if err != nil {
+		t.Fatalf("open the source: %v", err)
+	}
+	t.Cleanup(func() { src.Close(context.Background()) })
+	rep, err := Run(ctx, src, cp, Options{NoRerun: true, MaxRows: 100}, tyForwarded())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, r := range rep.Results {
+		if written := cp.Rewrite(r.Statement); r.Verdict != sqlcompare.Equal || !strings.Contains(written, "CAST(") || !strings.Contains(written, "_bintrail_pg_") {
+			t.Errorf("want EQUAL with a cast and a macro written in, got %s %s: %s\n    detail: %s\n    written: %s", r.Verdict, r.Kind, r.Statement, r.Detail, written)
+		}
+	}
+
 	t.Logf("%d expressions and statements compared in %d modes", n, len(tyModes))
 }

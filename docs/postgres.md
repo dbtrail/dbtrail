@@ -1261,8 +1261,40 @@ listener, its own workers, its own memory.
   the count PostgreSQL sends (the largest and smallest 32-bit day for a `date`,
   64-bit microsecond for a timestamp), in arrays too.
 
-  An expression's type is the one the copy computes it with, which is not
-  always PostgreSQL's: a `round()` the copy answers is PostgreSQL's
+  An expression's type is the one the copy computes it with. Where that is
+  not PostgreSQL's, the port converts these to PostgreSQL's type before it
+  answers, so a driver reads the same type from the port as from the source,
+  in text and in binary:
+  - `length`, `char_length`, `character_length`, `position`, `strpos` and
+    `ntile` are an `integer`;
+  - `sum` of a `smallint` or an `integer` is a `bigint` (of a `bigint` it is a
+    `numeric`, as on PostgreSQL);
+  - `extract` of a field that is a whole number (`year`, `quarter`, `month`,
+    `week`, `day`, `hour`, `minute`, `dow`, `doy`, `isodow`, `isoyear`,
+    `decade`, `century`, `millennium`) is a `numeric`, and `date_part` of one
+    a `double precision`;
+  - a `NULL` alone in the select list is `text`.
+
+  That holds under an alias, in a subquery or a `WITH`, behind `SELECT *`,
+  as a window (`sum(x) OVER (...)`), inside another expression
+  (`length(x) + 1` is an `integer`, `sum(x) + 1` a `bigint`) and in what a
+  prepared statement announces before it runs. These still carry another type
+  than on PostgreSQL, with the same value:
+  - a `date` less a `date` is a `bigint` (PostgreSQL: `integer`);
+  - a `smallint` with a number (`s + 1`) stays a `smallint` (PostgreSQL:
+    `integer`), and is an error where the result passes 32767;
+  - `sum` is a `numeric` where PostgreSQL has a `bigint` when its argument
+    is a name the statement defines itself (`SELECT sum(n) FROM (SELECT qty
+    AS n ...)`), a column that is an `integer` in one table and another type
+    in another, or anything but whole-number columns, numbers, casts, `CASE`
+    and `+ - * / %` between them, and in a statement that names columns in a
+    list (`AS t(a, b)`);
+  - a `NULL` named inside a subquery or a `WITH`, and a second `NULL` with no
+    name in one select list, are an `integer` (PostgreSQL: `text`);
+  - arithmetic over a `real` column is a `real` (PostgreSQL: `double
+    precision`), and `sum` of one a `double precision` (PostgreSQL: `real`).
+
+  Also not PostgreSQL's: a `round()` the copy answers is PostgreSQL's
   `numeric`, with exactly the decimals PostgreSQL writes, on every
   connection (`avg()` of a `numeric` or of whole numbers, which PostgreSQL
   writes with 16 to 20 decimals, is refused on the copy), and an aggregate or a literal of a `numeric` keeps its
