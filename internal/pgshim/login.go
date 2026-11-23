@@ -253,11 +253,20 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, c
 		database = user
 	}
 	place.spoke.Store(true)
-	password, err := scramExchange(connCtx, be, user, encrypted, pt.bindingData(), place)
+	password, err := scramExchange(be, encrypted, pt.bindingData())
 	if err != nil {
 		// Debug: psql itself closes here once, to ask for the password and
 		// connect again. A malformed exchange was told why.
 		logger.Debug("pgshim: no password was proved", "err", err, "user", user, "remote", c.RemoteAddr())
+		return
+	}
+	// The client's proof reached the port: it has done its part of the login
+	// and keeps its place from here, while the proof is checked and its
+	// server is opened, however long that takes (prelogin.go). Unless its
+	// place went to a newer connection first: its socket is closed, and its
+	// proof is not checked, so nothing is logged as a wrong password.
+	if !place.loggedIn() {
+		logger.Info("pgshim: "+errLostPlace.Error(), "user", user, "database", database, "remote", c.RemoteAddr())
 		return
 	}
 	bound, refused := cfg.Login(connCtx, user, database, password, func() { _ = c.Close() })
@@ -269,22 +278,6 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, c
 			bound.Close()
 		}
 		bound, refused = nil, &Error{Code: "28P01", Message: fmt.Sprintf("password authentication failed for user %q", user)}
-	}
-	if password.lostPlace && bound == nil {
-		// Not a wrong password: the port closed this connection to make
-		// room, and its proof was never checked.
-		logger.Info("pgshim: "+errLostPlace.Error(), "user", user, "database", database, "remote", c.RemoteAddr())
-		return
-	}
-	if bound == nil && !password.matched() {
-		// No refusal of a proof comes sooner than the floor, whatever the
-		// port had in memory for the username.
-		password.holdFailure()
-	}
-	if password.busy && bound == nil {
-		// The proof was not checked, or failed while the port had no room
-		// to check a new one: not said as a wrong password.
-		refused = &Error{Code: busyLoginCode, Message: busyLoginMessage}
 	}
 	if refused != nil || bound == nil {
 		if refused == nil {
@@ -302,12 +295,6 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, c
 	if !loginTimer.Stop() {
 		// It fired: the socket is closed, or about to be.
 		logger.Info("pgshim login took too long", "user", user, "database", database, "remote", c.RemoteAddr())
-		return
-	}
-	if !place.loggedIn() {
-		// Its place went to a newer connection while it was logging in, and
-		// its socket is closed.
-		logger.Info("pgshim: the port was full and this connection had not logged in; its place went to a newer one", "user", user, "database", database, "remote", c.RemoteAddr())
 		return
 	}
 	sess := &session{be: be, bound: bound, ctx: connCtx, logger: logger, budget: cfg.ResultBudget}

@@ -127,9 +127,9 @@ func (p *preLogins) warnTaken(logger *slog.Logger, old *connPlace, c net.Conn, m
 
 // loggedIn marks the connection as having done its part of the login, which
 // keeps its place for as long as it lasts: it is asked when the client's
-// proof is about to be checked (Password.gate), and again when the login is
-// over. False when the place was taken first: the connection is closed, and
-// must not be served, nor its proof checked.
+// proof has reached the port, before it is checked. False when the place was
+// taken first: the connection is closed, and must not be served, nor its
+// proof checked.
 func (pl *connPlace) loggedIn() bool {
 	if pl == nil {
 		return true

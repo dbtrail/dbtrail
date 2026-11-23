@@ -2,7 +2,6 @@ package pgshim
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +13,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/dbtrail/dbtrail/internal/shim"
 )
 
 // The port's places before a login (#3097): when the port is full and a new
@@ -290,376 +291,6 @@ func TestConnPlace_takenOrLoggedInNeverBoth(t *testing.T) {
 	}
 }
 
-// --- a salt for each login -------------------------------------------------------
-
-func TestScramSaltFor(t *testing.T) {
-	long := strings.Repeat("x", 100000)
-	names := []string{"app", "App", "APP", "app ", " app", "", "nobody", "app\x00", "ápp", long, long + "y"}
-	seen := map[string]string{}
-	for _, n := range names {
-		salt := scramSaltFor(n)
-		if len(salt) != scramSaltLen {
-			t.Fatalf("the salt of %.20q is %d bytes", n, len(salt))
-		}
-		if string(scramSaltFor(n)) != string(salt) {
-			t.Errorf("the salt of %.20q changed between two logins", n)
-		}
-		if other, dup := seen[string(salt)]; dup {
-			t.Errorf("%.20q and %.20q have the same salt", n, other)
-		}
-		seen[string(salt)] = n
-	}
-}
-
-// deriveCounter counts derivations, and how many ran at once.
-type deriveCounter struct {
-	total, now, most atomic.Int64
-}
-
-func countDerivations(t *testing.T) *deriveCounter {
-	t.Helper()
-	d := &deriveCounter{}
-	old := scramDerive
-	scramDerive = func(pw string, salt []byte, n int) []byte {
-		d.total.Add(1)
-		cur := d.now.Add(1)
-		for m := d.most.Load(); cur > m && !d.most.CompareAndSwap(m, cur); m = d.most.Load() {
-		}
-		defer d.now.Add(-1)
-		return old(pw, salt, n)
-	}
-	t.Cleanup(func() { scramDerive = old })
-	return d
-}
-
-// wrongLogin tries user with a wrong password and returns the refusal.
-func wrongLogin(t *testing.T, addr, user string) string {
-	t.Helper()
-	host, port, _ := net.SplitHostPort(addr)
-	cfg, err := pgconn.ParseConfig(fmt.Sprintf("host=%s port=%s password=wrong dbname=orders sslmode=disable", host, port))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.User = user
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	_, err = pgconn.ConnectConfig(ctx, cfg)
-	var pe *pgconn.PgError
-	if !errors.As(err, &pe) {
-		t.Fatalf("%.20q: %v", user, err)
-	}
-	return pe.Code
-}
-
-// appLogins is a host with the port's password for every username and one
-// more for the username app1.
-func appLogins(_ context.Context, user, _ string, password *Password, _ func()) (*Binding, *Error) {
-	all := []string{"token", portPassword, "app1-own"}
-	WarmPasswords(all)
-	candidates := all[:2]
-	if user == "app1" {
-		candidates = all
-	}
-	if !password.Matches(candidates) {
-		return nil, &Error{Code: "28P01", Message: fmt.Sprintf("password authentication failed for user %q", user)}
-	}
-	return &Binding{Run: one}, nil
-}
-
-// The first login under a username derives the same number of keys whether
-// the username has a password of its own or is nobody's, and the next ones
-// derive none; an empty name, a long one and one in capitals are names like
-// any other.
-func TestSCRAM_everyNameTheSameWork(t *testing.T) {
-	WarmPasswords([]string{"a set no other test uses"})
-	d := countDerivations(t)
-	addr := serveAddrCfg(t, Config{Login: appLogins})
-	for _, user := range []string{"app1", "nobody", "APP1", "x", strings.Repeat("n", 4000), "app1 "} {
-		before := d.total.Load()
-		if code := wrongLogin(t, addr, user); code != "28P01" {
-			t.Fatalf("%.20q: %s", user, code)
-		}
-		if got := d.total.Load() - before; got != scramDerivations {
-			t.Errorf("%.20q: its first login derived %d keys, want %d as for every name", user, got, scramDerivations)
-		}
-		before = d.total.Load()
-		for range 3 {
-			if code := wrongLogin(t, addr, user); code != "28P01" {
-				t.Fatalf("%.20q: %s", user, code)
-			}
-		}
-		if got := d.total.Load() - before; got != 0 {
-			t.Errorf("%.20q: three more logins derived %d keys, want none", user, got)
-		}
-	}
-	// The right password still opens the port, under a name with a password
-	// of its own and under one without.
-	host, port, _ := net.SplitHostPort(addr)
-	for user, pw := range map[string]string{"app1": "app1-own", "anyone": portPassword} {
-		c, err := pgconn.Connect(context.Background(), fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=orders sslmode=disable", host, port, user, pw))
-		if err != nil {
-			t.Fatalf("%s with its password: %v", user, err)
-		}
-		_ = c.Close(context.Background())
-	}
-	// A login's own password under another name does not.
-	cfg, _ := pgconn.ParseConfig(fmt.Sprintf("host=%s port=%s user=other password=app1-own dbname=orders sslmode=disable", host, port))
-	if _, err := pgconn.ConnectConfig(context.Background(), cfg); err == nil {
-		t.Error("a login's own password opened the port under another name")
-	}
-
-	// A change of any password forgets every key: each name's next login
-	// derives again, the same number.
-	WarmPasswords([]string{"another set"})
-	for _, user := range []string{"nobody", "app1"} {
-		before := d.total.Load()
-		wrongLogin(t, addr, user)
-		// appLogins warms its own set back first, which is a change too.
-		if got := d.total.Load() - before; got != scramDerivations {
-			t.Errorf("%s after a change of passwords: derived %d keys, want %d", user, got, scramDerivations)
-		}
-	}
-}
-
-// keysOf is scramKeys for a connection that goes on.
-func keysOf(t *testing.T, name string, forms ...string) map[string][]byte {
-	t.Helper()
-	keys, err := scramKeys(context.Background(), scramSaltFor(name), forms)
-	if err != nil {
-		t.Fatalf("%s: %v", name, err)
-	}
-	return keys
-}
-
-// kept is how many names each memory holds.
-func kept() (proven, others int) {
-	scramCache.mu.Lock()
-	defer scramCache.mu.Unlock()
-	return len(scramCache.proven.names), len(scramCache.others.names)
-}
-
-// fakeDerive makes a derivation cost nothing, and counts them.
-func fakeDerive(t *testing.T) *atomic.Int64 {
-	t.Helper()
-	var derived atomic.Int64
-	old := scramDerive
-	scramDerive = func(pw string, salt []byte, _ int) []byte { derived.Add(1); return append([]byte(pw+"|"), salt...) }
-	t.Cleanup(func() { scramDerive = old; WarmPasswords([]string{"cleared after " + t.Name()}) })
-	return &derived
-}
-
-// The names whose keys are kept are bounded, and so are the keys of one
-// name: logins under ever new names do not grow what the port holds.
-func TestSCRAM_namesKeptAreBounded(t *testing.T) {
-	WarmPasswords([]string{"a set for the bound"})
-	derived := fakeDerive(t)
-	for i := range scramNamesMax + 500 {
-		keysOf(t, fmt.Sprintf("name-%d", i), "pw", scramDummy)
-	}
-	if proven, others := kept(); proven != 0 || others != scramNamesMax {
-		t.Fatalf("%d proven and %d other names kept, want 0 and %d", proven, others, scramNamesMax)
-	}
-	// The one used last is kept, the first ones are gone.
-	derived.Store(0)
-	keysOf(t, fmt.Sprintf("name-%d", scramNamesMax+499), "pw", scramDummy)
-	if derived.Load() != 0 {
-		t.Error("the name used last was forgotten")
-	}
-	keysOf(t, "name-0", "pw", scramDummy)
-	if derived.Load() != scramDerivations {
-		t.Errorf("the name used first: %d keys derived, want %d (it was forgotten)", derived.Load(), scramDerivations)
-	}
-	// A name used again moves to the front: it outlives names used since.
-	keysOf(t, "kept", "pw")
-	for i := range scramNamesMax - 1 {
-		keysOf(t, "kept", "pw")
-		keysOf(t, fmt.Sprintf("later-%d", i), "pw")
-	}
-	derived.Store(0)
-	keysOf(t, "kept", "pw")
-	if derived.Load() != 0 {
-		t.Error("a name used all along was forgotten")
-	}
-	// One name asked for ever new passwords keeps a bounded number of keys.
-	for i := range 20 * scramNameFormsMax {
-		keysOf(t, "many passwords", fmt.Sprintf("pw-%d", i))
-	}
-	var id [scramSaltLen]byte
-	copy(id[:], scramSaltFor("many passwords"))
-	scramCache.mu.Lock()
-	n := len(scramCache.others.names[id].keys)
-	scramCache.mu.Unlock()
-	if n > scramNameFormsMax {
-		t.Errorf("one name keeps %d keys, more than %d", n, scramNameFormsMax)
-	}
-	// The same form asked for twice in one login is derived once, and every
-	// form asked for is answered.
-	derived.Store(0)
-	keys := keysOf(t, "twice", "a", "a", "b", scramDummy, scramDummy)
-	if len(keys) != 3 || keys["a"] == nil || keys["b"] == nil || keys[scramDummy] == nil {
-		t.Errorf("keys %v", keys)
-	}
-	if derived.Load() != scramDerivations {
-		t.Errorf("%d derivations for three forms, want %d", derived.Load(), scramDerivations)
-	}
-}
-
-// A name a login succeeded under is kept apart from every other name: ten
-// thousand names nobody logs in under do not push it out, and do not grow
-// what the port holds.
-func TestSCRAM_aNameThatLogsInIsNotPushedOut(t *testing.T) {
-	WarmPasswords([]string{"a set for the proven"})
-	derived := fakeDerive(t)
-	// A login under "app" succeeds: the proof is made with the key the fake
-	// derivation gives.
-	prove := func(name string) *Password {
-		salt := scramSaltFor(name)
-		auth := []byte("n=,r=x,r=xy,s=c2FsdA==,i=4096,c=biws,r=xy")
-		clientKey := testHMAC(scramDerive(portPassword, salt, 0), "Client Key")
-		derived.Add(-1)
-		stored := sha256.Sum256(clientKey)
-		sig := testHMAC(stored[:], string(auth))
-		proof := make([]byte, 32)
-		for i := range proof {
-			proof[i] = clientKey[i] ^ sig[i]
-		}
-		return &Password{authMessage: auth, proof: proof, salt: salt}
-	}
-	if !prove("app").Matches([]string{portPassword}) {
-		t.Fatal("the right password did not match")
-	}
-	if proven, others := kept(); proven != 1 || others != 0 {
-		t.Fatalf("after a login that succeeded: %d proven, %d others, want 1 and 0", proven, others)
-	}
-	// A wrong password under another name stays among the others.
-	wrong := prove("guest")
-	wrong.proof[0] ^= 1
-	if wrong.Matches([]string{portPassword}) {
-		t.Fatal("a wrong proof matched")
-	}
-	if proven, others := kept(); proven != 1 || others != 1 {
-		t.Fatalf("after a login that failed: %d proven, %d others, want 1 and 1", proven, others)
-	}
-	for i := range 10000 {
-		keysOf(t, fmt.Sprintf("invented-%d", i), portPassword, scramDummy)
-	}
-	if proven, others := kept(); proven != 1 || others != scramNamesMax {
-		t.Errorf("after 10,000 invented names: %d proven and %d others, want 1 and %d", proven, others, scramNamesMax)
-	}
-	derived.Store(0)
-	if !prove("app").Matches([]string{portPassword}) {
-		t.Fatal("the right password did not match after the invented names")
-	}
-	if derived.Load() != 0 {
-		t.Errorf("the name that logs in derived %d keys again: it was pushed out", derived.Load())
-	}
-	// The proven names are bounded too.
-	for i := range scramNamesMax + 50 {
-		if !prove(fmt.Sprintf("client-%d", i)).Matches([]string{portPassword}) {
-			t.Fatal("the right password did not match")
-		}
-	}
-	if proven, _ := kept(); proven != scramNamesMax {
-		t.Errorf("%d proven names kept, want %d", proven, scramNamesMax)
-	}
-}
-
-// A connection that ended, or lost its place in the port, derives nothing:
-// before it waits for its turn, while it waits, and between two keys.
-func TestSCRAM_aConnectionThatEndedDerivesNothing(t *testing.T) {
-	WarmPasswords([]string{"a set for the ended"})
-	derived := fakeDerive(t)
-	// Its place went to another connection: the proof is not checked.
-	pw := &Password{authMessage: []byte("x"), proof: make([]byte, 32), salt: scramSaltFor("put out"), gate: func() bool { return false }}
-	if pw.Matches([]string{portPassword}) || derived.Load() != 0 || pw.busy {
-		t.Errorf("a connection without its place: derived %d keys, busy=%v", derived.Load(), pw.busy)
-	}
-	// Ended before it asked.
-	ended, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := scramKeys(ended, scramSaltFor("gone"), []string{"pw"}); !errors.Is(err, context.Canceled) || derived.Load() != 0 {
-		t.Errorf("an ended connection: %v, %d keys derived", err, derived.Load())
-	}
-	// Ended while waiting for its turn: every slot is taken.
-	for range cap(scramSlots) {
-		scramSlots <- struct{}{}
-	}
-	free := func() {
-		for range cap(scramSlots) {
-			<-scramSlots
-		}
-	}
-	waiting, stop := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { _, err := scramKeys(waiting, scramSaltFor("waiting"), []string{"pw"}); done <- err }()
-	deadline := time.Now().Add(5 * time.Second)
-	for scramWaiting.Load() != 1 {
-		if time.Now().After(deadline) {
-			free()
-			t.Fatal("the login never waited for a slot")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	stop()
-	select {
-	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
-			t.Errorf("ended while waiting: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Error("a login whose connection ended went on waiting for a slot")
-	}
-	if scramWaiting.Load() != 0 || derived.Load() != 0 {
-		t.Errorf("after it ended: %d waiting, %d keys derived", scramWaiting.Load(), derived.Load())
-	}
-	// With as many waiting as may wait, one more is refused at once.
-	scramWaiting.Store(scramWaitMax)
-	_, err := scramKeys(context.Background(), scramSaltFor("one too many"), []string{"pw"})
-	scramWaiting.Store(0)
-	if !errors.Is(err, errScramBusy) || derived.Load() != 0 {
-		t.Errorf("past the line: %v, %d keys derived", err, derived.Load())
-	}
-	busy := &Password{authMessage: []byte("x"), proof: make([]byte, 32), salt: scramSaltFor("busy")}
-	scramWaiting.Store(scramWaitMax)
-	matched := busy.Matches([]string{portPassword})
-	scramWaiting.Store(0)
-	if matched || !busy.busy {
-		t.Errorf("past the line: matched=%v busy=%v, want refused as busy", matched, busy.busy)
-	}
-	free()
-	// Ended between two keys: the first is derived, the rest are not.
-	between, end := context.WithCancel(context.Background())
-	old := scramDerive
-	scramDerive = func(pw string, salt []byte, n int) []byte { end(); return old(pw, salt, n) }
-	_, err = scramKeys(between, scramSaltFor("between"), []string{"a", "b", "c"})
-	scramDerive = old
-	if !errors.Is(err, context.Canceled) || derived.Load() != 1 {
-		t.Errorf("ended between two keys: %v, %d keys derived, want 1", err, derived.Load())
-	}
-	if _, others := kept(); others != 0 {
-		t.Errorf("%d names kept from logins that did not finish", others)
-	}
-	if len(scramSlots) != 0 {
-		t.Errorf("%d slots still taken", len(scramSlots))
-	}
-}
-
-// A client told the port is busy checking logins gets the code of a full
-// port, not of a wrong password.
-func TestSCRAM_busyIsNotAWrongPassword(t *testing.T) {
-	WarmPasswords([]string{"a set for busy"})
-	addr := serveAddrCfg(t, Config{Login: appLogins})
-	scramWaiting.Store(scramWaitMax)
-	code := wrongLogin(t, addr, "someone new")
-	scramWaiting.Store(0)
-	if code != "53300" {
-		t.Errorf("a login the port had no room to check: %q, want 53300", code)
-	}
-	if code := wrongLogin(t, addr, "someone new"); code != "28P01" {
-		t.Errorf("the same login once there is room: %q, want 28P01", code)
-	}
-}
-
 // A connection whose proof reached the port keeps its place while the proof
 // is checked and its server is opened, however long that takes and however
 // full the port is; and one that sent nothing goes before one that spoke.
@@ -732,169 +363,45 @@ func TestPreLogin_aProvedConnectionKeepsItsPlace(t *testing.T) {
 	}
 }
 
-// At most scramDeriveSlots logins derive at once, however many arrive.
-func TestSCRAM_derivationsAtOnceAreBounded(t *testing.T) {
-	WarmPasswords([]string{"a set for the slots"})
-	d := countDerivations(t)
-	addr := serveAddrCfg(t, Config{Login: appLogins})
-	var wg sync.WaitGroup
-	for i := range 40 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if code := wrongLogin(t, addr, fmt.Sprintf("crowd-%d", i)); code != "28P01" {
-				t.Errorf("crowd-%d: %s", i, code)
-			}
-		}()
-	}
-	wg.Wait()
-	if most := d.most.Load(); most > int64(cap(scramSlots)) {
-		t.Errorf("%d derivations ran at once, more than %d", most, cap(scramSlots))
-	}
-	if got := d.total.Load(); got != 40*scramDerivations {
-		t.Errorf("40 new names derived %d keys, want %d", got, 40*scramDerivations)
-	}
-}
-
-// WarmPasswords forgets the keys when the set changed, and only then; the
-// order the passwords are given in is not a change.
-func TestWarmPasswords_forgetsOnAChange(t *testing.T) {
-	old := scramDerive
-	var derived atomic.Int64
-	scramDerive = func(pw string, salt []byte, _ int) []byte { derived.Add(1); return append([]byte(pw+"|"), salt...) }
-	t.Cleanup(func() { scramDerive = old; WarmPasswords([]string{"cleared after the change test"}) })
-	WarmPasswords([]string{"one", "two"})
-	keysOf(t, "someone", "one")
-	derived.Store(0)
-	for _, same := range [][]string{{"one", "two"}, {"two", "one"}} {
-		WarmPasswords(same)
-		keysOf(t, "someone", "one")
-	}
-	if derived.Load() != 0 {
-		t.Errorf("the same set derived %d keys again", derived.Load())
-	}
-	for _, changed := range [][]string{{"one", "three"}, {"one"}, {"one", "two", ""}, {"onetwo"}, {"on", "etwo"}, nil} {
-		WarmPasswords(changed)
-		derived.Store(0)
-		keysOf(t, "someone", "one")
-		if derived.Load() != scramDerivations {
-			t.Errorf("after the set changed to %q: %d keys derived, want %d", changed, derived.Load(), scramDerivations)
-		}
-	}
-}
-
-// In this package's tests a refusal waits a moment, not the port's quarter
-// of a second: the tests that are about that wait set their own.
-func init() { failedLoginFloor = 5 * time.Millisecond }
-
-// The slots for deriving are half the machine's cores, between 1 and 4.
-func TestScramSlotCount(t *testing.T) {
-	for cores, want := range map[int]int{0: 1, 1: 1, 2: 1, 3: 1, 4: 2, 6: 3, 8: 4, 16: 4, 96: 4} {
-		if got := scramSlotCount(cores); got != want {
-			t.Errorf("%d cores: %d logins derive at once, want %d", cores, got, want)
-		}
-	}
-	if n := cap(scramSlots); n < 1 || n > scramDeriveSlots {
-		t.Errorf("this machine derives for %d logins at once", n)
-	}
-}
-
-// A wrong password under a username the port has in memory and under one it
-// has never seen: the same answer, and neither sooner than the floor. With
-// the line for deriving full, both are told the port is busy. A right
-// password is not held back.
-func TestSCRAM_aSeenNameAndANewOneAnswerAlike(t *testing.T) {
-	WarmPasswords([]string{"a set for the floor"})
-	const floor = 300 * time.Millisecond
-	old := failedLoginFloor
-	failedLoginFloor = floor
-	t.Cleanup(func() { failedLoginFloor = old })
-	addr := serveAddrCfg(t, Config{Login: appLogins})
-	timed := func(user string) (string, time.Duration) {
-		start := time.Now()
-		code := wrongLogin(t, addr, user)
-		return code, time.Since(start)
-	}
-	// "app1" is put in memory by a first attempt; each "fresh" name is new.
-	timed("app1")
-	for i := range 3 {
-		seenCode, seen := timed("app1")
-		newCode, fresh := timed(fmt.Sprintf("fresh-%d", i))
-		if seenCode != "28P01" || newCode != "28P01" {
-			t.Errorf("a wrong password: %q under a name in memory, %q under a new one", seenCode, newCode)
-		}
-		if seen < floor || fresh < floor {
-			t.Errorf("refused after %v (in memory) and %v (new): one came sooner than the floor of %v", seen, fresh, floor)
-		}
-		if d := (seen - fresh).Abs(); d > 200*time.Millisecond {
-			t.Errorf("refused after %v (in memory) and %v (new): %v apart", seen, fresh, d)
-		}
-	}
-	// The line full: a new name is not checked, and a name in memory that
-	// fails says the same thing, no sooner.
-	scramWaiting.Store(scramWaitMax)
-	seenCode, seen := timed("app1")
-	newCode, fresh := timed("fresh-when-full")
-	scramWaiting.Store(0)
-	if seenCode != "53300" || newCode != "53300" {
-		t.Errorf("with the line full: %q under a name in memory, %q under a new one, want 53300 for both", seenCode, newCode)
-	}
-	if seen < floor || fresh < floor {
-		t.Errorf("with the line full: refused after %v and %v, sooner than %v", seen, fresh, floor)
-	}
-	// The right password, from memory: let in at once, line full or not.
-	host, port, _ := net.SplitHostPort(addr)
-	dsn := fmt.Sprintf("host=%s port=%s user=app1 password=app1-own dbname=orders sslmode=disable", host, port)
-	c, err := pgconn.Connect(context.Background(), dsn)
+// The first mode (bintrail-pg flashback) keeps the same places: a silent
+// connection loses its own to a newcomer, and a tenant that logged in does
+// not.
+func TestPreLogin_firstMode(t *testing.T) {
+	shortGrace(t, 20*time.Millisecond)
+	auth, err := shim.NewTenantAuth(map[string]string{"alice": "alice-pw"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = c.Close(context.Background())
-	scramWaiting.Store(scramWaitMax)
-	start := time.Now()
-	c, err = pgconn.Connect(context.Background(), dsn)
-	took := time.Since(start)
-	scramWaiting.Store(0)
-	if err != nil {
-		t.Fatalf("the right password with the line full: %v", err)
-	}
-	_ = c.Close(context.Background())
-	if took >= floor {
-		t.Errorf("the right password was held back %v", took)
-	}
-}
-
-// Many logins under one name at once, none in memory (a pool that connects
-// again after a restart): the name's keys are derived once, nobody is told
-// the port is busy, and every one is let in.
-func TestSCRAM_oneDerivationForANameAtOnce(t *testing.T) {
-	WarmPasswords([]string{"a set for the pool"})
-	d := countDerivations(t)
-	addr := serveAddrCfg(t, Config{Login: appLogins})
+	addr := serveAddrCfg(t, Config{Auth: auth, MaxConns: 1})
 	host, port, _ := net.SplitHostPort(addr)
-	const clients = 3 * scramWaitMax
-	var wg sync.WaitGroup
-	var in atomic.Int32
-	for range clients {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
-			c, err := pgconn.Connect(ctx, fmt.Sprintf("host=%s port=%s user=pool password=%s dbname=orders sslmode=disable", host, port, portPassword))
-			if err != nil {
-				t.Errorf("a client of the pool: %v", err)
-				return
-			}
-			in.Add(1)
-			_ = c.Close(ctx)
-		}()
+	login := func() (*pgconn.PgConn, string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		c, err := pgconn.Connect(ctx, fmt.Sprintf("host=%s port=%s user=alice password=alice-pw dbname=public sslmode=disable", host, port))
+		if err == nil {
+			t.Cleanup(func() { _ = c.Close(context.Background()) })
+			return c, ""
+		}
+		var pe *pgconn.PgError
+		if errors.As(err, &pe) {
+			return nil, pe.Code
+		}
+		return nil, err.Error()
 	}
-	wg.Wait()
-	if in.Load() != clients {
-		t.Errorf("%d of %d clients were let in", in.Load(), clients)
+	quiet := silent(t, addr)
+	time.Sleep(100 * time.Millisecond)
+	tenant, code := login()
+	if code != "" {
+		t.Fatalf("a tenant at a port full of a silent connection: %s, want to be let in", code)
 	}
-	if got := d.total.Load(); got != scramDerivations {
-		t.Errorf("%d clients under one name derived %d keys, want %d: once for the name", clients, got, scramDerivations)
+	if !closedByPort(quiet, 2*time.Second) {
+		t.Error("the silent connection was not closed")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, code := login(); code != "53300" {
+		t.Errorf("a newcomer to a port full of a tenant got %q, want 53300", code)
+	}
+	if closedByPort(tenant.Conn(), 100*time.Millisecond) {
+		t.Error("a tenant that had logged in was closed to make room")
 	}
 }

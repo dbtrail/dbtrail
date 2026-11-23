@@ -252,8 +252,8 @@ func handleConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, cancel
 	// Per-connection context: cancelling it aborts an in-flight resolve
 	// (QueryTimeout is the other backstop). The socket is read on a
 	// goroutine of its own (shim.WatchConn), as on the port with a login of
-	// its own, so a client that hangs up ends connCtx at once: its login
-	// stops waiting to be checked, and its statement stops.
+	// its own, so a client that hangs up ends connCtx at once, and its
+	// statement stops.
 	wc, connCtx, cancel := shim.WatchConn(ctx, c)
 	defer cancel()
 
@@ -295,7 +295,11 @@ func handleConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, cancel
 	database := startup.Parameters["database"]
 
 	place.spoke.Store(true)
-	password, err := authenticate(connCtx, be, cfg.Auth, user, encrypted, pt.bindingData(), place)
+	password, err := authenticate(be, cfg.Auth, user, encrypted, pt.bindingData(), place)
+	if errors.Is(err, errLostPlace) {
+		logger.Info("pgshim: "+errLostPlace.Error(), "user", user, "remote", c.RemoteAddr())
+		return
+	}
 	if err != nil {
 		logger.Info("pgshim auth denied", "user", user, "remote", c.RemoteAddr(), "err", err)
 		return
@@ -303,12 +307,6 @@ func handleConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, cancel
 
 	if !loginTimer.Stop() {
 		logger.Info("pgshim login took too long", "user", user, "remote", c.RemoteAddr())
-		return
-	}
-	if !place.loggedIn() {
-		// Its place went to a newer connection while it was logging in, and
-		// its socket is closed.
-		logger.Info("pgshim: the port was full and this connection had not logged in; its place went to a newer one", "user", user, "remote", c.RemoteAddr())
 		return
 	}
 	h := shim.NewHandlerWithConfig(cfg.IndexDB, cfg.ShimConfig, logger)
@@ -454,28 +452,26 @@ func commandLoop(be *pgproto3.Backend, sess *session) {
 // refused with a byte-identical 28P01 message, and in the same time: the proof
 // is checked against as many passwords either way (Password.Matches), so
 // neither the answer nor its timing says which usernames exist.
-func authenticate(ctx context.Context, be *pgproto3.Backend, auth shim.TenantAuth, user string, encrypted bool, endPoint []byte, place *connPlace) (*Password, error) {
-	password, err := scramExchange(ctx, be, user, encrypted, endPoint, place)
+func authenticate(be *pgproto3.Backend, auth shim.TenantAuth, user string, encrypted bool, endPoint []byte, place *connPlace) (*Password, error) {
+	password, err := scramExchange(be, encrypted, endPoint)
 	if err != nil {
 		return nil, err
 	}
-	// Every tenant's password: a change of any forgets every derived key,
-	// so what a login derives does not say whose password changed.
+	// The client's proof reached the port: it keeps its place from here
+	// (prelogin.go). Unless its place went to a newer connection first: its
+	// socket is closed and its proof is not checked, so it is not refused, or
+	// logged, as a wrong password.
+	if !place.loggedIn() {
+		return nil, errLostPlace
+	}
+	// Every tenant's password, before the one of this username: what is
+	// derived must not depend on the username.
 	WarmPasswords(auth.Passwords())
 	var candidates []string
 	if expected, found, cerr := auth.LookupPassword(user); found && cerr == nil {
 		candidates = []string{expected}
 	}
 	if !password.Matches(candidates) {
-		if password.lostPlace {
-			// Nothing to say: the port closed this connection to make room.
-			return nil, errLostPlace
-		}
-		password.holdFailure()
-		if password.busy {
-			sendFatal(be, busyLoginCode, busyLoginMessage)
-			return nil, fmt.Errorf("the login of user %q was not checked: %w", user, errScramBusy)
-		}
 		sendFatal(be, "28P01", fmt.Sprintf("password authentication failed for user %q", user))
 		return nil, fmt.Errorf("auth failed for user %q", user)
 	}
@@ -483,16 +479,8 @@ func authenticate(ctx context.Context, be *pgproto3.Backend, auth shim.TenantAut
 }
 
 // errLostPlace is a login that was not checked: the connection's place went
-// to a newer one while it logged in.
+// to a newer one before its proof reached the port.
 var errLostPlace = errors.New("the port was full and this connection had not logged in; its place went to a newer one")
-
-// What a client is told when the port has too many logins to check at once
-// (scramWaitMax): the code of a full port, which a client reads as "try
-// again".
-const (
-	busyLoginCode    = "53300"
-	busyLoginMessage = "the port is checking as many logins as it takes at once; try again in a moment"
-)
 
 // sendSASLFinal sends the server's last SCRAM message, once the password
 // matched: what shows the client the port knows it too.

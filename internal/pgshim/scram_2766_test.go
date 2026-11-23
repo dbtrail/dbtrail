@@ -689,11 +689,6 @@ func TestSCRAM_aWrongPasswordTakesTheSameWork(t *testing.T) {
 	coldOtherMsg, coldOther := try("nobody")
 	change("app1-\uff52\u00e9\u00b2")
 	coldLoginMsg, coldLogin := try("app1")
-	// The other name's first login since the change costs what the login
-	// user's did (a change forgets every name's keys, #3097).
-	if _, again := try("nobody"); again != coldLogin {
-		t.Errorf("first login since the change: %+v for another, %+v for a login user", again, coldLogin)
-	}
 	// Warm: nothing changed since.
 	warmLoginMsg, warmLogin := try("app1")
 	warmOtherMsg, warmOther := try("nobody")
@@ -714,7 +709,7 @@ func TestSCRAM_aWrongPasswordTakesTheSameWork(t *testing.T) {
 }
 
 // A client that holds no password costs the port no PBKDF2 per attempt:
-// each password is derived once with the username's salt, and kept.
+// each password is derived once, with the process's salt, and kept.
 func TestSCRAM_attemptsDeriveNothingNew(t *testing.T) {
 	var derived atomic.Int32
 	old := scramDerive
@@ -738,7 +733,7 @@ func TestSCRAM_attemptsDeriveNothingNew(t *testing.T) {
 // The first mode (bintrail-pg flashback): an unknown tenant and a known one
 // with a wrong password, the same answer and the same work.
 func TestSCRAM_firstModeUnknownTenantAndWrongPassword(t *testing.T) {
-	auth, err := shim.NewTenantAuth(map[string]string{"alice": "alice-pw", "bob": "bob-pw"})
+	auth, err := shim.NewTenantAuth(map[string]string{"alice": "alice-pw"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -768,13 +763,6 @@ func TestSCRAM_firstModeUnknownTenantAndWrongPassword(t *testing.T) {
 	if msg, _ := try("alice", "alice-pw"); msg != "" {
 		t.Fatalf("the right password: %s", msg)
 	}
-	// The first login under a name derives its keys, the same number for a
-	// tenant and for nobody (a salt for each name, #3097).
-	_, firstKnown := try("bob", "wrong")
-	_, firstUnknown := try("mallory", "wrong")
-	if firstKnown != firstUnknown || firstKnown < 1000 {
-		t.Errorf("first login under a name, work (checks + 1000 x derivations): %d for a tenant, %d for an unknown one", firstKnown, firstUnknown)
-	}
 	known, kw := try("alice", "wrong")
 	unknown, uw := try("mallory", "wrong")
 	if known != unknown || !strings.HasPrefix(known, "28P01") {
@@ -790,8 +778,7 @@ func TestSCRAM_firstModeUnknownTenantAndWrongPassword(t *testing.T) {
 func proofFor(t *testing.T, given string, prep func(string) string) *Password {
 	t.Helper()
 	auth := []byte("n=,r=x,r=xy,s=c2FsdA==,i=4096,c=biws,r=xy")
-	salt := scramSaltFor("a client")
-	salted := scramDerive(prep(given), salt, scramIterations)
+	salted := scramDerive(prep(given), scramSalt, scramIterations)
 	clientKey := testHMAC(salted, "Client Key")
 	stored := sha256.Sum256(clientKey)
 	sig := testHMAC(stored[:], string(auth))
@@ -799,7 +786,7 @@ func proofFor(t *testing.T, given string, prep func(string) string) *Password {
 	for i := range proof {
 		proof[i] = clientKey[i] ^ sig[i]
 	}
-	return &Password{authMessage: auth, proof: proof, salt: salt}
+	return &Password{authMessage: auth, proof: proof}
 }
 
 // What the cleartext comparison accepted, SCRAM accepts: one of the

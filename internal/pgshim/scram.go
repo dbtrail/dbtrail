@@ -2,25 +2,19 @@ package pgshim
 
 import (
 	"bytes"
-	"container/list"
-	"context"
 	"crypto/hmac"
 	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net"
-	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 	"golang.org/x/text/secure/precis"
@@ -36,28 +30,14 @@ import (
 // something in the middle that holds another certificate.
 //
 // The port knows each password it takes as text, so nothing is stored for
-// SCRAM on disk. Each username gets a salt of its own, derived from a secret
-// the process makes up when it starts (scramSaltFor): the same username gets
-// the same salt for as long as the process runs, whether or not it is a
-// login the port knows, so the salt says nothing about which usernames
-// exist, and what one exchange shows of a password is of use against that
-// username alone.
-//
-// A password is derived with a username's salt the first time that username
-// logs in, and kept (scramKeys): a client that holds no password then costs
-// the port a few HMACs per attempt, not a PBKDF2 per password, which is what
-// PostgreSQL's stored verifier gives it too. These bounds keep that from
-// being turned against the port: the names whose keys are kept are at most
-// scramNamesMax of those a login succeeded under and as many of all the
-// others, each kept apart, the least recently used forgotten first; at most
-// scramDeriveSlots logins derive at once and scramWaitMax wait their turn,
-// one more being refused as busy; a connection that ended, or lost its
-// place in the port, derives nothing; and a
-// login that derives anything derives the same number of keys
-// (scramDerivations), made-up ones filling the rest, so that the first login
-// under a username takes the same work whether the username has a password
-// of its own or not. Every attempt checks the same number of passwords in the
-// same number of forms.
+// SCRAM on disk. One salt is made up when the process starts and sent to
+// every client, and every password that opens the port is derived with it
+// ahead of the check, all of them at once (WarmPasswords): a client that
+// holds no password then costs the port a few HMACs per attempt, not a PBKDF2
+// per password, which is what PostgreSQL's stored verifier gives it too.
+// Nothing about one username decides what is derived or checked: the salt is
+// the same for all, the set derived is the whole set, and every attempt
+// checks the same number of passwords in the same number of forms.
 
 const (
 	scramMechanism     = "SCRAM-SHA-256"
@@ -80,288 +60,78 @@ const (
 	scramForms = 3
 	// scramDummy is the made-up password the checks are filled with.
 	scramDummy = "\x00 not a password"
-	// scramDerivations is how many keys a login derives when it derives any:
-	// every form of every password it checks at the least
-	// (scramMinCandidates of scramForms each), made-up ones filling the rest.
-	scramDerivations = scramMinCandidates * scramForms
-	// scramNamesMax is how many usernames' derived keys are kept; past it
-	// the one used longest ago is forgotten, and derived again if it logs in.
-	scramNamesMax = 1024
-	// scramNameFormsMax is how many derived keys one username keeps; past it
-	// they are forgotten together.
-	scramNameFormsMax = 4 * scramDerivations
-	// scramDeriveSlots is the most logins that derive keys at once (fewer
-	// on a small machine, scramSlotCount), and
-	// scramWaitMax how many may wait for their turn: one more is refused as
-	// busy, without waiting.
-	scramDeriveSlots = 4
-	scramWaitMax     = 64
 )
 
-// scramSecret is what every username's salt is derived from: made up when
-// the process starts, never sent, never written.
-var scramSecret = func() []byte {
-	b := make([]byte, 32)
+// scramSalt is the salt every exchange of this process sends.
+var scramSalt = func() []byte {
+	b := make([]byte, scramSaltLen)
 	_, _ = rand.Read(b)
 	return b
 }()
 
-// scramSaltFor is the salt of username user: the same for a username for as
-// long as the process runs, another for any other username, as the client
-// wrote it (App is not app), and worked out the same way for a username
-// nobody has.
-func scramSaltFor(user string) []byte {
-	m := hmac.New(sha256.New, scramSecret)
-	m.Write([]byte("pgshim scram salt\x00"))
-	m.Write([]byte(user))
-	return m.Sum(nil)[:scramSaltLen]
-}
-
-// scramName is the keys derived with one username's salt, by the form of
-// the password (saslPrepForms).
-type scramName struct {
-	salt  [scramSaltLen]byte
-	keys  map[string][]byte
-	place *list.Element
-}
-
-// scramNames is a bounded memory of names' keys, by salt: a username is kept
-// as its salt, 16 bytes however long the username was. Past max, the name
-// used longest ago is forgotten.
-type scramNames struct {
-	max   int
-	names map[[scramSaltLen]byte]*scramName
-	// used orders the names, the one used last in front.
-	used *list.List
-}
-
-func (m *scramNames) get(id [scramSaltLen]byte) *scramName {
-	n := m.names[id]
-	if n != nil {
-		m.used.MoveToFront(n.place)
-	}
-	return n
-}
-
-func (m *scramNames) put(n *scramName) {
-	if m.names == nil {
-		m.names, m.used = map[[scramSaltLen]byte]*scramName{}, list.New()
-	}
-	n.place = m.used.PushFront(n)
-	m.names[n.salt] = n
-	for m.used.Len() > m.max {
-		last := m.used.Back()
-		m.used.Remove(last)
-		delete(m.names, last.Value.(*scramName).salt)
-	}
-}
-
-func (m *scramNames) drop(n *scramName) {
-	if m.names[n.salt] == n {
-		m.used.Remove(n.place)
-		delete(m.names, n.salt)
-	}
-}
-
-// scramCache holds the derived keys in two memories, each bounded on its
-// own. proven are the names a login succeeded under: only a client that
-// holds a password puts a name there, so names nobody can log in under never
-// push out one that people do log in under. others are every other name
-// seen. A name moves from others to proven when a login under it succeeds.
-var scramCache = struct {
+// scramCache holds every password that opens the port derived with
+// scramSalt, by the form a client hashes it in (saslPrepForms): the whole set
+// WarmPasswords was last given, nothing more and nothing less.
+var scramCache struct {
 	mu     sync.Mutex
-	proven scramNames
-	others scramNames
-	// set is the passwords WarmPasswords was last given, hashed.
-	set [sha256.Size]byte
-}{proven: scramNames{max: scramNamesMax}, others: scramNames{max: scramNamesMax}}
-
-// scramSlots bounds the logins deriving keys at once, and scramWaiting
-// counts the ones waiting for a slot: past scramWaitMax a login does not
-// wait, it is refused as busy.
-var (
-	scramSlots   = make(chan struct{}, scramSlotCount(runtime.NumCPU()))
-	scramWaiting atomic.Int64
-)
-
-// scramSlotCount is how many logins derive at once on a machine of cores
-// cores: half of them, at least 1 and at most scramDeriveSlots, so that
-// deriving for clients that hold no password never takes the whole machine.
-func scramSlotCount(cores int) int {
-	return min(scramDeriveSlots, max(1, cores/2))
+	salted map[string][]byte
 }
 
-// scramFlights are the names whose keys are being derived now: a second
-// login under the same name waits for that one and reads what it derived,
-// without a turn of its own. A pool that connects again all at once after a
-// restart derives its user's keys once.
-var scramFlights = struct {
-	mu sync.Mutex
-	m  map[[scramSaltLen]byte]chan struct{}
-}{m: map[[scramSaltLen]byte]chan struct{}{}}
-
-// failedLoginFloor is the least time between a client's proof reaching the
-// port and the port's refusal of it, whatever the reason and whatever the
-// port had in memory: a refusal that came sooner for a username seen before
-// than for a new one would say which usernames are in use. A variable so a
-// test can shorten it.
-var failedLoginFloor = 250 * time.Millisecond
-
-// errScramBusy is a login whose keys were not derived: too many logins were
-// already waiting to derive theirs.
-var errScramBusy = errors.New("too many logins are being checked at once")
-
-// WarmPasswords tells the port every password that opens it, for any
-// username. A host calls it before it checks a proof (Password.Matches).
-// Nothing is derived here: a key is derived with a username's salt when that
-// username logs in. What it does is forget every key when the set of
-// passwords changed, so that the change costs every username its next login
-// the same work, whichever username the changed password belongs to.
+// WarmPasswords derives every form of every password in passwords, and the
+// made-up one, and makes that the set a proof is checked with. A host calls
+// it with ALL the passwords that open the port, for any username, before it
+// checks a proof (Password.Matches): what is derived then depends on the
+// port's passwords alone, never on the username a client names, and a
+// change of passwords is paid once, by whichever attempt comes first. A set
+// that did not change derives nothing.
 func WarmPasswords(passwords []string) {
-	sorted := append([]string(nil), passwords...)
-	sort.Strings(sorted)
-	h := sha256.New()
-	for _, pw := range sorted {
-		var n [8]byte
-		binary.BigEndian.PutUint64(n[:], uint64(len(pw)))
-		h.Write(n[:])
-		h.Write([]byte(pw))
-	}
-	var set [sha256.Size]byte
-	copy(set[:], h.Sum(nil))
-	scramCache.mu.Lock()
-	defer scramCache.mu.Unlock()
-	if set == scramCache.set {
-		return
-	}
-	scramCache.set = set
-	scramCache.proven = scramNames{max: scramNamesMax}
-	scramCache.others = scramNames{max: scramNamesMax}
-}
-
-// scramKeys is each of forms derived with salt, by form. Keys the salt's
-// username already has are read; when one is missing, the missing ones are
-// derived, and made-up ones until scramDerivations were derived in all, on
-// one of the scramDeriveSlots.
-//
-// The wait for a slot ends with ctx (the connection's: a client that left,
-// or whose place went to another, derives nothing), and so does the
-// deriving, between one key and the next. With scramWaitMax logins already
-// waiting, this one does not: errScramBusy.
-func scramKeys(ctx context.Context, salt []byte, forms []string) (map[string][]byte, error) {
-	var id [scramSaltLen]byte
-	copy(id[:], salt)
-	var out map[string][]byte
-	var missing []string
-	for {
-		out, missing = make(map[string][]byte, len(forms)), nil
-		scramCache.mu.Lock()
-		n := scramCache.proven.get(id)
-		if n == nil {
-			n = scramCache.others.get(id)
-		}
-		if n != nil {
-			for _, f := range forms {
-				if k, ok := n.keys[f]; ok {
-					out[f] = k
-				}
-			}
-		}
-		scramCache.mu.Unlock()
-		for _, f := range forms {
-			if _, ok := out[f]; !ok {
-				// Marked, so a form asked for twice is derived once.
-				missing = append(missing, f)
-				out[f] = nil
-			}
-		}
-		if len(missing) == 0 {
-			return out, nil
-		}
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		// One login derives a name's keys; the others under that name wait
-		// for it, then read again.
-		scramFlights.mu.Lock()
-		other, flying := scramFlights.m[id]
-		if !flying {
-			mine := make(chan struct{})
-			scramFlights.m[id] = mine
-			scramFlights.mu.Unlock()
-			defer func() {
-				scramFlights.mu.Lock()
-				delete(scramFlights.m, id)
-				scramFlights.mu.Unlock()
-				close(mine)
-			}()
-			break
-		}
-		scramFlights.mu.Unlock()
-		select {
-		case <-other:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
-	if scramWaiting.Add(1) > scramWaitMax {
-		scramWaiting.Add(-1)
-		return nil, errScramBusy
-	}
-	select {
-	case scramSlots <- struct{}{}:
-		scramWaiting.Add(-1)
-	case <-ctx.Done():
-		scramWaiting.Add(-1)
-		return nil, ctx.Err()
-	}
-	defer func() { <-scramSlots }()
-	for i := range max(len(missing), scramDerivations) {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if i < len(missing) {
-			out[missing[i]] = scramDerive(missing[i], salt, scramIterations)
+	forms := map[string]bool{}
+	for _, pw := range append([]string{scramDummy}, passwords...) {
+		if pw == "" {
 			continue
 		}
-		// The same work as a key that is kept, for nothing: what a username
-		// with fewer passwords does not have to derive.
-		_ = scramDerive(scramDummy, salt, scramIterations)
+		for _, f := range saslPrepForms(pw) {
+			forms[f] = true
+		}
 	}
-
 	scramCache.mu.Lock()
 	defer scramCache.mu.Unlock()
-	n := scramCache.proven.get(id)
-	if n == nil {
-		n = scramCache.others.get(id)
+	same := len(forms) == len(scramCache.salted)
+	for f := range forms {
+		if _, ok := scramCache.salted[f]; !ok {
+			same = false
+			break
+		}
 	}
-	if n == nil {
-		n = &scramName{salt: id, keys: map[string][]byte{}}
-		scramCache.others.put(n)
-	}
-	if len(n.keys)+len(missing) > scramNameFormsMax {
-		n.keys = map[string][]byte{}
-	}
-	for _, f := range missing {
-		n.keys[f] = out[f]
-	}
-	return out, nil
-}
-
-// scramProven moves the name of salt among the names a login succeeded
-// under.
-func scramProven(salt []byte) {
-	var id [scramSaltLen]byte
-	copy(id[:], salt)
-	scramCache.mu.Lock()
-	defer scramCache.mu.Unlock()
-	if scramCache.proven.get(id) != nil {
+	if same {
 		return
 	}
-	if n := scramCache.others.get(id); n != nil {
-		scramCache.others.drop(n)
-		scramCache.proven.put(n)
+	next := make(map[string][]byte, len(forms))
+	for f := range forms {
+		if k, ok := scramCache.salted[f]; ok {
+			next[f] = k
+		} else {
+			next[f] = scramDerive(f, scramSalt, scramIterations)
+		}
 	}
+	scramCache.salted = next
+}
+
+// scramSalted is form derived with scramSalt, from the set WarmPasswords
+// derived. A form outside it (a host that checks a password it did not warm)
+// is derived here, and kept until the next set.
+func scramSalted(form string) []byte {
+	scramCache.mu.Lock()
+	defer scramCache.mu.Unlock()
+	if k, ok := scramCache.salted[form]; ok {
+		return k
+	}
+	if scramCache.salted == nil {
+		scramCache.salted = map[string][]byte{}
+	}
+	k := scramDerive(form, scramSalt, scramIterations)
+	scramCache.salted[form] = k
+	return k
 }
 
 // scramChecks counts the password forms proofs were checked against, for a
@@ -373,21 +143,6 @@ var scramChecks atomic.Int64
 type Password struct {
 	authMessage []byte
 	proof       []byte
-	// salt is the one the exchange sent the client: its username's.
-	salt []byte
-	// ctx is the connection's: keys are not derived for one that ended.
-	// gate, when set, is asked before anything is derived, and false stops
-	// the check: the connection lost its place in the port (prelogin.go).
-	ctx  context.Context
-	gate func() bool
-	// busy: the proof was not checked, the port had too many to check, or
-	// it failed while the port had too many to check (a failure is answered
-	// the same then whether the name's keys were in memory or not).
-	// lostPlace: it was not checked because the connection's place went to
-	// another. since is when the proof reached the port.
-	busy      bool
-	lostPlace bool
-	since     time.Time
 	// salted is the derived password that matched, kept to sign the
 	// server's last message; nil until one matched.
 	salted []byte
@@ -401,59 +156,27 @@ func (p *Password) Matches(candidates []string) bool {
 	if p == nil {
 		return false
 	}
-	// What is checked, in order: each candidate in each of its forms, the
-	// made-up password in every place that is empty.
-	type check struct {
-		form string
-		real bool
-	}
-	var checks []check
-	var forms []string
+	var hit []byte
 	for i := range max(len(candidates), scramMinCandidates) {
 		real := i < len(candidates) && candidates[i] != ""
 		pw := scramDummy
 		if real {
 			pw = candidates[i]
 		}
-		own := saslPrepForms(pw)
+		forms := saslPrepForms(pw)
 		for j := range scramForms {
-			c := check{form: scramDummy}
-			if j < len(own) {
-				c = check{form: own[j], real: real}
+			scramChecks.Add(1)
+			form := scramDummy
+			if j < len(forms) {
+				form = forms[j]
 			}
-			checks = append(checks, c)
-			forms = append(forms, c.form)
-		}
-	}
-	if p.gate != nil && !p.gate() {
-		p.lostPlace = true
-		return false
-	}
-	ctx := p.ctx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	keys, err := scramKeys(ctx, p.salt, forms)
-	if err != nil {
-		p.busy = errors.Is(err, errScramBusy)
-		return false
-	}
-	var hit []byte
-	for _, c := range checks {
-		scramChecks.Add(1)
-		salted := keys[c.form]
-		if p.proves(salted) && c.real && hit == nil {
-			hit = salted
+			salted := scramSalted(form)
+			if p.proves(salted) && real && j < len(forms) && hit == nil {
+				hit = salted
+			}
 		}
 	}
 	p.salted = hit
-	if hit != nil {
-		scramProven(p.salt)
-	} else if scramWaiting.Load() >= scramWaitMax {
-		// With the line full a login under a new name is refused as busy
-		// unchecked: one under a name in memory that fails says the same.
-		p.busy = true
-	}
 	return hit != nil
 }
 
@@ -468,29 +191,6 @@ func (p *Password) proves(salted []byte) bool {
 	subtle.XORBytes(recovered, p.proof, signature)
 	got := sha256.Sum256(recovered)
 	return subtle.ConstantTimeCompare(got[:], stored[:]) == 1
-}
-
-// holdFailure waits until failedLoginFloor has passed since the proof
-// reached the port, or the connection ended: called before a login that did
-// not prove its password is refused.
-func (p *Password) holdFailure() {
-	if p == nil || p.matched() || p.since.IsZero() {
-		return
-	}
-	wait := failedLoginFloor - time.Since(p.since)
-	if wait <= 0 {
-		return
-	}
-	ctx := p.ctx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	t := time.NewTimer(wait)
-	defer t.Stop()
-	select {
-	case <-t.C:
-	case <-ctx.Done():
-	}
 }
 
 // matched says whether Matches found the password.
@@ -582,18 +282,8 @@ func malformedSCRAM(what string) *scramError {
 // exchange that cannot go on the client is sent the reason as a FATAL error,
 // and the error says the connection is over. endPoint is the TLS channel
 // binding data, used only when encrypted.
-func scramExchange(ctx context.Context, be *pgproto3.Backend, user string, encrypted bool, endPoint []byte, place *connPlace) (*Password, error) {
-	pw, err := scramSteps(be, user, encrypted, endPoint)
-	if pw != nil {
-		pw.since = time.Now()
-		pw.ctx = ctx
-		if place != nil {
-			// A connection whose proof is about to be checked has done its
-			// part of the login: it keeps its place from here, or learns it
-			// lost it and stops.
-			pw.gate = place.loggedIn
-		}
-	}
+func scramExchange(be *pgproto3.Backend, encrypted bool, endPoint []byte) (*Password, error) {
+	pw, err := scramSteps(be, encrypted, endPoint)
 	var se *scramError
 	if errors.As(err, &se) {
 		sendFatal(be, se.code, se.msg)
@@ -601,7 +291,7 @@ func scramExchange(ctx context.Context, be *pgproto3.Backend, user string, encry
 	return pw, err
 }
 
-func scramSteps(be *pgproto3.Backend, user string, encrypted bool, endPoint []byte) (*Password, error) {
+func scramSteps(be *pgproto3.Backend, encrypted bool, endPoint []byte) (*Password, error) {
 	// Before anyone is authenticated a message is part of the login and
 	// nothing else. The protocol library sizes its buffer from the length a
 	// message announces and has no ceiling of its own, so without one a
@@ -648,9 +338,7 @@ func scramSteps(be *pgproto3.Backend, user string, encrypted bool, endPoint []by
 		return nil, &scramError{"28000", "SCRAM channel binding negotiation error: the client did not see this port's offer of SCRAM-SHA-256-PLUS"}
 	}
 
-	// The username of the start-up message: the one the login is checked
-	// under (the one inside the SCRAM message is ignored, parseClientFirst).
-	salt := scramSaltFor(user)
+	salt := scramSalt
 	nonce := make([]byte, scramNonceLen)
 	_, _ = rand.Read(nonce)
 	combined := first.nonce + base64.RawStdEncoding.EncodeToString(nonce)
@@ -680,7 +368,6 @@ func scramSteps(be *pgproto3.Backend, user string, encrypted bool, endPoint []by
 	return &Password{
 		authMessage: []byte(first.bare + "," + serverFirst + "," + withoutProof),
 		proof:       proof,
-		salt:        salt,
 	}, nil
 }
 
