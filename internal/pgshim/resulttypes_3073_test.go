@@ -197,6 +197,46 @@ func TestWholeType(t *testing.T) {
 	}
 }
 
+// What the connection hands the copy carries the casts, when it runs a
+// statement and when it describes one first, so both announce one type.
+func TestAsPostgresTypes_handedToTheCopy(t *testing.T) {
+	modes := map[string]pgx.QueryExecMode{"SimpleProtocol": pgx.QueryExecModeSimpleProtocol, "DescribeExec": pgx.QueryExecModeDescribeExec}
+	for name, mode := range modes {
+		t.Run(name, func(t *testing.T) {
+			l := &typedLogin{answer: func(st string) (sqlsandbox.Result, error) {
+				res := sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "length", Type: "INTEGER"}}}
+				if !strings.Contains(st, "dbtrail_describe") {
+					res.Rows = [][]any{{json.Number("3")}}
+				}
+				return res, nil
+			}}
+			conn := dialTyped(t, l, mode)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var n int32
+			if err := conn.QueryRow(ctx, "SELECT length(t) FROM v").Scan(&n); err != nil || n != 3 {
+				t.Fatalf("got %d, %v", n, err)
+			}
+			ran, described := 0, 0
+			for _, st := range l.statements() {
+				if !strings.Contains(st, "length") {
+					continue
+				}
+				ran++
+				if !strings.Contains(st, "CAST(length(t) AS INTEGER)") {
+					t.Errorf("handed to the copy without its cast: %s", st)
+				}
+				if strings.Contains(st, "dbtrail_describe") {
+					described++
+				}
+			}
+			if ran == 0 || (mode == pgx.QueryExecModeDescribeExec) != (described > 0) {
+				t.Errorf("%d statements reached the copy, %d of them a Describe: %q", ran, described, l.statements())
+			}
+		})
+	}
+}
+
 // A statement of sums nested in sums is handed over as written: the
 // argument of a sum is written twice, and so would each one inside it be.
 func TestAsPostgresTypes_nestedSumsStaySmall(t *testing.T) {
