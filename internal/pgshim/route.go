@@ -1507,14 +1507,17 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 					return "a cast with :: to a type other than date"
 				}
 			case "/":
-				// A division by a whole number other than zero, of a column of
-				// whole numbers or of floats: what pgcompare measured. Any
+				// A division by a whole number other than zero, of a product of
+				// columns of whole numbers or of floats and whole numbers
+				// (rawDivisionLeftOK): what pgcompare measured. Any
 				// other can divide by zero (NULL on the copy, an error on
 				// PostgreSQL) or divide a numeric to another scale.
 				n := next
 				ok := n.kind == rtNumber && !strings.ContainsAny(n.text, ".eE") && strings.Trim(n.text, "0") != "" &&
 					!(at(i+2).kind == rtOp && (at(i+2).text == "." || at(i+2).text == "::" || at(i+2).text == "[")) &&
-					prev.kind == rtWord && all(prev.text, func(ty string) bool { return typeIsInteger(ty) || typeIsFloat(ty) })
+					rawDivisionLeftOK(toks, i, func(name string) bool {
+						return all(name, func(ty string) bool { return typeIsInteger(ty) || typeIsFloat(ty) })
+					})
 				if !ok {
 					return "a division"
 				}
