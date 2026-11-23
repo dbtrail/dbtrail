@@ -2144,8 +2144,17 @@ one of them lists the same schemas, tables and columns. Up to DBTrail
   writes differently, until its statements are added.
 - `\d` of an index is refused: the copy has no index; `\d <table>` shows the
   primary key. A connection reads the catalog once for a burst of statements:
-  a table hidden while it is connected leaves its listing within 10 seconds,
-  and is never readable.
+  a table or a column hidden while it is connected leaves its listing within
+  10 seconds, and is not readable in the meantime: a statement that reads the
+  table or the column fails as soon as the rule applies.
+- **A rule saved while a client is half way through a result does not reach
+  the rest of that result.** A client of the extended protocol can ask for
+  some rows of a statement and for the rest later (a cursor, a driver's fetch
+  size). The port computes the whole result when the statement runs and keeps
+  it for that client, so the rows it asks for after a rule that hides a
+  column was saved still carry that column: they are rows of a statement it
+  was allowed to run when it ran it. Its next statement is answered under the
+  rule.
 
 ### Interactive `AS OF` from `psql`
 

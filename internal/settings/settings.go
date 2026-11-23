@@ -307,6 +307,8 @@ var table = []Entry{
 	{Env: "BINTRAIL_PG_ROUTER_STATUS_STATEMENTS"},
 	// Which ROUTER_AWS_* the compose file was given (#2690), never values.
 	{Env: "BINTRAIL_ROUTER_OWN_AWS_KEYS", Kind: Internal},
+	// The same for PG_ROUTER_AWS_* and the pg-router service (#3142).
+	{Env: "BINTRAIL_PG_ROUTER_OWN_AWS_KEYS", Kind: Internal},
 	{Env: "BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS"},
 	{Env: "BINTRAIL_CONSOLE_ROUTE_READ_ONLY"},
 	{Env: "BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD"},
