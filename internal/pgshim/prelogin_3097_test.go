@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -522,7 +521,7 @@ func (c hangingConn) QueryContext(ctx context.Context, q string, _ []driver.Name
 	select {
 	case <-ctx.Done():
 		c.d.mu.Lock()
-		c.d.seen = append(c.d.seen, fmt.Sprintf("DEBUG cause=%v stack=%s", context.Cause(ctx), debug.Stack()))
+		c.d.seen = append(c.d.seen, fmt.Sprintf("its context ended: %v", context.Cause(ctx)))
 		c.d.mu.Unlock()
 		select {
 		case c.d.cancelled <- struct{}{}:
@@ -571,31 +570,32 @@ func TestPreLogin_firstModeClientHangsUpDuringAStatement(t *testing.T) {
 	if code != "" {
 		t.Fatalf("the tenant: %s", code)
 	}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_, _ = c.Exec(context.Background(), "SELECT * FROM _flashback.users AS OF '2026-01-01 00:00:00' WHERE id = 1").ReadAll()
-	}()
+	// The connection is driven by hand from here: a driver that finds its
+	// socket closed sends a cancel request on another connection, and that
+	// would stop the statement whether or not the port saw the client leave.
+	raw, err := c.Hijack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Conn.Close()
+	raw.Frontend.Send(&pgproto3.Query{String: "SELECT * FROM _flashback.users AS OF '2026-01-01 00:00:00' WHERE id = 1"})
+	if err := raw.Frontend.Flush(); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-idx.entered:
 	case <-time.After(10 * time.Second):
 		t.Fatalf("the statement did not reach the index server's events (it saw: %s)", idx.statements())
 	}
-	time.Sleep(300 * time.Millisecond)
-	select {
-	case <-idx.cancelled:
-		t.Fatalf("DEBUG the statement ended before the client left (the index server saw: %s)", idx.statements())
-	default:
-	}
-	t.Logf("DEBUG saw: %s", idx.statements())
 	// The client is gone, with its statement still running.
-	_ = c.Conn().Close()
+	_ = raw.Conn.Close()
 	select {
 	case <-idx.cancelled:
 	case <-time.After(10 * time.Second):
 		t.Fatalf("the client hung up and its connection's context did not end: the statement is still running (the index server saw: %s)", idx.statements())
 	}
-	<-done
-	t.Logf("DEBUG after: %s", idx.statements())
+	if saw := idx.statements(); !strings.Contains(saw, "its context ended: context canceled") {
+		t.Errorf("the statement was not ended by its connection's context: %s", saw)
+	}
 	placeGivenBack(t, addr, "a client hung up during its statement")
 }
