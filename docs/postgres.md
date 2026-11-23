@@ -1799,7 +1799,12 @@ estimate is used for one kind of statement, the one where it can be trusted:
 one table read alone, whole or by an index, with nothing left to check row
 by row (no `Filter` in the plan), under a `LIMIT` or a sort at most
 (`SELECT * FROM orders`, `SELECT * FROM orders WHERE id > 5000 ORDER BY id`).
-A `LIMIT` at or under the cap keeps the statement on the copy. For anything
+A `LIMIT` at or under the cap, written as a number, keeps the statement on
+the copy. A prepared statement with parameters (`LIMIT $1`, `WHERE id > $1`)
+is never sent to the source for its size: its plan is asked for once,
+without its values, PostgreSQL then estimates by fixed guesses (a `LIMIT $1`
+is taken to return a tenth of the rows), and the port does not take a guess
+for the size of a result. It is tried on the copy, as before. For anything
 else (a filter no index serves, a join, an aggregate, `GROUP BY`, `DISTINCT`,
 a window, a `UNION`, a partitioned table) the estimate is a guess, so the
 statement is tried on the copy as before, and one that does return more rows

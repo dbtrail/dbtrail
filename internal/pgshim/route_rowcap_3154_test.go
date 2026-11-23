@@ -3,6 +3,7 @@ package pgshim
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -84,6 +85,13 @@ func TestResultEstimate(t *testing.T) {
 			{"Node Type": "Seq Scan", "Parent Relationship": "InitPlan", "Total Cost": 90000, "Plan Rows": 2400000}]}`, 0},
 		{"a scan with a subplan of its own", `{"Node Type": "Seq Scan", "Total Cost": 98367, "Plan Rows": 2400000, "Plans": [
 			{"Node Type": "Result", "Parent Relationship": "InitPlan", "Total Cost": 1, "Plan Rows": 1}]}`, 0},
+		{"a bitmap read with an init plan among its children", `{"Node Type": "Bitmap Heap Scan", "Total Cost": 70000, "Plan Rows": 30000, "Recheck Cond": "(w_id = $0)", "Plans": [
+			{"Node Type": "Result", "Parent Relationship": "InitPlan", "Total Cost": 1, "Plan Rows": 1},
+			{"Node Type": "Bitmap Index Scan", "Parent Relationship": "Outer", "Total Cost": 300, "Plan Rows": 30000}]}`, 0},
+		{"a bitmap read with a subplan among its children", `{"Node Type": "Bitmap Heap Scan", "Total Cost": 70000, "Plan Rows": 30000, "Plans": [
+			{"Node Type": "Bitmap Index Scan", "Parent Relationship": "Outer", "Total Cost": 300, "Plan Rows": 30000},
+			{"Node Type": "Seq Scan", "Parent Relationship": "SubPlan", "Total Cost": 1, "Plan Rows": 1}]}`, 0},
+		{"a bitmap read whose child is not a node", `{"Node Type": "Bitmap Heap Scan", "Total Cost": 70000, "Plan Rows": 30000, "Plans": [3]}`, 0},
 		{"no table", `{"Node Type": "Result", "Total Cost": 1, "Plan Rows": 1}`, 0},
 		{"a function in FROM", `{"Node Type": "Function Scan", "Total Cost": 98367, "Plan Rows": 2400000}`, 0},
 		// A plan this cannot read gives no estimate, and no error: the cost
@@ -219,32 +227,80 @@ func TestRouteByCost_resultOverRowCap(t *testing.T) {
 	}
 }
 
-// A prepared statement is decided once, by its plan without values, and the
-// source answers its Describe and every execution.
+// A prepared statement with parameters is asked about without its values
+// (GENERIC_PLAN), and there PostgreSQL's rows are fixed guesses: LIMIT $1 is
+// taken to let a tenth of the rows through, an index condition on $1 a
+// fixed share of the table. Such a plan never sends the statement to the
+// source for its size, and the copy answers every execution; the verdict is
+// kept for as long as the statement lives, so a guess would send an ORM's
+// paging (ORDER BY ... LIMIT $1) to the source for good.
 func TestRouteByCost_resultOverRowCap_prepared(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	src := startFakeSource(t, rowCapPlans)
+	plans := map[string]string{
+		// 2,400,000 rows sorted, and a tenth of them "returned".
+		"FROM paged": plan(`{"Node Type": "Limit", "Total Cost": 400000, "Plan Rows": 240000, "Plans": [
+			{"Node Type": "Sort", "Total Cost": 400000, "Plan Rows": 2400000, "Plans": [
+				{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}]}`),
+		// A third of the table for id > $1.
+		"FROM ranged": plan(`{"Node Type": "Index Scan", "Total Cost": 60000, "Plan Rows": 800000, "Index Cond": "(id > $1)"}`),
+		// No parameter in what is read: still not judged.
+		"FROM listed": plan(`{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}`),
+		"FROM whole":  plan(`{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}`),
+	}
+	src := startFakeSource(t, plans)
 	l := &costLogin{src: src, cost: &CostPolicy{CostThreshold: DefaultCostThreshold, ScanRows: DefaultScanRows, RowCap: 1000}}
 	c := costPortConn(t, ctx, l)
-	const stmt = "SELECT n FROM ranged WHERE id > $1"
-	if _, err := c.Prepare(ctx, "s", stmt, nil); err != nil {
-		t.Fatal(err)
-	}
-	for i := range 3 {
-		res := c.ExecPrepared(ctx, "s", [][]byte{[]byte("5")}, nil, nil).Read()
-		if res.Err != nil || len(res.Rows) != 1 || string(res.Rows[0][0]) != "42" {
-			t.Errorf("run %d: %v %q, want the source's 42", i, res.Err, res.Rows)
+	for i, tc := range []struct {
+		name, stmt string
+		args       [][]byte
+		answer     string
+		side       string
+		reason     string
+		explain    string
+	}{
+		{"paging with LIMIT $1", "SELECT n FROM paged ORDER BY n LIMIT $1", [][]byte{[]byte("20")}, "7", RouteCopy, ReasonAnswersTheSame,
+			"EXPLAIN (GENERIC_PLAN, FORMAT JSON) SELECT n FROM paged ORDER BY n LIMIT $1"},
+		{"an index range on $1", "SELECT n FROM ranged WHERE id > $1", [][]byte{[]byte("5")}, "7", RouteCopy, ReasonAnswersTheSame,
+			"EXPLAIN (GENERIC_PLAN, FORMAT JSON) SELECT n FROM ranged WHERE id > $1"},
+		{"a parameter that filters nothing the plan shows", "SELECT n FROM listed WHERE n = $1", [][]byte{[]byte("5")}, "7", RouteCopy, ReasonAnswersTheSame,
+			"EXPLAIN (GENERIC_PLAN, FORMAT JSON) SELECT n FROM listed WHERE n = $1"},
+		// Without parameters the plan is the statement's own, values and
+		// all: over the cap, the source answers every execution.
+		{"prepared without parameters", "SELECT n FROM whole", nil, "42", RouteSource, ReasonResultOverRowCap,
+			"EXPLAIN (FORMAT JSON) SELECT n FROM whole"},
+	} {
+		name := fmt.Sprintf("s%d", i)
+		before, runs := len(src.explained()), l.runs.Load()
+		if _, err := c.Prepare(ctx, name, tc.stmt, nil); err != nil {
+			t.Fatalf("%s: prepare: %v", tc.name, err)
 		}
-		if n := l.last(); n.Side != RouteSource || n.Reason != ReasonResultOverRowCap {
-			t.Errorf("run %d: noted %s/%s", i, n.Side, n.Reason)
+		for run := range 3 {
+			res := c.ExecPrepared(ctx, name, tc.args, nil, nil).Read()
+			if res.Err != nil || len(res.Rows) != 1 || string(res.Rows[0][0]) != tc.answer {
+				t.Errorf("%s, run %d: %v %q, want %s", tc.name, run, res.Err, res.Rows, tc.answer)
+			}
+			if n := l.last(); n.Side != tc.side || n.Reason != tc.reason {
+				t.Errorf("%s, run %d: noted %s/%s, want %s/%s", tc.name, run, n.Side, n.Reason, tc.side, tc.reason)
+			}
+		}
+		if asked := src.explained()[before:]; len(asked) != 1 || asked[0] != tc.explain {
+			t.Errorf("%s: the source was asked %q, want %q once", tc.name, asked, tc.explain)
+		}
+		if onCopy := l.runs.Load() - runs; tc.side == RouteSource && onCopy != 0 {
+			t.Errorf("%s: the copy ran %d statement(s)", tc.name, onCopy)
 		}
 	}
-	if asked := src.explained(); len(asked) != 1 || asked[0] != "EXPLAIN (GENERIC_PLAN, FORMAT JSON) "+stmt {
-		t.Errorf("the source was asked %q, want the plan without values once", asked)
-	}
-	if n := l.runs.Load(); n != 0 {
-		t.Errorf("the copy ran %d statement(s)", n)
+	// The same paging written with its number is read from the plan: a
+	// LIMIT of 20 is 20 rows, and stays on the copy for that.
+	lit := &costLogin{src: startFakeSource(t, map[string]string{
+		"FROM paged": plan(`{"Node Type": "Limit", "Total Cost": 400000, "Plan Rows": 20, "Plans": [
+			{"Node Type": "Sort", "Total Cost": 400000, "Plan Rows": 2400000, "Plans": [
+				{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}]}`)}),
+		cost: &CostPolicy{CostThreshold: DefaultCostThreshold, ScanRows: DefaultScanRows, RowCap: 1000}}
+	d := costPortConn(t, ctx, lit)
+	if got := costSimple(ctx, d, lit, "SELECT n FROM paged ORDER BY n LIMIT 20"); got.side != RouteCopy {
+		t.Errorf("LIMIT 20 written out: %+v, want the copy", got)
 	}
 }
 

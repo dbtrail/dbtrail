@@ -166,6 +166,10 @@ func parsePGPlan(raw []byte) (pgPlan, error) {
 // the top node already counts. The estimate is the top node's Plan Rows: a
 // LIMIT has cut it, and a Gather has counted every process.
 //
+// A plan asked for without values (GENERIC_PLAN, for a prepared statement
+// with parameters) is not judged by this at all: routeByCostPlan drops its
+// estimate.
+//
 // Any other plan has no estimate here, and the statement is tried on the
 // copy as before: a filter no index serves is a guess from an assumed
 // selectivity (a scan estimated at 221,203 rows that returns 1), and so are
@@ -200,6 +204,18 @@ func resultEstimate(top map[string]any) float64 {
 			// own condition, asked again of a page kept whole.
 			if _, filtered := node["Filter"]; filtered {
 				return 0
+			}
+			list, _ := node["Plans"].([]any)
+			for _, c := range list {
+				child, ok := c.(map[string]any)
+				if !ok {
+					return 0
+				}
+				// A subplan or an init plan under it decides rows too, as
+				// under the other scans.
+				if rel, _ := child["Parent Relationship"].(string); rel == "InitPlan" || rel == "SubPlan" {
+					return 0
+				}
 			}
 			return rows
 		default:
@@ -398,6 +414,18 @@ func (s *session) routeByCostPlan(text string, generic bool) (d routeDecision, k
 	if !toCopy {
 		s.logger.Debug("pgshim: sent to the source", "reason", ReasonCheapPlan, "plan", why)
 		return routeDecision{RouteSource, ReasonCheapPlan}, true, nil, &pl
+	}
+	if generic {
+		// A plan asked for without the statement's values (a prepared
+		// statement with parameters) estimates by fixed guesses wherever a
+		// parameter stands: LIMIT $1 is taken to let a tenth of the rows
+		// through, an index condition on $1 a fixed share of the table. Its
+		// rows say nothing of what an execution returns, and the verdict is
+		// kept for as long as the prepared statement lives: no such plan
+		// sends a statement to the source for its size. It is tried on the
+		// copy, as before, which is what the MySQL port does with a LIMIT
+		// it cannot read (readrouter resultRows).
+		pl.resultRows = 0
 	}
 	if over := pol.overRowCap(pl); over != "" {
 		// The copy would run it and refuse its result for its size (#3154):
