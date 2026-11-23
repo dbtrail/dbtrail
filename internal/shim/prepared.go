@@ -250,6 +250,13 @@ func (h *Handler) prepareRouted(query string, parts []string) (int, int, any, er
 	if err := h.readOnlyRefusal(query); err != nil {
 		return 0, 0, nil, err
 	}
+	if h.routerCfg.ReadOnly {
+		// Prepared, it would run on the source at each execution: the
+		// port answers these only as plain statements (routeStatement).
+		if action, _ := readrouter.ReadOnlyMark(query); action != readrouter.MarkNone {
+			return 0, 0, nil, h.refuseReadOnly(readWriteRefused)
+		}
+	}
 	ctx, cancel := h.queryContext()
 	defer cancel()
 	up, err := h.router.Prepare(ctx, query)
