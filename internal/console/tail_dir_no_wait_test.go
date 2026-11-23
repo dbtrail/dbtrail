@@ -287,7 +287,7 @@ func waitsForUpdate(k *tailKeeper, ctx context.Context, read []views.BaselineTab
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		k.waitUpdateOver(ctx, read, limit)
+		k.waitUpdateOver(ctx, read, limit, false)
 	}()
 	return done
 }
@@ -486,4 +486,102 @@ func TestWaitUpdateOver(t *testing.T) {
 		k.stop()
 		returnsSoon(t, done, "after the keeper closed")
 	})
+}
+
+// With the wait for the source on, a statement over a table with a version
+// waits for the running update first: its 200 ms must not run out during it.
+func TestWaitUpdateOver_evenWithAVersion(t *testing.T) {
+	r := newWaitRig(t, 200*time.Millisecond)
+	r.publish(t)
+	updateRuns(r.k)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.k.waitUpdateOver(context.Background(), r.read, time.Minute, true)
+	}()
+	stillWaiting(t, done, "the statement that waits for the source")
+	r.k.pub.mu.Lock()
+	r.k.pub.updating = false
+	r.k.pub.markPublishedLocked()
+	r.k.pub.mu.Unlock()
+	returnsSoon(t, done, "after the update")
+	r.k.mu.Unlock()
+
+	// And at its limit, like any other.
+	updateRuns(r.k)
+	defer r.k.mu.Unlock()
+	capped := make(chan struct{})
+	go func() {
+		defer close(capped)
+		r.k.waitUpdateOver(context.Background(), r.read, 200*time.Millisecond, true)
+	}()
+	returnsSoon(t, capped, "past its limit")
+}
+
+// freshWaitWillAct is true exactly where waitForSource would wait.
+func TestFreshWaitWillAct(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(r *waitRig) (context.Context, []views.BaselineTable)
+		want bool
+	}{
+		{"on, a MySQL source, tails published", func(r *waitRig) (context.Context, []views.BaselineTable) {
+			return withTailsFor(context.Background(), r.id), r.read
+		}, true},
+		{"the switch off", func(r *waitRig) (context.Context, []views.BaselineTable) {
+			r.s.freshWait = 0
+			return withTailsFor(context.Background(), r.id), r.read
+		}, false},
+		{"no way to read the source's position", func(r *waitRig) (context.Context, []views.BaselineTable) {
+			r.s.sourcePos = nil
+			return withTailsFor(context.Background(), r.id), r.read
+		}, false},
+		{"no way to read capture's position", func(r *waitRig) (context.Context, []views.BaselineTable) {
+			r.s.freshSavedHook = nil
+			return withTailsFor(context.Background(), r.id), r.read
+		}, false},
+		{"a statement of no server", func(r *waitRig) (context.Context, []views.BaselineTable) {
+			return context.Background(), r.read
+		}, false},
+		{"the boot server", func(r *waitRig) (context.Context, []views.BaselineTable) {
+			return withTailsFor(context.Background(), bootServerID), r.read
+		}, false},
+		{"a server not in the registry", func(r *waitRig) (context.Context, []views.BaselineTable) {
+			return withTailsFor(context.Background(), "nosuch"), r.read
+		}, false},
+		{"a PostgreSQL source", func(r *waitRig) (context.Context, []views.BaselineTable) {
+			must(r.t, r.s.cm.reg.UpdateWith(r.id, func(e ServerEntry) (ServerEntry, bool) { e.Flavor = FlavorPostgres; return e, true }))
+			return withTailsFor(context.Background(), r.id), r.read
+		}, false},
+		{"no source", func(r *waitRig) (context.Context, []views.BaselineTable) {
+			must(r.t, r.s.cm.reg.UpdateWith(r.id, func(e ServerEntry) (ServerEntry, bool) { e.SourceDSN = ""; return e, true }))
+			return withTailsFor(context.Background(), r.id), r.read
+		}, false},
+		{"no table", func(r *waitRig) (context.Context, []views.BaselineTable) {
+			return withTailsFor(context.Background(), r.id), nil
+		}, false},
+		{"a table with no version", func(r *waitRig) (context.Context, []views.BaselineTable) {
+			return withTailsFor(context.Background(), r.id), []views.BaselineTable{r.read[0], keeperTable("lines")}
+		}, false},
+		{"a newer cut of the table", func(r *waitRig) (context.Context, []views.BaselineTable) {
+			return withTailsFor(context.Background(), r.id), []views.BaselineTable{newerCut(r.read[0])}
+		}, false},
+		{"a source that refused its position", func(r *waitRig) (context.Context, []views.BaselineTable) {
+			w := r.s.freshWaits.of(r.id)
+			w.mu.Lock()
+			w.refusedUntil = time.Now().Add(time.Hour)
+			w.mu.Unlock()
+			return withTailsFor(context.Background(), r.id), r.read
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newWaitRig(t, 200*time.Millisecond)
+			r.t = t
+			r.publish(t)
+			ctx, read := tc.edit(r)
+			if got := r.s.freshWaitWillAct(ctx, nil, r.k, read); got != tc.want {
+				t.Errorf("%v, want %v", got, tc.want)
+			}
+		})
+	}
 }

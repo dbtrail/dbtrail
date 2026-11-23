@@ -19,7 +19,12 @@ import (
 // time to run. Past limit the statement goes on the normal way: MySQL or the
 // source answers it, or the copy does, saying it read the snapshot alone.
 // limit 0 or less is one update's own deadline.
-func (k *tailKeeper) waitUpdateOver(ctx context.Context, read []views.BaselineTable, limit time.Duration) {
+//
+// evenWithVersion waits for the running update whatever versions the tables
+// have: a statement about to wait for the source (freshWaitWillAct) promises
+// its client's own last write, and its short wait would otherwise run out
+// during the update and read the version from before it.
+func (k *tailKeeper) waitUpdateOver(ctx context.Context, read []views.BaselineTable, limit time.Duration, evenWithVersion bool) {
 	if len(read) == 0 {
 		return
 	}
@@ -49,7 +54,7 @@ func (k *tailKeeper) waitUpdateOver(ctx context.Context, read []views.BaselineTa
 		ch := k.nextPublish()
 		p.mu.Lock()
 		over := !p.updating || p.pubGen >= target
-		pending := p.tailsPendingLocked(read)
+		pending := evenWithVersion || p.tailsPendingLocked(read)
 		p.mu.Unlock()
 		if over || !pending {
 			return
@@ -93,4 +98,44 @@ func (p *tailPublish) tailsPendingLocked(read []views.BaselineTable) bool {
 		pending = true
 	}
 	return pending
+}
+
+// freshWaitWillAct says waitForSource will really wait for this statement:
+// the switch is on, its server is a MySQL source whose position can be read,
+// and every table it reads has a version. Asked before it, in its own order
+// and with nothing counted or started, so that a statement it would skip for
+// does not hold a worker for a running update.
+func (s *Server) freshWaitWillAct(ctx context.Context, b *bundle, k *tailKeeper, read []views.BaselineTable) bool {
+	id, ok := tailsFor(ctx)
+	if !ok || s.freshWait <= 0 || s.sourcePos == nil || k == nil || len(read) == 0 {
+		return false
+	}
+	if s.freshSavedHook == nil && (b == nil || b.db == nil) {
+		return false
+	}
+	if id == bootServerID || s.cm == nil || s.cm.reg == nil {
+		return false
+	}
+	entry, found := s.cm.reg.Get(id)
+	if !found || entry.SourceDSN == "" || entry.IsPostgres() {
+		return false
+	}
+	p := &k.pub
+	p.mu.Lock()
+	all := true
+	for _, t := range read {
+		key := tailKey(t.Schema, t.Table)
+		cut, covered := p.cuts[key]
+		_, has := p.views[key]
+		all = all && covered && has && cut == tailCutOf(t)
+	}
+	p.mu.Unlock()
+	if !all {
+		return false
+	}
+	w := s.freshWaits.of(id)
+	w.mu.Lock()
+	refused := time.Now().Before(w.refusedUntil)
+	w.mu.Unlock()
+	return !refused
 }
