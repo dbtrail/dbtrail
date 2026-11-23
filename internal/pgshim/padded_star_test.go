@@ -98,7 +98,6 @@ func TestPaddedStar_toTheSource(t *testing.T) {
 		`SELECT id FROM (SELECT * FROM codes) s WHERE id IN (WITH z AS (SELECT 1 AS a) SELECT a FROM z)`,
 		// A star a subquery hands to an expression.
 		`SELECT id FROM plain WHERE name IN (SELECT * FROM codes)`,
-		`SELECT id FROM plain WHERE EXISTS (SELECT * FROM codes)`,
 		`SELECT (SELECT * FROM codes LIMIT 1) FROM plain`,
 		`SELECT ARRAY(SELECT * FROM codes) FROM plain`,
 		// IS DISTINCT FROM is not the FROM of its SELECT.

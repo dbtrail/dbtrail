@@ -1925,6 +1925,17 @@ The source answers:
   domain, an enum or another type that is not built in. A `char(n)` column named in the last
   `SELECT` of a `WITH` goes to the source even when returned as it is: the
   bytes match, but the port would announce it as `text`, not `bpchar(n)`.
+  Two more places where a table with a `char(n)` column stands without its
+  padding counting, and the statement stays on the copy: as a later table of
+  a `FROM` list written with commas (`FROM orders, order_line WHERE
+  ol_o_id = o_id`), which joins by what its `WHERE` compares, as `JOIN ...
+  ON` does; and under the `*` of `EXISTS (SELECT * FROM t WHERE ...)` or
+  `NOT EXISTS`, whose select list PostgreSQL never reads. In both, the
+  `char(n)` column itself named in the `WHERE` still sends the statement to
+  the source. A list that mixes `JOIN ... ON` with commas is not followed
+  and goes to the source, and so does a `*` in any other subquery (`IN`,
+  `= ANY`, a subquery used as a value or compared as a row) and an `EXISTS`
+  whose subquery has a `UNION`, `INTERSECT` or `EXCEPT`.
   The rule is by where the column stands,
   not by what it would give: `WHERE code IS NULL` answers the same on both
   sides and goes to the source all the same. Only the tables the statement

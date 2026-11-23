@@ -49,6 +49,21 @@ func provenNotPadded(c CatalogColumn) bool {
 // compares without its trailing blanks on PostgreSQL, whatever the columns.
 var starPaddedTypes = map[string]bool{"char": true, "character": true, "bpchar": true, "nchar": true}
 
+// paddedTypeWritten reports whether a token may give a value the padded type
+// without any column: the type's name, or an argument, whose declared type is
+// not in the text (declared bpchar, it compares without its trailing blanks).
+func paddedTypeWritten(t rtToken) bool {
+	switch t.kind {
+	case rtQuoted:
+		return strings.EqualFold(t.text, "bpchar") || t.text == "char"
+	case rtParam:
+		return true
+	case rtWord:
+		return starPaddedTypes[t.text]
+	}
+	return false
+}
+
 // starUnfollowed are words that put a statement outside what paddedExempt
 // follows.
 var starUnfollowed = map[string]bool{
@@ -98,12 +113,7 @@ func paddedExempt(toks []rtToken, types map[string][]string) map[int]bool {
 		if t.kind == rtOp && t.text == ";" {
 			return nil
 		}
-		if t.kind == rtQuoted && (strings.EqualFold(t.text, "bpchar") || t.text == "char") {
-			return nil
-		}
-		// An argument's type is not in the text: declared bpchar, it compares
-		// without its trailing blanks.
-		if t.kind == rtParam {
+		if paddedTypeWritten(t) {
 			return nil
 		}
 		if t.kind != rtWord {
@@ -114,7 +124,7 @@ func paddedExempt(toks []rtToken, types map[string][]string) map[int]bool {
 		if i > 0 && (isOpTok(toks, i-1, ".") || toks[i-1].kind == rtWord && toks[i-1].text == "as") && (aliasStop[t.text] || starFromEnd[t.text] || starJoinWords[t.text]) {
 			return nil
 		}
-		if starPaddedTypes[t.text] || starUnfollowed[t.text] || t.text == "with" && i != 0 {
+		if starUnfollowed[t.text] || t.text == "with" && i != 0 {
 			return nil
 		}
 		if t.text == "by" && i+1 < n && toks[i+1].kind == rtWord && toks[i+1].text == "all" {
