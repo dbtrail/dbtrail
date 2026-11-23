@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -175,5 +176,34 @@ func TestCombined_aKeptConnectionIsResetBeforeItIsUsed(t *testing.T) {
 	}
 	if n := l.held.Load(); n != 1 {
 		t.Errorf("%d held", n)
+	}
+}
+
+// Nothing is sent to a source the host bars, not even the reset of a
+// connection kept from before the rule.
+func TestCombined_noResetOnABarredSource(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	src := startFakeSource(t, costPlans)
+	var barred atomic.Bool
+	l := &costLogin{src: src, keep: &keptSources{}, barred: func() string {
+		if barred.Load() {
+			return "hidden rules"
+		}
+		return ""
+	}}
+	c := costPortConn(t, ctx, l)
+	if got := costSimple(ctx, c, l, keepLookup); got != keepAnswer {
+		t.Fatal(got)
+	}
+	barred.Store(true)
+	if got := costSimple(ctx, c, l, keepLookup); got.side != RouteCopy {
+		t.Fatalf("barred: %+v", got)
+	}
+	src.mu.Lock()
+	n := src.discards
+	src.mu.Unlock()
+	if n != 0 {
+		t.Errorf("%d resets sent to a barred source", n)
 	}
 }

@@ -633,6 +633,25 @@ func TestIntegrationPGRouterForward(t *testing.T) {
 		if again := one(ctx, c, "SELECT pg_backend_pid()"); again != pid {
 			t.Errorf("the connection was not kept: backend %s, then %s", pid, again)
 		}
+		// What the port itself keeps for the client is given back after the
+		// reset: its settings, and its prepared statements.
+		if got := one(ctx, c, "SET statement_timeout = '7s'"); strings.HasPrefix(got, "error") {
+			t.Fatal(got)
+		}
+		for i := range 2 {
+			if got := one(ctx, c, "SELECT current_setting('statement_timeout') FROM (SELECT now()) x"); got != "7s" {
+				t.Errorf("the client's own setting, read %d: %q", i, got)
+			}
+		}
+		if _, err := c.Prepare(ctx, "kept_stmt", "SELECT $1::int + 1 FROM (SELECT now()) x", nil); err != nil {
+			t.Fatal(err)
+		}
+		for i := range 3 {
+			res := c.ExecPrepared(ctx, "kept_stmt", [][]byte{[]byte("41")}, nil, nil).Read()
+			if res.Err != nil || len(res.Rows) != 1 || string(res.Rows[0][0]) != "42" {
+				t.Errorf("a prepared statement, execution %d: %v %q", i, res.Err, res.Rows)
+			}
+		}
 	})
 
 	t.Run("at most the port's connections to the sources", func(t *testing.T) {
