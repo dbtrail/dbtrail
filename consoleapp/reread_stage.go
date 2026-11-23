@@ -115,6 +115,12 @@ func rereadTableList(tables []string) ([]string, error) {
 			// quote one.
 			return nil, fmt.Errorf("%w: %q has a comma in its name, which mydumper's table list cannot hold", errRereadUnavailable, st)
 		}
+		if strings.Contains(table, ".") {
+			// Measured with mydumper 1.0.3-1: a table whose name holds a dot
+			// is not read from a table list, and the dump ends well without
+			// it. A dot in the schema's name cannot be told from this one.
+			return nil, fmt.Errorf("%w: %q has a dot in its table or schema name, which mydumper does not match in a table list", errRereadUnavailable, st)
+		}
 		if !slices.Contains(out, st) {
 			out = append(out, st)
 		}
@@ -129,7 +135,7 @@ func rereadTableList(tables []string) ([]string, error) {
 // errRereadUnavailable says no table of this server (or not these) can be
 // read alone, and the caller takes a full read: a PostgreSQL server, a lock
 // mode other than ftwrl and lock-all, a mydumper that cannot be told the
-// mode, a comma in a name.
+// mode, a comma or a dot in a name.
 func (s *baselineSupervisor) stageReread(req console.BaselineRequest, tables []string) (stagedReread, error) {
 	want, err := rereadTableList(tables)
 	if err != nil {

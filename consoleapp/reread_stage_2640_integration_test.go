@@ -30,8 +30,11 @@ func TestIntegrationStageReread_realMydumperNames_2640(t *testing.T) {
 	other := name + "_b"
 	testutil.MustExec(t, db, "CREATE DATABASE `"+other+"`")
 	t.Cleanup(func() { _, _ = db.Exec("DROP DATABASE IF EXISTS `" + other + "`") })
-	tables := []string{name + ".orders", name + ".Order Items", name + ".v1.2", other + ".t"}
-	for _, st := range tables {
+	tables := []string{name + ".orders", name + ".Order Items", other + ".t"}
+	// A dot in a table's name: measured, mydumper 1.0.3-1 does not read it
+	// from a table list, so stageReread refuses it before the dump.
+	dotted := name + ".v1.2"
+	for _, st := range append([]string{dotted}, tables...) {
 		schema, table, _ := strings.Cut(st, ".")
 		q := "`" + schema + "`.`" + table + "`"
 		testutil.MustExec(t, db, "CREATE TABLE "+q+" (id INT PRIMARY KEY, label VARCHAR(20))")
@@ -86,6 +89,9 @@ func TestIntegrationStageReread_realMydumperNames_2640(t *testing.T) {
 				t.Fatal(err)
 			}
 
+			if _, err := s.stageReread(req, []string{name + ".orders", dotted}); !errors.Is(err, errRereadUnavailable) {
+				t.Fatalf("err = %v, want a table with a dot in its name refused for a full read", err)
+			}
 			_, err = s.stageReread(req, []string{name + ".orders", name + ".gone"})
 			if !errors.Is(err, errRereadTableMissing) || !strings.Contains(err.Error(), name+".gone") {
 				t.Fatalf("err = %v, want the table the source does not hold named", err)
