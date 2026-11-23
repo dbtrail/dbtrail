@@ -948,6 +948,12 @@ writes at all a changed column is seen at the first update after the next
 write to any table. `bintrail baseline refresh` on the command line does not
 read the source and makes no such comparison.
 
+A full read copies tables in parallel, each on a connection of its own to the
+source. One started by DBTrail itself (the Create button, a schedule,
+`snapshot run`) copies four tables at once, as a MySQL full read does, so at
+most four connections to the source copy tables at a time. `bintrail-pg baseline` takes its number from `--parallelism`, one per
+CPU of the machine it runs on unless set.
+
 A full read starts from the replication slot's position, so it needs the slot
 to have one. On a busy source capture can take a while to get its slot:
 PostgreSQL finishes creating a slot only when every write transaction that was
@@ -988,7 +994,9 @@ What to know:
   the loaded rows. Not made: other indexes and constraints, collations,
   comments, grants, and any type or sequence a default refers to that the table
   does not own; a snapshot taken before these facts were recorded is refused
-  (take a new one). `--output-format mydumper` is refused.
+  (take a new one). `--output-format mydumper` is refused. The web
+  interface's **Build a .sql backup for any moment** on a PostgreSQL server
+  builds these same files, and its download is one `.tar.gz` of them.
 - **A change to the table's columns or primary key refuses**, a type-only
   change included: the fold compares the shape the snapshot recorded with every
   shape the stream saw up to the point, and the key the changes were captured
