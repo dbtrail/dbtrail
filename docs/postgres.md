@@ -1642,6 +1642,17 @@ forwarding user of its own, when the server has one, is used instead. An edit
 that points the source at another user or address takes the yes back, and the
 form says so: the box has to be ticked again for the new one.
 
+Removing the forwarding user is not the same in the two places. In the web
+interface, **Remove the forwarding account** says the port then stops
+forwarding for the server, so it also takes the yes back, before the user is
+removed: nothing is sent to your PostgreSQL afterwards, and the save says so
+from what DBTrail answered. To forward as the source user instead, tick the
+box once the removal is saved. On a terminal, `server forward-user <server>
+--remove` removes the user alone: with a yes saved, the source user takes its
+place, and the command says so and names `--no-capture-account`. A server
+that hides tables or columns sends nothing to your PostgreSQL whatever is
+saved, and both the form and the SQL clients page say that for it.
+
 That role can read more than the copy holds (it can be the database owner, or
 the master user on a managed service, and read the system catalog), so with
 it the port sends a statement to your PostgreSQL only when all of this holds,
