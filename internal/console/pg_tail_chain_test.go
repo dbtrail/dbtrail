@@ -560,7 +560,7 @@ func scaleReadChain(t *testing.T, tbl views.BaselineTable, v tailView) time.Dura
 	}
 	start := time.Now()
 	var n int64
-	if err := db.QueryRow("SELECT count(*), max(status) FROM (" + q + ")").Scan(&n, new(sql.NullString)); err != nil {
+	if err := db.QueryRow("SELECT count(*), max(status) FROM ("+q+")").Scan(&n, new(sql.NullString)); err != nil {
 		t.Fatalf("%v\n%s", err, q)
 	}
 	return time.Since(start)
