@@ -123,7 +123,20 @@ func charCases() []charCase {
 		sent(`SELECT id, concat(c, '|') FROM ` + x + ` ORDER BY id`),
 		sent(`SELECT id FROM ` + x + ` WHERE c LIKE 'ab%' ORDER BY id`),
 		sent(`SELECT id FROM ` + x + ` WHERE c IS NULL ORDER BY id`),
-		sent(`SELECT c, count(*) FROM ` + x + ` GROUP BY c`),
+		// Sorted, a char(n) is text: the source sorts it by its collation.
+		differs(`SELECT c, count(*) FROM ` + x + ` GROUP BY c ORDER BY c`),
+		// A whole key of GROUP BY (#3219): every value of a char(n) has the
+		// same length, so both sides make the same groups.
+		stays(`SELECT c, count(*) FROM ` + x + ` GROUP BY c`),
+		stays(`SELECT count(*), sum(k) FROM ` + x + ` GROUP BY c`),
+		stays(`SELECT a.c, count(*) AS n, sum(b.k) FROM ` + x + ` a JOIN ` + p + ` b ON b.id = a.id GROUP BY a.c`),
+		stays(`SELECT c, k, count(*) FROM ` + x + ` WHERE k < 6 GROUP BY c, k HAVING count(*) >= 1`),
+		// A bpchar without a length keeps each value's own blanks: two
+		// groups on the copy where PostgreSQL makes one.
+		differs(`SELECT u, count(*) FROM ` + x + ` GROUP BY u`),
+		differs(`SELECT count(*) FROM ` + x + ` GROUP BY u`),
+		// The key used again, or inside an expression: the source's.
+		sent(`SELECT c, count(*) FROM ` + x + ` GROUP BY c HAVING c IS NOT NULL`),
 		sent(`SELECT count(DISTINCT c), count(c) FROM ` + x),
 		// A table with a char(n) as a later item of a FROM list written with
 		// commas (#3219): the join compares what its WHERE compares.
@@ -145,6 +158,23 @@ func charCases() []charCase {
 		// A table alias spelled like a keyword, with a list that renames the
 		// columns: the renamed char(n) column is compared.
 		differs(`SELECT count(*) FROM ` + x + ` AS materialized(p, q) WHERE q = 'ab'`),
+		// A char(n) as a key of GROUP BY (#3219) beside a list with commas
+		// and an EXISTS (#3219): neither lets the other through.
+		stays(`SELECT a.c, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY a.c`),
+		stays(`SELECT a.c, d.c, count(*) FROM ` + x + ` a, ` + x + ` d WHERE a.id = d.id GROUP BY a.c, d.c`),
+		stays(`SELECT a.c, b.c, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY a.c, b.c`),
+		differs(`SELECT a.c, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.c = b.c GROUP BY a.c`),
+		differs(`SELECT a.c, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id AND a.c = 'ab' GROUP BY a.c`),
+		sent(`SELECT a.c, d.c, count(*) FROM ` + x + ` a, ` + x + ` d WHERE a.c = d.c GROUP BY a.c, d.c`),
+		differs(`SELECT a.u, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY a.u`),
+		differs(`SELECT a.c, a.u, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY a.c, a.u`),
+		differs(`SELECT a.c, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY a.c ORDER BY a.c`),
+		sent(`SELECT a.c AS z, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY z`),
+		{`SELECT b.t AS c, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY c`, sqlcompare.SourceError, false},
+		sent(`SELECT count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY a.arr`),
+		sent(`SELECT a.c, count(*) FROM ` + x + ` a WHERE EXISTS (SELECT * FROM ` + p + ` b WHERE b.id = a.id) GROUP BY a.c`),
+		sent(`SELECT a.c, count(*) FROM ` + x + ` a WHERE EXISTS (SELECT * FROM ` + x + ` d WHERE d.c = a.c) GROUP BY a.c`),
+		differs(`SELECT b.k, count(*) FROM ` + p + ` b WHERE EXISTS (SELECT * FROM ` + x + ` a WHERE a.c = b.c) GROUP BY b.k`),
 		// WITH ... AS [NOT] MATERIALIZED.
 		stays(`WITH y AS MATERIALIZED (SELECT id, k FROM ` + p + `) SELECT id, k FROM y ORDER BY id`),
 		stays(`WITH y AS NOT MATERIALIZED (SELECT id, k FROM ` + p + `) SELECT id FROM y WHERE k > 2 ORDER BY id`),

@@ -137,9 +137,11 @@ func TestPadded_toTheSource(t *testing.T) {
 		`SELECT a.id FROM codes a JOIN plain b ON b.name = a.code`,
 		`SELECT a.id FROM codes a JOIN plain b USING (code)`,
 		`SELECT a.id FROM codes a, plain b WHERE a.code = b.code`,
-		// GROUP BY, DISTINCT, ORDER BY.
-		`SELECT code, count(*) FROM codes GROUP BY code`,
-		`SELECT count(*) FROM codes GROUP BY code`,
+		// GROUP BY of anything but the column alone, DISTINCT, ORDER BY.
+		`SELECT code, count(*) FROM codes GROUP BY code ORDER BY code`,
+		`SELECT count(*) FROM codes GROUP BY code || 'x'`,
+		`SELECT count(*) FROM codes GROUP BY code HAVING code = 'ab'`,
+		`SELECT n FROM (SELECT code, count(*) AS n FROM codes GROUP BY code) s`,
 		`SELECT DISTINCT length(code) FROM codes`,
 		`SELECT DISTINCT ON (code) id FROM codes`,
 		`SELECT id FROM codes ORDER BY code`,
@@ -244,6 +246,10 @@ func TestPadded_leftToTheCopy(t *testing.T) {
 		`SELECT id, code, label FROM codes WHERE label = 'x' AND k IN (1, 2)`,
 		`SELECT DISTINCT code FROM codes`,
 		`SELECT code, count(*) FROM codes GROUP BY 1`,
+		// A whole key of GROUP BY (#3219): the same groups on both sides.
+		`SELECT code, count(*) FROM codes GROUP BY code`,
+		`SELECT count(*) FROM codes GROUP BY code`,
+		`SELECT c.code, k, count(*) FROM codes c GROUP BY c.code, k HAVING count(*) > 1`,
 		`SELECT code, id FROM codes LIMIT 5`,
 		`SELECT tags FROM codes WHERE id = 1`,
 		`SELECT free FROM codes WHERE id = 1`,

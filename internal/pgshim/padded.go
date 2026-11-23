@@ -183,6 +183,17 @@ func paddedKind(types map[string][]string, name string) (padded, sized bool) {
 	return padded, padded && sized
 }
 
+// paddedArray reports whether a column of that name is an array of a padded
+// type. Only a plain char(n) is known to group the same on both sides.
+func paddedArray(types map[string][]string, name string) bool {
+	for _, t := range types[name] {
+		if paddedType(t) && strings.HasSuffix(t, "[]") {
+			return true
+		}
+	}
+	return false
+}
+
 // paddedAmong reports whether any column of the screen's types is padded
 // on the source, and whether every such column is a char(n).
 func paddedAmong(types map[string][]string) (padded, sized bool) {
@@ -217,9 +228,11 @@ func paddedWhat(name string, sized bool) string {
 // nothing else (no subquery, no WITH, no UNION, INTERSECT or EXCEPT), with
 // or without a table before it and an alias after it. There PostgreSQL and
 // the copy write the same padded value, and nothing can read it again under
-// another name. Named anywhere else (a comparison, a join, GROUP BY, ORDER
-// BY, a function, ||, a cast, a CASE, an aggregate, USING), the statement is
-// the source's. The same holds for a star: it stands for the padded column
+// another name, or, for a char(n), as a whole key of that statement's GROUP
+// BY (#3219): every value of a char(n) has the same length, so the groups
+// are the same. Named anywhere else (a comparison, a join, ORDER BY, a
+// function, ||, a cast, a CASE, an aggregate, USING, an expression in GROUP
+// BY), the statement is the source's. The same holds for a star: it stands for the padded column
 // too, so it is left to the copy only as a whole item of that one select
 // list.
 //
@@ -339,6 +352,65 @@ func paddedRead(toks []rtToken, types map[string][]string, exemptions bool) stri
 		}
 		return false, -1
 	}
+	// keys are the keys of the statement's GROUP BY, each [start, end), when
+	// it is one SELECT and nothing else.
+	var keys [][2]int
+	if plain {
+		depth := 0
+	clause:
+		for g, t := range toks {
+			switch {
+			case t.kind == rtOp && (t.text == "(" || t.text == "["):
+				depth++
+			case t.kind == rtOp && (t.text == ")" || t.text == "]"):
+				depth--
+			case depth == 0 && t.kind == rtWord && t.text == "group" && g+1 < len(toks) && toks[g+1].kind == rtWord && toks[g+1].text == "by":
+				start, in := g+2, 0
+				for j := g + 2; ; j++ {
+					if j >= len(toks) {
+						keys = append(keys, [2]int{start, j})
+						break clause
+					}
+					u := toks[j]
+					switch {
+					case u.kind == rtOp && (u.text == "(" || u.text == "["):
+						in++
+					case u.kind == rtOp && (u.text == ")" || u.text == "]"):
+						in--
+					case in == 0 && u.kind == rtOp && u.text == ",":
+						keys = append(keys, [2]int{start, j})
+						start = j + 1
+					case in == 0 && (u.kind == rtOp && u.text == ";" || u.kind == rtWord && groupEnd[u.text]):
+						keys = append(keys, [2]int{start, j})
+						break clause
+					}
+				}
+			}
+		}
+	}
+	// wholeKey reports whether the token at i is a whole key of GROUP BY:
+	// [name .]... <the token>, nothing else. Every value of a char(n) is
+	// padded to the same length, so the padded values PostgreSQL finds equal
+	// are the ones the copy does, and the groups are the same (#3219). Not
+	// so for a bpchar without a length (sized).
+	wholeKey := func(i int) bool {
+		for _, k := range keys {
+			if i < k[0] || i >= k[1] {
+				continue
+			}
+			if i != k[1]-1 {
+				return false
+			}
+			j := k[0]
+			for ; j < i; j += 2 {
+				if !name(toks[j]) || !isOpTok(toks, j+1, ".") {
+					return false
+				}
+			}
+			return j == i
+		}
+		return false
+	}
 	at := func(i int) rtToken {
 		if i < 0 || i >= len(toks) {
 			return rtToken{kind: rtOp}
@@ -440,6 +512,10 @@ func paddedRead(toks []rtToken, types map[string][]string, exemptions bool) stri
 				continue
 			}
 			whole, alias := wholeItem(i)
+			if !whole && sized && !paddedArray(types, n) && wholeKey(i) {
+				// A key of GROUP BY: the same groups on both sides.
+				continue
+			}
 			if !whole {
 				return paddedWhat(n, sized) + ", used where its trailing blanks count (PostgreSQL ignores them, the copy compares them)"
 			}
@@ -485,6 +561,12 @@ func paddedRead(toks []rtToken, types map[string][]string, exemptions bool) stri
 		}
 	}
 	return ""
+}
+
+// groupEnd are the words that end a GROUP BY's list of keys.
+var groupEnd = map[string]bool{
+	"having": true, "order": true, "limit": true, "offset": true, "window": true, "fetch": true, "for": true,
+	"union": true, "intersect": true, "except": true,
 }
 
 // catalogUnread is the veto of a statement that reads a table while the

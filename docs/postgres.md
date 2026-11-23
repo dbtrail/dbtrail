@@ -1758,7 +1758,10 @@ The source answers:
   its length when given, written as whole numbers above zero:
   `substring(name, 1, 3)`, `substring(name FROM 2 FOR 3)`), `trim`, `position`,
   `concat`, `abs`, `bool_and`, `string_agg`, `row_number`, `rank`, `lag`, and
-  `extract`, `date_part` and `date_trunc` of a year, month or day;
+  `extract`, `date_part` and `date_trunc` of a year, month or day
+  (`date_trunc` of a `timestamp` or a `timestamp with time zone` column,
+  written with or without its table: a series by day over a `timestamptz`
+  stays on the copy, in a session in UTC, the only one the copy answers in);
   `round(a / b, k)` and `round(avg(x), k)` (also `round(100 * avg(x), k)`, or
   any other power of ten) where `k` is written as a whole number from 0 to 15 (counting the
   power of ten of `avg`)
@@ -1863,7 +1866,10 @@ The source answers:
 - **Text sorted or compared by order** (`ORDER BY` a text column, `min()` of
   one, `name > 'B'`): PostgreSQL orders text by the database's collation, the
   copy by bytes. Text compared for equality, grouped or matched with `LIKE`
-  stays on the copy. The port finds the text by what the statement names,
+  stays on the copy. A sort key that is one call of `count`, `sum`, `rank`
+  and the like is a number whatever text the statement reads elsewhere
+  (`ORDER BY sum(amount) DESC` beside a selected name stays on the copy), and
+  the field of a `date_trunc` or a `date_part` (`'day'`) is not text. The port finds the text by what the statement names,
   and reads three ways of sorting text that name none. A position behind a
   `*`: in `SELECT * FROM t ORDER BY 2`, one table and nothing else, the
   port looks the position up in the table's columns, so it goes to the
@@ -1894,13 +1900,18 @@ The source answers:
   select list of a statement that is one `SELECT` and nothing else, no
   subquery, `WITH`, `UNION`, `INTERSECT` or `EXCEPT` (`SELECT id, code FROM t
   WHERE id = 7`, with or without the table's name before it and an alias
-  after it). There both sides write the same padded value, and nothing reads
-  it again under another name: the alias written a second time, a `NATURAL
+  after it), and as a whole key of that statement's `GROUP BY` (`SELECT
+  status, count(*) FROM t GROUP BY status`, the key selected or not): every
+  value of a `char(n)` has the same length, so both sides make the same
+  groups. A `bpchar` declared without a length keeps each value's own blanks
+  and is not grouped by the copy. There both sides write the same padded
+  value, and nothing reads it again under another name: the alias written a second time, a `NATURAL
   JOIN`, the table's name used as a value (`count(DISTINCT t)`), `TABLE t`
   inside a larger statement and a list that renames the columns (`t AS
   a(i, x)`) go to the source as well. So a comparison (`=`, `<>`, `<`, `BETWEEN`,
   `IN`, `LIKE`, `IS DISTINCT FROM`, `IS NULL`), a join's condition or
-  `USING`, `GROUP BY`, `ORDER BY`, a function, `||`, a cast, a `CASE` or an
+  `USING`, a `GROUP BY` of an expression over it or of an array of `char(n)`, `ORDER BY` (a `char(n)` is
+  text, sorted by the source's collation), a function, `||`, a cast, a `CASE` or an
   aggregate of such a column goes to the source. A `*` stays on the copy as
   a whole item of that one select list (`SELECT * FROM t WHERE id = 7`), and
   inside a `WITH` or a subquery in `FROM` when nothing goes on to read the
