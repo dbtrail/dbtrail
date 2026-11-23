@@ -709,7 +709,7 @@ func TestSCRAM_aWrongPasswordTakesTheSameWork(t *testing.T) {
 }
 
 // A client that holds no password costs the port no PBKDF2 per attempt:
-// each password is derived once, with the process's salt, and kept.
+// each password is derived once with the username's salt, and kept.
 func TestSCRAM_attemptsDeriveNothingNew(t *testing.T) {
 	var derived atomic.Int32
 	old := scramDerive
@@ -763,6 +763,15 @@ func TestSCRAM_firstModeUnknownTenantAndWrongPassword(t *testing.T) {
 	if msg, _ := try("alice", "alice-pw"); msg != "" {
 		t.Fatalf("the right password: %s", msg)
 	}
+	// The first login under a name derives its keys, the same number for a
+	// tenant and for nobody (a salt for each name, #3097).
+	WarmPasswords([]string{"a set that forgets every key"})
+	_, firstKnown := try("alice", "wrong")
+	WarmPasswords([]string{"and another"})
+	_, firstUnknown := try("mallory", "wrong")
+	if firstKnown != firstUnknown || firstKnown < 1000 {
+		t.Errorf("first login under a name, work (checks + 1000 x derivations): %d for a tenant, %d for an unknown one", firstKnown, firstUnknown)
+	}
 	known, kw := try("alice", "wrong")
 	unknown, uw := try("mallory", "wrong")
 	if known != unknown || !strings.HasPrefix(known, "28P01") {
@@ -778,7 +787,8 @@ func TestSCRAM_firstModeUnknownTenantAndWrongPassword(t *testing.T) {
 func proofFor(t *testing.T, given string, prep func(string) string) *Password {
 	t.Helper()
 	auth := []byte("n=,r=x,r=xy,s=c2FsdA==,i=4096,c=biws,r=xy")
-	salted := scramDerive(prep(given), scramSalt, scramIterations)
+	salt := scramSaltFor("a client")
+	salted := scramDerive(prep(given), salt, scramIterations)
 	clientKey := testHMAC(salted, "Client Key")
 	stored := sha256.Sum256(clientKey)
 	sig := testHMAC(stored[:], string(auth))
@@ -786,7 +796,7 @@ func proofFor(t *testing.T, given string, prep func(string) string) *Password {
 	for i := range proof {
 		proof[i] = clientKey[i] ^ sig[i]
 	}
-	return &Password{authMessage: auth, proof: proof}
+	return &Password{authMessage: auth, proof: proof, salt: salt}
 }
 
 // What the cleartext comparison accepted, SCRAM accepts: one of the

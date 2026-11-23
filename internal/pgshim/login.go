@@ -200,7 +200,7 @@ func (s *session) runOptions() RunOptions {
 }
 
 // handleLoginConn runs one connection of a port with a login of its own.
-func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, cancels *cancelRegistry, logger *slog.Logger) {
+func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, cancels *cancelRegistry, logger *slog.Logger, place *connPlace) {
 	// The first defer, so the last to run: one connection's panic is logged
 	// with its stack and ends that connection, not the process the port
 	// shares with every other one.
@@ -252,7 +252,7 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, c
 	if database == "" {
 		database = user
 	}
-	password, err := scramExchange(be, encrypted, pt.bindingData())
+	password, err := scramExchange(be, user, encrypted, pt.bindingData())
 	if err != nil {
 		// Debug: psql itself closes here once, to ask for the password and
 		// connect again. A malformed exchange was told why.
@@ -285,6 +285,12 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, c
 	if !loginTimer.Stop() {
 		// It fired: the socket is closed, or about to be.
 		logger.Info("pgshim login took too long", "user", user, "database", database, "remote", c.RemoteAddr())
+		return
+	}
+	if !place.loggedIn() {
+		// Its place went to a newer connection while it was logging in, and
+		// its socket is closed.
+		logger.Info("pgshim: the port was full and this connection had not logged in; its place went to a newer one", "user", user, "database", database, "remote", c.RemoteAddr())
 		return
 	}
 	sess := &session{be: be, bound: bound, ctx: connCtx, logger: logger, budget: cfg.ResultBudget}

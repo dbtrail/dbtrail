@@ -134,6 +134,9 @@ func Serve(ctx context.Context, ln net.Listener, cfg Config) error {
 	// once; past it a connection is closed without a word.
 	refusals := make(chan struct{}, 16)
 
+	// The connections that hold a place and have not logged in yet (#3097).
+	waiting := newPreLogins()
+
 	var backoff time.Duration
 	for {
 		conn, err := ln.Accept()
@@ -155,19 +158,34 @@ func Serve(ctx context.Context, ln net.Listener, cfg Config) error {
 			select {
 			case sem <- struct{}{}:
 			default:
-				logger.Warn("pgshim connection refused: the connection limit is reached",
-					"remote", conn.RemoteAddr(), "max_connections", cfg.MaxConns)
-				refuseFull(conn, cfg.MaxConns, refusals, pt, cancels, logger)
-				continue
+				// Full. A place held by a connection that has not logged in
+				// for longer than preLoginGrace is given to this one: the
+				// one that waited longest is closed, and its place is not
+				// given back to the port but kept for the newcomer. With
+				// none, every place is a client's, and the newcomer is told
+				// the port is full, as before.
+				old := waiting.takeOldest(preLoginGrace)
+				if old == nil {
+					logger.Warn("pgshim connection refused: the connection limit is reached",
+						"remote", conn.RemoteAddr(), "max_connections", cfg.MaxConns)
+					refuseFull(conn, cfg.MaxConns, refusals, pt, cancels, logger)
+					continue
+				}
+				waiting.warnTaken(logger, old, conn, cfg.MaxConns)
 			}
 		}
+		place := waiting.add(conn)
 		wg.Add(1)
 		go func(c net.Conn) {
 			defer wg.Done()
-			if sem != nil {
-				defer func() { <-sem }()
-			}
-			handleConn(ctx, c, cfg, pt, cancels, logger)
+			// A place taken from this connection is the newcomer's to give
+			// back, not this one's.
+			defer func() {
+				if place.leave() && sem != nil {
+					<-sem
+				}
+			}()
+			handleConn(ctx, c, cfg, pt, cancels, logger, place)
 		}(conn)
 	}
 }
@@ -224,9 +242,9 @@ func nextBackoff(cur time.Duration) time.Duration {
 
 // handleConn runs one connection: startup negotiation (TLS when the port has
 // it), the SCRAM login, then the command loop over its own shim.Handler.
-func handleConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, cancels *cancelRegistry, logger *slog.Logger) {
+func handleConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, cancels *cancelRegistry, logger *slog.Logger, place *connPlace) {
 	if cfg.Login != nil {
-		handleLoginConn(ctx, c, cfg, pt, cancels, logger)
+		handleLoginConn(ctx, c, cfg, pt, cancels, logger, place)
 		return
 	}
 	defer c.Close()
@@ -281,6 +299,12 @@ func handleConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, cancel
 
 	if !loginTimer.Stop() {
 		logger.Info("pgshim login took too long", "user", user, "remote", c.RemoteAddr())
+		return
+	}
+	if !place.loggedIn() {
+		// Its place went to a newer connection while it was logging in, and
+		// its socket is closed.
+		logger.Info("pgshim: the port was full and this connection had not logged in; its place went to a newer one", "user", user, "remote", c.RemoteAddr())
 		return
 	}
 	h := shim.NewHandlerWithConfig(cfg.IndexDB, cfg.ShimConfig, logger)
@@ -427,12 +451,12 @@ func commandLoop(be *pgproto3.Backend, sess *session) {
 // is checked against as many passwords either way (Password.Matches), so
 // neither the answer nor its timing says which usernames exist.
 func authenticate(be *pgproto3.Backend, auth shim.TenantAuth, user string, encrypted bool, endPoint []byte) (*Password, error) {
-	password, err := scramExchange(be, encrypted, endPoint)
+	password, err := scramExchange(be, user, encrypted, endPoint)
 	if err != nil {
 		return nil, err
 	}
-	// Every tenant's password, before the one of this username: what is
-	// derived must not depend on the username.
+	// Every tenant's password: a change of any forgets every derived key,
+	// so what a login derives does not say whose password changed.
 	WarmPasswords(auth.Passwords())
 	var candidates []string
 	if expected, found, cerr := auth.LookupPassword(user); found && cerr == nil {
