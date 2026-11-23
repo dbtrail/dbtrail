@@ -301,7 +301,7 @@ func (j *monitorJob) streamHooks() *streamrun.Hooks {
 // confirmed LSN, so there is no replayed window to delete first.
 func (j *monitorJob) pgStreamHooks() *pgstreamrun.Hooks {
 	return &pgstreamrun.Hooks{
-		OnCheckpoint:      j.progress,
+		OnCheckpoint:      j.progressIfConnected,
 		OnIndexed:         func(int64) { j.progress() },
 		OnSourceConnected: j.markSourceConnected,
 	}
@@ -648,7 +648,7 @@ func (m *monitorSupervisor) start(ctx context.Context, e console.ServerEntry, ex
 				return fail(cErr)
 			}
 			pgcfg.Hooks = job.pgStreamHooks()
-			runOnce = func(c context.Context) error { return m.pgStreamFn(c, pgcfg) }
+			runOnce = pgRunThroughOutages(job, e, func(c context.Context) error { return m.pgStreamFn(c, pgcfg) })
 			startJobs(flavor)
 		default:
 			// The saved Source type of a MySQL-family entry is a hint: the stream
