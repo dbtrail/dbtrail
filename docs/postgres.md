@@ -920,6 +920,34 @@ takes one full read of the source to bring it into the copy, as it does for a
 new table on a MySQL source: where the schedule may take full reads, and no
 more than a few times for the same table.
 
+In that same read of the source, each update also asks the catalog what
+columns every table of the publication has now, and compares them with the
+columns the table's file in the previous snapshot records: names, types, and
+each column's position number, which tells a column that was dropped and added
+again under the same name from the one the snapshot holds values for.
+PostgreSQL's change stream describes a table only when it next carries a
+change of it, so a column dropped, added, renamed or retyped on a table that
+nothing has written to since is recorded nowhere else. A table that differs
+stops the update the way a column change the stream did record stops it: no
+snapshot is published by that update, the run names each such table with what
+changed (`dropped amount`, `added region`, `retyped total`), and the schedule
+takes a full read of the source in its place where it may take full reads.
+Where it may not, updates stay refused, with the tables named, until a full
+read is taken. An index, a default, `NOT NULL`, a comment or a grant changes
+no column and stops nothing. Only the catalog is read: nothing is created or
+written on the source.
+
+Two limits. The catalog is read once, at the start of the update: a column
+changed after that read and before the snapshot is published is in that
+snapshot with its old columns, and the next update sees it. And when the
+source cannot be reached for that read, the update still publishes from the
+changes it captured, as it does for new tables, and the run says that neither
+new tables nor changed columns were looked for. An update that has no captured
+change to apply is skipped before it reads anything, so on a source with no
+writes at all a changed column is seen at the first update after the next
+write to any table. `bintrail baseline refresh` on the command line does not
+read the source and makes no such comparison.
+
 A full read copies tables in parallel, each on a connection of its own to the
 source. One started by DBTrail itself (the Create button, a schedule,
 `snapshot run`) copies four tables at once, as a MySQL full read does, so at

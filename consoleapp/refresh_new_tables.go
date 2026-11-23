@@ -16,6 +16,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/pgbaseline"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
 // Tables created after the previous snapshot (#1993).
@@ -31,8 +32,9 @@ import (
 // otherwise the gap stays reported on the run with the reason.
 
 // listSourceTablesPG is listSourceTables for a PostgreSQL source; a package
-// variable for the reason listSourceTables is.
-var listSourceTablesPG = pgbaseline.TablesOfNextRun
+// variable for the reason listSourceTables is. Each table comes with its
+// columns as the source has them now (#3112, pgSourceShapes).
+var listSourceTablesPG = pgbaseline.ShapesOfNextRun
 
 // newTablesCheck is what one update learned about tables it left out.
 // unchecked non-empty means the source was not asked or did not answer, and
@@ -42,6 +44,10 @@ type newTablesCheck struct {
 	tables    []string // all, capped at console.RefusedTablesCap for display
 	omitted   int
 	unchecked string
+	// pgShapes: a PostgreSQL source's tables with their columns as it has
+	// them now, for the fold to compare each file with (#3112). nil when the
+	// source was not asked or did not answer: nothing is compared then.
+	pgShapes map[reconstruct.PGTableName]reconstruct.PGSourceShape
 	// action and reason: what the daemon decided about them
 	// (console.NewTablesAction*), set once the snapshot is published.
 	action, reason string
@@ -134,6 +140,7 @@ func (s *baselineSupervisor) checkNewTables(req refreshRequest, snapshot []strin
 		source   []string
 		foldCase bool
 		err      error
+		pgShapes map[reconstruct.PGTableName]reconstruct.PGSourceShape
 	)
 	if req.SourcePostgres {
 		// A PostgreSQL source's tables are its publication's (#2759): what a
@@ -142,8 +149,13 @@ func (s *baselineSupervisor) checkNewTables(req refreshRequest, snapshot []strin
 		if req.SourcePublication == "" {
 			return newTablesCheck{unchecked: "this PostgreSQL server has no publication set, so tables added after the previous snapshot were not looked for"}
 		}
-		source, err = listSourceTablesPG(ctx, req.SourceDSN, req.SourcePublication,
+		var now []pgbaseline.SourceTable
+		now, err = listSourceTablesPG(ctx, req.SourceDSN, req.SourcePublication,
 			cliutil.BuildIndexFilters(strings.Join(req.Schemas, ","), ""))
+		if err != nil {
+			return newTablesCheck{unchecked: console.ScrubReason(pgSourceUnaskedReason(err), req.SourceDSN)}
+		}
+		source, pgShapes = pgSourceShapes(now)
 	} else {
 		source, foldCase, err = listSourceTables(ctx, req.SourceDSN, req.SourceSSL, req.Schemas)
 	}
@@ -153,7 +165,7 @@ func (s *baselineSupervisor) checkNewTables(req refreshRequest, snapshot []strin
 	}
 	all := withoutKnownLeftOut(tablesLeftOut(snapshot, source, foldCase), snapshot, s.knownLeftOut(req.ServerID), foldCase)
 	kept, omitted := console.NewTablesOf(all)
-	return newTablesCheck{all: all, tables: kept, omitted: omitted}
+	return newTablesCheck{all: all, tables: kept, omitted: omitted, pgShapes: pgShapes}
 }
 
 // planNewTables asks the request's planner what happens to the tables the

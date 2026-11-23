@@ -9,6 +9,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/event"
+	"github.com/dbtrail/dbtrail/internal/pgbaseline"
 )
 
 // The check for tables an update leaves out, on a PostgreSQL server (#2759):
@@ -23,9 +24,14 @@ func TestCheckNewTables_postgres_2759(t *testing.T) {
 		var calls []asked
 		prev, prevMySQL := listSourceTablesPG, listSourceTables
 		t.Cleanup(func() { listSourceTablesPG, listSourceTables = prev, prevMySQL })
-		listSourceTablesPG = func(_ context.Context, dsn, publication string, filters event.Filters) ([]string, error) {
+		listSourceTablesPG = func(_ context.Context, dsn, publication string, filters event.Filters) ([]pgbaseline.SourceTable, error) {
 			calls = append(calls, asked{dsn, publication, filters})
-			return tables, err
+			var now []pgbaseline.SourceTable
+			for _, name := range tables {
+				schema, table, _ := strings.Cut(name, ".")
+				now = append(now, pgbaseline.SourceTable{Schema: schema, Table: table})
+			}
+			return now, err
 		}
 		listSourceTables = func(context.Context, string, config.SSL, []string) ([]string, bool, error) {
 			t.Error("a PostgreSQL server's tables were asked for with the MySQL read")
