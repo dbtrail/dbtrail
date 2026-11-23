@@ -175,7 +175,15 @@ func TestPaddedStar_aDottedKeyword(t *testing.T) {
 // A keyword after AS is a label: read as FROM, it would make the real table
 // the alias of a table named "from".
 func TestPaddedStar_aKeywordAsLabel(t *testing.T) {
-	tables := append(starCatalog(), CatalogTable{Schema: "public", Name: "from", Columns: []CatalogColumn{
+	// Such a statement is not read whole, so every table counts as read:
+	// without the table of unrecorded types, only the label's rule refuses it.
+	var tables []CatalogTable
+	for _, tb := range starCatalog() {
+		if tb.Name != "legacy" {
+			tables = append(tables, tb)
+		}
+	}
+	tables = append(tables, CatalogTable{Schema: "public", Name: "from", Columns: []CatalogColumn{
 		{Name: "id", Type: "INTEGER", SourceType: oidInt4, SourceTypeMod: -1},
 	}})
 	for _, q := range []string{
