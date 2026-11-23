@@ -539,6 +539,8 @@ type costLogin struct {
 	keep *keptSources
 	// barred, when set, is the server's Forward.Barred.
 	barred func() string
+	// sides, when set, is the server's Forward.Sides.
+	sides *CostSides
 	// notCaptured, when set, is Binding.NotCaptured.
 	notCaptured func(context.Context) ([]TableNotCaptured, error)
 }
@@ -617,7 +619,7 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 		l.notes = append(l.notes, n)
 	}}
 	if l.src != nil {
-		b.Forward = &Forward{DSN: l.src.dsn(), Limit: 4, Cost: l.cost, Barred: l.barred, Acquire: func(ctx context.Context) (func(), bool) {
+		b.Forward = &Forward{DSN: l.src.dsn(), Limit: 4, Cost: l.cost, Barred: l.barred, Sides: l.sides, Acquire: func(ctx context.Context) (func(), bool) {
 			if l.refuse {
 				return nil, false
 			}

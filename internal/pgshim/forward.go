@@ -89,6 +89,11 @@ type Forward struct {
 	// it was reclaimed first. Nil: the connection is ended after every
 	// answer, as before.
 	Park func(reclaim func()) (unpark func() bool)
+	// Sides, when set, is the side each statement shape of the server was
+	// last sent to by its plan, shared by its connections: a plan near a
+	// threshold keeps the shape there (route_cost.go, #3045). Nil: the plan
+	// alone decides, against the threshold.
+	Sides *CostSides
 }
 
 // barred is why nothing may be sent to the source now, "" when it may.

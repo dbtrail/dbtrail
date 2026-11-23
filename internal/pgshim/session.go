@@ -89,6 +89,9 @@ type session struct {
 	// costVerdicts are the source's plans' verdicts this connection
 	// remembers, by statement shape (route_cost.go).
 	costVerdicts map[string]costVerdict
+	// pendingSide is a plan's verdict for the copy on the statement being
+	// answered, remembered once the copy answers it (settleCostSide).
+	pendingSide *pendingCostSide
 	// sourceAnsweredAt is when the source last answered a statement of this
 	// connection: the copy may not answer it with data older than that
 	// (copyOlderThanSource). Zero when the source never answered one.
