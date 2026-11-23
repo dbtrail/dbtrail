@@ -15,8 +15,7 @@ import (
 // 1040 rather than a bare TCP reset the operator can't attribute.
 // Pre-handshake the CLIENT_PROTOCOL_41 capability is not negotiated
 // yet, so the packet omits the '#'+SQLSTATE marker, matching mysqld's
-// own pre-handshake ERR format (a client derives SQLSTATE 08004 from
-// the code). Caller closes the conn.
+// own pre-handshake ERR format. Caller closes the conn.
 func RefuseTooManyConnections(c net.Conn) {
 	code := uint16(gomysql.ER_CON_COUNT_ERROR) // 1040
 	msg := "Too many connections"

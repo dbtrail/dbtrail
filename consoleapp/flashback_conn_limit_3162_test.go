@@ -651,3 +651,30 @@ func TestFlashbackPort_closedToMakeRoomIsNotServedAfterItsLogin(t *testing.T) {
 		t.Fatal("its goroutine did not end")
 	}
 }
+
+// Refusals are logged at once the first time, then at most once per
+// interval, with how many were refused since the line before.
+func TestRefusalLog_oneLinePerInterval(t *testing.T) {
+	r := refusalLog{every: 10 * time.Second}
+	t0 := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	if n, say := r.refused(t0); !say || n != 1 {
+		t.Fatalf("the first refusal: %d, %v; want a line for 1", n, say)
+	}
+	for i := 1; i <= 500; i++ {
+		if n, say := r.refused(t0.Add(time.Duration(i) * time.Millisecond)); say {
+			t.Fatalf("refusal %d of a burst was logged (%d)", i, n)
+		}
+	}
+	if n, say := r.refused(t0.Add(9999 * time.Millisecond)); say {
+		t.Fatalf("a line before the interval passed (%d)", n)
+	}
+	if n, say := r.refused(t0.Add(10 * time.Second)); !say || n != 502 {
+		t.Fatalf("after the interval: %d, %v; want a line for the 502 since the first", n, say)
+	}
+	if n, say := r.refused(t0.Add(10*time.Second + time.Millisecond)); say {
+		t.Fatalf("a second line right after (%d)", n)
+	}
+	if n, say := r.refused(t0.Add(time.Hour)); !say || n != 2 {
+		t.Fatalf("an hour later: %d, %v; want a line for 2", n, say)
+	}
+}

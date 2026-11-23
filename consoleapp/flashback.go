@@ -227,6 +227,7 @@ func serveFlashback(ctx context.Context, srv *console.Server, ln net.Listener, c
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
+	refusedLog := refusalLog{every: flashbackRefusedLogEvery}
 	var backoff time.Duration
 	for {
 		conn, err := ln.Accept()
@@ -246,8 +247,11 @@ func serveFlashback(ctx context.Context, srv *console.Server, ln net.Listener, c
 		backoff = 0
 		if connSem != nil {
 			if !takeFlashbackPlace(connSem, pre, logger) {
-				logger.Warn("flashback connection refused: the connection limit is reached",
-					"remote", conn.RemoteAddr(), "max_connections", cfg.MaxConns)
+				// Not a line per refusal: a burst of them would fill the log.
+				if n, say := refusedLog.refused(time.Now()); say {
+					logger.Warn("flashback connections refused: the connection limit is reached",
+						"refused_since_last_line", n, "last_remote", conn.RemoteAddr(), "max_connections", cfg.MaxConns)
+				}
 				shim.RefuseTooManyConnections(conn)
 				_ = conn.Close()
 				continue
@@ -269,6 +273,28 @@ func serveFlashback(ctx context.Context, srv *console.Server, ln net.Listener, c
 			handleFlashbackConn(ctx, srv, c, mysrv, creds, gate, cfg, logger)
 		}(conn)
 	}
+}
+
+// flashbackRefusedLogEvery is the least time between two log lines about
+// connections refused for the limit.
+const flashbackRefusedLogEvery = 10 * time.Second
+
+// refusalLog counts refused connections and says when to log them: the
+// first at once, then at most one line per every, each with how many were
+// refused since the line before. The accept loop alone uses it.
+type refusalLog struct {
+	every time.Duration
+	last  time.Time
+	n     int
+}
+
+func (r *refusalLog) refused(now time.Time) (n int, say bool) {
+	r.n++
+	if !r.last.IsZero() && now.Sub(r.last) < r.every {
+		return 0, false
+	}
+	n, r.n, r.last = r.n, 0, now
+	return n, true
 }
 
 // takeFlashbackPlace takes one of the port's places for a new client. When

@@ -2905,8 +2905,9 @@ as the router applies it:
   connection that is not routed.
 - **How many clients connect.** At most 256 clients are connected to the
   router at once. One more is refused before it logs in with MySQL error
-  1040, "Too many connections" (SQLSTATE 08004), the answer a MySQL server
-  gives at its `max_connections`, which drivers and pools know. Change the
+  1040, "Too many connections", the answer a MySQL server gives at its
+  `max_connections`, which drivers and pools know. The router's log says
+  so at most once every 10 seconds, with how many were refused. Change the
   number with `--max-connections` (`BINTRAIL_ROUTER_MAX_CONNECTIONS`, 1 to
   1024; in the Docker stack, a line under the `router` service's
   `environment:`). A pool in front of the router (ProxySQL, an application's
