@@ -1400,6 +1400,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			switch {
 			case tails != nil && tailsKnown:
 				tailsStart := time.Now()
+				tails.waitUpdateOver(ctx, tailTables, s.sqlLimits.Timeout/2)
 				waited := func(bool) {}
 				if id, ok := tailsFor(ctx); ok {
 					// Fresh mode's wait for the source (#2645), off unless
