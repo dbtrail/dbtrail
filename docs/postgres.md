@@ -325,9 +325,14 @@ Instead:
   The snapshot pages still count it among the tables reused unchanged, and
   show it as `reused unchanged`. Fresh mode leaves it out, and statements on it read the
   copy as of that file (a server's lag limit, `max_behind_source_seconds`,
-  sends them to the source when that is too old); with #3191, which ships
-  with this, the PostgreSQL port sends them to the source
-  (`table_not_captured`).
+  sends them to the source when that is too old); with a forwarding user the
+  PostgreSQL port sends them to the source (`table_not_captured`).
+  This rests on the capture's record of dropped changes, which is saved with
+  its checkpoint. Until the next checkpoint (0.3 s on a healthy capture, in
+  one measurement) a table can still read as current. A capture that has
+  saved its state and then cannot save it again leaves later drops
+  unrecorded, so the port can keep answering that table from its copy with
+  no notice ([#3202](https://github.com/dbtrail/dbtrail/issues/3202)).
   Where the file cannot be published again as it is (a snapshot read from S3,
   or with `--baseline-carry-forward-unchanged` off), the update is refused for all the
   tables (`refused-gap`, naming the table). A full read brings the copy up to
@@ -1185,6 +1190,15 @@ listener, its own workers, its own memory.
   - **Waiting for the source** (`BINTRAIL_SQL_FRESH_WAIT`) does not apply to
     PostgreSQL yet: a statement does not wait for the newest changes to
     arrive before it reads.
+- **If capture falls behind, the copy falls behind with it, as a replica
+  does.** The port keeps answering from the copy and does not tell the
+  client. A server's lag limit, `max_behind_source_seconds`, is off by
+  default, as on the MySQL port. Set it with `PUT /api/servers/{id}/sql-mode`
+  and `{"max_behind_source_seconds": 300}`, and with a forwarding user a
+  statement on a copy further behind than that goes to the source
+  (`copy_behind_source`, or `copy_age_unknown` when the lag cannot be told).
+  Capture's state is read at most every 30 seconds, so a limit is not kept
+  to the second.
 - **The copy answers what it answers as PostgreSQL does.** With the server's
   forwarding user, each statement is decided on its own: the copy answers it
   when everything in it is known to give PostgreSQL's answer there and its
