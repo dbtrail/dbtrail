@@ -1085,9 +1085,6 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 	if why := scaleMixRisk(in); why != "" {
 		return why
 	}
-	if why := numericMix(in, types, untyped); why != "" {
-		return why
-	}
 	if !untyped {
 		if why := realUse(in, types); why != "" {
 			return why

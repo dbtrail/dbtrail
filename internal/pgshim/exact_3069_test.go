@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// The screen's rules of #3069, #3070, #3071 and #3072. What a test says
+// The screen's rules of #3069, #3071 and #3072. What a test says
 // PostgreSQL 16 and the copy answer was measured by internal/pgcompare
 // (screenExactness), over the table these types are of.
 
@@ -199,125 +199,7 @@ func TestCopyScreen_strictLiterals(t *testing.T) {
 	}
 }
 
-// --- #3070 ---------------------------------------------------------------------
-
-func TestCopyScreen_numericMix(t *testing.T) {
-	const x = "pgcmp_exact"
-	const mix = "different decimals"
-	checkExactness(t, exactTypes, map[string]string{
-		// CASE WHEN n > 3 THEN n ELSE 0 END is 0 on PostgreSQL, 0.00 here.
-		`SELECT id, CASE WHEN amt > 3 THEN amt ELSE 0 END FROM ` + x:                                                          "CASE over numbers of " + mix,
-		`SELECT id, case when amt > 3 then 0 else amt end FROM ` + x:                                                          "CASE over numbers of " + mix,
-		`SELECT id, CASE whole WHEN 1 THEN amt WHEN 2 THEN amt4 END FROM ` + x:                                                "CASE over numbers of " + mix,
-		`SELECT id, CASE WHEN id = 2 THEN whole ELSE amt END FROM ` + x:                                                       "CASE over numbers of " + mix,
-		`SELECT id, CASE WHEN amt > 3 THEN amt ELSE 0.0 END FROM ` + x:                                                        "CASE over numbers of " + mix,
-		`SELECT id, CASE WHEN amt > 3 THEN x.amt ELSE -1 END FROM ` + x + ` x`:                                                "CASE over numbers of " + mix,
-		`SELECT id, CASE WHEN amt > 3 THEN (amt) ELSE (0) END FROM ` + x:                                                      "CASE over numbers of " + mix,
-		`SELECT id, CASE WHEN whole > 0 THEN amt * whole ELSE 0 END FROM ` + x:                                                "CASE over numbers of " + mix,
-		`SELECT id, CASE WHEN whole > 0 THEN amt ELSE whole * 2 END FROM ` + x:                                                "CASE over numbers of " + mix,
-		`SELECT id, CASE WHEN whole > 0 THEN amt + 1 ELSE amt4 + 1 END FROM ` + x:                                             "CASE over numbers of " + mix,
-		`SELECT id, CASE WHEN whole > 0 THEN 1 ELSE CASE WHEN whole < 0 THEN amt ELSE 0 END END FROM ` + x:                    "CASE over numbers of " + mix,
-		`SELECT sum(CASE WHEN whole > 0 THEN amt ELSE 0 END) FROM ` + x:                                                       "CASE over numbers of " + mix,
-		`SELECT id FROM ` + x + ` WHERE CASE WHEN whole > 0 THEN amt ELSE 0 END > 1`:                                          "CASE over numbers of " + mix,
-		`SELECT CASE WHEN true THEN 1.5 ELSE 0 END`:                                                                           "CASE over numbers of " + mix,
-		`SELECT id, greatest(amt, amt4), least(amt, amt4) FROM ` + x:                                                          "greatest() over numbers of " + mix,
-		`SELECT id, least(amt, 3) FROM ` + x:                                                                                  "least() over numbers of " + mix,
-		`SELECT id, greatest(amt, 3) FROM ` + x:                                                                               "greatest() over numbers of " + mix,
-		`SELECT id, greatest(1, 2.5) FROM ` + x:                                                                               "greatest() over numbers of " + mix,
-		`SELECT coalesce(max(amt), 0) FROM ` + x + ` WHERE id < 0`:                                                            "coalesce() over numbers of " + mix,
-		`SELECT coalesce(sum(amt), 0) FROM ` + x:                                                                              "coalesce() over numbers of " + mix,
-		`SELECT coalesce(sum(DISTINCT amt), 0) FROM ` + x:                                                                     "coalesce() over numbers of " + mix,
-		`SELECT id, coalesce(amt, 0) FROM ` + x:                                                                               "coalesce() over numbers of " + mix,
-		`SELECT id, COALESCE(amt, whole) FROM ` + x:                                                                           "coalesce() over numbers of " + mix,
-		`SELECT id, coalesce(amt, amt4, 0.00) FROM ` + x:                                                                      "coalesce() over numbers of " + mix,
-		`SELECT id, coalesce(nullif(amt, 0), 0) FROM ` + x:                                                                    "coalesce() over numbers of " + mix,
-		`SELECT id, coalesce(amt, count(*) OVER ()) FROM ` + x:                                                                "coalesce() over numbers of " + mix,
-		`SELECT id, coalesce(amt, $1) FROM ` + x:                                                                              "coalesce() over numbers of " + mix,
-		`SELECT id, coalesce(amt, '0') FROM ` + x:                                                                             "coalesce() over numbers of " + mix,
-		`SELECT coalesce(t.total, 0) FROM (SELECT sum(amt) AS total FROM ` + x + ` WHERE id < 0) t`:                           "coalesce() over numbers of " + mix,
-		`WITH t AS (SELECT whole, sum(amt) AS total FROM ` + x + ` GROUP BY whole) SELECT coalesce(total, 0) FROM t`:          "coalesce() over numbers of " + mix,
-		`SELECT coalesce(v, 0) FROM (SELECT amt * 2 AS v FROM ` + x + `) t`:                                                   "coalesce() over numbers of " + mix,
-		`SELECT id, coalesce(amt, whole) FROM (SELECT id, CASE WHEN id < 5 THEN amt END AS amt, 7 AS whole FROM ` + x + `) s`: "coalesce() over numbers of " + mix,
-	}, []string{
-		`SELECT id, CASE WHEN amt > 3 THEN amt ELSE 0.00 END FROM ` + x,
-		`SELECT id, coalesce(amt, 0.00), greatest(amt, 3.00), least(amt, 3.00) FROM ` + x,
-		`SELECT id, coalesce(amt4, 0.0000), greatest(amt4, amt4) FROM ` + x,
-		`SELECT id, CASE WHEN whole > 0 THEN whole ELSE 0 END, coalesce(whole, 0), greatest(whole, 2) FROM ` + x,
-		`SELECT id, CASE WHEN amt > 3 THEN amt END, CASE WHEN amt > 3 THEN amt ELSE NULL END FROM ` + x,
-		`SELECT id, coalesce(amt, NULL), coalesce(NULL, amt) FROM ` + x,
-		`SELECT coalesce(max(amt), 0.00), coalesce(sum(amt), 0.00), coalesce(count(amt), 0) FROM ` + x + ` WHERE id < 0`,
-		`SELECT coalesce(t.total, 0.00), coalesce(t.k, 0) FROM (SELECT sum(amt) AS total, count(*) AS k FROM ` + x + ` WHERE id < 0) t`,
-		`WITH t AS (SELECT whole AS w, count(*) AS k, sum(whole) AS units FROM ` + x + ` GROUP BY whole) SELECT coalesce(t.k, 0), coalesce(units, 0) FROM t`,
-		`SELECT sum(CASE WHEN whole > 0 THEN amt ELSE 0.00 END), sum(CASE WHEN whole > 0 THEN 1 ELSE 0 END) FROM ` + x,
-		`SELECT count(CASE WHEN amt > 3 THEN 1 END), sum(CASE WHEN amt > 3 THEN whole ELSE 0 END) FROM ` + x,
-		// A double precision or a real beside another number: a float on
-		// both sides.
-		`SELECT id, coalesce(dbl, 0), greatest(dbl, amt), CASE WHEN whole > 0 THEN dbl ELSE 0 END FROM ` + x,
-		`SELECT id, coalesce(rl, 0), greatest(rl, 1), least(rl, dbl), CASE WHEN whole > 0 THEN rl ELSE 0 END FROM ` + x,
-		`SELECT id, coalesce(rl, amt), greatest(rl, amt) FROM ` + x,
-		// Not numbers.
-		`SELECT id, CASE WHEN amt > 3 THEN 'big' ELSE 'small' END FROM ` + x,
-		`SELECT id, coalesce(word, '-'), coalesce(day, DATE '2026-01-01') FROM ` + x,
-		`SELECT id, CASE WHEN amt > 3.5 THEN 1 ELSE 0 END FROM ` + x,
-		`SELECT id, coalesce(length(word), 0), coalesce(whole * 2, 0), coalesce(whole + 1, whole) FROM ` + x,
-	})
-
-	// Without the copy's types only what the statement writes is known.
-	if why := CopyScreen(`SELECT CASE WHEN c THEN 1.5 ELSE 0 END FROM t`, nil); !strings.Contains(why, mix) {
-		t.Errorf("literals of two scales, no types: %q", why)
-	}
-	if why := CopyScreen(`SELECT coalesce(a, 0.5) FROM t`, nil); !strings.Contains(why, mix) {
-		t.Errorf("a column of unknown type beside 0.5, no types: %q", why)
-	}
-	if why := CopyScreen(`SELECT coalesce(a, 0), CASE WHEN a = 1 THEN a ELSE b END FROM t`, nil); why != "" {
-		t.Errorf("nothing known to have decimals, no types: sent to the source (%s)", why)
-	}
-	// The screen before the types are known judges only the numbers written:
-	// under some types a column beside 0.5 answers the same.
-	for _, q := range []string{`SELECT coalesce(a, 0.5) FROM t`, `SELECT CASE WHEN c THEN a ELSE 0 END FROM t`} {
-		toks, _ := lexSQL(q)
-		if why := screenUntyped(toks); why != "" {
-			t.Errorf("%s: vetoed without its types (%s)", q, why)
-		}
-	}
-	if toks, _ := lexSQL(`SELECT CASE WHEN c THEN 1.5 ELSE 0 END FROM t`); !strings.Contains(screenUntyped(toks), mix) {
-		t.Error("literals of two scales: not vetoed before the types are known")
-	}
-
-	// A name that is a numeric of one scale in one table and of another
-	// elsewhere is of neither, and goes to the source beside any number.
-	two := map[string][]string{"amount": {"DECIMAL(12,2)", "DECIMAL(10,4)"}, "price": {"DECIMAL(12,2)"}, "id": {"INTEGER"}}
-	if why := CopyScreen(`SELECT coalesce(amount, 0.00) FROM t`, two); !strings.Contains(why, mix) {
-		t.Errorf("a name of two scales: %q", why)
-	}
-	if why := CopyScreen(`SELECT coalesce(price, 0.00), coalesce(amount, NULL) FROM t`, two); why != "" {
-		t.Errorf("one scale, and a value alone: sent to the source (%s)", why)
-	}
-	// A numeric declared without precision has no one number of decimals.
-	free := map[string][]string{"free": {unsizedNumeric}, "id": {"INTEGER"}}
-	if why := CopyScreen(`SELECT coalesce(free, 0) FROM t`, free); !strings.Contains(why, mix) {
-		t.Errorf("a numeric without precision beside 0: %q", why)
-	}
-}
-
-// A CASE or a COALESCE around a rewritten round is checked where it runs,
-// value by value (packMixedScale): the screen leaves it to that check.
-func TestCopyScreen_numericMixLeavesRounds(t *testing.T) {
-	const x = "pgcmp_exact"
-	for _, q := range []string{
-		`SELECT id, CASE WHEN whole > 0 THEN round(amt, 1) ELSE 0 END FROM ` + x,
-		`SELECT id, coalesce(round(amt, 1), 0) FROM ` + x,
-	} {
-		if why := CopyScreen(q, exactTypes); why != "" {
-			t.Errorf("%s: sent to the source (%s), want the copy's own check", q, why)
-		}
-	}
-	// A round in the condition is no value: the values are judged.
-	q := `SELECT id, CASE WHEN round(amt, 1) > 3 THEN amt ELSE 0 END FROM ` + x
-	if why := CopyScreen(q, exactTypes); !strings.Contains(why, "different decimals") {
-		t.Errorf("%s: %q", q, why)
-	}
-}
+// --- what kind of number a column is ------------------------------------------
 
 func TestTypeNum(t *testing.T) {
 	for ty, want := range map[string]numValue{
@@ -444,48 +326,85 @@ func screenWithin(t *testing.T, name, q string, types map[string][]string) strin
 
 func TestNumReader_bounded(t *testing.T) {
 	// Forty names in a chain: each is read once, and the last is what the
-	// first is, a numeric of decimals not worked out, or a real.
-	if why := screenWithin(t, "40 names over a numeric", chained(40, "amt", "coalesce(a%d, 0)"), exactTypes); !strings.Contains(why, "different decimals") {
-		t.Errorf("40 chained names over a numeric beside 0: %q", why)
-	}
+	// first is, a real.
 	if why := screenWithin(t, "40 names over a real", chained(40, "rl", "a%d * 2"), exactTypes); why != realArithmeticVeto {
 		t.Errorf("40 chained names over a real, multiplied: %q", why)
 	}
 	if why := screenWithin(t, "40 names over a real, summed", chained(40, "rl", "sum(a%d)"), exactTypes); why != realSumVeto {
 		t.Errorf("40 chained names over a real, summed: %q", why)
 	}
-	// Whole numbers all the way: nothing to send to the source for, and
-	// still read once each.
-	if why := screenWithin(t, "40 names over a whole number", chained(40, "whole", "coalesce(a%d, 0)"), exactTypes); why != "" {
-		t.Errorf("40 chained names over a whole number beside 0: sent to the source (%s)", why)
+	// A double precision all the way: nothing to send to the source for,
+	// and still read once each.
+	if why := screenWithin(t, "40 names over a double precision", chained(40, "dbl", "a%d * 2"), exactTypes); why != "" {
+		t.Errorf("40 chained names over a double precision: sent to the source (%s)", why)
 	}
 	// A chain deeper than the reader follows is not judged: the source
 	// answers.
-	if why := screenWithin(t, "300 names", chained(300, "amt", "coalesce(a%d, 0.00)"), exactTypes); why != numReadVeto {
+	if why := screenWithin(t, "300 names", chained(300, "dbl", "a%d * 2"), exactTypes); why != numReadVeto {
 		t.Errorf("300 chained names: %q, want the reader's own veto", why)
 	}
 	// Names that define each other end: each is read inside the other as a
 	// column, of which there is none.
-	loop := `SELECT coalesce(a, 0.5), coalesce(b, 0.5) FROM (SELECT b + 1 AS a, a + 1 AS b FROM pgcmp_exact) s`
+	loop := `SELECT a * 2, b * 2 FROM (SELECT b + 1 AS a, a + 1 AS b FROM pgcmp_exact) s`
 	if why := screenWithin(t, "two names in a circle", loop, exactTypes); why == numReadVeto {
 		t.Errorf("two names in a circle: %q", why)
 	}
-	// Parentheses nested by the thousand around a real, each level computed
-	// with: the work is bounded, and the statement goes to the source either
-	// for the real or for its size.
+	// Parentheses nested by the thousand, each level computed with: the
+	// work is bounded, and the statement goes to the source for its size.
 	deep := "SELECT " + strings.Repeat("(", 20000) + "dbl" + strings.Repeat(" + 1)", 20000) + " FROM pgcmp_exact"
 	if why := screenWithin(t, "20,000 parentheses", deep, exactTypes); why == "" {
 		t.Error("20,000 nested parentheses computed with: left to the copy")
 	}
-	nested := "SELECT " + strings.Repeat("CASE WHEN id > 1 THEN ", 20000) + "amt" + strings.Repeat(" ELSE 0.00 END", 20000) + " FROM pgcmp_exact"
-	if why := screenWithin(t, "20,000 CASEs", nested, exactTypes); why == "" {
-		t.Error("20,000 nested CASEs: left to the copy")
+
+	// A megabyte of one word, or of calls that never close, beside a real
+	// column: nothing looks for a parenthesis' other end by walking the
+	// statement again, so the screen answers at once. (What it answers is
+	// the source: the statements are not SQL.)
+	for name, piece := range map[string]string{
+		"case":       "case ",
+		"a call":     "foo( ",
+		"sum":        "sum( ",
+		"closings":   ") + ",
+		"openings":   "( + ",
+		"coalesce":   "coalesce( ",
+		"a real":     "rl + ( ",
+		"then a sum": "- sum( rl ",
+	} {
+		q := "SELECT " + strings.Repeat(piece, (1<<20)/len(piece)) + " FROM pgcmp_exact"
+		start := time.Now()
+		toks, why := lexSQL(q)
+		if why != "" {
+			t.Fatalf("%s: not read: %s", name, why)
+		}
+		lexed := time.Since(start)
+		start = time.Now()
+		done := make(chan string, 1)
+		go func() { done <- realUse(toks, exactTypes) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("a megabyte of %q: the rule on real columns did not answer in 5 s (read in %v)", piece, lexed)
+		}
+		if took := time.Since(start); took > time.Second {
+			t.Errorf("a megabyte of %q: the rule on real columns took %v", piece, took)
+		}
+	}
+	// The matching itself.
+	toks, _ := lexSQL("a ( b [ c ] ( ) ) ) ( d")
+	got := matchParens(toks)
+	for i := range toks {
+		if toks[i].kind == rtOp && (toks[i].text == "(" || toks[i].text == "[") && got[i] >= 0 && got[got[i]] != i {
+			t.Errorf("token %d opens and its other end %d does not point back", i, got[i])
+		}
+	}
+	if got[1] != 8 || got[8] != 1 || got[3] != 5 || got[6] != 7 || got[9] != -1 || got[10] != -1 || got[0] != -1 {
+		t.Errorf("matchParens: %v", got)
 	}
 
 	// The memory itself: a name is worked out once.
-	toks, _ := lexSQL(chained(40, "amt", "coalesce(a%d, 0)"))
-	r := newNumReader(toks, exactTypes)
-	if v := r.name("a40"); v.kind != numAnyScale || r.over {
+	toks, _ = lexSQL(chained(40, "rl", "a%d * 2"))
+	r := newNumReader(toks, exactTypes, matchParens(toks))
+	if v := r.name("a40"); v.kind != numReal || r.over {
 		t.Errorf("a40: %+v, over=%v", v, r.over)
 	}
 	first := r.steps
@@ -497,9 +416,9 @@ func TestNumReader_bounded(t *testing.T) {
 	}
 	// A name read inside its own definition is the column of that name, and
 	// what is kept is what it stands for.
-	toks, _ = lexSQL(`SELECT coalesce(t.amt, 0.00) FROM (SELECT sum(amt) AS amt FROM pgcmp_exact) t`)
-	r = newNumReader(toks, exactTypes)
-	if v := r.name("amt"); v != (numValue{kind: numScaled, scale: 2}) {
-		t.Errorf("sum(amt) AS amt: %+v", v)
+	toks, _ = lexSQL(`SELECT t.rl * 2 FROM (SELECT max(rl) AS rl FROM pgcmp_exact) t`)
+	r = newNumReader(toks, exactTypes, matchParens(toks))
+	if v := r.name("rl"); v.kind != numReal {
+		t.Errorf("max(rl) AS rl: %+v", v)
 	}
 }

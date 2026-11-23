@@ -4,9 +4,9 @@ package pgcompare
 
 import "github.com/dbtrail/dbtrail/internal/sqlcompare"
 
-// screenExactness are the statements of #3069, #3070, #3071 and #3072,
-// measured on PostgreSQL 16 and on the copy: four things the copy answers
-// otherwise, and beside each the forms it answers the same.
+// screenExactness are the statements of #3069, #3071 and #3072, measured on
+// PostgreSQL 16 and on the copy: three things the copy answers otherwise,
+// and beside each the forms it answers the same.
 //
 // A line that is DIFFERENT, or that the source fails, is one the port's
 // screen must send to the source (checkRouting). A line marked stay is one
@@ -22,7 +22,6 @@ func screenExactness() []expectation {
 	const (
 		sub    = "#3071: the copy counts a start of zero or below otherwise"
 		lit    = "#3072: the copy reads this date or time literal otherwise"
-		scale  = "#3070: PostgreSQL writes each value with its own decimals"
 		asReal = "#3069: PostgreSQL computes a real as a double precision, and sums it as a real"
 	)
 	return []expectation{
@@ -76,28 +75,6 @@ func screenExactness() []expectation {
 		stay(`SELECT id FROM ` + x + ` WHERE day BETWEEN DATE '2026-01-01' AND '2026-01-31'`),
 		stay(`SELECT id FROM ` + x + ` WHERE stamp >= '2026-01-05' AND stamp < '2026-01-06 00:00:00' AND stamp <> TIMESTAMP '2026-01-05 10:30:00.123456'`),
 		stay(`SELECT id FROM ` + x + ` WHERE clock < '12:00:00' OR clock = TIME '23:59:59'`),
-
-		// --- #3070: numbers of different decimals in one column -----------
-		differs("precision", scale, `SELECT id, CASE WHEN amt > 3 THEN amt ELSE 0 END FROM `+x+` ORDER BY id`),
-		differs("precision", scale, `SELECT id, greatest(amt, amt4), least(amt, amt4) FROM `+x+` ORDER BY id`),
-		differs("precision", scale, `SELECT coalesce(max(amt), 0) FROM `+x+` WHERE id < 0`),
-		differs("precision", scale, `SELECT id, coalesce(amt, 0) FROM `+x+` ORDER BY id`),
-		differs("precision", scale, `SELECT id, CASE WHEN id = 2 THEN whole ELSE amt END FROM `+x+` ORDER BY id`),
-		differs("precision", scale, `SELECT id, coalesce(amt, whole) FROM (SELECT id, CASE WHEN id < 5 THEN amt END AS amt, 7 AS whole FROM `+x+`) s ORDER BY id`),
-		differs("precision", scale, `SELECT CASE WHEN true THEN 1.5 ELSE 0 END, CASE WHEN false THEN 1.5 ELSE 0 END`),
-		differs("precision", scale, `SELECT id, CASE WHEN whole > 0 THEN amt * whole ELSE 0 END FROM `+x+` ORDER BY id`),
-		differs("precision", scale, `SELECT coalesce(t.total, 0) FROM (SELECT sum(amt) AS total FROM `+x+` WHERE id < 0) t`),
-		differs("precision", scale, `SELECT id, greatest(amt, 3) FROM `+x+` ORDER BY id`),
-		differs("precision", scale, `SELECT sum(CASE WHEN whole > 0 THEN amt ELSE 0 END) FROM `+x+` WHERE id = 3`),
-		stay(`SELECT id, CASE WHEN amt > 3 THEN amt ELSE 0.00 END FROM ` + x + ` ORDER BY id`),
-		stay(`SELECT id, coalesce(amt, 0.00), greatest(amt, 3.00), least(amt, 3.00) FROM ` + x + ` ORDER BY id`),
-		stay(`SELECT id, CASE WHEN whole > 0 THEN whole ELSE 0 END, coalesce(whole, 0), greatest(whole, 2) FROM ` + x + ` ORDER BY id`),
-		stay(`SELECT id, CASE WHEN amt > 3 THEN amt END, CASE WHEN amt > 3 THEN amt ELSE NULL END FROM ` + x + ` ORDER BY id`),
-		stay(`SELECT coalesce(max(amt), 0.00), coalesce(sum(amt), 0.00), coalesce(count(amt), 0) FROM ` + x + ` WHERE id < 0`),
-		stay(`SELECT coalesce(t.total, 0.00), coalesce(t.k, 0) FROM (SELECT sum(amt) AS total, count(*) AS k FROM ` + x + ` WHERE id < 0) t`),
-		stay(`SELECT sum(CASE WHEN whole > 0 THEN amt ELSE 0.00 END), sum(CASE WHEN whole > 0 THEN 1 ELSE 0 END) FROM ` + x),
-		stay(`SELECT id, coalesce(dbl, 0), greatest(dbl, amt), CASE WHEN whole > 0 THEN dbl ELSE 0 END FROM ` + x + ` ORDER BY id`),
-		stay(`SELECT id, CASE WHEN amt > 3 THEN 'big' ELSE 'small' END FROM ` + x + ` ORDER BY id`),
 
 		// --- #3069: a real computed with, and summed ----------------------
 		differs("precision", asReal, `SELECT id, rl + 1 FROM `+x+` ORDER BY id`),

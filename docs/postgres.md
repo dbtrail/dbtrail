@@ -1661,8 +1661,10 @@ The source answers:
   a time as `HH:MM` or `HH:MM:SS` with at most six decimals and an hour below
   24, a timestamp as the date alone or the date, a blank or a `T`, and the
   time (`DATE '2026-01-05'`, `TIMESTAMP '2026-01-05 10:30:00.123456'`). A
-  string compared with a `date`, `timestamp` or `time` column (`=`, `<`,
-  `BETWEEN`, `IN`) is held to the same form; joins, `GROUP BY`, `HAVING`, `DISTINCT [ON]`, `UNION`,
+  string written in the statement and compared with a `date`, `timestamp`
+  or `time` column (`=`, `<`, `BETWEEN`, `IN`) is held to the same form; a
+  value that arrives as a parameter of a prepared statement is not read by
+  this rule; joins, `GROUP BY`, `HAVING`, `DISTINCT [ON]`, `UNION`,
   `INTERSECT`, `EXCEPT`, `WITH`, window functions, `FILTER`, `LIMIT` and
   `OFFSET`. Anything else goes to the source. Some of what the harness found
   answering otherwise, and why each one goes there: `avg()` and division of a
@@ -1686,14 +1688,7 @@ The source answers:
   time literal in any other form (`'26-01-05'::date` is 2026-01-05 on
   PostgreSQL and the year 26 on the copy, a seventh decimal of a second is
   rounded there and cut here, `TIME '24:00:00'` is a time there and midnight
-  here), a `CASE`, `COALESCE`, `GREATEST` or `LEAST` whose values are numbers
-  PostgreSQL writes with different decimals (`coalesce(amount, 0)` over a
-  `numeric(12,2)` is `0` on PostgreSQL for a NULL and `0.00` on the copy, and
-  `greatest(a, b)` of a `numeric(10,2)` and a `numeric(10,4)` is `10.50` and
-  `10.5000`: write the other value with the column's decimals,
-  `coalesce(amount, 0.00)`, and the copy answers it; values that are all whole
-  numbers, or that hold a `double precision` or a `real`, stay on the copy),
-  arithmetic (`+`, `-`, `*`, `/`) and `sum()` over a `real` column
+  here), arithmetic (`+`, `-`, `*`, `/`) and `sum()` over a `real` column
   (PostgreSQL computes it as a `double precision`, so `r + 1` with `r = -0.1`
   is `0.8999999985098839` there and `0.9` on the copy, and answers `sum(r)`
   as a `real`; a `real` that is only read, compared, counted or taken the
@@ -2482,6 +2477,18 @@ Three things still answer differently from PostgreSQL, with no error:
 
 A numeric with no precision prints with all 18 decimals (`12345.678` as
 `12345.678000000000000000`); it compares, sorts and sums as the same number.
+
+A `CASE`, `COALESCE`, `GREATEST` or `LEAST` whose values are numbers of
+different scales can print more zeros on the copy than on PostgreSQL, for the
+same value: PostgreSQL writes each value with its own decimals, the copy
+gives them all one type and writes every one with that type's. Over a
+`numeric(12,2)` column, `coalesce(sum(amount), 0)` of no rows is `0` on
+PostgreSQL and `0.00` on the copy, and `CASE WHEN ... THEN amount ELSE 0 END`
+writes `0.00` for the rows that take the `0`. The number is the same; a
+client that reads it as a number sees no difference. Writing the other value
+with the column's decimals (`coalesce(sum(amount), 0.00)`) makes both sides
+print the same. (Around a `round()` the port does check this, value by
+value, and sends a statement whose decimals would differ to the source.)
 
 ---
 

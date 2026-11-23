@@ -726,10 +726,49 @@ func caseEnd(toks []rtToken, i int) int {
 // packCase is the CASE at toks[i:end+1] with each value packed, "" when no
 // value holds a rewritten round.
 func packCase(q string, toks []rtToken, spans [][2]int, i, end int, names map[string]bool) string {
+	// The values: from after each THEN or ELSE of this CASE (not of one
+	// inside it, nor inside parentheses) to the next WHEN, ELSE or its END.
 	type span struct{ from, to int }
 	var values []span
-	for _, v := range caseValues(toks, i, end) {
-		values = append(values, span{v[0], v[1]})
+	start, depth, nested := -1, 0, 0
+	for j := i + 1; j <= end; j++ {
+		t := toks[j]
+		switch {
+		case isOpTok(toks, j, "("):
+			depth++
+			continue
+		case isOpTok(toks, j, ")"):
+			depth--
+			continue
+		}
+		if t.kind != rtWord || depth != 0 || isOpTok(toks, j-1, ".") {
+			continue
+		}
+		switch t.text {
+		case "case":
+			nested++
+			continue
+		case "end":
+			if nested > 0 {
+				nested--
+				continue
+			}
+		}
+		if nested > 0 {
+			continue
+		}
+		switch t.text {
+		case "when", "else", "end":
+			if start >= 0 {
+				values = append(values, span{start, j})
+				start = -1
+			}
+			if t.text == "else" {
+				start = j + 1
+			}
+		case "then":
+			start = j + 1
+		}
 	}
 	held := false
 	for _, v := range values {

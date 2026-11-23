@@ -6,15 +6,13 @@ import (
 	"strings"
 )
 
-// Four rules of the screen, each for an answer pgcompare measured the copy
+// Three rules of the screen, each for an answer pgcompare measured the copy
 // giving otherwise than PostgreSQL 16 (screenExactness there):
 //
 //   - substring() with a start or a length that is not a positive whole
 //     number written in the statement (#3071);
 //   - a date, timestamp or time literal that is not written in the one form
 //     both read alike (#3072);
-//   - CASE, COALESCE, GREATEST and LEAST over numbers PostgreSQL writes with
-//     different decimals (#3070);
 //   - arithmetic and sum() over a real column (#3069).
 //
 // Each sends the statement to the source. None looks at a value: the rule is
@@ -120,7 +118,7 @@ func literalFamily(ty string) string {
 	return ""
 }
 
-// --- #3070 and #3069: what kind of number a value is ---------------------------
+// --- #3069: what kind of number a value is -------------------------------------
 
 // numKind is what the screen knows of a value as a number.
 type numKind int
@@ -174,8 +172,53 @@ const (
 
 const numReadVeto = "a statement whose names and parentheses nest deeper than the port reads to tell its numbers apart"
 
-func newNumReader(toks []rtToken, types map[string][]string) *numReader {
-	return &numReader{types: types, defs: aliasDefinitions(toks), listed: columnList(toks), known: map[string]numValue{}, busy: map[string]bool{}}
+func newNumReader(toks []rtToken, types map[string][]string, match []int) *numReader {
+	return &numReader{types: types, defs: aliasDefinitions(toks), listed: listsColumns(toks, match), known: map[string]numValue{}, busy: map[string]bool{}}
+}
+
+// matchParens is, for each token that opens or closes a parenthesis or a
+// bracket, where its other end is, and -1 for every other token and for one
+// with no other end. One pass over the statement: nothing here looks for a
+// parenthesis' other end by walking the statement again, which a statement
+// of nothing but opening parentheses would make cost its length squared.
+func matchParens(toks []rtToken) []int {
+	match := make([]int, len(toks))
+	var open []int
+	for i, t := range toks {
+		match[i] = -1
+		if t.kind != rtOp {
+			continue
+		}
+		switch t.text {
+		case "(", "[":
+			open = append(open, i)
+		case ")", "]":
+			if n := len(open); n > 0 {
+				match[i], match[open[n-1]] = open[n-1], i
+				open = open[:n-1]
+			}
+		}
+	}
+	return match
+}
+
+// listsColumns is columnList (aliastypes.go) read with the statement's
+// parentheses already matched: whether the statement names columns in a list
+// (AS b(n), ) b(n), c(n) AS (...)).
+func listsColumns(toks []rtToken, match []int) bool {
+	for i, t := range toks {
+		if t.kind != rtWord || !isOpTok(toks, i+1, "(") || parenWords[t.text] || t.text == "over" || t.text == "within" {
+			continue
+		}
+		if i > 0 && (toks[i-1].kind == rtWord && toks[i-1].text == "as" || isOpTok(toks, i-1, ")")) {
+			return true
+		}
+		if end := match[i+1]; end > 0 && end+1 < len(toks) && toks[end+1].kind == rtWord && toks[end+1].text == "as" &&
+			(isOpTok(toks, end+2, "(") || end+2 < len(toks) && toks[end+2].kind == rtWord && (toks[end+2].text == "materialized" || toks[end+2].text == "not")) {
+			return true
+		}
+	}
+	return false
 }
 
 // spend counts n tokens of work, and reports whether the reader may go on.
@@ -396,216 +439,12 @@ func (r *numReader) holds(toks []rtToken) numValue {
 	return out
 }
 
-// --- #3070: CASE, COALESCE, GREATEST and LEAST over numbers --------------------
-
-const numericMixVeto = " over numbers of different decimals, which PostgreSQL writes with each value's own (0 where the copy writes 0.00)"
-
-// caseValues are the values of the CASE at toks[i:end+1], as [from, to)
-// token spans: from after each THEN or ELSE of this CASE (not of one inside
-// it, nor inside parentheses) to the next WHEN, ELSE or its END.
-func caseValues(toks []rtToken, i, end int) [][2]int {
-	var values [][2]int
-	start, depth, nested := -1, 0, 0
-	for j := i + 1; j <= end; j++ {
-		t := toks[j]
-		switch {
-		case isOpTok(toks, j, "("):
-			depth++
-			continue
-		case isOpTok(toks, j, ")"):
-			depth--
-			continue
-		}
-		if t.kind != rtWord || depth != 0 || isOpTok(toks, j-1, ".") {
-			continue
-		}
-		switch t.text {
-		case "case":
-			nested++
-			continue
-		case "end":
-			if nested > 0 {
-				nested--
-				continue
-			}
-		}
-		if nested > 0 {
-			continue
-		}
-		switch t.text {
-		case "when", "else", "end":
-			if start >= 0 {
-				values = append(values, [2]int{start, j})
-				start = -1
-			}
-			if t.text == "else" {
-				start = j + 1
-			}
-		case "then":
-			start = j + 1
-		}
-	}
-	return values
-}
-
-// callArgs are the arguments of the call whose "(" is at open and ")" at
-// end, as [from, to) token spans.
-func callArgs(toks []rtToken, open, end int) [][2]int {
-	var args [][2]int
-	from, depth := open+1, 0
-	for j := open + 1; j <= end; j++ {
-		switch {
-		case isOpTok(toks, j, "(") || isOpTok(toks, j, "["):
-			depth++
-		case (isOpTok(toks, j, ")") || isOpTok(toks, j, "]")) && j < end:
-			depth--
-		case depth == 0 && (isOpTok(toks, j, ",") || j == end):
-			args = append(args, [2]int{from, j})
-			from = j + 1
-		}
-	}
-	return args
-}
-
-// numericMix names a CASE, COALESCE, GREATEST or LEAST whose values are
-// numbers PostgreSQL writes with different decimals, "" when none: the copy
-// gives them all one type and writes every one with that type's decimals
-// (CASE WHEN n > 3 THEN n ELSE 0 END is 0 on PostgreSQL and 0.00 here,
-// greatest(n, n4) is 10.50 there and 10.5000 here). It stays on the copy
-// when every value that is not NULL is known to have the same number of
-// decimals (a numeric(12,2) beside 0.00, whole numbers beside whole numbers),
-// when a value is a double precision or a real (both sides answer a float
-// then, which has no decimals to keep), and when no value is known to be a
-// numeric with decimals. One that
-// holds a rewritten round is checked value by value where it runs instead
-// (packMixedScale, scaleMixRisk).
-//
-// literalsOnly is the screen before the columns' types are known
-// (screenUntyped): only numbers written in the statement are judged there,
-// which no column's type can change.
-func numericMix(toks []rtToken, types map[string][]string, literalsOnly bool) string {
-	r := newNumReader(toks, types)
-	for i, t := range toks {
-		if r.over {
-			return numReadVeto
-		}
-		if t.kind != rtWord || isOpTok(toks, i-1, ".") {
-			continue
-		}
-		var values [][2]int
-		what := ""
-		switch t.text {
-		case "case":
-			end := caseEnd(toks, i)
-			if end < 0 {
-				continue
-			}
-			if !r.spend(end - i) {
-				return numReadVeto
-			}
-			values, what = caseValues(toks, i, end), "CASE"
-		case "coalesce", "greatest", "least":
-			if !isOpTok(toks, i+1, "(") {
-				continue
-			}
-			end := closingParen(toks, i+1)
-			if end < 0 {
-				continue
-			}
-			if !r.spend(end - i) {
-				return numReadVeto
-			}
-			values, what = callArgs(toks, i+1, end), t.text+"()"
-		default:
-			continue
-		}
-		scales := map[int]bool{}
-		count, anyScale, unknown, float, macro := 0, 0, 0, false, false
-		for _, v := range values {
-			if v[1] <= v[0] {
-				continue
-			}
-			branch := toks[v[0]:v[1]]
-			for _, b := range branch {
-				if b.kind == rtWord && strings.HasPrefix(b.text, "_bintrail_pg_") {
-					macro = true
-				}
-			}
-			var k numValue
-			if literalsOnly {
-				if len(branch) == 1 && branch[0].kind == rtNumber {
-					k = numValue{kind: numScaled, scale: decimals(branch[0].text)}
-				} else {
-					continue
-				}
-			} else {
-				k = r.value(branch)
-			}
-			if k.kind == numNull {
-				continue
-			}
-			count++
-			switch k.kind {
-			case numScaled:
-				scales[k.scale] = true
-			case numAnyScale:
-				anyScale++
-			case numDouble, numReal:
-				float = true
-			case numUnknown:
-				unknown++
-			}
-		}
-		if r.over {
-			return numReadVeto
-		}
-		if macro || count < 2 {
-			continue
-		}
-		decimalsKnown := false
-		for s := range scales {
-			if s > 0 {
-				decimalsKnown = true
-			}
-		}
-		switch {
-		case float:
-			continue
-		case len(scales) >= 2,
-			anyScale > 0 && (len(scales) > 0 || anyScale > 1 || unknown > 0),
-			decimalsKnown && unknown > 0:
-			return what + numericMixVeto
-		}
-	}
-	if r.over {
-		return numReadVeto
-	}
-	return ""
-}
-
 // --- #3069: arithmetic and sum over a real -------------------------------------
 
 const (
 	realArithmeticVeto = "arithmetic over a real column (PostgreSQL computes it as a double precision, the copy as a real)"
 	realSumVeto        = "sum() over a real column (PostgreSQL answers a real, the copy a double precision)"
 )
-
-// openingParen finds the "(" that the ")" at end closes, -1 if none.
-func openingParen(toks []rtToken, end int) int {
-	depth := 0
-	for j := end; j >= 0; j-- {
-		switch {
-		case isOpTok(toks, j, ")") || isOpTok(toks, j, "]"):
-			depth++
-		case isOpTok(toks, j, "(") || isOpTok(toks, j, "["):
-			depth--
-			if depth == 0 {
-				return j
-			}
-		}
-	}
-	return -1
-}
 
 // realUse names arithmetic (+ - * /) with a real column on either side, or a
 // sum() over one, "" when none. PostgreSQL widens a real to a double
@@ -632,14 +471,15 @@ func realUse(toks []rtToken, types map[string][]string) string {
 	if !found {
 		return ""
 	}
-	r := newNumReader(toks, types)
+	match := matchParens(toks)
+	r := newNumReader(toks, types, match)
 	for i, t := range toks {
 		if r.over {
 			return numReadVeto
 		}
 		switch {
 		case t.kind == rtWord && t.text == "sum" && isOpTok(toks, i+1, "(") && !isOpTok(toks, i-1, "."):
-			if end := closingParen(toks, i+1); end > 0 && r.holds(toks[i+2:end]).kind == numReal {
+			if end := match[i+1]; end > 0 && r.holds(toks[i+2:end]).kind == numReal {
 				return realSumVeto
 			}
 		case t.kind == rtOp && (t.text == "+" || t.text == "-" || t.text == "*" || t.text == "/"):
@@ -648,9 +488,7 @@ func realUse(toks []rtToken, types map[string][]string) string {
 			if i > 0 {
 				from := i - 1
 				if isOpTok(toks, from, ")") {
-					open := openingParen(toks, from)
-					r.spend(from - max(open, 0))
-					if open >= 0 {
+					if open := match[from]; open >= 0 {
 						from = open
 						if open > 0 && toks[open-1].kind == rtWord {
 							from = open - 1
@@ -679,7 +517,7 @@ func realUse(toks []rtToken, types map[string][]string) string {
 				open = from + 1
 			}
 			if open >= 0 {
-				if end := closingParen(toks, open); end > 0 {
+				if end := match[open]; end > 0 {
 					to = end + 1
 				}
 			}
