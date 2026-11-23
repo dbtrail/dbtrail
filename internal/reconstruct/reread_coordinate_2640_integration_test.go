@@ -367,11 +367,17 @@ func indexBinlogsFrom(t *testing.T, sourceDB, indexDB *sql.DB, res *metadata.Res
 	if len(files) == 0 {
 		t.Fatalf("no binary log between %s and %s", first, current)
 	}
+	// Where the server keeps its binary logs, by its own account.
+	var basename string
+	if err := sourceDB.QueryRow("SELECT @@log_bin_basename").Scan(&basename); err != nil {
+		t.Fatalf("read @@log_bin_basename: %v", err)
+	}
+	binlogDir := filepath.Dir(basename)
 	tmpDir := t.TempDir()
 	idx := indexer.New(indexDB, 1000)
 	p := parser.New(tmpDir, res, parser.Filters{Schemas: map[string]bool{schema: true}}, nil)
 	for _, f := range files {
-		cp := exec.Command("docker", "cp", mysqlContainer()+":/var/lib/mysql/"+f, filepath.Join(tmpDir, f))
+		cp := exec.Command("docker", "cp", mysqlContainer()+":"+binlogDir+"/"+f, filepath.Join(tmpDir, f))
 		if out, err := cp.CombinedOutput(); err != nil {
 			t.Fatalf("docker cp %s: %v\n%s", f, err, out)
 		}
