@@ -91,7 +91,9 @@ func fromListItem(toks []rtToken, i int) bool {
 // subquery of an EXISTS: EXISTS (SELECT * FROM ...), with no set operation
 // in the subquery (UNION, INTERSECT and EXCEPT compare the star's rows).
 func existsStar(toks []rtToken, i int) bool {
-	word := func(j int, w string) bool { return j >= 0 && j < len(toks) && toks[j].kind == rtWord && toks[j].text == w }
+	word := func(j int, w string) bool {
+		return j >= 0 && j < len(toks) && toks[j].kind == rtWord && toks[j].text == w
+	}
 	if !(word(i-1, "select") && isOpTok(toks, i-2, "(") && word(i-3, "exists") && word(i+1, "from")) || isOpTok(toks, i-4, ".") {
 		return false
 	}
