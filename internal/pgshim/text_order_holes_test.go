@@ -285,6 +285,10 @@ func TestCopyScreen_maybeTextIsNotConcatenated(t *testing.T) {
 		`SELECT name || '!' FROM (SELECT min(DISTINCT price) AS name FROM items) s`,
 		`SELECT name || '!' FROM (SELECT public.items.price AS name FROM items) s`,
 		`SELECT concat(name, '!') FROM (SELECT "price" AS name FROM items) s`,
+		// The name stands for the text column in one branch and for a float
+		// in the other: it may be text, and is not known to be.
+		`SELECT name || '!' FROM (SELECT name AS name FROM items UNION ALL SELECT price AS name FROM items) s`,
+		`SELECT concat(name, '!') FROM (SELECT name AS name FROM items UNION ALL SELECT price AS name FROM items) s`,
 	} {
 		if why := CopyScreen(q, types); why == "" {
 			t.Errorf("%s: left to the copy, want the source", q)
