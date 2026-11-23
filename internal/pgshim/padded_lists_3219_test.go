@@ -117,8 +117,8 @@ func TestFromListItem(t *testing.T) {
 		{`SELECT f((SELECT 1 FROM a, codes)) FROM t`, 0, true},
 		{`SELECT 1 FROM (SELECT 1 FROM t WHERE u > 1) s, codes`, 0, true},
 		{`SELECT 1 FROM t WHERE EXISTS (SELECT 1 FROM a, codes)`, 0, true},
-		{`SELECT 1 FROM codes`, 0, false},               // after FROM, not after a comma: the other rule's
-		{`SELECT a, codes FROM t`, 0, false},            // a value
+		{`SELECT 1 FROM codes`, 0, false},    // after FROM, not after a comma: the other rule's
+		{`SELECT a, codes FROM t`, 0, false}, // a value
 		{`SELECT 1 FROM t WHERE x IN (a, codes)`, 0, false},
 		{`SELECT 1 FROM t ORDER BY a, codes`, 0, false},
 		{`SELECT 1 FROM t GROUP BY a, codes`, 0, false},
@@ -134,6 +134,53 @@ func TestFromListItem(t *testing.T) {
 		toks, i := at(tc.q, "codes", tc.nth)
 		if got := fromListItem(toks, i); got != tc.want {
 			t.Errorf("%s: fromListItem = %v, want %v", tc.q, got, tc.want)
+		}
+	}
+}
+
+// The two statements of the issue, over the TPC-C tables: order_line holds a
+// char(24) column, ol_dist_info, which neither statement uses.
+func TestPaddedLists_reportsOfTheIssue(t *testing.T) {
+	col := func(name, typ string, oid uint32, mod int32) CatalogColumn {
+		return CatalogColumn{Name: name, Type: typ, SourceType: oid, SourceTypeMod: mod}
+	}
+	const timestamptz = 1184
+	catalog := []CatalogTable{
+		{Schema: "public", Name: "orders", Columns: []CatalogColumn{
+			col("o_id", "INTEGER", oidInt4, -1), col("o_w_id", "INTEGER", oidInt4, -1), col("o_d_id", "INTEGER", oidInt4, -1),
+			col("o_carrier_id", "INTEGER", oidInt4, -1), col("o_ol_cnt", "INTEGER", oidInt4, -1),
+			col("o_entry_d", "TIMESTAMP WITH TIME ZONE", timestamptz, -1)}},
+		{Schema: "public", Name: "order_line", Columns: []CatalogColumn{
+			col("ol_o_id", "INTEGER", oidInt4, -1), col("ol_w_id", "INTEGER", oidInt4, -1), col("ol_d_id", "INTEGER", oidInt4, -1),
+			col("ol_delivery_d", "TIMESTAMP WITH TIME ZONE", timestamptz, -1), col("ol_dist_info", "VARCHAR", oidBpchar, 28)}},
+	}
+	for name, q := range map[string]string{
+		"Q12, tables listed with commas": `select o_ol_cnt,
+       sum(case when o_carrier_id = 1 or o_carrier_id = 2 then 1 else 0 end) as high_line_count,
+       sum(case when o_carrier_id <> 1 and o_carrier_id <> 2 then 1 else 0 end) as low_line_count
+from orders, order_line
+where ol_w_id = o_w_id and ol_d_id = o_d_id and ol_o_id = o_id
+  and o_entry_d <= ol_delivery_d and ol_delivery_d < '2032-01-01 00:00:00'
+group by o_ol_cnt order by o_ol_cnt`,
+		"Q4, EXISTS with a star": `select o_ol_cnt, count(*) as order_count
+from orders
+where o_entry_d >= '2007-01-02 00:00:00' and o_entry_d < '2032-01-02 00:00:00'
+  and exists (select * from order_line
+              where o_id = ol_o_id and o_w_id = ol_w_id and o_d_id = ol_d_id
+                and ol_delivery_d >= o_entry_d)
+group by o_ol_cnt order by o_ol_cnt`,
+	} {
+		if veto := CopyScreenFor(q, catalog); veto != "" {
+			t.Errorf("%s: sent to the source (%s), want the copy", name, veto)
+		}
+	}
+	// The same two with the char(n) column compared: the source's.
+	for name, q := range map[string]string{
+		"the list, the column compared": `select count(*) from orders, order_line where ol_o_id = o_id and ol_dist_info = 'x'`,
+		"EXISTS, the column compared":   `select count(*) from orders where exists (select * from order_line where ol_o_id = o_id and ol_dist_info = 'x')`,
+	} {
+		if veto := CopyScreenFor(q, catalog); !isPaddedVeto(veto) {
+			t.Errorf("%s: %q, want it sent to the source for its padded column", name, veto)
 		}
 	}
 }
