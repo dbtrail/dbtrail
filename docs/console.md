@@ -682,7 +682,11 @@ and only a `SELECT` whose every table is a table of the copy
 anything else is refused and not sent. The MySQL port does not yet: it saves
 the answer, keeps forwarding only as a user set with `-u`, and says so in
 `SHOW ROUTER STATUS`. An edit that points the server's source at another user
-or another host takes the answer back; a new password keeps it. The API is
+or another host takes the answer back; a new password keeps it. In the web
+interface the answer is a box on a PostgreSQL server's form, unticked until
+somebody ticks it, with the forwarding user's two fields behind **Advanced:
+use a separate forwarding user**; a MySQL or MariaDB server's form has no such
+box and keeps its two forwarding fields. The API is
 `PUT /api/servers/{id}/route` with `{"capture_account": true}` (or `false`),
 sent alone.
 

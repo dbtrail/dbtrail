@@ -16376,6 +16376,22 @@ function pgPortLine(host, name) {
   return 'psql "host=' + (host || "127.0.0.1") + " port=5433 dbname=" + db + ' user=app sslmode=require"';
 }
 
+// pgForwardSaid says, on the PostgreSQL clients page, what the PostgreSQL
+// port sends to the source of the server picked in the sidebar (#3054): as
+// its forwarding user, as the source user once the server's form said yes,
+// or nothing. cur is that server as GET /api/servers lists it, absent when
+// none is picked. Pure, so every state is rendered with node.
+function pgForwardSaid(cur) {
+  const how = " To change it, edit the server (Servers, Edit).";
+  if (!cur || cur.flavor !== "postgres" || !cur.has_source) return "What it does not answer goes to your PostgreSQL, read-only, only for a server whose form lets the port forward; for any other, the copy answers alone.";
+  const name = cur.name || "this server";
+  if (cur.has_route) return "For " + name + ", every other statement, and a transaction block (BEGIN to COMMIT or ROLLBACK), runs on your PostgreSQL as its forwarding user, " + cur.route_user + ", read-only." + how;
+  if (cur.route_is_capture || cur.route_unreadable) return "For " + name + ", nothing is sent to your PostgreSQL: its saved forwarding user is one the port refuses, so the copy answers alone. Edit the server (Servers, Edit) and remove that user.";
+  if (cur.forward_with_capture_account && cur.capture_account_refused) return "For " + name + ", nothing is sent to your PostgreSQL: " + String(cur.capture_account_refused).replace(/\.+$/, "") + ".";
+  if (cur.forward_with_capture_account) return "For " + name + ", a SELECT the copy does not answer runs on your PostgreSQL, read-only and as the source user (" + cur.source_user + "), when every table it reads is a table of the copy; anything else is refused and not sent." + how;
+  return "For " + name + ", nothing is sent to your PostgreSQL: the copy answers alone, and a statement it cannot answer gets an error." + how;
+}
+
 // sqlClientPanel renders the MySQL port: could not check, not here (a
 // read-only console), off, a setting this console cannot change, or on (the
 // ready-to-copy mysql line for the server picked in the sidebar, the user
@@ -16411,9 +16427,9 @@ function sqlClientPanel(servers, fb, reveal, live, rt, split) {
     if (!split) return panel;
     if (pg) {
       wrap.append(cnSection("PostgreSQL client", "Read your copy from a PostgreSQL client",
-        "Your tables as DBTrail keeps them, answered by DBTrail's copy where it gives the answer PostgreSQL gives. Everything else goes to your database, read-only, as the server's forwarding user when it has one.", "pink"), panel);
+        "Your tables as DBTrail keeps them, answered by DBTrail's copy where it gives the answer PostgreSQL gives. What else goes to your database, read-only, is each server's own choice: nothing, until its form says so.", "pink"), panel);
       wrap.append(el("section", { class: "ov-panel cn-routep sqlc is-idle" },
-        el("p", { class: "cn-sql-row", text: "Engine Routing and the proxy logins are the MySQL port's. On the PostgreSQL port, the copy answers what it is known to answer as PostgreSQL does; every other statement, and a transaction block (BEGIN to COMMIT or ROLLBACK), runs on your PostgreSQL as the server's forwarding user, read-only, when one is set (edit the server); without one, the copy answers alone." })));
+        el("p", { class: "cn-sql-row", text: "Engine Routing and the proxy logins are the MySQL port's. On the PostgreSQL port, the copy answers what it is known to answer as PostgreSQL does. " + pgForwardSaid((servers || []).find((x) => x && x.id === (currentServer || defaultServerId))) })));
       return wrap;
     }
     wrap.append(cnSection("MySQL client", "Read your copy from a MySQL client",
@@ -16547,7 +16563,7 @@ function sqlClientPanel(servers, fb, reveal, live, rt, split) {
         "The user can be anything: the password is what opens the port."),
       reveal ? null : el("p", { class: "form-hint", text: "Password: the one shown when it was created" +
         (fb.password_created_at ? ", " + utcLabel(fb.password_created_at) : "") + ". It cannot be shown again." }),
-      el("p", { class: "form-hint", text: "This password reads the copy of every server in the sidebar. It is not an account on your PostgreSQL: DBTrail made it, and it opens only this port. A statement that is not a read is refused. Until the server has a forwarding user, nothing is sent to your PostgreSQL: the copy answers every statement." }),
+      el("p", { class: "form-hint", text: "This password reads the copy of every server in the sidebar. It is not an account on your PostgreSQL: DBTrail made it, and it opens only this port. A statement that is not a read is refused. Nothing is sent to your PostgreSQL for a server until its form (Servers, Edit) lets the port forward: the copy answers every statement." }),
       el("p", { class: "form-hint", text: "5433 is the port the PostgreSQL router listens on unless it was started with another (BINTRAIL_PG_ROUTER_LISTEN). It answers on this machine only unless that setting says otherwise; for another machine, open a tunnel to it. Keep sslmode=require in the line: the login never sends the password, and the port does not refuse a client that asks for no encryption." })));
     return done("card");
   }
@@ -18195,7 +18211,56 @@ const FORWARDING_HINT = "Forwarding user and password are optional. They only ma
 
 // FORWARDING_HINT_PG is FORWARDING_HINT for a PostgreSQL source (#2771): what
 // its port, the PostgreSQL router, sends there as this user.
-const FORWARDING_HINT_PG = "Forwarding user and password are optional. With them, every statement the copy is not known to answer as PostgreSQL does, a transaction block a SQL client opens on the PostgreSQL port (BEGIN to COMMIT or ROLLBACK), and a catalog statement the copy does not answer run on this server as the forwarding user, read-only; the copy answers the rest. Create a role that can log in, with SELECT on what the port should read and nothing more. It must be another user than the source user: the port never forwards with the account DBTrail captures with, so with these fields blank the copy answers alone. Saving a change to the forwarding account closes the connections open on that port for this server, so that none stays on the previous account; clients reconnect.";
+const FORWARDING_HINT_PG = "A separate forwarding user is optional: it is for a port that should send to this PostgreSQL more than the box above allows. With one, every statement the copy is not known to answer as PostgreSQL does, a transaction block a SQL client opens on the PostgreSQL port (BEGIN to COMMIT or ROLLBACK), and a catalog statement the copy does not answer run on this server as that user, read-only; the copy answers the rest. Create a role that can log in, with SELECT on what the port should read and nothing more. It must be another user than the source user. While the server has one, the port forwards as that user and the box above is not used. Saving a change to it closes the connections open on that port for this server, so that none stays on the previous account; clients reconnect.";
+
+// The capture account (#3054): a PostgreSQL server needs no second user for
+// its port to forward. The box is the yes or no the terminal asks at
+// `server add`, saved the same way (PUT /api/servers/{id}/route with
+// capture_account alone), off until somebody ticks it.
+const PG_FORWARD_ASK = "Let the PostgreSQL port send to this PostgreSQL, read-only and as the source user above, a SELECT the copy does not answer";
+const PG_FORWARD_HINT = "Unticked, the copy answers alone and nothing is sent to this PostgreSQL: a statement the copy cannot answer gets an error. Ticked, the port sends such a statement only when it is a SELECT whose every table is a table of the copy; anything else is refused and not sent, and a server that hides tables or columns sends nothing. No second user is needed. The port then logs in as the source user, so its connections count toward that role's connection limit. Changing the box closes the connections open on that port for this server; clients reconnect.";
+
+// captureWas remembers, per form, the answer its server had when the form
+// opened (false for a new server): the answer is sent only when the box
+// differs from it, so a save about something else never gives or takes it.
+const captureWas = new WeakMap();
+
+// captureChoice is what a save must send about the capture account: true or
+// false when the box of a PostgreSQL form differs from what the server had,
+// undefined when nothing is to be sent. Any other source type sends nothing,
+// whatever the box holds: its form never shows it.
+function captureChoice(form) {
+  const f = form.elements;
+  if (!f.forward_capture || f.flavor.value !== "postgres") return undefined;
+  const on = !!f.forward_capture.checked;
+  return on === !!captureWas.get(form) ? undefined : on;
+}
+
+// captureFormProblem stops a save that says two things about who the port
+// forwards as: the box newly ticked, and a forwarding user typed beside it.
+function captureFormProblem(form) {
+  if (captureChoice(form) !== true) return "";
+  const f = form.elements, was = routePrefill.get(form) || { user: "" };
+  if (!f.route_user || (f.route_user.value.trim() === was.user && f.route_password.value === "")) return "";
+  return "The box that lets the port forward as the source user is ticked, and a separate forwarding user was typed too. Both say who the port forwards as: untick the box, or clear the forwarding user and its password.";
+}
+
+// captureSaid is the line shown once the answer is saved: what the server's
+// port forwards as now. s is the server as PUT /api/servers/{id}/route
+// answered it. tone "err" when the answer is saved and the port does not
+// act on it. Pure, so every state is rendered with node.
+function captureSaid(s) {
+  const name = s.name || "This server";
+  if (!s.forward_with_capture_account) {
+    return { tone: "ok", text: s.has_route
+      ? name + ": the PostgreSQL port does not forward as the source user. It forwards as its forwarding user, " + s.route_user + ", as before."
+      : name + ": the PostgreSQL port sends nothing to this PostgreSQL now. The copy answers alone." };
+  }
+  if (s.has_route) return { tone: "ok", text: name + ": saved. The PostgreSQL port keeps forwarding as its forwarding user, " + s.route_user + ", while that one is set. Once it is removed, the source user takes its place." };
+  if (s.route_is_capture || s.route_unreadable) return { tone: "err", text: name + ": saved, and not used yet. The server has a saved forwarding user that the port refuses, and while it is saved nothing is forwarded. Edit the server and remove it." };
+  if (s.capture_account_refused) return { tone: "err", text: name + ": saved, and not used: " + String(s.capture_account_refused).replace(/\.+$/, "") + "." };
+  return { tone: "ok", text: name + ": the PostgreSQL port now sends to this PostgreSQL, read-only and as " + (s.source_user || "the source user") + ", a SELECT the copy does not answer, when every table it reads is a table of the copy." };
+}
 
 // routePrefill remembers, per form, the forwarding account its server had
 // when the form opened: serverFormBody sends the forwarding fields only when
@@ -18245,9 +18310,19 @@ function tagFlavor(node, families) { node.setAttribute("data-flavor", families);
 // CSS :not() default-hide, never a [hidden]/style="display:none" toggle (the
 // documented display-bug class this codebase already hit).
 function applyFlavor(form) {
-  const f = (form.elements.flavor && form.elements.flavor.value) || "mysql";
-  $all("[data-flavor]", form).forEach((n) =>
-    n.classList.toggle("flavor-on", n.dataset.flavor.split(" ").includes(f)));
+  const e = form.elements, f = (e.flavor && e.flavor.value) || "mysql";
+  // A PostgreSQL's separate forwarding user is folded (#3054): its nodes
+  // carry "postgres-own" and show once the fold is opened, or while they
+  // hold something (a saved account, or a value typed before the type was
+  // changed), so nothing the form sends is ever out of sight.
+  const own = f === "postgres" && (form.dataset.routeOwn === "1" ||
+    (!!e.route_user && (e.route_user.value.trim() !== "" || e.route_password.value !== "")));
+  $all("[data-flavor]", form).forEach((n) => {
+    const fams = n.dataset.flavor.split(" ");
+    n.classList.toggle("flavor-on", fams.includes(f) || (own && fams.includes("postgres-own")));
+  });
+  const open = form.querySelector("button#route-own-open");
+  if (open) open.hidden = own;
 }
 
 // sqlString quotes a value as a MySQL string literal. Backslashes first: under
@@ -18530,8 +18605,8 @@ function buildServerForm(offered, familyLine) {
   // never prefilled and blank keeps the saved one. Removing a saved account
   // is the control in #route-extra, filled in when the form opens on a
   // server that has one.
-  monGrid.append(tagFlavor(srvField("Forwarding user", "route_user", { placeholder: "(optional) blank: the port does not forward", autocomplete: "off" }), "mysql mariadb postgres"));
-  monGrid.append(tagFlavor(srvField("Forwarding password", "route_password", { type: "password", autocomplete: "new-password" }), "mysql mariadb postgres"));
+  monGrid.append(tagFlavor(srvField("Forwarding user", "route_user", { placeholder: "(optional) blank: the port does not forward", autocomplete: "off" }), "mysql mariadb postgres-own"));
+  monGrid.append(tagFlavor(srvField("Forwarding password", "route_password", { type: "password", autocomplete: "new-password" }), "mysql mariadb postgres-own"));
   // PostgreSQL-only: a logical-replication connection is per-database, and the
   // slot/publication are operator-created (validate-don't-create).
   monGrid.append(tagFlavor(srvField("Database", "source_database", { placeholder: "appdb" }), "postgres"));
@@ -18553,9 +18628,20 @@ function buildServerForm(offered, familyLine) {
   monGrid.append(srvField("S3 access key", "s3_access_key_id", { placeholder: "(optional) blank uses DBTrail's own credentials", autocomplete: "off" }));
   monGrid.append(srvField("S3 secret key", "s3_secret_access_key", { type: "password", autocomplete: "new-password" }));
   mon.append(monGrid);
+  // A PostgreSQL's port forwards with the source user once this box says so
+  // (#3054); its separate forwarding user, the two fields above, is folded
+  // behind the button. A session that may not change servers sees the box
+  // and cannot change it.
+  const mayWrite = sessionMay("servers:write");
+  mon.append(tagFlavor(el("div", { id: "pg-forward" },
+    el("label", { class: "check" }, el("input", { type: "checkbox", name: "forward_capture", disabled: !mayWrite }), el("span", { text: PG_FORWARD_ASK })),
+    mayWrite ? null : el("p", { class: "form-hint", text: "Changing it needs permission to change servers." }),
+    el("p", { class: "form-hint", text: PG_FORWARD_HINT }),
+    el("button", { class: "btn btn-sm btn-ghost", type: "button", id: "route-own-open", text: "Advanced: use a separate forwarding user",
+      onclick: () => { form.dataset.routeOwn = "1"; applyFlavor(form); form.elements.route_user.focus(); } })), "postgres"));
   mon.append(tagFlavor(el("div", { id: "route-extra" }), "mysql mariadb postgres"));
   mon.append(tagFlavor(el("p", { class: "form-hint", text: FORWARDING_HINT }), "mysql mariadb"));
-  mon.append(tagFlavor(el("p", { class: "form-hint", text: FORWARDING_HINT_PG }), "postgres"));
+  mon.append(tagFlavor(el("p", { class: "form-hint", text: FORWARDING_HINT_PG }), "postgres-own"));
   mon.append(el("p", { class: "form-hint", text: "Leave the S3 fields blank for AWS. They apply to the Archive and Snapshots locations set on this server, for uploads and reads alike, not to the default Snapshots location DBTrail was started with. A bucket has one store and one pair of keys, so two servers sharing a bucket must agree. Clearing the access key removes both keys." }));
   // The source user is the #1 friction point — spell out the grant inline,
   // never behind a <details>. REPLICATION SLAVE/CLIENT drive the stream;
@@ -18696,6 +18782,12 @@ function showServerForm(prefill, opts) {
     });
     form.elements.route_password.placeholder = prefill.has_route_password ? "(unchanged; leave blank to keep)" : "";
     fillRouteExtra(form, prefill);
+    // The saved answer, for a PostgreSQL alone: any other type's box stays
+    // unticked and is never sent.
+    if (prefill.flavor === "postgres" && prefill.forward_with_capture_account) {
+      form.elements.forward_capture.checked = true;
+      captureWas.set(form, true);
+    }
     form.elements.password.placeholder = prefill.has_password ? "(unchanged; leave blank to keep)" : "(none)";
     form.elements.source_password.placeholder = prefill.has_source_password ? "(unchanged; leave blank to keep)" : "";
     if (prefill.has_source_password) savedSourcePasswords.set(form, true);
@@ -19750,6 +19842,7 @@ function fillRouteExtra(form, prefill) {
   // the PostgreSQL port, every other one's the MySQL port, as before.
   const portWord = prefill.flavor === "postgres" ? "PostgreSQL port" : "MySQL port";
   if (!stored) return;
+  form.dataset.routeOwn = "1";
   if (prefill.route_unreadable) {
     box.append(el("p", { class: "form-msg err", text: "The forwarding account saved for this server cannot be read (was the servers file edited by hand?), so the " + portWord + " cannot forward for this server. Type the forwarding user and password again, or remove it below. Saving this form without doing either leaves it as it is." }));
   } else if (prefill.route_is_capture) {
@@ -19821,7 +19914,7 @@ async function saveServer(form) {
   const id = form.elements.id.value;
   refreshGrants(form);
   if (missingSourceHost(form)) { formMsg("Fill in Source host, the database you want DBTrail to watch.", true); form.elements.source_host.focus(); return; }
-  const routeProblem = routeFormProblem(form);
+  const routeProblem = routeFormProblem(form) || captureFormProblem(form);
   if (routeProblem) { formMsg(routeProblem, true); form.elements.route_user.focus(); return; }
   const body = serverFormBody(form);
   let saved;
@@ -19833,6 +19926,8 @@ async function saveServer(form) {
     openNotice({ tone: "err", title: "Could not save", lines: [why], button: "Back to the form" });
     return;
   }
+  const captureNote = await saveCaptureChoice(form, saved);
+  if (captureNote.server) saved = captureNote.server;
   // The pending password now belongs to the server just saved; the next new
   // server gets its own.
   if (!id && body.source_password && body.source_password === pendingSourcePassword) pendingSourcePassword = "";
@@ -19843,7 +19938,7 @@ async function saveServer(form) {
     formMsg("Running startup checks…", false);
     const res = await startMonitor(saved.id);
     await refreshServersList();
-    if (res && res.started && !doctorWarnings(res.doctor) && !doctorOptional(res.doctor)) { hideServerForm(); toast("Monitoring started. Events will appear within a minute"); return; }
+    if (res && res.started && !doctorWarnings(res.doctor) && !doctorOptional(res.doctor)) { hideServerForm(); toast("Monitoring started. Events will appear within a minute." + captureNote.said, captureNote.said ? 9000 : 0); return; }
     // The entry now EXISTS: the form is re-shown from the saved entry so that
     // Save is a real retry (a PUT of this id) rather than a second POST of the
     // same name, which the registry refuses as a duplicate. Save stays
@@ -19885,7 +19980,39 @@ async function saveServer(form) {
   if (why) noCaptureNotes[saved.id] = why;
   await refreshServersList();
   if (why && !document.getElementById("srv-status-" + saved.id)) toastError(why);
-  toast((id ? "Server updated" : "Server added") + (why ? "; it will not capture changes yet" : ""));
+  toast((id ? "Server updated" : "Server added") + (why ? "; it will not capture changes yet" : "") + (captureNote.said ? "." + captureNote.said : ""), captureNote.said ? 9000 : 0);
+}
+
+// saveCaptureChoice sends the answer about the capture account (#3054) for a
+// server just saved, when the form's box differs from what the server had:
+// PUT /api/servers/{id}/route with capture_account alone, the request
+// `server add` sends from a terminal, so the web and the terminal save the
+// same thing. Nothing is sent for a MySQL or MariaDB server, or for a box
+// nobody changed. The server is saved by then, so a failure says so in a
+// message that stays, and the box can be tried again from the server's form.
+// It returns { server, said }: the server as the answer left it (absent when
+// nothing was saved), and the line to add to the save's own message.
+async function saveCaptureChoice(form, saved) {
+  const on = captureChoice(form);
+  if (on === undefined) {
+    // The box was ticked when the form opened and nobody touched it, and the
+    // save itself took the answer back: it was given about another account.
+    if (captureWas.get(form) && form.elements.flavor.value === "postgres" && !saved.forward_with_capture_account) {
+      toastError((saved.name || "This server") + ": the PostgreSQL port no longer forwards as the source user. The source's user or address changed, and the yes was given for the one before. Edit the server and tick the box again to give it for this one.");
+    }
+    return { said: "" };
+  }
+  let after;
+  try {
+    after = await api("/api/servers/" + encodeURIComponent(saved.id) + "/route", { method: "PUT", body: { capture_account: on } });
+    if (!after || !!after.forward_with_capture_account !== on) throw new Error("DBTrail took the request and did not save the answer");
+  } catch (err) {
+    toastError((saved.name || "This server") + " was saved, and the box about forwarding as the source user was not: " + ((err && err.message) || err) + ". Edit the server to try again.");
+    return { said: "" };
+  }
+  const said = captureSaid(after);
+  if (said.tone === "err") { toastError(said.text); return { server: after, said: "" }; }
+  return { server: after, said: " " + said.text };
 }
 
 // noCaptureReason names why a saved server will not stream, or null when it

@@ -98,7 +98,7 @@ function draw({ servers, fb, reveal = "", split = false, picked = "shop" }) {
   });
   vm.runInContext("var currentServer = " + JSON.stringify(picked) + ", defaultServerId = '', capsCache = { monitor: true };", c);
   for (const name of ["el", "mcpSelector", "shellWord", "flashbackHost", "sqlPortAddress", "cnSection", "cnFact", "cnFine", "utcLabel",
-    "postgresInstall", "pgPortLine", "sqlClientPanel"]) {
+    "postgresInstall", "pgPortLine", "pgForwardSaid", "sqlClientPanel"]) {
     vm.runInContext(fn(name), c);
   }
   c.args = { servers, fb, reveal, split };
@@ -109,7 +109,7 @@ test("drawn for a PostgreSQL server: on", () => {
   const on = { enabled: true, can_manage: true, password_created_at: "2026-11-15T10:00:00Z" };
   const text = draw({ servers: [pg("shop")], fb: on, reveal: "bfp_secret" });
   for (const want of ['psql "host=dbtrail.example port=5433 dbname=shop user=app sslmode=require"', "Database", "5433",
-    "the PostgreSQL router's usual number", "bfp_secret", "Until the server has a forwarding user, nothing is sent to your PostgreSQL", "The user can be anything"]) {
+    "the PostgreSQL router's usual number", "bfp_secret", "Nothing is sent to your PostgreSQL for a server until its form (Servers, Edit) lets the port forward", "The user can be anything"]) {
     assert.ok(text.includes(want), "lacks " + JSON.stringify(want) + ":\n" + text);
   }
   for (const not of ["mysql -h", "3309", "Engine Routing", "forwarding account", "_flashback", "MySQL"]) {
@@ -120,7 +120,7 @@ test("drawn for a PostgreSQL server: on", () => {
 test("drawn for a PostgreSQL server: the page with two sections", () => {
   const text = draw({ servers: [pg("shop")], fb: { enabled: true, can_manage: true }, split: true });
   for (const want of ["PostgreSQL client", "Read your copy from a PostgreSQL client", "port=5433 dbname=shop",
-    "On the PostgreSQL port, the copy answers what it is known to answer", "as the server's forwarding user"]) {
+    "On the PostgreSQL port, the copy answers what it is known to answer", "For shop, nothing is sent to your PostgreSQL: the copy answers alone"]) {
     assert.ok(text.includes(want), "lacks " + JSON.stringify(want) + ":\n" + text);
   }
   for (const not of ["mysql -h", "3309", "Run MySQL and DuckDB", "Put ProxySQL in front", "Read your copy from a MySQL client"]) {
@@ -140,4 +140,35 @@ test("drawn for a MySQL server: off, as it always was", () => {
   const off = draw({ servers: [my("shop")], fb: { enabled: false, can_manage: true } });
   assert.ok(off.includes("your usual MySQL client can read any table as it was at a chosen moment"), off);
   assert.ok(!off.includes("PostgreSQL"), off);
+});
+
+// What the port sends to the picked server's PostgreSQL (#3054): each state a
+// server can be in, drawn by the real panel and read whole.
+test("drawn for a PostgreSQL server: what the port forwards as", () => {
+  const fb = { enabled: true, can_manage: true };
+  const line = (server, picked = "shop") => {
+    const text = draw({ servers: [server], fb, split: true, picked });
+    const at = text.indexOf("On the PostgreSQL port, the copy answers what it is known to answer as PostgreSQL does. ");
+    assert.ok(at >= 0, text);
+    return text.slice(at + "On the PostgreSQL port, the copy answers what it is known to answer as PostgreSQL does. ".length).trim();
+  };
+  const shop = { ...pg("shop"), source_user: "dbtrail" };
+  const cases = [
+    ["nobody said yes", shop,
+      "For shop, nothing is sent to your PostgreSQL: the copy answers alone, and a statement it cannot answer gets an error. To change it, edit the server (Servers, Edit)."],
+    ["the box is ticked", { ...shop, forward_with_capture_account: true },
+      "For shop, a SELECT the copy does not answer runs on your PostgreSQL, read-only and as the source user (dbtrail), when every table it reads is a table of the copy; anything else is refused and not sent. To change it, edit the server (Servers, Edit)."],
+    ["a forwarding user of its own", { ...shop, has_route: true, route_user: "app_ro", forward_with_capture_account: true },
+      "For shop, every other statement, and a transaction block (BEGIN to COMMIT or ROLLBACK), runs on your PostgreSQL as its forwarding user, app_ro, read-only. To change it, edit the server (Servers, Edit)."],
+    ["a saved forwarding user the port refuses", { ...shop, route_is_capture: true, forward_with_capture_account: true },
+      "For shop, nothing is sent to your PostgreSQL: its saved forwarding user is one the port refuses, so the copy answers alone. Edit the server (Servers, Edit) and remove that user."],
+    ["ticked, and the source URL cannot be forwarded with", { ...shop, forward_with_capture_account: true, capture_account_refused: "the server's source URL asks for replication: set a separate forwarding user instead, or correct the source" },
+      "For shop, nothing is sent to your PostgreSQL: the server's source URL asks for replication: set a separate forwarding user instead, or correct the source."],
+  ];
+  for (const [name, server, want] of cases) assert.equal(line(server), want, name);
+  assert.equal(line(shop, ""), "What it does not answer goes to your PostgreSQL, read-only, only for a server whose form lets the port forward; for any other, the copy answers alone.", "no server picked");
+  for (const [name, server] of cases) {
+    const said = line(server);
+    assert.ok(!/undefined|null|MySQL|\u2014/.test(said), name + ": " + said);
+  }
 });

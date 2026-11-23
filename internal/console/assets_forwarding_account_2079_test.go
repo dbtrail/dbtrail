@@ -195,7 +195,7 @@ console.log(JSON.stringify(out));
 	if got.PgPassword != (sent{HasUser: true, User: "report_ro", HasPassword: true, Password: "pg-pw"}) {
 		t.Errorf("a PostgreSQL server's typed password sends %+v", got.PgPassword)
 	}
-	for _, want := range []string{"transaction block", "read-only", "never forwards with the account DBTrail captures with", "closes the connections"} {
+	for _, want := range []string{"transaction block", "read-only", "the box above is not used", "closes the connections"} {
 		if !strings.Contains(got.HintPG, want) {
 			t.Errorf("the PostgreSQL form hint lacks %q: %s", want, got.HintPG)
 		}
