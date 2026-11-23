@@ -48,6 +48,9 @@ export const WRITES = [
   { method: "PUT", path: "/api/servers/{id}/hidden", count: 1, kind: "scene", id: "hidden" },
   // Fast or fresh SQL answers, per server, on the Snapshots page (#2546).
   { method: "PUT", path: "/api/servers/{id}/sql-mode", count: 1, kind: "scene", id: "sql-mode" },
+  // May the port forward with the user DBTrail connects with (#3054): the
+  // box on a PostgreSQL server's form.
+  { method: "PUT", path: "/api/servers/{id}/route", count: 1, kind: "scene", id: "capture-answer" },
   { method: "DELETE", path: "/api/servers/{id}/backup-schedule", count: 1, kind: "scene", id: "schedule" },
   { method: "POST", path: "/api/telemetry", count: 1, kind: "scene", id: "telemetry" },
   { method: "POST", path: "/api/mcp-token", count: 1, kind: "scene", id: "mcp-token" },
@@ -840,6 +843,38 @@ export async function runSaveScenes(ctx) {
       const removed = await click("Remove application login");
       const gone = await until(async () => { const o = await own(); return o && !o.port_user ? o : null; });
       check("proxy-logins", "Remove removes the stored login", !!removed && !!gone, JSON.stringify({ removed, gone }));
+    });
+
+    // The yes or no about forwarding with the user DBTrail connects with
+    // (#3054). The box is a PostgreSQL server's, and this suite's
+    // installation serves MySQL, whose form never shows it. So the page's own
+    // save, the function the form calls once the server is saved, is run
+    // here for the monitored source, where the server stores the answer too,
+    // and the stored answer is read back. The box itself, in each mode of the
+    // form, runs in internal/console/assets_capture_forward_3054_test.go.
+    await scene("capture-answer", async () => {
+      const listed = await readAs(page, "/api/servers");
+      const src = ((listed.body && listed.body.servers) || []).find((s) => s.has_source && s.editable);
+      if (!src) throw new Error("no server with a source in the list");
+      const say = (on) => page.evaluate(async ({ id, name, on }) => {
+        // What the form's box gives: captureChoice's answer for a box that
+        // was changed, read as saveServer reads it.
+        const form = { elements: { flavor: { value: "postgres" }, forward_capture: { checked: on } } };
+        if (!on) captureWas.set(form, true);
+        const r = await saveCaptureChoice(captureChoice(form), !on, { id, name });
+        return { saved: !!r.server, said: r.said };
+      }, { id: src.id, name: src.name, on });
+      const stored = async () => {
+        const r = await readAs(page, "/api/servers/" + encodeURIComponent(src.id));
+        return r.body ? r.body.forward_with_capture_account : null;
+      };
+      const before = await stored();
+      const yes = await say(true);
+      const afterYes = await stored();
+      check("capture-answer", "nothing is stored before anyone says yes, and a yes is stored on the server", before === false && yes.saved && afterYes === true, JSON.stringify({ before, yes, afterYes }));
+      const no = await say(false);
+      const afterNo = await stored();
+      check("capture-answer", "a no takes it back", no.saved && afterNo === false, JSON.stringify({ no, afterNo }));
     });
 
     await scene("server-delete", async () => {
