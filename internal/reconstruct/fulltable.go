@@ -191,6 +191,10 @@ type FullTableConfig struct {
 	// instead. The caller keeps the folder until the run returns: nothing
 	// here holds it against a cleanup, and nothing here removes it. Nil, the
 	// zero value: every table is folded from the snapshot found for it.
+	//
+	// Not for every table of a run at once: the record of skipped views is
+	// carried from the snapshot of a table folded the usual way, and a run
+	// with none publishes without that record.
 	BaselineOverride map[string]string
 
 	// snapshotDir and cut are per-run state ReconstructTables resolves once and
