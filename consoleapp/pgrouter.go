@@ -775,7 +775,18 @@ type pgSourceSlots struct {
 	// wait is how long a statement waits for one when every one is taken,
 	// the time a statement waits in line for the copy (#2985).
 	wait time.Duration
+	// idle are the connections clients keep open between their statements
+	// (park, #3046), oldest first: each holds a slot, and gives it up to a
+	// client that waits for one when none is free.
+	mu   sync.Mutex
+	idle []*pgIdleSource
+	// parked is closed, and replaced, each time a connection is kept: every
+	// client waiting for a slot looks at the idle ones again.
+	parked chan struct{}
 }
+
+// pgIdleSource is one connection to a source kept idle by its client.
+type pgIdleSource struct{ reclaim func() }
 
 // pgSourceSlotWait is how long a statement waits for a connection to the
 // source when the port holds as many as it opens: the copy's line
@@ -787,36 +798,94 @@ type pgSourceSlots struct {
 const pgSourceSlotWait = sqlsandbox.DefaultMaxWait
 
 func newPGSourceSlots(n int) *pgSourceSlots {
-	return &pgSourceSlots{ch: make(chan struct{}, n), wait: pgSourceSlotWait}
+	return &pgSourceSlots{ch: make(chan struct{}, n), wait: pgSourceSlotWait, parked: make(chan struct{})}
 }
 
 // limit is how many there may be.
 func (p *pgSourceSlots) limit() int { return cap(p.ch) }
 
+// park offers the slot of a connection its client keeps idle between
+// statements (pgshim.Forward.Park): reclaim ends that connection, giving its
+// slot back, and is called at most once, here, for a client that waits for a
+// slot. unpark takes it back for its client and reports whether it was still
+// there; once it returns, reclaim is never called.
+func (p *pgSourceSlots) park(reclaim func()) (unpark func() bool) {
+	e := &pgIdleSource{reclaim: reclaim}
+	p.mu.Lock()
+	p.idle = append(p.idle, e)
+	close(p.parked)
+	p.parked = make(chan struct{})
+	p.mu.Unlock()
+	return func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		for i, x := range p.idle {
+			if x == e {
+				p.idle = append(p.idle[:i], p.idle[i+1:]...)
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// reclaimIdle ends the connection kept idle longest, if any, and reports
+// whether one was.
+func (p *pgSourceSlots) reclaimIdle() bool {
+	p.mu.Lock()
+	if len(p.idle) == 0 {
+		p.mu.Unlock()
+		return false
+	}
+	e := p.idle[0]
+	p.idle = p.idle[1:]
+	p.mu.Unlock()
+	e.reclaim()
+	return true
+}
+
 // acquire takes one, waiting for it up to p.wait while ctx lasts; release
-// gives it back, once.
+// gives it back, once. When every one is taken and some are kept idle by
+// their clients (park), the one kept longest is ended for this one first:
+// a client never waits behind a connection nobody is using.
 func (p *pgSourceSlots) acquire(ctx context.Context) (release func(), ok bool) {
 	give := func() func() {
 		var once sync.Once
 		return func() { once.Do(func() { <-p.ch }) }
 	}
-	select {
-	case p.ch <- struct{}{}:
-		return give(), true
-	default:
+	var expired <-chan time.Time
+	if p.wait > 0 {
+		t := time.NewTimer(p.wait)
+		defer t.Stop()
+		expired = t.C
 	}
-	if p.wait <= 0 {
-		return nil, false
+	for {
+		// Taken before the idle ones are looked at: a connection kept after
+		// this look closes this channel, so it is not missed.
+		p.mu.Lock()
+		parked := p.parked
+		p.mu.Unlock()
+		select {
+		case p.ch <- struct{}{}:
+			return give(), true
+		default:
+		}
+		if p.reclaimIdle() {
+			continue
+		}
+		if p.wait <= 0 {
+			return nil, false
+		}
+		select {
+		case p.ch <- struct{}{}:
+			return give(), true
+		case <-parked:
+		case <-ctx.Done():
+			return nil, false
+		case <-expired:
+			return nil, false
+		}
 	}
-	t := time.NewTimer(p.wait)
-	defer t.Stop()
-	select {
-	case p.ch <- struct{}{}:
-		return give(), true
-	case <-ctx.Done():
-	case <-t.C:
-	}
-	return nil, false
 }
 
 // servePGPortWith is servePGPortWithin with the bound on connections to the
@@ -855,6 +924,9 @@ func servePGPortRouted(ctx context.Context, srv *console.Server, ln net.Listener
 // connections share (#2771), and routes counts which side answered each of
 // their statements (#2770; nil counts nothing).
 func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, logger *slog.Logger, sources *pgSourceSlots, routes *pgRouteStats, cost *pgshim.CostPolicy) pgshim.LoginFunc {
+	// The side each statement shape of a server was last sent to by its
+	// plan, for all the port's connections to it (#3045).
+	sides := &pgCostSides{}
 	return func(ctx context.Context, user, database string, password *pgshim.Password, drop func()) (*pgshim.Binding, *pgshim.Error) {
 		// Before the passwords are read: a connection opened with an
 		// application login is served only if no login changed since
@@ -974,8 +1046,8 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 				return nil, &pgshim.Error{Code: "57P03", Message: "the server's forwarding account changed while connecting; reconnect"}
 			}
 			closers = append(closers, untrack)
-			bound.Forward = &pgshim.Forward{DSN: fwd.DSN, CaptureAccount: fwd.CaptureAccount, Acquire: sources.acquire, Limit: sources.limit(), Timeout: timeout,
-				Barred: pgForwardBarred(tgt.ID, tgt.TimeTravelRefusal, routes, logger), Cost: cost}
+			bound.Forward = &pgshim.Forward{DSN: fwd.DSN, CaptureAccount: fwd.CaptureAccount, Acquire: sources.acquire, Park: sources.park, Limit: sources.limit(), Timeout: timeout,
+				Barred: pgForwardBarred(tgt.ID, tgt.TimeTravelRefusal, routes, logger), Cost: cost, Sides: sides.of(tgt.ID)}
 		case fwd.Refused != "":
 			bound.Forward = &pgshim.Forward{Refused: fwd.Refused}
 		}
@@ -1050,7 +1122,7 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 				schema = pgPortSchema
 			}
 			sess := sqlsandbox.Session{PostgresRules: true, PostgresNames: true, TimeZone: opts.TimeZone}
-			res, err := copySQL.Run(ctx, statement, schema, sess)
+			res, err := copySQL.Run(pgRunContext(ctx, opts), statement, schema, sess)
 			if err == nil && !opts.Probe {
 				// How old what it read was, for /status (#2756), kept once
 				// the port says the client got it (bound.Routed).
@@ -1061,6 +1133,16 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		// The system catalog's statements are answered from the copy's own
 		// tables (#2769), read in UTC and in the port's schema: what the
 		// catalog lists does not depend on the session.
+		// The capture gate's list: the copy's views by name, as the catalog
+		// lists them, with no worker of the copy.
+		bound.CopyTableNames = func(ctx context.Context) ([][2]string, error) {
+			if timeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, timeout)
+				defer cancel()
+			}
+			return copySQL.PGCopyViewNames(ctx)
+		}
 		bound.Catalog = func(ctx context.Context) ([]pgshim.CatalogTable, error) {
 			if timeout > 0 {
 				var cancel context.CancelFunc
@@ -1073,6 +1155,26 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		}
 		return bound, nil
 	}
+}
+
+// pgRunContext is the context a statement of the port runs on the copy
+// under: one whose answer the port gives only with its tables' recent
+// changes (opts.NeedTails) is refused before it runs when they are not ready
+// (console.WithPGNeedTails, #3086).
+func pgRunContext(ctx context.Context, opts pgshim.RunOptions) context.Context {
+	if opts.NeedTails {
+		return console.WithPGNeedTails(ctx)
+	}
+	return ctx
+}
+
+// pgCostSides is a port's pgshim.CostSides, one per server: a server's
+// statement shapes are another server's only by name.
+type pgCostSides struct{ by sync.Map }
+
+func (p *pgCostSides) of(id string) *pgshim.CostSides {
+	v, _ := p.by.LoadOrStore(id, &pgshim.CostSides{})
+	return v.(*pgshim.CostSides)
 }
 
 // pgHiddenBarred is why nothing is sent to the source of a server that hides

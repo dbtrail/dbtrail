@@ -181,6 +181,37 @@ type fakeSource struct {
 	// statements it was asked to confirm the tables of.
 	positions int
 	proofs    []string
+	// discards counts its DISCARD ALL; refuseDiscard answers one with an
+	// error.
+	discards      int
+	refuseDiscard bool
+	// hangDiscard answers a DISCARD ALL with nothing.
+	hangDiscard bool
+	// realDSN, when set, is a real PostgreSQL the port forwards to.
+	realDSN string
+	// conns are the connections it serves now (dropConns).
+	conns map[net.Conn]bool
+}
+
+// sayToConns writes a FATAL to every connection it serves, without closing
+// them yet, as a source ending an idle one says why first.
+func (f *fakeSource) sayToConns() {
+	msg, _ := (&pgproto3.ErrorResponse{Severity: "FATAL", Code: "25P04", Message: "terminating connection due to idle-session timeout"}).Encode(nil)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for c := range f.conns {
+		_, _ = c.Write(msg)
+	}
+}
+
+// dropConns ends every connection it serves, as a source does for an idle
+// one past idle_session_timeout.
+func (f *fakeSource) dropConns() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for c := range f.conns {
+		_ = c.Close()
+	}
 }
 
 // proofRef is one name of a proofSQL statement and whether it may stay
@@ -261,6 +292,9 @@ func startFakeSourceWith(t *testing.T, f *fakeSource) *fakeSource {
 }
 
 func (f *fakeSource) dsn() string {
+	if f.realDSN != "" {
+		return f.realDSN
+	}
 	return fmt.Sprintf("postgres://fwd:pw@%s/db?sslmode=disable&connect_timeout=5", f.addr)
 }
 
@@ -279,6 +313,17 @@ func (f *fakeSource) ran() []string {
 var dollarParam = regexp.MustCompile(`\$(\d+)`)
 
 func (f *fakeSource) serve(c net.Conn) {
+	f.mu.Lock()
+	if f.conns == nil {
+		f.conns = map[net.Conn]bool{}
+	}
+	f.conns[c] = true
+	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		delete(f.conns, c)
+		f.mu.Unlock()
+	}()
 	defer c.Close()
 	be := pgproto3.NewBackend(c, c)
 	if _, err := be.ReceiveStartupMessage(); err != nil {
@@ -353,6 +398,26 @@ func (f *fakeSource) serve(c net.Conn) {
 				be.Send(&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{{Name: []byte("lsn"), DataTypeOID: 3220, DataTypeSize: 8, TypeModifier: -1}}})
 				be.Send(&pgproto3.DataRow{Values: [][]byte{[]byte(fakeWALPosition)}})
 				be.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")})
+			case upper == "DISCARD ALL":
+				f.mu.Lock()
+				f.discards++
+				refuse, hang := f.refuseDiscard, f.hangDiscard
+				f.mu.Unlock()
+				if hang {
+					// Answers nothing, until the port closes the connection.
+					_, _ = be.Receive()
+					return
+				}
+				if refuse {
+					be.Send(&pgproto3.ErrorResponse{Severity: "ERROR", Code: "25006", Message: "refused by the fake source"})
+				} else {
+					be.Send(&pgproto3.CommandComplete{CommandTag: []byte("DISCARD ALL")})
+				}
+				be.Send(&pgproto3.ReadyForQuery{TxStatus: tx})
+				if be.Flush() != nil {
+					return
+				}
+				continue
 			case strings.HasPrefix(upper, "SET"):
 				be.Send(&pgproto3.CommandComplete{CommandTag: []byte("SET")})
 			case upper == "BEGIN" || strings.HasPrefix(upper, "BEGIN "):
@@ -475,11 +540,78 @@ type costLogin struct {
 	// of 7 when it is not nil; catalogErr the same for its catalog.
 	copyErr    func(st string) error
 	catalogErr func() error
+	// captureAccount is Forward.CaptureAccount, names Binding.CopyTableNames.
+	captureAccount bool
+	names          func() [][2]string
+	// tailsPending is a copy whose tables' recent changes are not ready: a
+	// statement asked to have them (RunOptions.NeedTails) is refused before
+	// it runs, as the host's copy refuses it (#3086); any other runs from
+	// the snapshot. needTails records what each statement asked.
+	tailsPending atomic.Bool
+	needTails    []bool
+	// keep, when set, is the port's pool of connections kept idle between
+	// statements (Forward.Park).
+	keep *keptSources
+	// barred, when set, is the server's Forward.Barred.
+	barred func() string
+	// sides, when set, is the server's Forward.Sides.
+	sides *CostSides
 	// notCaptured, when set, is Binding.NotCaptured.
 	notCaptured func(context.Context) ([]TableNotCaptured, error)
 }
 
-func (l *costLogin) run(_ context.Context, st string, _ RunOptions) (sqlsandbox.Result, error) {
+// keptSources is a port's pool of connections kept idle by their clients, as
+// the pg-router's is: reclaimAll ends them all, as clients waiting for a
+// slot would.
+type keptSources struct {
+	mu   sync.Mutex
+	idle map[*func()]bool
+}
+
+func (k *keptSources) park(reclaim func()) func() bool {
+	e := &reclaim
+	k.mu.Lock()
+	if k.idle == nil {
+		k.idle = map[*func()]bool{}
+	}
+	k.idle[e] = true
+	k.mu.Unlock()
+	return func() bool {
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		ok := k.idle[e]
+		delete(k.idle, e)
+		return ok
+	}
+}
+
+func (k *keptSources) reclaimAll() int {
+	k.mu.Lock()
+	var all []*func()
+	for e := range k.idle {
+		all = append(all, e)
+	}
+	clear(k.idle)
+	k.mu.Unlock()
+	for _, e := range all {
+		(*e)()
+	}
+	return len(all)
+}
+
+func (k *keptSources) parked() int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return len(k.idle)
+}
+
+func (l *costLogin) run(_ context.Context, st string, opts RunOptions) (sqlsandbox.Result, error) {
+	l.mu.Lock()
+	l.needTails = append(l.needTails, opts.NeedTails)
+	l.mu.Unlock()
+	if opts.NeedTails && l.tailsPending.Load() {
+		return sqlsandbox.Result{}, &sqlsandbox.MayHaveChangedError{Reason: "fresh mode: the newest captured changes of public.t are not ready yet"}
+	}
 	l.runs.Add(1)
 	if l.copyErr != nil {
 		if err := l.copyErr(st); err != nil {
@@ -502,7 +634,7 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 		l.notes = append(l.notes, n)
 	}}
 	if l.src != nil {
-		b.Forward = &Forward{DSN: l.src.dsn(), Limit: 4, Cost: l.cost, Acquire: func(ctx context.Context) (func(), bool) {
+		b.Forward = &Forward{DSN: l.src.dsn(), Limit: 4, CaptureAccount: l.captureAccount, Cost: l.cost, Barred: l.barred, Sides: l.sides, Acquire: func(ctx context.Context) (func(), bool) {
 			if l.refuse {
 				return nil, false
 			}
@@ -528,6 +660,12 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 			}, true
 		}}
 	}
+	if l.src != nil && l.keep != nil {
+		b.Forward.Park = l.keep.park
+	}
+	if l.names != nil {
+		b.CopyTableNames = func(context.Context) ([][2]string, error) { return l.names(), nil }
+	}
 	b.RunAge = l.age
 	if l.catalog != nil {
 		b.Catalog = func(context.Context) ([]CatalogTable, error) {
@@ -544,6 +682,13 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 	}
 	b.NotCaptured = l.notCaptured
 	return b, nil
+}
+
+// lastNeedTails is what the copy's last statement asked of its tails.
+func (l *costLogin) lastNeedTails() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.needTails) > 0 && l.needTails[len(l.needTails)-1]
 }
 
 func (l *costLogin) last() RouteNote {

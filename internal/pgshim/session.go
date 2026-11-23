@@ -89,6 +89,12 @@ type session struct {
 	// costVerdicts are the source's plans' verdicts this connection
 	// remembers, by statement shape (route_cost.go).
 	costVerdicts map[string]costVerdict
+	// pendingSide is a plan's verdict for the copy on the statement being
+	// answered, remembered once the copy answers it (settleCostSide).
+	pendingSide *pendingCostSide
+	// unreachableNote is what the client is told if the copy answers a
+	// statement whose plan could not be asked (screenTyped).
+	unreachableNote string
 	// sourceAnsweredAt is when the source last answered a statement of this
 	// connection: the copy may not answer it with data older than that
 	// (copyOlderThanSource). Zero when the source never answered one.
@@ -198,7 +204,6 @@ func (s *session) handleSimpleQuery(qstr string) error {
 	screenBusy := ""
 	if s.abortedRefusal(qstr) == nil {
 		d = s.route(s.classify(qstr), qstr)
-		screenBusy = s.takeScreenBusy()
 	}
 	if byCostApplies(d) {
 		// The screen lets the copy answer it: the source's plan says
@@ -209,6 +214,10 @@ func (s *session) handleSimpleQuery(qstr string) error {
 			s.routeNote(qstr, d, time.Since(started), true)
 			return s.readyFlush()
 		}
+		// Headed for the copy: only now its list of columns is read, which
+		// can wait for one of its workers.
+		d = s.screenTyped(qstr, d)
+		screenBusy = s.takeScreenBusy()
 	}
 	if busyOnCopy(withScreenBusy(d, screenBusy)) {
 		// For the copy, which was too busy to list its columns (#3109,
@@ -840,9 +849,9 @@ func (s *session) errorResponse(code, msg string) {
 // failure — after a ParameterStatus for each reported parameter the
 // statements before it changed.
 func (s *session) readyFlush() error {
-	// A connection to the source nothing of the client's lives on goes back
-	// to the port (forward.go).
-	s.releaseIdleSource()
+	// A connection to the source nothing of the client's lives on is kept
+	// for the client's next statement, or goes back to the port (forward.go).
+	s.parkIdleSource()
 	s.reportChanges()
 	s.be.Send(&pgproto3.ReadyForQuery{TxStatus: s.txStatus()})
 	return s.be.Flush()

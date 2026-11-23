@@ -1436,7 +1436,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 				// saying so. Under routing MySQL answers; on a connection
 				// that does not route, the snapshot answers with the reason
 				// as a warning.
-				if sess.StrictStar {
+				if sess.StrictStar || pgNeedTails(ctx) {
 					viewsRefusal = &sqlChangedRefusal{"fresh mode: " + missing}
 					return "", viewsRefusal
 				}
