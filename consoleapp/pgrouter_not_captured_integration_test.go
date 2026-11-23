@@ -5,6 +5,7 @@ package consoleapp
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -338,10 +339,19 @@ func TestIntegrationPGRouterNoCaptureStateGoesToTheSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = idx.Close() })
-	var skips sql.NullString
-	if err := idx.QueryRowContext(ctx, "SELECT capture_skips FROM stream_state WHERE id = 1").Scan(&skips); err != nil {
-		t.Fatalf("capture's state after replication started: %v", err)
-	}
+	// The full read can end before capture has started replicating, and the
+	// row is written when it has: wait for the row, not for the read.
+	pgTestWait(t, "capture's state after replication started", 30*time.Second, func() (bool, string) {
+		var skips sql.NullString
+		err := idx.QueryRowContext(ctx, "SELECT capture_skips FROM stream_state WHERE id = 1").Scan(&skips)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, "no row yet"
+		}
+		if err != nil {
+			t.Fatalf("capture's state after replication started: %v", err)
+		}
+		return true, "saved"
+	})
 	if got := oneOn(read); got != "10" {
 		t.Fatalf("a quiet source, capture healthy: %q, want the copy's 10", got)
 	}
