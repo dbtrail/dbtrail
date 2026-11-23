@@ -115,6 +115,10 @@ func TestPaddedStar_toTheSource(t *testing.T) {
 		`SELECT 'a '::"bpchar" = 'a' FROM (SELECT * FROM codes) s`,
 		`SELECT 'a '::pg_catalog.bpchar = 'a' FROM (SELECT * FROM codes) s`,
 		`SELECT 'a '::nchar(3) = 'a' FROM (SELECT * FROM codes) s`,
+		// The internal one-byte type: it keeps only the first byte.
+		`SELECT 'abc'::"char" FROM (SELECT * FROM codes) s`,
+		`SELECT 'a  '::"char" = 'a' FROM (SELECT * FROM codes) s`,
+		`SELECT count(*) FROM (SELECT 'a  '::"char" AS v FROM (SELECT * FROM codes) s) q WHERE v = 'a'`,
 		`SELECT 'a '::nchar = 'a' FROM (SELECT * FROM codes) s`,
 		`SELECT CAST('a ' AS char(3)) = 'a' FROM (SELECT * FROM codes) s`,
 		`SELECT char 'a ' = 'a' FROM (SELECT * FROM codes) s`,

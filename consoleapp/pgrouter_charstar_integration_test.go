@@ -95,6 +95,14 @@ func pgStarRead(ctx context.Context, c *pgconn.PgConn, stmt string, extended boo
 	return b.String()
 }
 
+// pgStarOneByte are casts to the internal type "char", which keeps one byte,
+// with what PostgreSQL answers for each over the one row of pgStarFlags.
+var pgStarOneByte = []struct{ stmt, want string }{
+	{`SELECT 'abc'::"char" FROM (SELECT * FROM ` + pgStarFlags + `) s`, "a"},
+	{`SELECT 'a  '::"char" = 'a' FROM (SELECT * FROM ` + pgStarFlags + `) s`, "t"},
+	{`SELECT count(*) FROM (SELECT 'a  '::"char" AS v FROM (SELECT * FROM ` + pgStarFlags + `) s) q WHERE v = 'a'`, "1"},
+}
+
 // pgStarDotted joins a bpchar table after a condition on a column named with
 // a keyword: PostgreSQL's DISTINCT finds 'a' and 'a ' one value.
 func pgStarDotted() string {
@@ -201,8 +209,17 @@ WHERE r.rnk <= 3 ORDER BY r.w_id, r.d_id, r.rnk LIMIT 500`
 		{"a domain over char(n), measured", `SELECT sum(length(dc)) FROM (SELECT * FROM ` + pgStarDomain + `) s`},
 		{"a literal cast to char(n)", `SELECT 'a '::char(3) = 'a' FROM (SELECT * FROM ` + pgStarFlags + `) s`},
 		{"a keyword after a dot", pgStarDotted()},
+		{"the one-byte \"char\", returned", pgStarOneByte[0].stmt},
+		{"the one-byte \"char\", compared", pgStarOneByte[1].stmt},
+		{"the one-byte \"char\", through a subquery", pgStarOneByte[2].stmt},
 		{"a set operation", `WITH y AS (SELECT * FROM ` + cu + ` UNION SELECT * FROM ` + cu + `) SELECT c_id FROM y`},
 	}
+	for _, c := range pgStarOneByte {
+		if got := pgRows(t, source, c.stmt); got != c.want {
+			t.Fatalf("PostgreSQL itself: %s: %q, want %q: the test's premise", c.stmt, got, c.want)
+		}
+	}
+
 	// An argument declared bpchar compares without its trailing blank, which
 	// the text the copy is handed no longer shows: refused when it runs,
 	// unnamed and prepared.

@@ -98,7 +98,7 @@ func paddedExempt(toks []rtToken, types map[string][]string) map[int]bool {
 		if t.kind == rtOp && t.text == ";" {
 			return nil
 		}
-		if t.kind == rtQuoted && strings.EqualFold(t.text, "bpchar") {
+		if t.kind == rtQuoted && (strings.EqualFold(t.text, "bpchar") || t.text == "char") {
 			return nil
 		}
 		// An argument's type is not in the text: declared bpchar, it compares
