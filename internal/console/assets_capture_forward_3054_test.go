@@ -37,6 +37,7 @@ func TestServerFormCaptureAccount(t *testing.T) {
 	script := renderHarnessJS + harness + `
 ctx.__said = [];
 vm.runInContext("toast = (m) => { __said.push('toast: ' + m); }; toastError = (m) => { __said.push('stays: ' + m); }; formMsg = (m, bad) => { if (m && bad) __said.push('form: ' + m); };", ctx);
+ctx.__during = null; ctx.__refuse = false;
 // run saves the form with an api that records every request. route answers
 // PUT /api/servers/{id}/route: "ok" stores what was asked, "fail" refuses,
 // "ignored" answers without storing. base is what the server's own save
@@ -50,6 +51,8 @@ const run = async (f, base, route) => {
       if (route === "fail") throw new Error("this session may not change servers");
       return { ...base, forward_with_capture_account: route === "ignored" ? !opts.body.capture_account : opts.body.capture_account };
     }
+    if (ctx.__during) ctx.__during();
+    if (ctx.__refuse) throw new Error("a server named shop already exists");
     return base;
   };
   vm.runInContext("api = __api; startMonitor = async () => ({ started: true });", ctx);
@@ -127,6 +130,17 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
   out.pgRemoveFails = await run(f, pgSaved, "fail");
   f = show({ monitor: true }, { ...own, forward_with_capture_account: true }); f.elements.route_remove.checked = true;
   out.pgRemoveKept = await run(f, { ...pgSaved, forward_with_capture_account: true }, "ok");
+  // The yes is taken back, then the server's own save is refused.
+  f = show({ monitor: true }, { ...own, forward_with_capture_account: true }); f.elements.route_remove.checked = true;
+  ctx.__refuse = true;
+  out.pgRemoveSaveRefused = await run(f, pgSaved, "ok");
+  ctx.__refuse = false;
+  out.pgRemoveSaveRefusedBox = { ticked: !!f.elements.forward_capture.checked, again: await run(f, pgSaved, "ok") };
+  // A new MySQL whose type is put back to PostgreSQL, the box ticked, while
+  // its save is on its way: what was pressed is what is saved.
+  f = fresh("mysql"); ctx.__during = () => { f.elements.flavor.value = "postgres"; f.elements.forward_capture.checked = true; };
+  out.myNewTypeChangedMeanwhile = await run(f, myNew, "ok");
+  ctx.__during = null;
   f = show({ monitor: true }, own); f.elements.route_remove.checked = true; f.elements.forward_capture.checked = true;
   out.pgRemoveAndTick = await run(f, pgSaved, "ok");
   f = show({ monitor: true }, { ...mySaved, has_route: true, route_user: "app_ro", has_route_password: true, forward_with_capture_account: true }); f.elements.route_remove.checked = true;
@@ -164,6 +178,7 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
     yesRefusedUser: said({ ...pgSaved, route_unreadable: true, forward_with_capture_account: true }),
     yesRefusedURL: said({ ...pgSaved, forward_with_capture_account: true, capture_account_refused: "the server's source URL asks for replication: set a separate forwarding user instead, or correct the source" }),
     noName: said({ forward_with_capture_account: true }),
+    yesHides: said({ ...pgSaved, forward_with_capture_account: true, hidden: { tables: ["shop.audit"], columns: [] } }),
   };
   out.ask = vm.runInContext("PG_FORWARD_ASK", ctx);
   out.hint = vm.runInContext("PG_FORWARD_HINT", ctx);
@@ -193,6 +208,11 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
 		PgEditYesUntouched, PgEditUnticked, PgEditNoUntouched, PgEditTicked, PgEditSourceChanged            ran
 		PgEditOwnTicked, MyNew, MyNewAfterPGTick, MariaNew, MyEdit, MyEditYes                               ran
 		PgRemoveYes, PgRemoveNo, PgRemoveFails, PgRemoveKept, PgRemoveAndTick, MyRemove                     ran
+		PgRemoveSaveRefused, MyNewTypeChangedMeanwhile                                                      ran
+		PgRemoveSaveRefusedBox                                                                              struct {
+			Ticked bool
+			Again  ran
+		}
 		Now                                                                                                 map[string]string
 		PgReaderText, Ask, Hint, PgRemoveExtra                                                              string
 		Said                                                                                                map[string]line
@@ -275,7 +295,7 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
 	// The yes was about another account: it is not given again by a box
 	// nobody touched, and the form says it was taken back.
 	calls("an edited PostgreSQL whose source user changed", got.PgEditSourceChanged, `PUT /api/servers/x {} flavor=postgres`)
-	says("an edited PostgreSQL whose source user changed", got.PgEditSourceChanged, "stays: shop: the PostgreSQL port no longer forwards as the source user. The source's user or address changed, and the yes was given for the one before. Edit the server and tick the box again to give it for this one.")
+	says("an edited PostgreSQL whose source user changed", got.PgEditSourceChanged, "stays: shop: the PostgreSQL port no longer forwards as the source user. The yes was taken back: the source's user or address changed and it was given for the one before, or somebody unticked the box meanwhile. Edit the server and tick the box again to give it.")
 	// A saved forwarding user of its own, or one the port refuses, is in
 	// sight when the form opens.
 	if got.PgEditOwnLook != (look{Box: true, User: true, Password: true}) || got.PgEditRefusedLook != (look{Box: true, User: true, Password: true}) {
@@ -300,6 +320,17 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
 	if strings.Contains(strings.Join(got.PgRemoveKept.Said, "\n"), "nothing is sent") {
 		t.Errorf("the server still forwards, and the save says nothing is sent: %v", got.PgRemoveKept.Said)
 	}
+	// The yes was taken back and the server's own save was then refused: the
+	// form says both, shows the box unticked, and a second Save does not
+	// blame the source for it.
+	calls("a removal whose own save is refused", got.PgRemoveSaveRefused, at(no, "x"), `PUT /api/servers/x {"route_user":""} flavor=postgres`)
+	says("a removal whose own save is refused", got.PgRemoveSaveRefused, "form: a server named shop already exists. The forwarding account was not removed. The box that lets the port forward as the source user was unticked and that was saved: tick it again if the port should forward as the source user.")
+	if got.PgRemoveSaveRefusedBox.Ticked {
+		t.Error("the yes was taken back on the server, and the form still shows the box ticked")
+	}
+	calls("the same form saved again", got.PgRemoveSaveRefusedBox.Again, at(no, "x"), `PUT /api/servers/x {"route_user":""} flavor=postgres`)
+	silent("the same form saved again", ran{Said: filterOut(got.PgRemoveSaveRefusedBox.Again.Said, "toast: ")})
+	calls("a new MySQL whose type and box were changed while it was being saved", got.MyNewTypeChangedMeanwhile, `POST /api/servers {} flavor=mysql`)
 	calls("remove ticked and the box newly ticked", got.PgRemoveAndTick)
 	says("remove ticked and the box newly ticked", got.PgRemoveAndTick, "form: Remove the forwarding account is ticked, which stops the port forwarding for this server, and the box that lets it forward as the source user was ticked too.")
 	calls("removing a MySQL's forwarding account, a yes saved from a terminal", got.MyRemove, `PUT /api/servers/y {"route_user":""} flavor=mysql`)
@@ -343,7 +374,8 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
 	wantSaid := map[string]line{
 		"yes":            {"ok", "shop: the PostgreSQL port now sends to this PostgreSQL, read-only and as dbtrail, a SELECT the copy does not answer, when every table it reads is a table of the copy."},
 		"no":             {"ok", "shop: the PostgreSQL port sends nothing to this PostgreSQL now. The copy answers alone."},
-		"noOwn":          {"ok", "shop: the PostgreSQL port does not forward as the source user. It forwards as its forwarding user, app_ro, as before."},
+		"noOwn":          {"ok", "shop: the PostgreSQL port does not forward as the source user. Its forwarding user, app_ro, stays as it was."},
+		"yesHides":       {"err", "shop: saved, and not used. This server hides tables or columns, so the port sends nothing to this PostgreSQL."},
 		"yesOwn":         {"ok", "shop: saved. The PostgreSQL port keeps forwarding as its forwarding user, app_ro, while that one is set. Once it is removed, the source user takes its place."},
 		"yesRefusedUser": {"err", "shop: saved, and not used yet. The server has a saved forwarding user that the port refuses, and while it is saved nothing is forwarded. Edit the server and remove it."},
 		"yesRefusedURL":  {"err", "shop: saved, and not used: the server's source URL asks for replication: set a separate forwarding user instead, or correct the source."},
@@ -359,7 +391,7 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
 	if got.Ask != "Let the PostgreSQL port send to this PostgreSQL, read-only and as the source user above, a SELECT the copy does not answer" {
 		t.Errorf("the box reads %q", got.Ask)
 	}
-	for _, want := range []string{"Unticked, the copy answers alone and nothing is sent to this PostgreSQL", "every table is a table of the copy", "anything else is refused and not sent", "No second user is needed", "connection limit", "closes the connections"} {
+	for _, want := range []string{"Unticked, the copy answers alone and nothing is sent to this PostgreSQL", "every table is a table of the copy", "anything else is refused and not sent", "No second user is needed", "connection limit", "closes the connections", "unless it has a separate forwarding user"} {
 		if !strings.Contains(got.Hint, want) {
 			t.Errorf("the box's hint lacks %q: %s", want, got.Hint)
 		}
@@ -369,4 +401,15 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
 			t.Errorf("%s speaks of the MySQL port, or holds an em dash or undefined: %s", name, text)
 		}
 	}
+}
+
+// filterOut drops the lines that start with prefix.
+func filterOut(lines []string, prefix string) []string {
+	var out []string
+	for _, l := range lines {
+		if !strings.HasPrefix(l, prefix) {
+			out = append(out, l)
+		}
+	}
+	return out
 }

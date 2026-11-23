@@ -162,6 +162,10 @@ test("drawn for a PostgreSQL server: what the port forwards as", () => {
       "For shop, every other statement, and a transaction block (BEGIN to COMMIT or ROLLBACK), runs on your PostgreSQL as its forwarding user, app_ro, read-only. To change it, edit the server (Servers, Edit)."],
     ["a saved forwarding user the port refuses", { ...shop, route_is_capture: true, forward_with_capture_account: true },
       "For shop, nothing is sent to your PostgreSQL: its saved forwarding user is one the port refuses, so the copy answers alone. Edit the server (Servers, Edit) and remove that user."],
+    ["ticked, on a server that hides a table", { ...shop, forward_with_capture_account: true, hidden: { tables: ["shop.audit"], columns: [] } },
+      "For shop, nothing is sent to your PostgreSQL: this server hides tables or columns, which your PostgreSQL would not hide, so the copy answers alone."],
+    ["a forwarding user of its own, on a server that hides a column", { ...shop, has_route: true, route_user: "app_ro", hidden: { tables: [], columns: ["shop.users.email"] } },
+      "For shop, nothing is sent to your PostgreSQL: this server hides tables or columns, which your PostgreSQL would not hide, so the copy answers alone."],
     ["ticked, and the source URL cannot be forwarded with", { ...shop, forward_with_capture_account: true, capture_account_refused: "the server's source URL asks for replication: set a separate forwarding user instead, or correct the source" },
       "For shop, nothing is sent to your PostgreSQL: the server's source URL asks for replication: set a separate forwarding user instead, or correct the source."],
   ];

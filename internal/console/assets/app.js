@@ -16385,6 +16385,7 @@ function pgForwardSaid(cur) {
   const how = " To change it, edit the server (Servers, Edit).";
   if (!cur || cur.flavor !== "postgres" || !cur.has_source) return "What it does not answer goes to your PostgreSQL, read-only, only for a server whose form lets the port forward; for any other, the copy answers alone.";
   const name = cur.name || "this server";
+  if (cur.hidden) return "For " + name + ", nothing is sent to your PostgreSQL: this server hides tables or columns, which your PostgreSQL would not hide, so the copy answers alone.";
   if (cur.has_route) return "For " + name + ", every other statement, and a transaction block (BEGIN to COMMIT or ROLLBACK), runs on your PostgreSQL as its forwarding user, " + cur.route_user + ", read-only." + how;
   if (cur.route_is_capture || cur.route_unreadable) return "For " + name + ", nothing is sent to your PostgreSQL: its saved forwarding user is one the port refuses, so the copy answers alone. Edit the server (Servers, Edit) and remove that user.";
   if (cur.forward_with_capture_account && cur.capture_account_refused) return "For " + name + ", nothing is sent to your PostgreSQL: " + String(cur.capture_account_refused).replace(/\.+$/, "") + ".";
@@ -18218,7 +18219,7 @@ const FORWARDING_HINT_PG = "A separate forwarding user is optional: it is for a 
 // `server add`, saved the same way (PUT /api/servers/{id}/route with
 // capture_account alone), off until somebody ticks it.
 const PG_FORWARD_ASK = "Let the PostgreSQL port send to this PostgreSQL, read-only and as the source user above, a SELECT the copy does not answer";
-const PG_FORWARD_HINT = "Unticked, the copy answers alone and nothing is sent to this PostgreSQL: a statement the copy cannot answer gets an error. Ticked, the port sends such a statement only when it is a SELECT whose every table is a table of the copy; anything else is refused and not sent, and a server that hides tables or columns sends nothing. No second user is needed. The port then logs in as the source user, so its connections count toward that role's connection limit. Changing the box closes the connections open on that port for this server; clients reconnect.";
+const PG_FORWARD_HINT = "Unticked, the copy answers alone and nothing is sent to this PostgreSQL: a statement the copy cannot answer gets an error. Ticked, the port sends such a statement only when it is a SELECT whose every table is a table of the copy; anything else is refused and not sent, and a server that hides tables or columns sends nothing. No second user is needed. The port then logs in as the source user, so its connections count toward that role's connection limit. Changing the box closes the connections open on that port for this server, unless it has a separate forwarding user; clients reconnect.";
 
 // captureWas remembers, per form, the answer its server had when the form
 // opened (false for a new server): the answer is sent only when the box
@@ -18261,9 +18262,10 @@ function captureSaid(s) {
   const name = s.name || "This server";
   if (!s.forward_with_capture_account) {
     return { tone: "ok", text: s.has_route
-      ? name + ": the PostgreSQL port does not forward as the source user. It forwards as its forwarding user, " + s.route_user + ", as before."
+      ? name + ": the PostgreSQL port does not forward as the source user. Its forwarding user, " + s.route_user + ", stays as it was."
       : name + ": the PostgreSQL port sends nothing to this PostgreSQL now. The copy answers alone." };
   }
+  if (s.hidden) return { tone: "err", text: name + ": saved, and not used. This server hides tables or columns, so the port sends nothing to this PostgreSQL." };
   if (s.has_route) return { tone: "ok", text: name + ": saved. The PostgreSQL port keeps forwarding as its forwarding user, " + s.route_user + ", while that one is set. Once it is removed, the source user takes its place." };
   if (s.route_is_capture || s.route_unreadable) return { tone: "err", text: name + ": saved, and not used yet. The server has a saved forwarding user that the port refuses, and while it is saved nothing is forwarded. Edit the server and remove it." };
   if (s.capture_account_refused) return { tone: "err", text: name + ": saved, and not used: " + String(s.capture_account_refused).replace(/\.+$/, "") + "." };
@@ -19929,23 +19931,33 @@ async function saveServer(form) {
   // A PostgreSQL's forwarding account removed: the yes about the source user
   // is taken back FIRST, so the port never forwards as the source user in
   // between, and a removal that cannot take it back removes nothing.
-  const removing = !!id && captureChoice(form) === false && !!form.elements.route_remove && form.elements.route_remove.checked;
+  // Read once, here: what the person changes while a request is on its way
+  // is not what they pressed Save on.
+  const want = captureChoice(form), hadYes = !!captureWas.get(form) && body.flavor === "postgres";
+  const removing = !!id && want === false && !!form.elements.route_remove && form.elements.route_remove.checked;
   let captureNote = { said: "" };
   if (removing) {
-    captureNote = await saveCaptureChoice(form, { id, name: body.name }, true);
+    captureNote = await saveCaptureChoice(want, false, { id, name: body.name }, true);
     if (captureNote.failed) { formMsg("Nothing was saved: the forwarding account was not removed.", true); return; }
+    // The yes is gone from the server whatever the save below does: the
+    // form shows that from here on.
+    captureWas.set(form, false);
+    if (form.elements.forward_capture) form.elements.forward_capture.checked = false;
   }
   let saved;
   try {
     saved = await api(id ? "/api/servers/" + encodeURIComponent(id) : "/api/servers", { method: id ? "PUT" : "POST", body });
   } catch (err) {
-    const why = (err && err.message) || String(err);
+    let why = (err && err.message) || String(err);
+    if (removing) why = why.replace(/\.+$/, "") + ".";
+    if (removing && hadYes) why += " The forwarding account was not removed. The box that lets the port forward as the source user was unticked and that was saved: tick it again if the port should forward as the source user.";
+    else if (removing) why += " The forwarding account was not removed.";
     formMsg(why, true);
     openNotice({ tone: "err", title: "Could not save", lines: [why], button: "Back to the form" });
     return;
   }
   if (!removing) {
-    captureNote = await saveCaptureChoice(form, saved);
+    captureNote = await saveCaptureChoice(want, hadYes, saved);
     if (captureNote.server) saved = captureNote.server;
   } else {
     // What the server answered the removal with is who forwards now.
@@ -19970,6 +19982,7 @@ async function saveServer(form) {
     // server (most checks are fixed on the database side, with the same form
     // values). showServerForm rebuilds the form, so it goes before the notice
     // and the summary line that points back to it.
+    if (captureNote.said) toast(captureNote.said.trim(), 9000);
     if (!showServerForm(saved)) {
       // The modal was closed while the checks ran: nothing on screen can
       // carry the outcome, so it goes to a toast that stays until dismissed.
@@ -20008,23 +20021,26 @@ async function saveServer(form) {
 }
 
 // saveCaptureChoice sends the answer about the capture account (#3054) for a
-// server just saved, when the form's box differs from what the server had:
-// PUT /api/servers/{id}/route with capture_account alone, the request
+// server: PUT /api/servers/{id}/route with capture_account alone, the request
 // `server add` sends from a terminal, so the web and the terminal save the
-// same thing. Nothing is sent for a MySQL or MariaDB server, or for a box
-// nobody changed. The server is saved by then, so a failure says so in a
-// message that stays, and the box can be tried again from the server's form.
-// It returns { server, said }: the server as the answer left it (absent when
+// same thing. on is captureChoice's answer, read from the form before
+// anything was awaited: undefined sends nothing (a MySQL or MariaDB server,
+// or a box nobody changed). hadYes: the box was ticked when the form opened.
+// The server is saved by then, so a failure says so in a message that stays,
+// and the box can be tried again from the server's form. It returns
+// { server, said, failed }: the server as the answer left it (absent when
 // nothing was saved), and the line to add to the save's own message.
 // before: called ahead of the save that removes the forwarding account; a
 // failure then stops that save (failed), so the message says nothing changed.
-async function saveCaptureChoice(form, saved, before) {
-  const on = captureChoice(form);
+async function saveCaptureChoice(on, hadYes, saved, before) {
+  // Never for another source type, whatever was read from the form.
+  if (saved.flavor && saved.flavor !== "postgres") return { said: "" };
   if (on === undefined) {
     // The box was ticked when the form opened and nobody touched it, and the
-    // save itself took the answer back: it was given about another account.
-    if (captureWas.get(form) && form.elements.flavor.value === "postgres" && !saved.forward_with_capture_account) {
-      toastError((saved.name || "This server") + ": the PostgreSQL port no longer forwards as the source user. The source's user or address changed, and the yes was given for the one before. Edit the server and tick the box again to give it for this one.");
+    // server no longer holds the yes: the save took it back (it was given
+    // about another account), or somebody else did meanwhile.
+    if (hadYes && !saved.forward_with_capture_account) {
+      toastError((saved.name || "This server") + ": the PostgreSQL port no longer forwards as the source user. The yes was taken back: the source's user or address changed and it was given for the one before, or somebody unticked the box meanwhile. Edit the server and tick the box again to give it.");
     }
     return { said: "" };
   }

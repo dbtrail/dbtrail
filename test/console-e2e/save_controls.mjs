@@ -857,9 +857,11 @@ export async function runSaveScenes(ctx) {
       const src = ((listed.body && listed.body.servers) || []).find((s) => s.has_source && s.editable);
       if (!src) throw new Error("no server with a source in the list");
       const say = (on) => page.evaluate(async ({ id, name, on }) => {
+        // What the form's box gives: captureChoice's answer for a box that
+        // was changed, read as saveServer reads it.
         const form = { elements: { flavor: { value: "postgres" }, forward_capture: { checked: on } } };
         if (!on) captureWas.set(form, true);
-        const r = await saveCaptureChoice(form, { id, name });
+        const r = await saveCaptureChoice(captureChoice(form), !on, { id, name });
         return { saved: !!r.server, said: r.said };
       }, { id: src.id, name: src.name, on });
       const stored = async () => {
