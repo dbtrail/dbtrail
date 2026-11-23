@@ -1111,7 +1111,7 @@ listener, its own workers, its own memory.
   checked: a name that is **another server** (its id or its name) is refused
   with `28000` and an error that names the login's own server, for example
   `user "app" is the application login of server "prod" and opens that server
-  only, and database "staging" is another server ("staging"); connect with
+  only, and database "staging" is another server; connect with
   dbname=prod, or use the other server's login`. Before, such a connection was
   made to the login's own server and nothing said so. The login's own server
   (by id or name) connects, and so does a name that is no server at all (the

@@ -921,14 +921,22 @@ func pgLoginOtherServer(srv *console.Server, user, database, loginServer string)
 	if loginServer == "" {
 		return nil
 	}
-	other, otherName, ok := srv.PGPortDatabaseServer(database)
+	// The login's own server first, by its id or by its name: a name two
+	// servers share (a servers file edited by hand) is the login's own
+	// before it is anyone else's.
+	own := srv.PGPortServerName(loginServer)
+	if database == loginServer || database == own {
+		return nil
+	}
+	other, ok := srv.PGPortDatabaseServer(database)
 	if !ok || other == loginServer {
 		return nil
 	}
-	own := srv.PGPortServerName(loginServer)
+	// Only the login's own server is named: an id is not turned into the
+	// name of a server the login has nothing to do with.
 	return &pgshim.Error{Code: "28000", Message: fmt.Sprintf(
-		"user %q is the application login of server %q and opens that server only, and database %q is another server (%q); connect with dbname=%s, or use the other server's login",
-		user, own, database, otherName, own)}
+		"user %q is the application login of server %q and opens that server only, and database %q is another server; connect with dbname=%s, or use the other server's login",
+		user, own, database, own)}
 }
 
 // pgPortLogin is the port's login: the port's passwords, then the server.
