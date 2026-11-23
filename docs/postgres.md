@@ -920,6 +920,12 @@ takes one full read of the source to bring it into the copy, as it does for a
 new table on a MySQL source: where the schedule may take full reads, and no
 more than a few times for the same table.
 
+A full read copies tables in parallel, each on a connection of its own to the
+source. One started by DBTrail itself (the Create button, a schedule,
+`snapshot run`) copies four tables at once, as a MySQL full read does, so at
+most four connections to the source copy tables at a time. `bintrail-pg baseline` takes its number from `--parallelism`, one per
+CPU of the machine it runs on unless set.
+
 A full read starts from the replication slot's position, so it needs the slot
 to have one. On a busy source capture can take a while to get its slot:
 PostgreSQL finishes creating a slot only when every write transaction that was
@@ -960,7 +966,9 @@ What to know:
   the loaded rows. Not made: other indexes and constraints, collations,
   comments, grants, and any type or sequence a default refers to that the table
   does not own; a snapshot taken before these facts were recorded is refused
-  (take a new one). `--output-format mydumper` is refused.
+  (take a new one). `--output-format mydumper` is refused. The web
+  interface's **Build a .sql backup for any moment** on a PostgreSQL server
+  builds these same files, and its download is one `.tar.gz` of them.
 - **A change to the table's columns or primary key refuses**, a type-only
   change included: the fold compares the shape the snapshot recorded with every
   shape the stream saw up to the point, and the key the changes were captured
@@ -1106,8 +1114,18 @@ listener, its own workers, its own memory.
 
 - **The database name picks the server**: its id or its name, as the web
   interface shows them. The username is free, except that a server's
-  application login, used as the username, opens that server whatever database
-  is named.
+  application login, used as the username, opens that server and no other. With
+  an application login the database name does not pick the server, but it is
+  checked: a name that is **another server** (its id or its name) is refused
+  with `28000` and an error that names the login's own server, for example
+  `user "app" is the application login of server "prod" and opens that server
+  only, and database "staging" is another server; connect with
+  dbname=prod, or use the other server's login`. Before, such a connection was
+  made to the login's own server and nothing said so. The login's own server
+  (by id or name) connects, and so does a name that is no server at all (the
+  database of your application behind a proxy, `postgres`, no database): it
+  opens the login's own server, as before. Names are matched as written, so
+  `STAGING` is not the server `staging`.
 - **The password** is the one created for SQL clients in the web interface
   (`dbtrail port on`), the access token, or the application login's own. The
   port is open while the port for SQL clients is turned on in the web
@@ -1635,7 +1653,9 @@ The source answers:
 
 - **A function, operator, cast or construct the copy answers differently or
   not at all.** The copy takes `count`, `sum`, `min`, `max`, `coalesce`,
-  `nullif`, `greatest`, `least`, `length`, `substring`, `trim`, `position`,
+  `nullif`, `greatest`, `least`, `length`, `substring` (with its start, and
+  its length when given, written as whole numbers above zero:
+  `substring(name, 1, 3)`, `substring(name FROM 2 FOR 3)`), `trim`, `position`,
   `concat`, `abs`, `bool_and`, `string_agg`, `row_number`, `rank`, `lag`, and
   `extract`, `date_part` and `date_trunc` of a year, month or day;
   `round(a / b, k)` and `round(avg(x), k)` (also `round(100 * avg(x), k)`, or
@@ -1658,8 +1678,15 @@ The source answers:
   the
   operators `=`, `<>`, `<`, `>`, `<=`, `>=`, `+`, `-`, `*`, `||`, `LIKE`
   (a pattern without a backslash), `IN`, `BETWEEN`, `IS [NOT] DISTINCT FROM`,
-  `ANY`, `EXISTS`, an array subscript by a positive whole number; `::date` and `CAST(... AS date)`; `DATE`, `TIMESTAMP`, `TIME` and
-  `INTERVAL` literals; joins, `GROUP BY`, `HAVING`, `DISTINCT [ON]`, `UNION`,
+  `ANY`, `EXISTS`, an array subscript by a positive whole number; `::date` and `CAST(... AS date)`; `INTERVAL` literals, and `DATE`,
+  `TIMESTAMP` and `TIME` literals written in one form: a date as `YYYY-MM-DD`,
+  a time as `HH:MM` or `HH:MM:SS` with at most six decimals and an hour below
+  24, a timestamp as the date alone or the date, a blank or a `T`, and the
+  time (`DATE '2026-01-05'`, `TIMESTAMP '2026-01-05 10:30:00.123456'`). A
+  string written in the statement and compared with a `date`, `timestamp`
+  or `time` column (`=`, `<`, `BETWEEN`, `IN`) is held to the same form; a
+  value that arrives as a parameter of a prepared statement is not read by
+  this rule; joins, `GROUP BY`, `HAVING`, `DISTINCT [ON]`, `UNION`,
   `INTERSECT`, `EXCEPT`, `WITH`, window functions, `FILTER`, `LIMIT` and
   `OFFSET`. Anything else goes to the source. Some of what the harness found
   answering otherwise, and why each one goes there: `avg()` and division of a
@@ -1676,7 +1703,20 @@ The source answers:
   (the copy matched no row), `->` and `->>` (PostgreSQL answers `json`, and
   writes a nested value with spaces), a number with an exponent (a `numeric`
   on PostgreSQL), `::text` of a
-  float, a `DATE`, `TIMESTAMP` or `TIME` literal written with a time zone
+  float, `substring` with a start of zero or below, or one that is not a
+  number written in the statement (`substring('apple', -1, 3)` is `a` on
+  PostgreSQL; the copy counts a negative start from the end and answers `e`;
+  `substr`, `left`, `right` and `overlay` always go to the source), a date or
+  time literal in any other form (`'26-01-05'::date` is 2026-01-05 on
+  PostgreSQL and the year 26 on the copy, a seventh decimal of a second is
+  rounded there and cut here, `TIME '24:00:00'` is a time there and midnight
+  here), arithmetic (`+`, `-`, `*`, `/`) and `sum()` over a `real` column
+  (PostgreSQL computes it as a `double precision`, so `r + 1` with `r = -0.1`
+  is `0.8999999985098839` there and `0.9` on the copy, and answers `sum(r)`
+  as a `real`; a `real` that is only read, compared, counted or taken the
+  `min` or `max` of stays on the copy, and so does arithmetic over a
+  `double precision`, a whole number or a `numeric`), a `DATE`, `TIMESTAMP` or
+  `TIME` literal written with a time zone
   (`TIMESTAMP '2026-03-02 10:00:00+02'`: the type holds none and PostgreSQL
   does not read it, so the literal is 10:00 there) and a string with one in
   either bound of a `BETWEEN` on a `timestamp` column, `upper`, `lower` and `ILIKE` (PostgreSQL folds case by the database's
@@ -1787,7 +1827,31 @@ sends it to the copy only when:
   scan run by parallel workers counts the rows of all of them.
 
 Anything else is answered by the source (`cheap_plan` in `/status`). 0 turns
-one rule off; both cannot be 0. In the compose `.env` they are
+one rule off; both cannot be 0.
+
+An expensive statement the copy could not return is answered by the source
+too (`result_over_row_cap` in `/status`). The copy returns at most
+`--sql-port-max-rows` rows for one statement (10,000 by default) and refuses a
+larger result, it does not cut it. So when the plan says the statement
+returns more rows than that, the port does not run it on the copy only to
+refuse it: your PostgreSQL answers it, and sends every row. The plan's
+estimate is used for one kind of statement, the one where it can be trusted:
+one table read alone, whole or by an index, with nothing left to check row
+by row (no `Filter` in the plan), under a `LIMIT` or a sort at most
+(`SELECT * FROM orders`, `SELECT * FROM orders WHERE id > 5000 ORDER BY id`).
+A `LIMIT` at or under the cap, written as a number, keeps the statement on
+the copy. A prepared statement with parameters (`LIMIT $1`, `WHERE id > $1`)
+is never sent to the source for its size: its plan is asked for once,
+without its values, PostgreSQL then estimates by fixed guesses (a `LIMIT $1`
+is taken to return a tenth of the rows), and the port does not take a guess
+for the size of a result. It is tried on the copy, as before. For anything
+else (a filter no index serves, a join, an aggregate, `GROUP BY`, `DISTINCT`,
+a window, a `UNION`, a partitioned table) the estimate is a guess, so the
+statement is tried on the copy as before, and one that does return more rows
+than the cap still gets the copy's error (`54000`, "the result has more than
+N rows"). A statement that the source answers this way runs there in full:
+it is the read of a whole table or a wide index range that the client asked
+for, and it loads the source as it would without the port. In the compose `.env` they are
 `PG_ROUTER_COST_THRESHOLD` and `PG_ROUTER_SCAN_ROWS`. The defaults come from a
 TPC-C source of 97 million rows on PostgreSQL 16: reads by a primary key cost
 1 to 12, an order's lines by an index 12, the stock level join 712, a
@@ -2085,6 +2149,7 @@ The reasons, with the MySQL port's names where they mean the same:
 | copy | `hidden_rules` | the server hides tables or columns: nothing is sent to its source |
 | copy | `capture_gate` | the server forwards with the capture account, and the statement did not pass that account's check, so the copy answered it without asking the source for its plan |
 | source | `cheap_plan` | its plan on the source is under both thresholds: the source answers it, by its indexes |
+| source | `result_over_row_cap` | its plan on the source is expensive and says it returns more rows than the copy returns for one statement (`--sql-port-max-rows`): the copy would refuse the result, so it is not tried there |
 | source | `explain_failed` | its plan could not be had (the source refused the `EXPLAIN`, a text of more than one statement): the source answers it, its error included |
 | source | `in_transaction` | the client's transaction block |
 | source | `veto` | a construct the copy answers differently, or is not known to answer the same |
@@ -2474,6 +2539,18 @@ Three things still answer differently from PostgreSQL, with no error:
 A numeric with no precision prints with all 18 decimals (`12345.678` as
 `12345.678000000000000000`); it compares, sorts and sums as the same number.
 
+A `CASE`, `COALESCE`, `GREATEST` or `LEAST` whose values are numbers of
+different scales can print more zeros on the copy than on PostgreSQL, for the
+same value: PostgreSQL writes each value with its own decimals, the copy
+gives them all one type and writes every one with that type's. Over a
+`numeric(12,2)` column, `coalesce(sum(amount), 0)` of no rows is `0` on
+PostgreSQL and `0.00` on the copy, and `CASE WHEN ... THEN amount ELSE 0 END`
+writes `0.00` for the rows that take the `0`. The number is the same; a
+client that reads it as a number sees no difference. Writing the other value
+with the column's decimals (`coalesce(sum(amount), 0.00)`) makes both sides
+print the same. (Around a `round()` the port does check this, value by
+value, and sends a statement whose decimals would differ to the source.)
+
 ---
 
 ### A proxy in front of the port
@@ -2482,8 +2559,12 @@ A proxy such as ProxySQL logs into the port twice:
 
 - **With your application's login**, for every statement it sends. Save that
   username and password as the server's **application login** (the same one
-  the MySQL port takes): it opens that server whatever database the
-  connection names.
+  the MySQL port takes): it opens that server, whatever database the proxy's
+  client named, unless that name is another server of this DBTrail (its id or
+  its name), which the port refuses with `28000` so that a login never reads
+  one server under another's name. If your application's database is called
+  like another server here, rename that server, or have the proxy connect
+  with the login's own server as the database.
 - **With its monitor login**, for its health checks (ProxySQL's
   `pgsql-monitor_username` and `pgsql-monitor_password`). The port takes the
   **monitor login** saved for the MySQL port: one username and password for

@@ -843,9 +843,7 @@ func (s *session) relay(up *upstream, out relayOut, done func(pgproto3.BackendMe
 			if out == relayClient {
 				s.be.Send(m)
 				s.markSourceRead()
-				for _, v := range m.Values {
-					sent += len(v)
-				}
+				sent += relayedBytes(m)
 				if sent > flushAfterBytes {
 					// A large answer goes out as it comes, not held whole
 					// here.
@@ -871,6 +869,20 @@ func (s *session) relay(up *upstream, out relayOut, done func(pgproto3.BackendMe
 			return perr, nil
 		}
 	}
+}
+
+// relayedBytes is what one row of the source's answer takes in the port's
+// buffer for the client, as it goes on the wire: the message's type, length
+// and count of cells (7 bytes), each cell's length (4 bytes), and the cells.
+// A row of NULLs or of empty cells holds no bytes of its own and takes these
+// all the same, so an answer of many of them is flushed as it comes too, and
+// not held whole here.
+func relayedBytes(m *pgproto3.DataRow) int {
+	n := 7 + 4*len(m.Values)
+	for _, v := range m.Values {
+		n += len(v)
+	}
+	return n
 }
 
 // statusKeeper ends a relay on ReadyForQuery and keeps the transaction

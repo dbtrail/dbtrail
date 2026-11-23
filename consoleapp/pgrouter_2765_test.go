@@ -253,8 +253,7 @@ func TestPGRouter_login(t *testing.T) {
 		{"anyone", "", "prod", "28P01", "an empty password"},
 		{"anyone", "pw-one", "prod", "28P01", "a login's password under another username"},
 		{"app1", "pw-one", "prod", found, "the application login with its own password"},
-		{"app1", "pw-one", "staging", found, "the application login opens its own server whatever database it names"},
-		{"app1", "pw-one", "nowhere", found, "even a database that does not exist"},
+		{"app1", "pw-one", "nowhere", found, "the application login with a database that is no server: its own server"},
 		{"app1", "port-pw", "prod", found, "the application login with the port's password"},
 		{"App1", "pw-one", "prod", "28P01", "the login in another case"},
 		{"app1", "wrong", "prod", "28P01", "the login with a wrong password"},
@@ -497,5 +496,135 @@ func TestPGRouter_monitorLogin(t *testing.T) {
 	}
 	if res := conn.ExecParams(context.Background(), "SELECT 1", nil, nil, nil, nil).Read(); res.Err == nil {
 		t.Error("the monitor login answered SELECT 1")
+	}
+}
+
+// An application login that names another server as its database is refused
+// (#3087): it used to be connected to its own server with nothing said, so
+// someone who wrote dbname=staging with the login of prod read prod.
+func TestPGRouter_loginNamesAnotherServer(t *testing.T) {
+	f := newRouterFiles(t)
+	prod, err := f.owner.Add(console.ServerEntry{Name: "prod", Flavor: console.FlavorPostgres, DSN: "u:p@tcp(127.0.0.1:1)/idx_prod"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	staging, err := f.owner.Add(console.ServerEntry{Name: "staging", Flavor: console.FlavorPostgres, DSN: "u:p@tcp(127.0.0.1:1)/idx_staging"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.owner.SetPortLogin(prod.ID, "app1", "pw-one"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.owner.SetPortLogin(staging.ID, "app2", "pw-two"); err != nil {
+		t.Fatal(err)
+	}
+	f.savePortFile(t, true, "port-pw")
+	srv, runner, err := newRouterConsole(f.settings(""), console.SQLPool{Workers: 1, Threads: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runner.Close)
+	srv.RefreshFollowedFiles()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- servePGPort(ctx, srv, ln, 0) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("the PostgreSQL port did not stop with its context")
+		}
+	})
+	addr := ln.Addr().String()
+
+	const let, other = "", "28000"
+	for _, tc := range []struct {
+		user, pw, db, want, why string
+	}{
+		// Another server, by its name and by its id, with either password
+		// the login takes.
+		{"app1", "pw-one", "staging", other, "another server's name"},
+		{"app1", "pw-one", staging.ID, other, "another server's id"},
+		{"app1", "port-pw", "staging", other, "another server's name, with the port's password"},
+		{"app2", "pw-two", "prod", other, "the other login, the other way round"},
+		{"app2", "pw-two", prod.ID, other, "the other login, by id"},
+		// Its own server, however it is named.
+		{"app1", "pw-one", "prod", let, "its own server's name"},
+		{"app1", "pw-one", prod.ID, let, "its own server's id"},
+		{"app2", "pw-two", "staging", let, "the other login's own server"},
+		// A name that is no server: left as it was, the login's own server.
+		// A proxy passes on the database its client named.
+		{"app1", "pw-one", "shop", let, "a name that is no server"},
+		{"app1", "pw-one", "postgres", let, "postgres"},
+		{"app1", "pw-one", "", let, "no database: the client sends the user's name"},
+		{"app1", "pw-one", "app1", let, "the login's own name"},
+		{"app1", "pw-one", "STAGING", let, "another server's name in another case is no server: names are matched as written"},
+		{"app1", "pw-one", "staging ", let, "another server's name with a blank after it is no server"},
+		{"app1", "pw-one", " staging", let, "or before it"},
+		{"app1", "pw-one", "stagin", let, "a part of another server's name"},
+		{"app1", "pw-one", "staging/prod", let, "two names in one"},
+		// The password comes first: nothing is said about servers without it.
+		{"app1", "wrong", "staging", "28P01", "a wrong password, naming another server"},
+		{"app1", "", "staging", "28P01", "no password, naming another server"},
+		{"app1", "pw-two", "staging", "28P01", "the other login's password"},
+		// Without an application login the database name picks the server,
+		// as before.
+		{"anyone", "port-pw", "staging", let, "no application login: the name picks the server"},
+		{"anyone", "port-pw", "prod", let, "no application login: the other one"},
+	} {
+		if got := pgLoginCode(t, addr, tc.user, tc.pw, tc.db); got != tc.want {
+			t.Errorf("%s (%s / %s / %q): SQLSTATE %q, want %q", tc.why, tc.user, tc.pw, tc.db, got, tc.want)
+		}
+	}
+
+	// The error names the login's own server and the one that was named.
+	refusal := pgLoginOtherServer(srv, "app1", "staging", prod.ID)
+	if refusal == nil {
+		t.Fatal("no refusal")
+	}
+	for _, want := range []string{`user "app1"`, `application login of server "prod"`, `database "staging" is another server;`, "connect with dbname=prod"} {
+		if !strings.Contains(refusal.Message, want) {
+			t.Errorf("the refusal does not say %q: %s", want, refusal.Message)
+		}
+	}
+	// Named by its id, the other server is not said by its name: the
+	// refusal names the login's own server and what the client wrote.
+	if r := pgLoginOtherServer(srv, "app1", staging.ID, prod.ID); r == nil || strings.Contains(r.Message, "staging") || !strings.Contains(r.Message, staging.ID) {
+		t.Errorf("another server named by its id: %+v", r)
+	}
+	// A name that selects two servers: a server named like another's id.
+	// The lookup finds the id first, so without its own server being
+	// accepted first this login would be refused under its own name, and
+	// told to connect with the very name it gave.
+	twin, err := f.owner.Add(console.ServerEntry{Name: prod.ID, Flavor: console.FlavorPostgres, DSN: "u:p@tcp(127.0.0.1:1)/idx_twin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.RefreshFollowedFiles()
+	if id, ok := srv.PGPortDatabaseServer(prod.ID); !ok || id != prod.ID {
+		t.Fatalf("the name %q selects %q, want the server of that id", prod.ID, id)
+	}
+	for _, db := range []string{prod.ID, twin.ID} {
+		if r := pgLoginOtherServer(srv, "app9", db, twin.ID); r != nil {
+			t.Errorf("the login's own server named %q: refused: %s", db, r.Message)
+		}
+	}
+	// And the other server's login is still its own under that name.
+	if r := pgLoginOtherServer(srv, "app1", prod.ID, prod.ID); r != nil {
+		t.Errorf("prod's login naming prod's id: refused: %s", r.Message)
+	}
+	// No application login, the own server, and no server: nothing refused.
+	for _, db := range []string{"prod", prod.ID, "shop", ""} {
+		if r := pgLoginOtherServer(srv, "app1", db, prod.ID); r != nil {
+			t.Errorf("database %q with prod's login: refused: %s", db, r.Message)
+		}
+	}
+	if r := pgLoginOtherServer(srv, "anyone", "staging", ""); r != nil {
+		t.Errorf("no application login: refused: %s", r.Message)
 	}
 }

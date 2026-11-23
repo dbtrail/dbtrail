@@ -1019,7 +1019,9 @@ jobs:
         if: env.RUN == 'true' && env.DATA == 'true'
         run: |
           set -o pipefail
-          go test -tags=integration -race -p 1 -count=1 -v \
+          # -timeout: internal/pgcompare runs every measured statement on
+          # PostgreSQL and on the copy, about nine minutes under -race.
+          go test -tags=integration -race -p 1 -count=1 -v -timeout 20m \
             ./internal/pgcapture/ ./internal/pgstreamrun/ ./internal/pgbaseline/ ./internal/pgshim/ ./internal/pgverifysource/ ./internal/pgcompare/ ./internal/pgdrill/ 2>&1 | tee /tmp/pg-it.out
           grep -q -- '--- PASS: TestOne_EndToEnd_PostgresToIndexToRecovery' /tmp/pg-it.out \
             || { echo "FATAL: PG end-to-end integration test did not run — false-green tripwire" >&2; exit 1; }
