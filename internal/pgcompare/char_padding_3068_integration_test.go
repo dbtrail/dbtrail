@@ -136,6 +136,7 @@ func charCases() []charCase {
 		stays(`SELECT b.id FROM ` + p + ` b WHERE EXISTS (SELECT * FROM ` + x + ` a WHERE a.id = b.id AND a.k > 2) ORDER BY b.id`),
 		stays(`SELECT b.id FROM ` + p + ` b WHERE NOT EXISTS (SELECT * FROM ` + x + ` a WHERE a.id = b.id AND a.k > 2) ORDER BY b.id`),
 		stays(`SELECT b.k, count(*) FROM ` + p + ` b WHERE EXISTS (SELECT * FROM ` + x + ` a, ` + p + ` d WHERE a.id = b.id AND d.k = a.k) GROUP BY b.k ORDER BY b.k`),
+		stays(`SELECT id FROM ` + p + ` WHERE EXISTS (SELECT * FROM ` + x + `) ORDER BY id`),
 		differs(`SELECT b.id FROM ` + p + ` b WHERE EXISTS (SELECT * FROM ` + x + ` a WHERE a.c = b.c) ORDER BY b.id`),
 		// Any other subquery reads the star's values: the source's.
 		differs(`SELECT b.id FROM ` + p + ` b WHERE (b.id, b.c, b.t, b.k) IN (SELECT id, c, t, k FROM ` + x + `) ORDER BY b.id`),

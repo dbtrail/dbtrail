@@ -23,6 +23,9 @@ func TestPaddedLists_leftToTheCopy(t *testing.T) {
 		`SELECT id FROM plain WHERE id IN (SELECT c.id FROM plain q, codes c WHERE c.id = q.id)`,
 
 		// EXISTS and NOT EXISTS with a star: the select list is not read.
+		// (The first one was held to the source until #3219, as every star
+		// outside a plain select list was.)
+		`SELECT id FROM plain WHERE EXISTS (SELECT * FROM codes)`,
 		`SELECT p.id FROM plain p WHERE EXISTS (SELECT * FROM codes c WHERE c.id = p.id)`,
 		`SELECT p.id FROM plain p WHERE NOT EXISTS (SELECT * FROM codes c WHERE c.id = p.id AND c.k > 2)`,
 		`SELECT p.qty, count(*) FROM plain p WHERE p.qty > 1 AND exists (select * from codes where codes.id = p.id) GROUP BY p.qty`,
@@ -58,7 +61,6 @@ func TestPaddedLists_toTheSource(t *testing.T) {
 		`SELECT id FROM codes ORDER BY id, codes`,
 		`SELECT id FROM codes GROUP BY id, codes`,
 		`SELECT id IS DISTINCT FROM k, codes FROM codes`,
-		`SELECT p.id FROM plain p WHERE p.id IN (1, codes)`,
 		// A list that mixes JOIN ... ON with commas is not followed.
 		`SELECT p.id FROM plain p JOIN plain q ON q.id = p.id, codes c WHERE c.id = p.id`,
 		// A star that is read: anything but EXISTS.
