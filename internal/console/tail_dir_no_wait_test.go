@@ -518,7 +518,10 @@ func TestWaitUpdateOver_evenWithAVersion(t *testing.T) {
 	returnsSoon(t, capped, "past its limit")
 }
 
-// freshWaitWillAct is true exactly where waitForSource would wait.
+// freshWaitWillAct is false wherever waitForSource is known to skip before
+// it reads anything. It can be true and waitForSource still skip on what only
+// its own reads tell: a position that cannot be read, a first refusal, no
+// saved position, capture's state unreadable, another binary log.
 func TestFreshWaitWillAct(t *testing.T) {
 	for _, tc := range []struct {
 		name string

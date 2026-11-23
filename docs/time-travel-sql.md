@@ -1496,11 +1496,13 @@ so a statement there often runs out of a 200 ms wait. Not yet per server
 
 **During an update of the recent changes, a statement does not wait, and may
 answer from the version before that update, with no notice.** That is usually
-seconds behind, and a minute or more in a long update. The way out on this
-port is the wait above: with `BINTRAIL_SQL_FRESH_WAIT` on, a statement the
-wait applies to first waits for the running update, for at most half of the
-statement's time limit (30 of 60 seconds by default), and only then for the
-source, so a client reads its own last write. A table with no version yet
+seconds behind, and a minute or more in a long update. With
+`BINTRAIL_SQL_FRESH_WAIT` on, a statement the wait applies to first waits for
+the running update, for at most half of the statement's time limit (30 of 60
+seconds by default), and only then for the source. A write captured before
+that update began is read; a write made during it needs the next update to
+finish within the wait, or the statement answers from the version before it.
+A table with no version yet
 (the first statement on it, the first after a new snapshot) waits for the
 running update under the same limit, with the switch on or off; past it the
 statement goes on: under routing MySQL answers, and on a connection that does

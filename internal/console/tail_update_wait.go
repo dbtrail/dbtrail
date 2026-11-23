@@ -21,9 +21,10 @@ import (
 // limit 0 or less is one update's own deadline.
 //
 // evenWithVersion waits for the running update whatever versions the tables
-// have: a statement about to wait for the source (freshWaitWillAct) promises
-// its client's own last write, and its short wait would otherwise run out
-// during the update and read the version from before it.
+// have: for a statement about to wait for the source (freshWaitWillAct),
+// whose short wait would otherwise run out during the update. A write
+// captured before that update began is then read; one made during it needs
+// the next update to finish within the short wait.
 func (k *tailKeeper) waitUpdateOver(ctx context.Context, read []views.BaselineTable, limit time.Duration, evenWithVersion bool) {
 	if len(read) == 0 {
 		return
@@ -100,11 +101,14 @@ func (p *tailPublish) tailsPendingLocked(read []views.BaselineTable) bool {
 	return pending
 }
 
-// freshWaitWillAct says waitForSource will really wait for this statement:
-// the switch is on, its server is a MySQL source whose position can be read,
-// and every table it reads has a version. Asked before it, in its own order
-// and with nothing counted or started, so that a statement it would skip for
-// does not hold a worker for a running update.
+// freshWaitWillAct says waitForSource can act for this statement: the switch
+// is on, its server is a MySQL source not known to refuse its position, and
+// every table it reads has a version. Asked before it, in its own order and
+// with nothing counted or started, so that a statement it is known to skip
+// for does not hold a worker for a running update. What only waitForSource's
+// own reads can tell (a position that cannot be read, a first refusal, no
+// saved position, capture's state unreadable, another binary log) is not
+// known here: such a statement waits for the update, and is then skipped.
 func (s *Server) freshWaitWillAct(ctx context.Context, b *bundle, k *tailKeeper, read []views.BaselineTable) bool {
 	id, ok := tailsFor(ctx)
 	if !ok || s.freshWait <= 0 || s.sourcePos == nil || k == nil || len(read) == 0 {
