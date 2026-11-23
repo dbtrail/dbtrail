@@ -247,8 +247,18 @@ func TestRouteByCost_resultOverRowCap_prepared(t *testing.T) {
 		"FROM listed": plan(`{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}`),
 		"FROM whole":  plan(`{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}`),
 	}
+	// The copy's columns, all whole numbers: the screen lets a sort by one
+	// of them through.
+	catalog := func() []CatalogTable {
+		var tables []CatalogTable
+		for _, name := range []string{"paged", "ranged", "listed", "whole"} {
+			tables = append(tables, CatalogTable{Schema: "public", Name: name, Columns: []CatalogColumn{
+				{Name: "k", Type: "INTEGER", SourceType: 23, SourceTypeMod: -1}, {Name: "n", Type: "INTEGER", SourceType: 23, SourceTypeMod: -1}}})
+		}
+		return tables
+	}
 	src := startFakeSource(t, plans)
-	l := &costLogin{src: src, cost: &CostPolicy{CostThreshold: DefaultCostThreshold, ScanRows: DefaultScanRows, RowCap: 1000}}
+	l := &costLogin{src: src, catalog: catalog, cost: &CostPolicy{CostThreshold: DefaultCostThreshold, ScanRows: DefaultScanRows, RowCap: 1000}}
 	c := costPortConn(t, ctx, l)
 	for i, tc := range []struct {
 		name, stmt string
@@ -258,12 +268,8 @@ func TestRouteByCost_resultOverRowCap_prepared(t *testing.T) {
 		reason     string
 		explain    string
 	}{
-		// The port of these tests has no catalog, and without column types
-		// its screen sends every ORDER BY of a name to the source: the
-		// paging is written with its sort key computed (sum(n)), which is
-		// never text.
-		{"paging with LIMIT $1", "SELECT k, sum(n) FROM paged GROUP BY k ORDER BY sum(n) LIMIT $1", [][]byte{[]byte("20")}, "7", RouteCopy, ReasonAnswersTheSame,
-			"EXPLAIN (GENERIC_PLAN, FORMAT JSON) SELECT k, sum(n) FROM paged GROUP BY k ORDER BY sum(n) LIMIT $1"},
+		{"paging with LIMIT $1", "SELECT n FROM paged ORDER BY k LIMIT $1", [][]byte{[]byte("20")}, "7", RouteCopy, ReasonAnswersTheSame,
+			"EXPLAIN (GENERIC_PLAN, FORMAT JSON) SELECT n FROM paged ORDER BY k LIMIT $1"},
 		{"an index condition on $1", "SELECT n FROM ranged WHERE k = $1", [][]byte{[]byte("5")}, "7", RouteCopy, ReasonAnswersTheSame,
 			"EXPLAIN (GENERIC_PLAN, FORMAT JSON) SELECT n FROM ranged WHERE k = $1"},
 		{"a parameter that filters nothing the plan shows", "SELECT n FROM listed WHERE n = $1", [][]byte{[]byte("5")}, "7", RouteCopy, ReasonAnswersTheSame,
@@ -299,10 +305,10 @@ func TestRouteByCost_resultOverRowCap_prepared(t *testing.T) {
 	lit := &costLogin{src: startFakeSource(t, map[string]string{
 		"FROM paged": plan(`{"Node Type": "Limit", "Total Cost": 400000, "Plan Rows": 20, "Plans": [
 			{"Node Type": "Sort", "Total Cost": 400000, "Plan Rows": 2400000, "Plans": [
-				{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}]}`)}),
+				{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}]}`)}), catalog: catalog,
 		cost: &CostPolicy{CostThreshold: DefaultCostThreshold, ScanRows: DefaultScanRows, RowCap: 1000}}
 	d := costPortConn(t, ctx, lit)
-	if got := costSimple(ctx, d, lit, "SELECT k, sum(n) FROM paged GROUP BY k ORDER BY sum(n) LIMIT 20"); got.side != RouteCopy {
+	if got := costSimple(ctx, d, lit, "SELECT n FROM paged ORDER BY k LIMIT 20"); got.side != RouteCopy {
 		t.Errorf("LIMIT 20 written out: %+v, want the copy", got)
 	}
 }
