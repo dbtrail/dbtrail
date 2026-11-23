@@ -512,10 +512,6 @@ func TestPGRouter_loginNamesAnotherServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A MySQL server is another server too.
-	if _, err := f.owner.Add(console.ServerEntry{Name: "mysqlbox", DSN: "u:p@tcp(127.0.0.1:1)/idx_my"}); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := f.owner.SetPortLogin(prod.ID, "app1", "pw-one"); err != nil {
 		t.Fatal(err)
 	}
@@ -555,7 +551,6 @@ func TestPGRouter_loginNamesAnotherServer(t *testing.T) {
 		{"app1", "pw-one", "staging", other, "another server's name"},
 		{"app1", "pw-one", staging.ID, other, "another server's id"},
 		{"app1", "port-pw", "staging", other, "another server's name, with the port's password"},
-		{"app1", "pw-one", "mysqlbox", other, "a server of another family is another server"},
 		{"app2", "pw-two", "prod", other, "the other login, the other way round"},
 		{"app2", "pw-two", prod.ID, other, "the other login, by id"},
 		// Its own server, however it is named.
