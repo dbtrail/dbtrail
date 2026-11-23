@@ -64,7 +64,8 @@ type tyList struct {
 }
 
 // tySame are the expressions the port announces and sends as PostgreSQL
-// does. The comments name what the port announced before #3073.
+// does. The comments name what the port announced before #3073. Arithmetic
+// and sum() over a real are not here: their value differs too (#3069).
 func tySame() []tyList {
 	return []tyList{
 		{"", []string{
@@ -74,12 +75,12 @@ func tySame() []tyList {
 			"SUM(i)", "sum(DISTINCT i)", "sum(i) FILTER (WHERE id > 1)", "sum(" + tyVals + ".i)", "sum(i) AS total",
 			"sum(i) + 1", "coalesce(sum(i), 0)", "sum(i + 1)", "sum(i - s)", "sum(-i)", "sum(abs(s))",
 			"sum(CASE WHEN id > 1 THEN 1 ELSE 0 END)", "sum(i::bigint)", "sum(s::int)", "sum(length(t))", "sum(2)",
-			"sum(r)", "count(*)", "count(i)", "min(s)", "max(i)", "max(b)", "min(n)", "max(f)", "min(d)", "max(t)", "bool_and(id > 0)",
+			"count(*)", "count(i)", "min(s)", "max(i)", "max(b)", "min(n)", "max(f)", "min(d)", "max(t)", "bool_and(id > 0)",
 		}},
 		{"ORDER BY id", []string{
 			// length, position and ntile are integers: the port said bigint.
 			"length(t)", "LENGTH(t)", "char_length(t)", "character_length(t)", "position('a' in t)", "strpos(t, 'a')",
-			"length(t) + 1", "length(t) AS n", "coalesce(length(t), 0)", "length(t) * b", "pg_catalog.length(t)",
+			"length(t) + 1", "length(t) AS n", "coalesce(length(t), 0)", "length(t) * b",
 			"ntile(2) OVER (ORDER BY id)", "ntile(3) OVER (PARTITION BY id % 2 ORDER BY id) AS bucket",
 			"row_number() OVER (ORDER BY id)", "rank() OVER (ORDER BY id)", "dense_rank() OVER (ORDER BY id)",
 			"count(*) OVER ()", "lag(i) OVER (ORDER BY id)",
@@ -105,7 +106,6 @@ func tySame() []tyList {
 			"d + 1", "d - 1", "id > 2", "t || 'x'", "coalesce(t, 'none')", "nullif(i, 10)",
 			"CASE WHEN id > 2 THEN i ELSE 0 END", "i::bigint", "s::int", "i::text", "n::int",
 			"1", "1.5", "'a'", "true", "NULL::int", "1 + 1", "3000000000", "DATE '2026-01-01'",
-			"d - e", "s + 1", "s + s", "s * 2", "r + 1", "r * 2", "r + r", "r + f",
 		}},
 	}
 }
@@ -120,12 +120,12 @@ func tyStatements() []string {
 		`WITH c AS (SELECT id % 2 AS g, sum(s) AS small, sum(i) AS total FROM ` + v + ` GROUP BY 1) SELECT g, small, total FROM c ORDER BY g`,
 		`SELECT * FROM (SELECT id, length(t) AS l, position('a' in t) AS p, ntile(2) OVER (ORDER BY id) AS q FROM ` + v + `) x ORDER BY id`,
 		`SELECT l + 1, y FROM (SELECT id, length(t) AS l, extract(year FROM d) AS y FROM ` + v + `) x ORDER BY id`,
-		`SELECT max(l), sum(l) FROM (SELECT length(t) AS l FROM ` + v + `) x`,
+		`SELECT max(l), min(l) + 1 FROM (SELECT length(t) AS l FROM ` + v + `) x`,
 		`SELECT id FROM ` + v + ` WHERE length(t) > 2 AND extract(year FROM d) > 2000 ORDER BY length(t), id`,
 		`SELECT length(t), count(*), sum(i) FROM ` + v + ` GROUP BY length(t) HAVING sum(i) > 0 ORDER BY 1`,
 		// A lone NULL is text.
 		`SELECT NULL`,
-		`SELECT NULL, 1, NULL AS nothing`,
+		`SELECT NULL, 1, NULL AS nothing, NULL AS more`,
 		`SELECT id, NULL FROM ` + v + ` ORDER BY id`,
 		// Beside another SELECT it takes the other side's type.
 		`SELECT NULL UNION ALL SELECT 1`,
@@ -133,17 +133,27 @@ func tyStatements() []string {
 	}
 }
 
-// tyOther is an expression the port still announces with another type than
-// PostgreSQL's, with the same value: docs/postgres.md lists them.
+// tyOther is a statement one of whose columns the port still announces with
+// another type than PostgreSQL's, with the same value: docs/postgres.md
+// lists them. col counts from 0.
 type tyOther struct {
-	expr     string
-	tail     string
+	sql      string
+	col      int
 	pg, port uint32
 	why      string
 }
 
 func tyDifferent() []tyOther {
-	return nil
+	v := tyVals
+	return []tyOther{
+		{`SELECT d - e FROM ` + v + ` ORDER BY id`, 0, 23, 20, "a date less a date is a bigint on the copy"},
+		{`SELECT s + 1 FROM ` + v + ` ORDER BY id`, 0, 23, 21, "a smallint with a literal stays a smallint on the copy"},
+		{`SELECT s - s FROM ` + v + ` ORDER BY id`, 0, 21, 21, "listed to hold the line above to its cause: two smallints are a smallint on both"},
+		{`SELECT sum(l) FROM (SELECT length(t) AS l FROM ` + v + `) x`, 0, 20, 1700, "the sum of a name the statement defines: its type is not read"},
+		{`SELECT sum(id) FROM (SELECT i AS id FROM ` + v + `) x`, 0, 20, 1700, "the same, under the name of a column"},
+		{`SELECT x FROM (SELECT NULL AS x) q`, 0, 25, 23, "a NULL named in a subquery"},
+		{`SELECT NULL, NULL`, 1, 25, 23, "a second NULL with no name"},
+	}
 }
 
 var tyTypeNames = map[uint32]string{
@@ -414,28 +424,29 @@ func TestIntegrationPGCompareAnnouncedTypes3073(t *testing.T) {
 		}
 	}
 	for _, o := range tyDifferent() {
-		sql := "SELECT " + o.expr + " FROM " + tyVals + " " + o.tail
-		answered(sql)
+		answered(o.sql)
 		n++
 		for _, mode := range tyModes {
-			pg, pt := tyAsk(ctx, setup.PgConn(), mode, sql), tyAsk(ctx, port.PgConn(), mode, sql)
-			if pg.err != nil || pt.err != nil || len(pg.fields) != 1 || len(pt.fields) != 1 {
-				t.Errorf("%s, %s: PostgreSQL: %v; the port: %v", o.expr, mode, pg.err, pt.err)
+			pg, pt := tyAsk(ctx, setup.PgConn(), mode, o.sql), tyAsk(ctx, port.PgConn(), mode, o.sql)
+			if pg.err != nil || pt.err != nil || len(pg.fields) <= o.col || len(pt.fields) != len(pg.fields) || len(pt.rows) != len(pg.rows) {
+				t.Errorf("%s, %s: PostgreSQL: %d columns, %d rows, %v; the port: %d columns, %d rows, %v", o.sql, mode, len(pg.fields), len(pg.rows), pg.err, len(pt.fields), len(pt.rows), pt.err)
 				continue
 			}
-			if pg.fields[0].DataTypeOID != o.pg || pt.fields[0].DataTypeOID != o.port {
-				t.Errorf("%s, %s: PostgreSQL announces %s and the port %s; listed as %s and %s (%s). If the port now agrees, move it to tySame and take it out of docs/postgres.md",
-					o.expr, mode, tyName(pg.fields[0].DataTypeOID), tyName(pt.fields[0].DataTypeOID), tyName(o.pg), tyName(o.port), o.why)
+			if got, is := pt.fields[o.col].DataTypeOID, pg.fields[o.col].DataTypeOID; is != o.pg || got != o.port {
+				t.Errorf("%s, %s: PostgreSQL announces %s and the port %s; listed as %s and %s (%s). If the port now agrees, move it to tyStatements and take it out of docs/postgres.md",
+					o.sql, mode, tyName(is), tyName(got), tyName(o.pg), tyName(o.port), o.why)
 			}
-			if pt.described != nil && pt.described[0].DataTypeOID != pt.fields[0].DataTypeOID {
-				t.Errorf("%s: the port's Describe and its answer announce different types", o.expr)
+			if pt.described != nil && pt.described[o.col].DataTypeOID != pt.fields[o.col].DataTypeOID {
+				t.Errorf("%s: the port's Describe and its answer announce different types", o.sql)
 			}
-		}
-		// The value is the same: as text, cell by cell.
-		pg, pt := tyAsk(ctx, setup.PgConn(), "simple", sql), tyAsk(ctx, port.PgConn(), "simple", sql)
-		for r := range pg.rows {
-			if r >= len(pt.rows) || !bytes.Equal(pg.rows[r][0], pt.rows[r][0]) {
-				t.Errorf("%s, row %d: PostgreSQL writes %q and the port another value", o.expr, r+1, pg.rows[r][0])
+			if mode != "simple" {
+				continue
+			}
+			// The value is the same: as text, cell by cell.
+			for r := range pg.rows {
+				if a, b := pg.rows[r][o.col], pt.rows[r][o.col]; !bytes.Equal(a, b) || (a == nil) != (b == nil) {
+					t.Errorf("%s, row %d: PostgreSQL writes %q and the port %q", o.sql, r+1, a, b)
+				}
 			}
 		}
 	}

@@ -65,9 +65,13 @@ const (
 	describeTail = "\n) AS dbtrail_describe LIMIT 0"
 )
 
-// lonelyNull is NULL as a whole select item: text, with no name of its own
-// (an operator's result is headed ?column?, as PostgreSQL heads a NULL).
-const lonelyNull = "(CAST(NULL AS VARCHAR) || '')"
+// textNull is NULL as a whole select item, which is text on PostgreSQL;
+// unnamedNull is one the statement gives no name, under the heading
+// PostgreSQL gives it (the engine would head it with the cast's own text).
+const (
+	textNull    = "CAST(NULL AS VARCHAR)"
+	unnamedNull = textNull + ` AS "?column?"`
+)
 
 // notWholeSum is what the engine answers when a sum this file took for one
 // of whole numbers is of something else: an error, never a rounded sum.
@@ -125,7 +129,7 @@ type typeRewrite struct {
 	columns func() map[string][]string
 	types   map[string][]string
 	asked   bool
-	nulls   map[int]bool
+	nulls   map[int]string
 	changed bool
 }
 
@@ -162,21 +166,13 @@ func (r *typeRewrite) render(from, to int) string {
 // that ends, or -1 when nothing of the table starts there.
 func (r *typeRewrite) castAt(i, to int) (string, int) {
 	toks := r.toks
-	if r.nulls[i] {
-		return lonelyNull, i
+	if null, ok := r.nulls[i]; ok {
+		return null, i
 	}
-	if toks[i].kind != rtWord {
-		return "", -1
-	}
-	// f(...), or pg_catalog.f(...); a function of any other schema is not
-	// PostgreSQL's own.
+	// f(...): a function of a schema (my.length) is not PostgreSQL's own,
+	// and one written pg_catalog.f never reaches the copy.
 	name := i
-	if toks[i].text == "pg_catalog" && isOpTok(toks, i+1, ".") && i+2 < to && toks[i+2].kind == rtWord {
-		name = i + 2
-	} else if isOpTok(toks, i-1, ".") {
-		return "", -1
-	}
-	if !isOpTok(toks, name+1, "(") {
+	if toks[i].kind != rtWord || isOpTok(toks, i-1, ".") || !isOpTok(toks, name+1, "(") {
 		return "", -1
 	}
 	closeAt := closingParen(toks, name+1)
@@ -398,18 +394,20 @@ func operandType(o []rtToken, types func() map[string][]string) string {
 	return ""
 }
 
-// loneNulls are the places of each NULL that is a whole item of the
-// statement's own select list, which PostgreSQL answers as text. None in a
-// statement with a UNION, an INTERSECT, an EXCEPT or a VALUES list, where a
-// NULL takes the type of what stands beside it, nor in a subquery, where
-// PostgreSQL reads it by what uses it.
-func loneNulls(toks []rtToken) map[int]bool {
+// loneNulls is what to write in place of each NULL that is a whole item of
+// the statement's own select list, which PostgreSQL answers as text, by its
+// place. None in a statement with a UNION, an INTERSECT, an EXCEPT or a
+// VALUES list, where a NULL takes the type of what stands beside it, nor in a
+// subquery, where PostgreSQL reads it by what uses it. Of the ones the
+// statement gives no name, only the first: a Describe reads the statement
+// inside a subquery, where two columns of one name are renamed.
+func loneNulls(toks []rtToken) map[int]string {
 	selectListEnd := map[string]bool{
 		"from": true, "where": true, "group": true, "having": true, "order": true, "limit": true, "offset": true,
 		"window": true, "fetch": true, "for": true,
 	}
-	out := map[int]bool{}
-	depth, list := 0, false
+	out := map[int]string{}
+	depth, list, unnamed := 0, false, false
 	for i, t := range toks {
 		switch {
 		case isOpTok(toks, i, "("):
@@ -424,10 +422,14 @@ func loneNulls(toks []rtToken) map[int]bool {
 			list = true
 		case t.text == "null":
 			before := isOpTok(toks, i-1, ",") || i > 0 && toks[i-1].kind == rtWord && toks[i-1].text == "select"
-			after := i+1 == len(toks) || isOpTok(toks, i+1, ",") || isOpTok(toks, i+1, ";") ||
-				toks[i+1].kind == rtWord && (toks[i+1].text == "from" || toks[i+1].text == "as")
-			if list && before && after {
-				out[i] = true
+			named := i+1 < len(toks) && toks[i+1].kind == rtWord && toks[i+1].text == "as"
+			ends := i+1 == len(toks) || isOpTok(toks, i+1, ",") || isOpTok(toks, i+1, ";") || toks[i+1].kind == rtWord && toks[i+1].text == "from"
+			switch {
+			case !list || !before:
+			case named:
+				out[i] = textNull
+			case ends && !unnamed:
+				out[i], unnamed = unnamedNull, true
 			}
 		case selectListEnd[t.text]:
 			list = false

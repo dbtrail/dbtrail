@@ -25,7 +25,6 @@ func TestAsPostgresTypes(t *testing.T) {
 		{"SELECT char_length(t), character_length(t), strpos(t, 'a') FROM v",
 			"SELECT CAST(char_length(t) AS INTEGER), CAST(character_length(t) AS INTEGER), CAST(strpos(t, 'a') AS INTEGER) FROM v"},
 		{"SELECT position('a' in t) FROM v", "SELECT CAST(position('a' in t) AS INTEGER) FROM v"},
-		{"SELECT pg_catalog.length(t) FROM v", "SELECT CAST(pg_catalog.length(t) AS INTEGER) FROM v"},
 		{"SELECT ntile(4) OVER (PARTITION BY length(t) ORDER BY id) FROM v",
 			"SELECT CAST(ntile(4) OVER (PARTITION BY CAST(length(t) AS INTEGER) ORDER BY id) AS INTEGER) FROM v"},
 		{"SELECT ntile(4) OVER w FROM v", "SELECT CAST(ntile(4) OVER w AS INTEGER) FROM v"},
@@ -38,7 +37,7 @@ func TestAsPostgresTypes(t *testing.T) {
 			"WITH c AS (SELECT CAST(length(t) AS INTEGER) AS l FROM v) SELECT l FROM c ORDER BY CAST(length('x') AS INTEGER)"},
 		// Not a call of the function, or one of another schema.
 		{"SELECT length FROM v", "SELECT length FROM v"},
-		{`SELECT "length"(t), my.length(t), v.length FROM v`, `SELECT "length"(t), my.length(t), v.length FROM v`},
+		{`SELECT "length"(t), my.length(t), pg_catalog.length(t), v.length FROM v`, `SELECT "length"(t), my.length(t), pg_catalog.length(t), v.length FROM v`},
 		{"SELECT 'length(t)' FROM v -- length(t)", "SELECT 'length(t)' FROM v -- length(t)"},
 		// Text around the statement and comments inside it stay.
 		{"/* a */ SELECT length(t -- c\n) FROM v; -- end", "/* a */ SELECT CAST(length(t) AS INTEGER) FROM v; -- end"},
@@ -88,9 +87,11 @@ func TestAsPostgresTypes(t *testing.T) {
 			"SELECT _bintrail_pg_round_k(sum(i), 2, 0.01), CAST(length(t) AS INTEGER), _bintrail_pg_epoch(ts) FROM v"},
 
 		// A lone NULL is text.
-		{"SELECT NULL", "SELECT " + lonelyNull},
-		{"select null, 1, NULL AS x, i FROM v;", "select " + lonelyNull + ", 1, " + lonelyNull + " AS x, i FROM v;"},
-		{"WITH c AS (SELECT NULL AS x) SELECT NULL FROM c", "WITH c AS (SELECT NULL AS x) SELECT " + lonelyNull + " FROM c"},
+		{"SELECT NULL", "SELECT " + unnamedNull},
+		{"select null, 1, NULL AS x, i FROM v;", "select " + unnamedNull + ", 1, " + textNull + " AS x, i FROM v;"},
+		{"WITH c AS (SELECT NULL AS x) SELECT NULL FROM c", "WITH c AS (SELECT NULL AS x) SELECT " + unnamedNull + " FROM c"},
+		// Only the first without a name: a Describe would rename the second.
+		{"SELECT NULL, NULL, NULL AS a, NULL AS b", "SELECT " + unnamedNull + ", NULL, " + textNull + " AS a, " + textNull + " AS b"},
 		{"SELECT NULL::int, NULL + 1, coalesce(NULL, 1), (NULL), DISTINCT NULL, NULL x FROM v", "SELECT NULL::int, NULL + 1, coalesce(NULL, 1), (NULL), DISTINCT NULL, NULL x FROM v"},
 		{"SELECT NULL UNION ALL SELECT 1", "SELECT NULL UNION ALL SELECT 1"},
 		{"SELECT 1 EXCEPT SELECT NULL", "SELECT 1 EXCEPT SELECT NULL"},
@@ -120,7 +121,7 @@ func TestAsPostgresTypes_describe(t *testing.T) {
 			t.Errorf("got  %s\nwant %s", got, want)
 		}
 	}
-	if got := AsPostgresTypes(describeHead+"SELECT NULL"+describeTail, nil); !strings.Contains(got, lonelyNull) {
+	if got := AsPostgresTypes(describeHead+"SELECT NULL"+describeTail, nil); !strings.Contains(got, unnamedNull) {
 		t.Errorf("a described lone NULL is not text: %s", got)
 	}
 }
@@ -168,7 +169,7 @@ func TestWholeType(t *testing.T) {
 
 func TestLoneNulls(t *testing.T) {
 	for stmt, want := range map[string]int{
-		"SELECT NULL": 1, "SELECT NULL, NULL": 2, "SELECT NULL AS a, 1 FROM t": 1, "SELECT NULL FROM t WHERE x IS NULL": 1,
+		"SELECT NULL": 1, "SELECT NULL, NULL": 1, "SELECT NULL AS a, NULL AS b, NULL": 3, "SELECT NULL AS a, 1 FROM t": 1, "SELECT NULL FROM t WHERE x IS NULL": 1,
 		"SELECT a, NULL FROM t ORDER BY NULL": 1, "SELECT (SELECT NULL)": 0, "SELECT NULL UNION SELECT NULL": 0,
 		"SELECT NULL FROM (VALUES (1)) v": 0, "SELECT x FROM t WHERE y IN (1, NULL)": 0, "SELECT NULL::text": 0,
 		"SELECT CASE WHEN a THEN 1 END, NULL FROM t": 1, "SELECT 1 ORDER BY 1, NULL": 0, "SELECT a FROM t GROUP BY a, NULL": 0,
