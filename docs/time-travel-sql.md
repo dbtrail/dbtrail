@@ -2625,11 +2625,23 @@ What this is and is not:
     every connection the router opens to the source starts with `SET
     SESSION TRANSACTION READ ONLY`, before anything of the client's. From
     then on MySQL itself refuses a write, with its own error 1792, whatever
-    the statement's text was. The port refuses what would take that back:
-    `START TRANSACTION READ WRITE`, `SET TRANSACTION READ WRITE` and a `SET`
-    of `transaction_read_only` (`tx_read_only`). If the source refuses
-    that first statement, the connection to it is not opened and the client
-    gets the error, rather than a session that is not protected.
+    the statement's text was. What would take that back never reaches the
+    source, and the port answers it as a MySQL server running with
+    `read_only=ON` answers an ordinary account: `SET SESSION TRANSACTION READ
+    WRITE`, `SET TRANSACTION READ WRITE` and a `SET` of
+    `transaction_read_only` (`tx_read_only`) get OK from the port, with no
+    error, and writes stay refused; `START TRANSACTION READ WRITE` gets
+    error 1290. So a driver or a pool that switches a connection back from
+    read-only (a Java application does it after each read-only transaction)
+    works as before. Two things to know: `SELECT
+    @@session.transaction_read_only` on the port answers 1 even after such a
+    `SET`, because that is what the session on the source is; and those `SET`
+    statements are answered only as plain statements, alone or in a list of
+    unquoted settings (as a prepared statement, or in a `SET` that also holds
+    quoted text, they are refused with error 1290). If the source refuses
+    the first statement, the connection to it is not opened, the client
+    gets the error rather than a session that is not protected, and the
+    router's log says why.
   - **What it cannot see.** The check reads the statement's text. A
     `SELECT` that calls a stored function, or reads a view built on one,
     looks like a read and is forwarded; if the function writes, MySQL

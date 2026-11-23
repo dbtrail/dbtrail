@@ -127,10 +127,9 @@ func TestIntegrationForwarder_readOnlySession_3093(t *testing.T) {
 	}
 }
 
-// What the screen refuses so the mark stays: each of these, sent to a
-// marked session, makes it writable again. If one stops doing so on some
-// server, the screen's refusal of it is only caution; if a NEW way appears,
-// it belongs here and in the screen.
+// What the port keeps from the source so the mark stays (ReadOnlyMark):
+// each of these, sent to a marked session, makes it writable again. If a
+// NEW way appears, it belongs here and in ReadOnlyMark.
 func TestIntegrationReadOnlySession_whatTakesTheMarkBack_3093(t *testing.T) {
 	db, name := testutil.CreateTestDB(t)
 	if _, err := db.Exec("CREATE TABLE t (a INT NOT NULL PRIMARY KEY)"); err != nil {
@@ -144,8 +143,8 @@ func TestIntegrationReadOnlySession_whatTakesTheMarkBack_3093(t *testing.T) {
 		"SET SESSION transaction_read_only = 0",
 		"SET @@transaction_read_only = 0",
 	} {
-		if ReadOnlyRefusal(undo) == "" {
-			t.Errorf("the screen allows %q", undo)
+		if action, _ := ReadOnlyMark(undo); action == MarkNone {
+			t.Errorf("the port would send %q to the source", undo)
 		}
 		fw, err := NewForwarder(testutil.IntegrationDSN(name), config.SSL{Mode: "preferred"}, DefaultPolicy(), 30*time.Second)
 		if err != nil {
@@ -172,6 +171,127 @@ func TestIntegrationReadOnlySession_whatTakesTheMarkBack_3093(t *testing.T) {
 // sessions are NOT read-only: the screen is on its own here.
 func TestIntegrationReadOnlyScreen_generatedTextAgainstTheServer_3093(t *testing.T) {
 	admin, name := testutil.CreateTestDB(t)
+	generatedTextAgainst(t, admin, name, testutil.IntegrationDSN(name), 40000)
+}
+
+// mariaDBTestDB makes a database of its own on the MariaDB source.
+func mariaDBTestDB(t *testing.T) (*sql.DB, string, string) {
+	t.Helper()
+	testutil.SkipIfNoMariaDB(t)
+	name := fmt.Sprintf("ro3093_%d", time.Now().UnixNano())
+	root, err := sql.Open("mysql", testutil.MariaDBBaseDSN()+"/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.Exec("CREATE DATABASE `" + name + "`"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = root.Exec("DROP DATABASE `" + name + "`"); root.Close() })
+	dsn := testutil.MariaDBBaseDSN() + "/" + name + "?parseTime=true"
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db, name, dsn
+}
+
+// The same generated text against a MariaDB source, whose reading of a
+// statement is its own (the job that runs the MariaDB-named tests runs it
+// on every supported MariaDB).
+func TestIntegrationReadOnlyScreen_generatedTextMariaDBSource_3093(t *testing.T) {
+	admin, name, dsn := mariaDBTestDB(t)
+	generatedTextAgainst(t, admin, name, dsn, 20000)
+}
+
+// The mark on a MariaDB source: the same statement, and the source refuses
+// a write on the marked session, under autocommit and in a transaction. The
+// forms the port keeps from the source do take the mark back there too.
+func TestIntegrationForwarder_readOnlySessionMariaDBSource_3093(t *testing.T) {
+	db, _, dsn := mariaDBTestDB(t)
+	if _, err := db.Exec("CREATE TABLE t (a INT NOT NULL PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO t VALUES (1),(2),(3)"); err != nil {
+		t.Fatal(err)
+	}
+	rows := func() int {
+		t.Helper()
+		var n int
+		if err := db.QueryRow("SELECT count(*) * 1000 + coalesce(sum(a), 0) FROM t").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	ctx := context.Background()
+	open := func(readOnly bool) *Forwarder {
+		t.Helper()
+		fw, err := NewForwarder(dsn, config.SSL{Mode: "preferred"}, DefaultPolicy(), 30*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(fw.Close)
+		fw.ReadOnlySession = readOnly
+		return fw
+	}
+	before := rows()
+	ro := open(true)
+	refused := func(q string) {
+		t.Helper()
+		_, err := ro.Forward(ctx, q, &BufferSink{})
+		var me *mysql.MyError
+		if !errors.As(err, &me) || me.Code != mysql.ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION {
+			t.Errorf("%q on a marked session: got %v, want the source's error 1792", q, err)
+		}
+		if after := rows(); after != before {
+			t.Fatalf("%q changed the source on a marked session", q)
+		}
+	}
+	for _, q := range []string{"INSERT INTO t VALUES (9)", "UPDATE t SET a = a + 10", "DELETE FROM t", "REPLACE INTO t VALUES (1)"} {
+		refused(q)
+	}
+	if _, err := ro.Forward(ctx, "BEGIN", &BufferSink{}); err != nil {
+		t.Fatal(err)
+	}
+	refused("INSERT INTO t VALUES (9)")
+	if _, err := ro.Forward(ctx, "ROLLBACK", &BufferSink{}); err != nil {
+		t.Fatal(err)
+	}
+	var buf BufferSink
+	if _, err := ro.Forward(ctx, "SELECT count(*) FROM t", &buf); err != nil || len(buf.Rows) != 1 {
+		t.Fatalf("a read on the marked session: %v", err)
+	}
+	// What ReadOnlyMark keeps from the source takes the mark back here too.
+	for i, undo := range []string{"START TRANSACTION READ WRITE", "SET SESSION TRANSACTION READ WRITE", "SET TRANSACTION READ WRITE", "SET SESSION tx_read_only = 0"} {
+		if action, _ := ReadOnlyMark(undo); action == MarkNone {
+			t.Errorf("the port would send %q to the source", undo)
+		}
+		fw := open(true)
+		_, err := fw.Forward(ctx, undo, &BufferSink{})
+		var me *mysql.MyError
+		if errors.As(err, &me) && me.Code == mysql.ER_UNKNOWN_SYSTEM_VARIABLE {
+			// A MariaDB that knows the variable under its other name only.
+			undo = "SET SESSION transaction_read_only = 0"
+			_, err = fw.Forward(ctx, undo, &BufferSink{})
+		}
+		if err != nil {
+			t.Fatalf("%q: %v", undo, err)
+		}
+		if _, err := fw.Forward(ctx, fmt.Sprintf("INSERT INTO t VALUES (%d)", 100+i), &BufferSink{}); err != nil {
+			t.Errorf("after %q the source still refused a write (%v)", undo, err)
+		}
+		_, _ = fw.Forward(ctx, "COMMIT", &BufferSink{})
+	}
+	// The control.
+	was := rows()
+	if _, err := open(false).Forward(ctx, "INSERT INTO t VALUES (9)", &BufferSink{}); err != nil || rows() == was {
+		t.Fatalf("a write on a session that is not marked: %v", err)
+	}
+}
+
+// generatedTextAgainst is the body of the generated-text tests: admin and
+// dsn reach the database name on the server under test.
+func generatedTextAgainst(t *testing.T, admin *sql.DB, name, dsn string, texts int) {
 	reset := func() {
 		t.Helper()
 		for _, q := range []string{"DROP TABLE IF EXISTS t", "DROP TABLE IF EXISTS u", "CREATE TABLE t (a INT NOT NULL PRIMARY KEY)", "INSERT INTO t VALUES (1),(2),(3)"} {
@@ -184,7 +304,7 @@ func TestIntegrationReadOnlyScreen_generatedTextAgainstTheServer_3093(t *testing
 	const clean = "rows 3 sum 6 tables 1"
 
 	ctx := context.Background()
-	db, err := sql.Open("mysql", testutil.IntegrationDSN(name)+"&multiStatements=true")
+	db, err := sql.Open("mysql", dsn+"&multiStatements=true")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +353,6 @@ func TestIntegrationReadOnlyScreen_generatedTextAgainstTheServer_3093(t *testing
 		"\n", "\r", ";", ";", " ", " ", "(", ")", ",", "x", "1", "\\N", "\xa0", "\x0b", "\x7f", "\xc3\xa9",
 	}
 	rng := rand.New(rand.NewSource(3093))
-	const texts = 40000
 	allowed, ran, holes := 0, 0, 0
 	for i := 0; i < texts && holes < 10; i++ {
 		var b strings.Builder

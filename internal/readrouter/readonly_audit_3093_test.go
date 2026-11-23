@@ -158,34 +158,22 @@ func TestReadOnlyScreen_audit_3093(t *testing.T) {
 		{"SET", "SET autocommit = 0", no},
 		{"SET", "SET SESSION sql_mode = 'ANSI_QUOTES'", no},
 		{"SET", "SET NAMES utf8mb4", no},
-		// The session is read-only on the source: nothing takes that back.
-		{"read-only session", "START TRANSACTION READ WRITE", yes},
-		{"read-only session", "start transaction with consistent snapshot, read write", yes},
-		{"read-only session", "START TRANSACTION READ/**/WRITE", yes},
-		{"read-only session", "START TRANSACTION READ\nWRITE", yes},
-		{"read-only session", "START TRANSACTION READ -- c\n WRITE", yes},
-		{"read-only session", "SET TRANSACTION READ WRITE", yes},
-		{"read-only session", "SET SESSION TRANSACTION READ WRITE", yes},
-		{"read-only session", "SET LOCAL TRANSACTION ISOLATION LEVEL READ COMMITTED, READ WRITE", yes},
-		{"read-only session", "SET transaction_read_only = 0", yes},
-		{"read-only session", "SET @@transaction_read_only = OFF", yes},
-		{"read-only session", "SET @@session.transaction_read_only := 0", yes},
-		{"read-only session", "SET @@SESSION.TRANSACTION_READ_ONLY = DEFAULT", yes},
-		{"read-only session", "SET SESSION tx_read_only = 0", yes},
-		{"read-only session", "SET LOCAL transaction_read_only = 0", yes},
-		{"read-only session", "SET autocommit = 1, @@local.tx_read_only = 0", yes},
-		{"read-only session", "SET `transaction_read_only` = 0", yes},
-		{"read-only session", "BEGIN", no},
-		{"read-only session", "START TRANSACTION", no},
-		{"read-only session", "START TRANSACTION READ ONLY", no},
-		{"read-only session", "START TRANSACTION WITH CONSISTENT SNAPSHOT", no},
-		{"read-only session", "SET TRANSACTION READ ONLY", no},
-		{"read-only session", "SET SESSION TRANSACTION READ ONLY", no},
-		{"read-only session", "SET TRANSACTION ISOLATION LEVEL READ COMMITTED", no},
-		{"read-only session", "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED, READ ONLY", no},
-		{"read-only session", "SET transaction_isolation = 'READ-COMMITTED'", no},
-		{"read-only session", "COMMIT", no},
-		{"read-only session", "ROLLBACK", no},
+		// Transaction control. What would take back the read-only mark of
+		// the session on the source passes the screen and is answered by
+		// the port (TestReadOnlyMark_3093).
+		{"transactions", "BEGIN", no},
+		{"transactions", "START TRANSACTION", no},
+		{"transactions", "START TRANSACTION READ ONLY", no},
+		{"transactions", "START TRANSACTION WITH CONSISTENT SNAPSHOT", no},
+		{"transactions", "SET TRANSACTION READ ONLY", no},
+		{"transactions", "SET SESSION TRANSACTION READ ONLY", no},
+		{"transactions", "SET SESSION TRANSACTION READ WRITE", no},
+		{"transactions", "SET TRANSACTION ISOLATION LEVEL READ COMMITTED", no},
+		{"transactions", "SET transaction_isolation = 'READ-COMMITTED'", no},
+		{"transactions", "COMMIT", no},
+		{"transactions", "ROLLBACK", no},
+		{"transactions", "BEGIN NOT ATOMIC DELETE FROM t; END", yes},
+		{"transactions", "XA START 'a'", yes},
 	}
 	for _, r := range rows {
 		why := ReadOnlyRefusal(r.stmt)
@@ -194,6 +182,82 @@ func TestReadOnlyScreen_audit_3093(t *testing.T) {
 			t.Errorf("%s: %q is allowed, want it refused", r.class, r.stmt)
 		case !r.refused && why != "":
 			t.Errorf("%s: %q is refused (%s), want it allowed", r.class, r.stmt, why)
+		}
+	}
+}
+
+// #3093: what a read-only port does with a statement that would take back
+// the read-only mark of the session on the source. The SET forms are what
+// drivers and pools send when a connection stops being read-only: answered
+// by the port, never sent. Measured on MySQL 8.0.46 with read_only=ON and an
+// account without SUPER: the SET forms answer OK and a later write is
+// refused; START TRANSACTION READ WRITE answers error 1290.
+func TestReadOnlyMark_3093(t *testing.T) {
+	for _, tc := range []struct {
+		stmt string
+		want MarkAction
+		send string
+	}{
+		{"SELECT 1", MarkNone, ""},
+		{"SET autocommit = 1", MarkNone, ""},
+		{"SET SESSION TRANSACTION READ ONLY", MarkNone, ""},
+		{"START TRANSACTION READ ONLY", MarkNone, ""},
+		{"START TRANSACTION", MarkNone, ""},
+		{"BEGIN", MarkNone, ""},
+		{"SET TRANSACTION ISOLATION LEVEL READ COMMITTED", MarkNone, ""},
+		{"SET @a = 'read write'", MarkNone, ""},
+		{"SELECT 'SET transaction_read_only = 0'", MarkNone, ""},
+		{"SET @transaction_read_only = 0", MarkNone, ""}, // a user variable
+		{"DELETE FROM t", MarkNone, ""},                  // the screen refuses it
+		{"SET GLOBAL transaction_read_only = 0", MarkNone, ""},
+
+		{"SET SESSION TRANSACTION READ WRITE", MarkAnswer, ""},
+		{"set session transaction read write", MarkAnswer, ""},
+		{"SET TRANSACTION READ WRITE", MarkAnswer, ""},
+		{"SET LOCAL TRANSACTION READ WRITE;", MarkAnswer, ""},
+		{"/* pool */ SET SESSION TRANSACTION READ/**/WRITE", MarkAnswer, ""},
+		{"SET SESSION TRANSACTION READ\nWRITE -- c", MarkAnswer, ""},
+		{"SET transaction_read_only = 0", MarkAnswer, ""},
+		{"SET SESSION transaction_read_only = OFF", MarkAnswer, ""},
+		{"SET SESSION transaction_read_only = 'OFF'", MarkAnswer, ""},
+		{"SET @@session.transaction_read_only := 0", MarkAnswer, ""},
+		{"SET @@SESSION.TRANSACTION_READ_ONLY = DEFAULT", MarkAnswer, ""},
+		{"SET @@transaction_read_only = 0", MarkAnswer, ""},
+		{"SET @@local.tx_read_only = 0", MarkAnswer, ""},
+		{"SET LOCAL tx_read_only = 0", MarkAnswer, ""},
+		{"SET tx_read_only = 0, transaction_read_only = 0", MarkAnswer, ""},
+		{"SET transaction_read_only = 1", MarkAnswer, ""},
+
+		{"SET autocommit = 1, transaction_read_only = 0", MarkRewrite, "set autocommit = 1"},
+		{"SET transaction_read_only=0, autocommit=1, @a = 2", MarkRewrite, "set autocommit=1, @a = 2"},
+		{"SET NAMES utf8mb4, tx_read_only = 0", MarkRewrite, "set names utf8mb4"},
+		{"SET @a = IF(1, 2, 3), @@session.transaction_read_only = 0", MarkRewrite, "set @a = if(1, 2, 3)"},
+		{"SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED, READ WRITE", MarkRewrite, "set session transaction isolation level read committed, read only"},
+		{"SET TRANSACTION READ WRITE, ISOLATION LEVEL REPEATABLE READ", MarkRewrite, "set transaction read only, isolation level repeatable read"},
+
+		{"START TRANSACTION READ WRITE", MarkRefuse, ""},
+		{"start transaction with consistent snapshot, read write", MarkRefuse, ""},
+		{"START TRANSACTION READ/**/WRITE", MarkRefuse, ""},
+		{"START TRANSACTION READ -- c\n WRITE", MarkRefuse, ""},
+		// With quoted text the rest cannot be rebuilt from the screen's reading.
+		{"SET @a = 'x', transaction_read_only = 0", MarkRefuse, ""},
+		{"SET sql_mode = `ansi`, tx_read_only = 0", MarkRefuse, ""},
+		// One reading of the backslash holds the mark and another does not.
+		{`SET @a = '\', transaction_read_only = 0 -- '`, MarkRefuse, ""},
+		{`SET @a = "\", @@session.tx_read_only = 0 -- "`, MarkRefuse, ""},
+	} {
+		got, send := ReadOnlyMark(tc.stmt)
+		if got != tc.want || send != tc.send {
+			t.Errorf("ReadOnlyMark(%q) = %d, %q; want %d, %q", tc.stmt, got, send, tc.want, tc.send)
+		}
+		if got == MarkRewrite {
+			// What is sent in its place passes the screen and holds no mark.
+			if why := ReadOnlyRefusal(send); why != "" {
+				t.Errorf("%q is rewritten to %q, which the screen refuses: %s", tc.stmt, send, why)
+			}
+			if again, _ := ReadOnlyMark(send); again != MarkNone {
+				t.Errorf("%q is rewritten to %q, which still changes the mark", tc.stmt, send)
+			}
 		}
 	}
 }

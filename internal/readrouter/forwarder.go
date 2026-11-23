@@ -428,9 +428,14 @@ func (f *Forwarder) open(ctx context.Context, track bool) (*client.Conn, bool, e
 // transaction.
 const ReadOnlySessionSet = "SET SESSION TRANSACTION READ ONLY"
 
+// ErrReadOnlyMarkRefused is in the error of a connection that did not open
+// because the source refused ReadOnlySessionSet, so a caller can say so in
+// its log (OnConnect).
+var ErrReadOnlyMarkRefused = errors.New("this port is read-only and the source refused to mark the session read-only")
+
 // readOnlySession marks a connection the source has just accepted read-only
-// (ReadOnlySession). The screen keeps a client from undoing it: it refuses
-// READ WRITE and a SET of the variable (ReadOnlyRefusal). Unlike a SET the
+// (ReadOnlySession). The port keeps a client from undoing it: what would
+// take the mark back is answered by the port and not sent (ReadOnlyMark). Unlike a SET the
 // port could do without (explainVersionOne), a source that refuses this one
 // leaves a connection that does not open, as safeClientCharset does: served
 // anyway, the session would be unprotected with nothing said.
@@ -440,7 +445,7 @@ func (f *Forwarder) readOnlySession(ctx context.Context, c *client.Conn) error {
 		if cause := ctx.Err(); cause != nil {
 			return cause
 		}
-		return fmt.Errorf("this port is read-only and the source refused to mark the session read-only (%s): %w", ReadOnlySessionSet, err)
+		return fmt.Errorf("%w (%s): %w", ErrReadOnlyMarkRefused, ReadOnlySessionSet, err)
 	}
 	return nil
 }

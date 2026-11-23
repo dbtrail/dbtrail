@@ -170,12 +170,41 @@ func TestIntegrationFlashbackReadOnly(t *testing.T) {
 			t.Fatalf("%q wrote to the source through the read-only port: %s, was %s", q, after, before)
 		}
 	}
-	// The client cannot take the mark back.
-	for _, q := range []string{"START TRANSACTION READ WRITE", "SET SESSION TRANSACTION READ WRITE", "SET TRANSACTION READ WRITE", "SET SESSION transaction_read_only = 0", "SET @@transaction_read_only = OFF"} {
-		_, err := ro.Exec(q)
+	// The client cannot take the mark back, and is not refused for trying
+	// the way drivers and pools do: the sequence a Java driver sends around
+	// a read-only transaction and when a connection is given back to its
+	// pool gets no error, and a write after it is refused as before.
+	for _, q := range []string{
+		"SET SESSION TRANSACTION READ ONLY", "SELECT 1",
+		"SET SESSION TRANSACTION READ WRITE", "SELECT 1",
+		"set session transaction read write",
+		"SET TRANSACTION READ WRITE",
+		"SET SESSION transaction_read_only = 0",
+		"SET @@transaction_read_only = OFF",
+		"SET autocommit = 1, transaction_read_only = 0",
+	} {
+		if _, err := ro.Exec(q); err != nil {
+			t.Errorf("%q on the read-only port: %v, want no error", q, err)
+		}
+		if _, err := ro.Exec("INSERT INTO orders VALUES (4,'written')"); err == nil {
+			t.Fatalf("after %q a write went through the read-only port", q)
+		}
+		var n int
+		err := ro.QueryRow("SELECT writes_a_row()").Scan(&n)
+		var me *drivermysql.MySQLError
+		if !errors.As(err, &me) || me.Number != 1792 {
+			t.Errorf("after %q, a function that writes: got %v, want the source's error 1792", q, err)
+		}
+		if after := sourceState(); after != before {
+			t.Fatalf("after %q the source was written to through the read-only port: %s, was %s", q, after, before)
+		}
+	}
+	// As a server with read_only=ON answers an account without SUPER.
+	{
+		_, err := ro.Exec("START TRANSACTION READ WRITE")
 		var me *drivermysql.MySQLError
 		if !errors.As(err, &me) || me.Number != 1290 {
-			t.Errorf("%q on the read-only port: got %v, want error 1290", q, err)
+			t.Errorf("START TRANSACTION READ WRITE on the read-only port: got %v, want error 1290", err)
 		}
 	}
 	if got := scanStrings(t, ro, "SELECT @@session.transaction_read_only"); len(got) != 1 || got[0] != "1" {

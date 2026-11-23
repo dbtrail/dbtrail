@@ -719,6 +719,11 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 					srv.RecordRouteAccountOK(id, gen)
 					return
 				}
+				if errors.Is(err, readrouter.ErrReadOnlyMarkRefused) {
+					// The client gets error 2006 on every statement; the
+					// cause is said here (#3093).
+					logger.Warn("Engine Routing: the source refused to mark the session read-only, so this read-only port forwards nothing to it on this connection", "server", user, "error", err)
+				}
 				if _, refused := readrouter.AccountRefused(err); refused {
 					text := accountRefusedText(account, err)
 					logger.Warn("Engine Routing: the source refused the port's login", "server", user, "account", account, "error", text)

@@ -51,10 +51,7 @@ var (
 	roLocking = regexp.MustCompile(`(?:^|[^a-z_$])(?:for\s+(?:update|share)|lock\s+in)(?:$|[^a-z0-9_$])`)
 	roLocks   = regexp.MustCompile(`(?:^|[^a-z_$])(?:get_lock|release_lock|release_all_locks)\s*\(`)
 	roSeq     = regexp.MustCompile(`(?:^|[^a-z_$])(?:nextval|setval|next\s+value\s+for)(?:$|[^a-z0-9_$])`)
-	// READ WRITE in START TRANSACTION or SET TRANSACTION: it would take back
-	// the read-only mark the port puts on the session at the source.
-	roReadWrite = regexp.MustCompile(`(?:^|[^a-z_$])read\s+write(?:$|[^a-z0-9_$])`)
-	roAnalyze   = regexp.MustCompile(`(?:^|[^a-z_$])analyze(?:$|[^a-z0-9_$])`)
+	roAnalyze = regexp.MustCompile(`(?:^|[^a-z_$])analyze(?:$|[^a-z0-9_$])`)
 
 	roIdent       = "(?:``|[\\w$\\p{L}]+)"
 	roBegin       = regexp.MustCompile(`^begin(\s+work)?$`)
@@ -90,14 +87,7 @@ var (
 // same. password: the old `SET PASSWORD = ...` spelling fits the assignment
 // shape. gtid_next: followed by an (allowed) empty transaction it writes a
 // GTID into the source's executed set.
-//
-// transaction_read_only (tx_read_only before MySQL 8.0 and on MariaDB): the
-// port marks the session read-only on the source (Forwarder.ReadOnlySession),
-// and a client must not be able to take that back.
-var roDeniedSessionVars = map[string]bool{"password": true, "gtid_next": true, "global": true, "persist": true, "persist_only": true,
-	"transaction_read_only": true, "tx_read_only": true}
-
-const readWriteRefused = "READ WRITE would make the session's transactions writable, and this port keeps them read-only on the source"
+var roDeniedSessionVars = map[string]bool{"password": true, "gtid_next": true, "global": true, "persist": true, "persist_only": true}
 
 // roKnownVerbs are the leading keywords a refusal may name. Any other first
 // word is not repeated back: it is whatever the client typed, and it goes to
@@ -376,9 +366,6 @@ func roScreenOne(kept, s string) string {
 		}
 		return "BEGIN followed by anything but WORK is not transaction control"
 	case "start":
-		if roReadWrite.MatchString(s) {
-			return readWriteRefused
-		}
 		if roStartTxn.MatchString(s) {
 			return ""
 		}
@@ -453,9 +440,6 @@ func roScreenSet(kept, s string) string {
 			return clientForm
 		}
 	case roSetTxn.MatchString(s):
-		if roReadWrite.MatchString(s) {
-			return readWriteRefused
-		}
 		return ""
 	case strings.Contains(s, "character_set_client"):
 		m := roSetCharsetClient.FindStringSubmatch(kept)
@@ -564,4 +548,127 @@ func roAfterCTEs(s string) (rest string, ok bool) {
 		}
 		s = s[1:]
 	}
+}
+
+// The read-only mark (#3093).
+//
+// A read-only port marks each session read-only on the source
+// (Forwarder.ReadOnlySession), and that mark must outlive whatever the
+// client sends. The statements that would take it back are ones ordinary
+// applications send: a Java application's driver sends SET SESSION
+// TRANSACTION READ WRITE each time a connection stops being read-only, as a
+// pool does when a connection is given back. So they are not refused. The
+// port answers them itself, as a MySQL server running with read_only=ON
+// answers an account without SUPER (measured on 8.0.46): the SET forms get
+// OK and a later write is still refused; START TRANSACTION READ WRITE gets
+// error 1290.
+
+// MarkAction is what a read-only port does with a statement, with regard to
+// the read-only mark of the session on the source.
+type MarkAction int
+
+const (
+	// MarkNone: the statement does not touch the mark.
+	MarkNone MarkAction = iota
+	// MarkAnswer: the statement only changes the mark. The port answers OK
+	// and sends nothing to the source.
+	MarkAnswer
+	// MarkRewrite: the statement changes the mark and something else. The
+	// port sends the text ReadOnlyMark returns, which is the rest.
+	MarkRewrite
+	// MarkRefuse: the statement is refused: START TRANSACTION READ WRITE,
+	// or one that changes the mark and cannot be rewritten safely.
+	MarkRefuse
+)
+
+var (
+	roReadWrite     = regexp.MustCompile(`(?:^|[^a-z_$])read\s+write(?:$|[^a-z0-9_$])`)
+	roReadWriteOnly = regexp.MustCompile(`^set\s+(?:(?:session|local)\s+)?transaction\s+read\s+write$`)
+	roReadWriteWord = regexp.MustCompile(`read\s+write`)
+)
+
+// roMarkVars are the session variable behind the mark, under both its names
+// (tx_read_only before MySQL 8.0 and on MariaDB).
+var roMarkVars = map[string]bool{"transaction_read_only": true, "tx_read_only": true}
+
+// ReadOnlyMark says what a read-only port does with a statement that passed
+// ReadOnlyRefusal, and for MarkRewrite the text to send in its place. A
+// statement the screen refuses is MarkNone: the screen answers it.
+//
+// It reads the statement as the screen does, under every reading of a
+// backslash. The text of a rewrite is the screen's own reading (lower-cased,
+// comments gone), which says the same as the original only when the
+// statement holds no quoted text; with quotes, or with a backslash, a
+// statement that changes the mark together with something else is refused
+// rather than rebuilt from a guess.
+func ReadOnlyMark(stmt string) (MarkAction, string) {
+	if ReadOnlyRefusal(stmt) != "" {
+		return MarkNone, ""
+	}
+	readings := [][2]bool{{true, true}}
+	backslash := strings.IndexByte(stmt, '\\') >= 0
+	if backslash {
+		readings = [][2]bool{{true, true}, {true, false}, {false, true}, {false, false}}
+	}
+	action, send := MarkNone, ""
+	for _, r := range readings {
+		clean, state := roClean(stmt, r[0], r[1], false)
+		if state != roClosed {
+			continue
+		}
+		s := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(clean), ";"))
+		if a, text := roMarkIn(s); a > action {
+			action, send = a, text
+		}
+	}
+	switch {
+	case action == MarkNone, action == MarkRefuse:
+		return action, ""
+	case backslash:
+		// The readings may not agree on what else the statement holds.
+		return MarkRefuse, ""
+	case action == MarkRewrite && strings.ContainsAny(stmt, "'\"`"):
+		return MarkRefuse, ""
+	}
+	return action, send
+}
+
+// roMarkIn reads one reading of a statement the screen allows.
+func roMarkIn(s string) (MarkAction, string) {
+	switch roLeadingWord.FindString(s) {
+	case "start":
+		if roReadWrite.MatchString(s) {
+			return MarkRefuse, ""
+		}
+	case "set":
+		if roSetTxn.MatchString(s) {
+			switch {
+			case !roReadWrite.MatchString(s):
+				return MarkNone, ""
+			case roReadWriteOnly.MatchString(s):
+				return MarkAnswer, ""
+			}
+			// With an isolation level beside it: that part is the
+			// client's to set, and the access mode stays read-only.
+			return MarkRewrite, roReadWriteWord.ReplaceAllString(s, "read only")
+		}
+		var keep []string
+		marks := 0
+		for _, item := range roSplitTopLevel(strings.TrimSpace(strings.TrimPrefix(s, "set"))) {
+			item = strings.TrimSpace(item)
+			if m := roSetItem.FindStringSubmatch(item); m != nil && (roMarkVars[m[1]] || roMarkVars[m[2]]) {
+				marks++
+				continue
+			}
+			keep = append(keep, item)
+		}
+		switch {
+		case marks == 0:
+			return MarkNone, ""
+		case len(keep) == 0:
+			return MarkAnswer, ""
+		}
+		return MarkRewrite, "set " + strings.Join(keep, ", ")
+	}
+	return MarkNone, ""
 }
