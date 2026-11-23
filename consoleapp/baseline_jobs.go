@@ -310,13 +310,14 @@ type jobDirResult struct {
 }
 
 // stagingNamePrefixes are the os.MkdirTemp patterns of the scratch
-// directories in the staging folder. Only the full read's dump is made today;
+// directories in the staging folder. The full read's dump and the staged read
+// of some tables alone (#2640, rereadDirPrefix) are made today;
 // "baseline-", "pgbaseline-" and "refresh-" are the staged snapshots and
 // update runs of servers whose snapshots went only to S3, which no longer
 // exist (#2431). They stay listed so a folder an older version journaled
 // before it died is still reclaimed after the upgrade. Nothing in them is
 // ever kept by a run that ends.
-var stagingNamePrefixes = []string{"dump-", "baseline-", "pgbaseline-", "refresh-"}
+var stagingNamePrefixes = []string{"dump-", rereadDirPrefix, "baseline-", "pgbaseline-", "refresh-"}
 
 func isStagingName(name string) bool {
 	for _, p := range stagingNamePrefixes {

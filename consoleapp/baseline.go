@@ -1050,68 +1050,12 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 		slog.Info("console snapshot: the source is an Amazon RDS or Aurora endpoint, so this snapshot uses lock mode lock-all",
 			"server", req.ServerID)
 	}
-	att, err := s.dumpAttempt(req, lockMode, src)
-	// One retry, and only for the automatic mode (#1986): ftwrl was refused
-	// for want of a privilege no user can have on a managed server (the
-	// global read lock itself, or RELOAD/BACKUP_ADMIN before mydumper ran).
-	// A host name that does not say RDS (an IP, a CNAME) lands here. The
-	// retry is lock-all, never a mode without a lock: whether this user has
-	// LOCK TABLES is for lock-all's own privilege check to say. An operator's
-	// explicit ftwrl is never second-guessed.
-	//
-	// A source that was never quiet enough for ftwrl (#2530) is retried the
-	// same way: a running query does not hold lock-all up, so the snapshot
-	// gets taken, at lock-all's own cost (it waits for an uncommitted writer
-	// instead). Without the retry, a source that always has a long query
-	// running would never get a full read in the automatic mode.
-	var quiet *mydumperlock.QuietWaitError
-	neverQuiet := errors.As(err, &quiet)
-	if err != nil && src == lockModeAutomatic && lockMode == baseline.LockModeFTWRL && (ftwrlRefused(err) || neverQuiet) && s.ctx.Err() == nil {
-		why := "lock mode ftwrl was refused by the source"
-		if neverQuiet {
-			why = "the source was never quiet enough for lock mode ftwrl"
-		}
-		slog.Info("console snapshot: "+why+"; retrying this snapshot once with lock-all",
-			"server", req.ServerID, "error", err)
-		first := err
-		att, err = s.dumpAttempt(req, baseline.LockModeLockAll, lockModeAutomatic)
-		if err != nil {
-			// Both causes reach the operator: the lock-all failure is the
-			// one to act on, and the ftwrl refusal before it is why lock-all
-			// was tried at all.
-			slog.Warn("console snapshot: the automatic retry with lock-all failed too",
-				"server", req.ServerID, "ftwrl_refusal", first, "error", err)
-			err = fmt.Errorf("%s (%s), and the automatic retry with lock-all failed too: %w",
-				why, refusalSummary(first), err)
-		}
-	}
+	att, err := s.dumpAnchored(req, lockMode, src, nil)
 	if err != nil {
-		if src == lockModeSaved && s.reg != nil {
-			// The saved value wins over the environment, so a refusal that
-			// names how to change it must also say where it lives.
-			err = fmt.Errorf("%w (this snapshot used lock mode %s, saved in %s under backup_settings.lock_mode)", err, lockMode, s.reg.Path())
-		}
-		if src.chosen() {
-			err = &chosenModeError{err: err}
-		}
 		return dumpOutcome{}, err
 	}
 	dumpDir, dumpStartedAt, ddlMark, eventMark := att.dir, att.startedAt, att.ddlMark, att.eventMark
 	defer os.RemoveAll(dumpDir)
-
-	// A dump that cannot be anchored is refused here, never published (#1688).
-	// mydumper exits 0 with no position in its metadata when binary logging is
-	// off, when the dump user cannot read it, and (measured) for a build older
-	// than 0.16.3 against MySQL 8.4; baseline.Run would convert that dump with a
-	// warning at most, and the next update from it would fall back to
-	// timestamps. Metadata that cannot be read at all is refused the same way,
-	// where baseline.Run only logs at Info: this daemon is unattended.
-	if err := baseline.RequireDumpPosition(dumpDir); err != nil {
-		if errors.Is(err, baseline.ErrDumpNotAnchored) {
-			return dumpOutcome{}, fmt.Errorf("dump: %w", err)
-		}
-		return dumpOutcome{}, fmt.Errorf("dump: cannot read mydumper's metadata, so the snapshot cannot be anchored to a binlog position: %w", err)
-	}
 
 	out := dumpOutcome{at: dumpStartedAt}
 	outputDir := req.LocalDir
@@ -1142,6 +1086,78 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 	out.stats = stats
 	out.snapDir = filepath.Join(outputDir, reconstruct.SnapshotDirName(dumpStartedAt))
 	return out, nil
+}
+
+// dumpAnchored is the dump of a full read: one attempt in lockMode, the
+// automatic mode's one retry, and the refusal of a dump that records no
+// binlog position. tables, when given, are the only tables read (#2640,
+// "schema.table" each); nil reads what the server is set to read. The caller
+// removes the returned folder.
+func (s *baselineSupervisor) dumpAnchored(req console.BaselineRequest, lockMode baseline.LockMode, src lockModeSource, tables []string) (dumpAttempt, error) {
+	att, err := s.dumpAttemptOf(req, lockMode, src, tables)
+	// One retry, and only for the automatic mode (#1986): ftwrl was refused
+	// for want of a privilege no user can have on a managed server (the
+	// global read lock itself, or RELOAD/BACKUP_ADMIN before mydumper ran).
+	// A host name that does not say RDS (an IP, a CNAME) lands here. The
+	// retry is lock-all, never a mode without a lock: whether this user has
+	// LOCK TABLES is for lock-all's own privilege check to say. An operator's
+	// explicit ftwrl is never second-guessed.
+	//
+	// A source that was never quiet enough for ftwrl (#2530) is retried the
+	// same way: a running query does not hold lock-all up, so the snapshot
+	// gets taken, at lock-all's own cost (it waits for an uncommitted writer
+	// instead). Without the retry, a source that always has a long query
+	// running would never get a full read in the automatic mode.
+	var quiet *mydumperlock.QuietWaitError
+	neverQuiet := errors.As(err, &quiet)
+	if err != nil && src == lockModeAutomatic && lockMode == baseline.LockModeFTWRL && (ftwrlRefused(err) || neverQuiet) && s.ctx.Err() == nil {
+		why := "lock mode ftwrl was refused by the source"
+		if neverQuiet {
+			why = "the source was never quiet enough for lock mode ftwrl"
+		}
+		slog.Info("console snapshot: "+why+"; retrying this snapshot once with lock-all",
+			"server", req.ServerID, "error", err)
+		first := err
+		att, err = s.dumpAttemptOf(req, baseline.LockModeLockAll, lockModeAutomatic, tables)
+		if err != nil {
+			// Both causes reach the operator: the lock-all failure is the
+			// one to act on, and the ftwrl refusal before it is why lock-all
+			// was tried at all.
+			slog.Warn("console snapshot: the automatic retry with lock-all failed too",
+				"server", req.ServerID, "ftwrl_refusal", first, "error", err)
+			err = fmt.Errorf("%s (%s), and the automatic retry with lock-all failed too: %w",
+				why, refusalSummary(first), err)
+		}
+	}
+	if err != nil {
+		if src == lockModeSaved && s.reg != nil {
+			// The saved value wins over the environment, so a refusal that
+			// names how to change it must also say where it lives.
+			err = fmt.Errorf("%w (this snapshot used lock mode %s, saved in %s under backup_settings.lock_mode)", err, lockMode, s.reg.Path())
+		}
+		if src.chosen() {
+			err = &chosenModeError{err: err}
+		}
+		return dumpAttempt{}, err
+	}
+
+	// A dump that cannot be anchored is refused here, never published (#1688).
+	// mydumper exits 0 with no position in its metadata when binary logging is
+	// off, when the dump user cannot read it, and (measured) for a build older
+	// than 0.16.3 against MySQL 8.4; baseline.Run would convert that dump with a
+	// warning at most, and the next update from it would fall back to
+	// timestamps. Metadata that cannot be read at all is refused the same way,
+	// where baseline.Run only logs at Info: this daemon is unattended.
+	if err := baseline.RequireDumpPosition(att.dir); err != nil {
+		if rmErr := os.RemoveAll(att.dir); rmErr != nil {
+			slog.Warn("console snapshot: could not remove the folder of a dump that was refused", "path", att.dir, "error", rmErr)
+		}
+		if errors.Is(err, baseline.ErrDumpNotAnchored) {
+			return dumpAttempt{}, fmt.Errorf("dump: %w", err)
+		}
+		return dumpAttempt{}, fmt.Errorf("dump: cannot read mydumper's metadata, so the snapshot cannot be anchored to a binlog position: %w", err)
+	}
+	return att, nil
 }
 
 // discardFailedSnapshot removes the snapshot folder a full read created in the
@@ -1225,6 +1241,11 @@ type dumpAttempt struct {
 }
 
 func (s *baselineSupervisor) dumpAttempt(req console.BaselineRequest, lockMode baseline.LockMode, src lockModeSource) (dumpAttempt, error) {
+	return s.dumpAttemptOf(req, lockMode, src, nil)
+}
+
+// dumpAttemptOf is dumpAttempt reading only tables when given (#2640).
+func (s *baselineSupervisor) dumpAttemptOf(req console.BaselineRequest, lockMode baseline.LockMode, src lockModeSource, tables []string) (dumpAttempt, error) {
 	dir, err := os.MkdirTemp(s.stagingDir, "dump-")
 	if err != nil {
 		return dumpAttempt{}, fmt.Errorf("create dump dir: %w", err)
@@ -1244,6 +1265,7 @@ func (s *baselineSupervisor) dumpAttempt(req console.BaselineRequest, lockMode b
 	a.ddlMark = dumpDDLMarkFunc(req)
 	a.eventMark = dumpEventMarkFunc(req)
 	ctx := withTransportNote(s.ctx, func(note string) { s.noteDumpTransport(req.ServerID, note) })
+	ctx = withDumpTables(ctx, tables)
 	// #2530: an ftwrl read waits for a quiet source right before mydumper
 	// starts, after runMydumper's own checks (its version, TLS, the
 	// privileges: a refusal there must reach execute's lock-all retry in
@@ -1815,6 +1837,14 @@ func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas 
 	if err != nil {
 		return err
 	}
+	// The tables of a read of some tables alone (#2640), nil for a full read.
+	tables := dumpTablesFrom(ctx)
+	if len(tables) > 0 && !plan.sendLockFlags {
+		// Such a read is only taken under a lock mode this process chose. A
+		// build that is not sent the mode takes its own, which nothing records.
+		return fmt.Errorf("%w: they are only read under a lock mode mydumper is told, and %s is not told it (%s)",
+			errRereadUnavailable, plan.path, plan.fallback)
+	}
 	if plan.fallback != "" {
 		slog.Warn("baseline: "+plan.fallback, "mydumper", plan.path, "lock_mode", string(lockMode))
 	}
@@ -1870,7 +1900,11 @@ func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas 
 		// would refuse a dump that works — while 0.16 and 0.17 DO take it and
 		// keep the gate. An unreadable version keeps the gate too.
 		if plan.preflight {
-			if err := checkMydumperPrivileges(ctx, sourceDSN, ssl, lockMode, remedy, schemas); err != nil {
+			privSchemas := schemas
+			if len(tables) > 0 {
+				privSchemas = schemasOfTables(tables)
+			}
+			if err := checkMydumperPrivileges(ctx, sourceDSN, ssl, lockMode, remedy, privSchemas); err != nil {
 				return err
 			}
 		}
@@ -1944,7 +1978,7 @@ func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas 
 	// writes none, and a schema it renames (a non-ASCII or "@" name) then
 	// cannot be read back from the dump (#2006).
 	listSchemas := plan.versionKnown && !plan.version.Less(mydumperlock.Version{Major: 1})
-	if listSchemas && len(schemas) == 0 {
+	if listSchemas && len(schemas) == 0 && len(tables) == 0 {
 		// No schema list set: the user schemas, asked from the source, go as
 		// that list too, so a schema mydumper renames can be read back here
 		// as well (the default setup is where most servers are). A schema
@@ -1958,6 +1992,11 @@ func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas 
 		}
 	}
 	args := buildConsoleMydumperArgs(host, port, user, schemas, dumpDir, lockMode, plan.sendLockFlags, tlsArgs, listSchemas)
+	if len(tables) > 0 {
+		// The tables in place of the schema selection. mydumper splits the
+		// list at commas, so stageReread refuses a name that holds one.
+		args = consoleMydumperArgs(host, port, user, []string{"--tables-list", strings.Join(tables, ",")}, dumpDir, lockMode, plan.sendLockFlags, tlsArgs)
+	}
 	// plan.path, not the bare name: the dump must run the very binary whose
 	// version was just read.
 	if err := runBeforeMydumper(ctx); err != nil {
@@ -2036,6 +2075,23 @@ const systemSchemaExcludeRegex = `^(?!(mysql|sys|performance_schema|information_
 // its version could not be read and the mode is ftwrl (#1688); see
 // planMydumper for when the dump may proceed without them.
 func buildConsoleMydumperArgs(host string, port uint16, user string, schemas []string, dumpDir string, lockMode baseline.LockMode, sendLockFlags bool, tlsArgs []string, listSchemas bool) []string {
+	var selection []string
+	switch {
+	case len(schemas) == 1:
+		selection = []string{"--database", schemas[0]}
+	case len(schemas) > 1 && listSchemas && !slices.ContainsFunc(schemas, func(s string) bool { return strings.Contains(s, ",") }):
+		selection = []string{"--database", strings.Join(schemas, ",")}
+	case len(schemas) > 1:
+		selection = []string{"--regex", "^(" + strings.Join(schemas, "|") + ")\\."}
+	default:
+		selection = []string{"--regex", systemSchemaExcludeRegex}
+	}
+	return consoleMydumperArgs(host, port, user, selection, dumpDir, lockMode, sendLockFlags, tlsArgs)
+}
+
+// consoleMydumperArgs is buildConsoleMydumperArgs with what the dump selects
+// already spelled as flags: the schema selection, or a table list (#2640).
+func consoleMydumperArgs(host string, port uint16, user string, selection []string, dumpDir string, lockMode baseline.LockMode, sendLockFlags bool, tlsArgs []string) []string {
 	args := []string{
 		"--host", host,
 		"--port", strconv.Itoa(int(port)),
@@ -2047,16 +2103,7 @@ func buildConsoleMydumperArgs(host string, port uint16, user string, schemas []s
 	if sendLockFlags {
 		args = append(args, "--sync-thread-lock-mode", lockMode.MydumperValue(), "--trx-tables")
 	}
-	switch {
-	case len(schemas) == 1:
-		args = append(args, "--database", schemas[0])
-	case len(schemas) > 1 && listSchemas && !slices.ContainsFunc(schemas, func(s string) bool { return strings.Contains(s, ",") }):
-		args = append(args, "--database", strings.Join(schemas, ","))
-	case len(schemas) > 1:
-		args = append(args, "--regex", "^("+strings.Join(schemas, "|")+")\\.")
-	default:
-		args = append(args, "--regex", systemSchemaExcludeRegex)
-	}
+	args = append(args, selection...)
 	// --outputdir last: docker wrapper scripts read the last arg for the mount.
 	// TLS options (#1996): how this source's TLS mode is spelled for this
 	// mydumper build, from mydumperTLSArgs.

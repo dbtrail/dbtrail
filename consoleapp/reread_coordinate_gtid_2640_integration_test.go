@@ -7,10 +7,8 @@ import (
 	"database/sql"
 	"fmt"
 	"math/rand"
-	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,12 +17,10 @@ import (
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
-	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
-	"github.com/dbtrail/dbtrail/internal/snapshotdir"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
@@ -48,14 +44,15 @@ import (
 //     after it. Nothing folds from the set today; it is recorded in every
 //     table file, so a set from another instant would be a wrong record.
 //
-// Run by hand: it needs mydumper (BINTRAIL_TEST_MYDUMPER) and a second MySQL
-// with gtid_mode=ON (BINTRAIL_TEST_GTID_SOURCE_DSN), the index on the main
-// test server.
+// The read is stageReread's, so this also measures the daemon's own way of
+// running mydumper for some tables. Run by hand: it needs a mydumper on PATH
+// (a wrapper around the pinned image works) and a second MySQL with
+// gtid_mode=ON (BINTRAIL_TEST_GTID_SOURCE_DSN), the index on the main test
+// server.
 func TestIntegrationRereadCoordinateGTIDSource_2640(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
-	mydumper := os.Getenv("BINTRAIL_TEST_MYDUMPER")
-	if mydumper == "" {
-		t.Skip("BINTRAIL_TEST_MYDUMPER is not set: this measurement runs the real mydumper")
+	if _, err := exec.LookPath("mydumper"); err != nil {
+		t.Skip("no mydumper on PATH: this measurement runs the real one")
 	}
 	sourceBase := testutil.SkipIfNoGTIDSource(t)
 	// The two modes a read of some tables is taken under (no-lock says of
@@ -63,13 +60,13 @@ func TestIntegrationRereadCoordinateGTIDSource_2640(t *testing.T) {
 	for _, mode := range []baseline.LockMode{baseline.LockModeFTWRL, baseline.LockModeLockAll} {
 		for round := 1; round <= 3; round++ {
 			t.Run(fmt.Sprintf("%s/round%d", mode, round), func(t *testing.T) {
-				measureRereadCoordinateGTID(t, mydumper, sourceBase, mode)
+				measureRereadCoordinateGTID(t, sourceBase, mode)
 			})
 		}
 	}
 }
 
-func measureRereadCoordinateGTID(t *testing.T, mydumper, sourceBase string, mode baseline.LockMode) {
+func measureRereadCoordinateGTID(t *testing.T, sourceBase string, mode baseline.LockMode) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	now := time.Now().UTC()
@@ -188,52 +185,25 @@ func measureRereadCoordinateGTID(t *testing.T, mydumper, sourceBase string, mode
 
 	time.Sleep(400 * time.Millisecond)
 	before := commits.Load()
-	host, port, user, password, err := config.ParseSourceDSN(sourceBase + "/" + srcName)
-	if err != nil {
-		t.Fatalf("ParseSourceDSN: %v", err)
-	}
-	dumpDir := filepath.Join(t.TempDir(), "dump")
-	if err := os.MkdirAll(dumpDir, 0o777); err != nil {
-		t.Fatal(err)
-	}
-	// The daemon's own flags (buildConsoleMydumperArgs), with the table list
-	// in place of the schema selection.
-	out, dumpErr := exec.Command(mydumper,
-		"--host", host, "--port", strconv.Itoa(int(port)), "--user", user, "--password", password,
-		"--threads", "4", "--compress-protocol", "--complete-insert",
-		"--sync-thread-lock-mode", mode.MydumperValue(), "--trx-tables",
-		"--tables-list", srcName+".t",
-		"--outputdir", dumpDir).CombinedOutput()
+	// The read itself, as the daemon will take it: stageReread, in the lock
+	// mode an operator chose, with the mydumper on PATH.
+	work := t.TempDir()
+	bs := newBaselineSupervisor(ctx, work, mode)
+	bs.lockModeChosen = true
+	read, err := bs.stageReread(console.BaselineRequest{ServerID: ent.ID, ServerName: ent.Name, SourceDSN: sourceBase + "/",
+		IndexDSN: testutil.IntegrationDSN(indexName), LocalDir: ent.BaselineDir}, []string{srcName + ".t"})
 	during := commits.Load() - before
 	time.Sleep(400 * time.Millisecond)
 	stopWriters()
-	if dumpErr != nil {
-		t.Fatalf("mydumper: %v\n%s", dumpErr, out)
-	}
-	if rawMeta, err := os.ReadFile(filepath.Join(dumpDir, "metadata")); err == nil {
-		t.Logf("mydumper metadata:\n%s", rawMeta)
-	}
-	want := rereadGTIDRows(t, src, "SELECT id, val, n FROM t")
-
-	// The dump, converted as a full read's is, into a staging folder.
-	staging := t.TempDir()
-	if _, err := baseline.Run(ctx, baseline.Config{InputDir: dumpDir, OutputDir: staging, Compression: "zstd", RowGroupSize: 10000}); err != nil {
-		t.Fatalf("baseline.Run: %v", err)
-	}
-	entries, err := os.ReadDir(staging)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("stageReread: %v", err)
 	}
-	var reads []string
-	for _, e := range entries {
-		if _, ok := snapshotdir.ParseTime(e.Name()); ok && e.IsDir() {
-			reads = append(reads, e.Name())
-		}
+	t.Cleanup(func() { _ = read.discard() })
+	want := rereadGTIDRows(t, src, "SELECT id, val, n FROM t")
+	if left, _ := filepath.Glob(filepath.Join(work, "dump-*")); len(left) != 0 {
+		t.Fatalf("the dump is still in the working folder: %v", left)
 	}
-	if len(reads) != 1 {
-		t.Fatalf("the staging folder holds %v, want one read", entries)
-	}
-	staged := filepath.Join(staging, reads[0], srcName, "t.parquet")
+	staged := read.files[srcName+".t"]
 	meta, err := baseline.ReadParquetMetadata(staged)
 	if err != nil {
 		t.Fatalf("ReadParquetMetadata: %v", err)
