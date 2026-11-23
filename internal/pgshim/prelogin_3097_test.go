@@ -472,6 +472,16 @@ func TestPreLogin_firstModeClientLeavesDuringTheLogin(t *testing.T) {
 type hangingIndex struct {
 	entered, cancelled chan struct{}
 	release            chan struct{}
+	// seen is each statement that reached it, and whether its context can
+	// end, for a failure's message.
+	mu   sync.Mutex
+	seen []string
+}
+
+func (d *hangingIndex) statements() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return strings.Join(d.seen, "; ")
 }
 
 func (d *hangingIndex) Connect(context.Context) (driver.Conn, error) { return hangingConn{d}, nil }
@@ -485,7 +495,10 @@ func (c hangingConn) Close() error                        { return nil }
 func (c hangingConn) Begin() (driver.Tx, error)           { return nil, errors.New("not used") }
 func (c hangingConn) Ping(context.Context) error          { return nil }
 
-func (c hangingConn) wait(ctx context.Context) error {
+func (c hangingConn) wait(ctx context.Context, what string) error {
+	c.d.mu.Lock()
+	c.d.seen = append(c.d.seen, fmt.Sprintf("%.80q (its context can end: %v)", what, ctx.Done() != nil))
+	c.d.mu.Unlock()
 	select {
 	case c.d.entered <- struct{}{}:
 	default:
@@ -502,16 +515,16 @@ func (c hangingConn) wait(ctx context.Context) error {
 	}
 }
 
-func (c hangingConn) QueryContext(ctx context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
-	return nil, c.wait(ctx)
+func (c hangingConn) QueryContext(ctx context.Context, q string, _ []driver.NamedValue) (driver.Rows, error) {
+	return nil, c.wait(ctx, q)
 }
 
-func (c hangingConn) ExecContext(ctx context.Context, _ string, _ []driver.NamedValue) (driver.Result, error) {
-	return nil, c.wait(ctx)
+func (c hangingConn) ExecContext(ctx context.Context, q string, _ []driver.NamedValue) (driver.Result, error) {
+	return nil, c.wait(ctx, q)
 }
 
 func (c hangingConn) BeginTx(ctx context.Context, _ driver.TxOptions) (driver.Tx, error) {
-	return nil, c.wait(ctx)
+	return nil, c.wait(ctx, "BEGIN")
 }
 
 // A client that hangs up in the middle of a statement, in the first mode:
@@ -549,7 +562,7 @@ func TestPreLogin_firstModeClientHangsUpDuringAStatement(t *testing.T) {
 	select {
 	case <-idx.cancelled:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the client hung up and its connection's context did not end: the statement is still running")
+		t.Fatalf("the client hung up and its connection's context did not end: the statement is still running (the index server saw: %s)", idx.statements())
 	}
 	<-done
 	placeGivenBack(t, addr, "a client hung up during its statement")
