@@ -99,6 +99,46 @@ func TestPGRoundMacros(t *testing.T) {
 		{"a CASE of floats", "_bintrail_pg_unpack(CASE WHEN 1 = 2 THEN _bintrail_pg_pack(CAST(1.50 AS DECIMAL(3,2))) ELSE _bintrail_pg_pack(CAST(2 AS DOUBLE)) END)", "2", "DOUBLE"},
 		// avg of a float stays the engine's.
 		{"avg of floats", "(SELECT _bintrail_pg_avg(x) FROM (VALUES (CAST(0.5 AS DOUBLE)), (0.25)) v(x))", "0.375", "DOUBLE"},
+		// A division on its own (#3219): the exact quotient rounded once to 16
+		// decimals. PostgreSQL writes 0.25000000000000000000,
+		// 3.7500000000000000, 0.33333333333333333333, 0.66666666666666666667,
+		// 0.10000000000000000000, 41152.263374485597 and
+		// 0.00000300000000000000.
+		{"numeric over numeric", "_bintrail_pg_div(CAST(1.00 AS DECIMAL(3,2)), CAST(4.00 AS DECIMAL(3,2)))", "0.2500000000000000", "DECIMAL(38,16)"},
+		{"numeric over a whole number", "_bintrail_pg_div(CAST(7.50 AS DECIMAL(3,2)), 2)", "3.7500000000000000", "DECIMAL(38,16)"},
+		{"a whole number over a numeric", "_bintrail_pg_div(1, CAST(3.0 AS DECIMAL(2,1)))", "0.3333333333333333", "DECIMAL(38,16)"},
+		{"rounded up at the last decimal", "_bintrail_pg_div(2, CAST(3.0 AS DECIMAL(2,1)))", "0.6666666666666667", "DECIMAL(38,16)"},
+		{"rounded away from zero", "_bintrail_pg_div(-2, CAST(3.0 AS DECIMAL(2,1)))", "-0.6666666666666667", "DECIMAL(38,16)"},
+		{"a quotient that ends", "_bintrail_pg_div(CAST(0.3 AS DECIMAL(2,1)), 3)", "0.1000000000000000", "DECIMAL(38,16)"},
+		{"a negative quotient", "_bintrail_pg_div(CAST(-7.50 AS DECIMAL(3,2)), 2)", "-3.7500000000000000", "DECIMAL(38,16)"},
+		{"two negatives", "_bintrail_pg_div(CAST(-7.50 AS DECIMAL(3,2)), -2)", "3.7500000000000000", "DECIMAL(38,16)"},
+		{"a large quotient", "_bintrail_pg_div(CAST(1000000.00 AS DECIMAL(12,2)), CAST(24.3 AS DECIMAL(3,1)))", "41152.2633744855967078", "DECIMAL(38,16)"},
+		{"a small quotient", "_bintrail_pg_div(CAST(0.003 AS DECIMAL(4,3)), 1000)", "0.0000030000000000", "DECIMAL(38,16)"},
+		// Past 2^53 without the point, which a double precision would not
+		// hold, and a divisor of 18 decimals.
+		{"a decimal past 2^53", "_bintrail_pg_div(CAST(12345678901234567.89 AS DECIMAL(20,2)), 1)", "12345678901234567.8900000000000000", "DECIMAL(38,16)"},
+		{"a third of a decimal past 2^53", "_bintrail_pg_div(CAST(123456789012345678.91 AS DECIMAL(20,2)), 3)", "41152263004115226.3033333333333333", "DECIMAL(38,16)"},
+		{"a long literal divisor", "_bintrail_pg_div(CAST(9.50 AS DECIMAL(12,2)), 3.123456789012345678)", "3.0415019773665422", "DECIMAL(38,16)"},
+		{"the smallest quotient answered", "_bintrail_pg_div(CAST(1.000 AS DECIMAL(4,3)), 1000000)", "0.0000010000000000", "DECIMAL(38,16)"},
+		{"zero over a numeric", "_bintrail_pg_div(CAST(0.00 AS DECIMAL(3,2)), 4)", "0.0000000000000000", "DECIMAL(38,16)"},
+		{"a bigint over a numeric", "_bintrail_pg_div(CAST(9007199254740993 AS BIGINT), CAST(2.0 AS DECIMAL(2,1)))", "4503599627370496.5000000000000000", "DECIMAL(38,16)"},
+		{"a numeric of 18 decimals", "_bintrail_pg_div(CAST(1.000000000000000001 AS DECIMAL(38,18)), 3)", "0.3333333333333333", "DECIMAL(38,16)"},
+		{"NULL over zero", "_bintrail_pg_div(CAST(NULL AS DECIMAL(3,2)), 0)", "<nil>", "DECIMAL(38,16)"},
+		{"over NULL", "_bintrail_pg_div(CAST(1.00 AS DECIMAL(3,2)), CAST(NULL AS INTEGER))", "<nil>", "DECIMAL(38,16)"},
+		{"a sum over a count", "(SELECT _bintrail_pg_div(sum(x), count(*)) FROM (VALUES (CAST(5.00 AS DECIMAL(3,2))), (10.00)) v(x))", "7.5000000000000000", "DECIMAL(38,16)"},
+		{"a chain of two", "_bintrail_pg_div(_bintrail_pg_div(CAST(9.00 AS DECIMAL(3,2)), 2), 3)", "1.5000000000000000", "DECIMAL(38,16)"},
+		// avg of numerics and of whole numbers (#3219): the exact sum over the
+		// count, on the same terms. PostgreSQL writes 7.5000000000000000,
+		// 0.50000000000000000000, 3.3333333333333333 and -2.5000000000000000.
+		{"avg of numerics", "(SELECT _bintrail_pg_avgn(x) FROM (VALUES (CAST(5.00 AS DECIMAL(3,2))), (10.00)) v(x))", "7.5000000000000000", "DECIMAL(38,16)"},
+		{"avg of whole numbers", "(SELECT _bintrail_pg_avgn(x) FROM (VALUES (0), (1)) v(x))", "0.5000000000000000", "DECIMAL(38,16)"},
+		{"avg of bigints", "(SELECT _bintrail_pg_avgn(x) FROM (VALUES (CAST(9007199254740993 AS BIGINT)), (9007199254740994)) v(x))", "9007199254740993.5000000000000000", "DECIMAL(38,16)"},
+		{"avg that does not end", "(SELECT _bintrail_pg_avgn(x) FROM (VALUES (CAST(3.00 AS DECIMAL(3,2))), (3.00), (4.00)) v(x))", "3.3333333333333333", "DECIMAL(38,16)"},
+		{"avg of negatives", "(SELECT _bintrail_pg_avgn(x) FROM (VALUES (CAST(-2.50 AS DECIMAL(3,2))), (-2.50)) v(x))", "-2.5000000000000000", "DECIMAL(38,16)"},
+		{"avg of NULLs", "(SELECT _bintrail_pg_avgn(x) FROM (VALUES (CAST(NULL AS DECIMAL(3,2))), (NULL)) v(x))", "<nil>", "DECIMAL(38,16)"},
+		{"avg skips NULL", "(SELECT _bintrail_pg_avgn(x) FROM (VALUES (CAST(NULL AS DECIMAL(3,2))), (4.00)) v(x))", "4.0000000000000000", "DECIMAL(38,16)"},
+		{"avg of no rows", "(SELECT _bintrail_pg_avgn(x) FROM (VALUES (CAST(1.00 AS DECIMAL(3,2)))) v(x) WHERE x > 5)", "<nil>", "DECIMAL(38,16)"},
+		{"avg of a division", "(SELECT _bintrail_pg_avgn(_bintrail_pg_div(x, 2)) FROM (VALUES (CAST(3.00 AS DECIMAL(3,2))), (5.00)) v(x))", "2.0000000000000000", "DECIMAL(38,16)"},
 	}
 	items := make([]string, len(cases))
 	for i, c := range cases {
@@ -154,6 +194,23 @@ func TestPGRoundMacros(t *testing.T) {
 		{"round of a whole number", "_bintrail_pg_round_whole(5)", "whole number"},
 		{"round of text", "_bintrail_pg_round_k('5', 2, 0.01)", "not a numeric or a whole number"},
 		{"more digits than the copy holds", "_bintrail_pg_round_k(CAST(123456789012345678901234567890123456.78 AS DECIMAL(38,2)), 3, 0.001)", "out of range"},
+		// A division on its own (#3219).
+		{"a zero divisor of a division", "_bintrail_pg_div(1.0, 0)", "division by zero"},
+		{"a zero numeric divisor", "_bintrail_pg_div(5, CAST(0.00 AS DECIMAL(3,2)))", "division by zero"},
+		{"two whole numbers divided", "_bintrail_pg_div(7, 2)", "both sides of the division are whole numbers"},
+		{"a bigint over a smallint", "_bintrail_pg_div(CAST(7 AS BIGINT), CAST(2 AS SMALLINT))", "both sides of the division are whole numbers"},
+		{"a float divided", "_bintrail_pg_div(CAST(1.5 AS DOUBLE), 2.0)", "not a numeric or a whole number"},
+		{"by a float", "_bintrail_pg_div(2.0, CAST(1.5 AS DOUBLE))", "not a numeric or a whole number"},
+		{"text divided", "_bintrail_pg_div('6', 2.0)", "not a numeric or a whole number"},
+		// Past 128 bits it fails, and the source answers: never another number.
+		{"a numeric of 18 decimals past 128 bits", "_bintrail_pg_div(CAST(200 AS DECIMAL(38,18)), 3)", "Overflow"},
+		{"a long literal divisor past 128 bits", "_bintrail_pg_div(CAST(9.50 AS DECIMAL(12,2)), 200.000000000000000000)", "Overflow"},
+		{"a quotient under the floor", "_bintrail_pg_div(CAST(0.999 AS DECIMAL(4,3)), 1000000)", "under 0.000001"},
+		{"a quotient that would round to zero", "_bintrail_pg_div(CAST(0.0000000001 AS DECIMAL(18,10)), 3000000)", "under 0.000001"},
+		{"a negative quotient under the floor", "_bintrail_pg_div(CAST(-0.0000000001 AS DECIMAL(18,10)), 3)", "under 0.000001"},
+		{"avg under the floor", "(SELECT _bintrail_pg_avgn(x) FROM (VALUES (CAST(0.0000001 AS DECIMAL(18,10))), (0.0000001)) v(x))", "under 0.000001"},
+		{"a quotient past the copy's numeric", "_bintrail_pg_div(CAST(99999999999999999999999.0 AS DECIMAL(24,1)), CAST(0.1 AS DECIMAL(2,1)))", ""},
+		{"avgn of floats", "(SELECT _bintrail_pg_avgn(x) FROM (VALUES (CAST(0.5 AS DOUBLE)), (0.25)) v(x))", "not a numeric or a whole number"},
 		// avg of a numeric or a whole number: PostgreSQL writes as many
 		// decimals as each value needs (500.0000000000000000, 0.50000000000000000000).
 		{"avg of whole numbers", "(SELECT _bintrail_pg_avg(x) FROM (VALUES (0), (1)) v(x))", "avg()"},

@@ -107,7 +107,7 @@ func CopyScreen(stmt string, types map[string][]string) string {
 	if w := ownName(stmt); w != "" {
 		return w
 	}
-	toks, why := lexSQL(RewriteForCopy(stmt))
+	toks, why := lexSQL(RewriteForCopyTyped(stmt, types))
 	if why != "" {
 		return why
 	}
@@ -202,12 +202,25 @@ func (s *session) screenTyped(qstr string, d routeDecision) routeDecision {
 		return d
 	}
 	text := RewriteForCopy(qstr)
-	toks, _ := lexSQL(text)
 	types, unread := s.columnTypes(text)
 	if unread && s.catalogBusy != "" {
+		if holdsDivisionOrAvg(text) {
+			// Whether the copy may answer the macro's division or an avg is
+			// told by the columns' types: without them it is the source's,
+			// as it was before the copy answered any. A column over a number
+			// written in the text (qty / 2) is not one of them: it is refused
+			// as busy, as it was.
+			s.logger.Debug("pgshim: sent to the source", "reason", ReasonVeto, "construct", "a division or an avg(), with the copy too busy to list its columns")
+			return routeDecision{RouteSource, ReasonVeto}
+		}
 		s.screenBusy = s.catalogBusy
 		return d
 	}
+	if !unread {
+		// What the columns' types decide, as copyText writes it for the copy.
+		text = retypeForCopy(text, types)
+	}
+	toks, _ := lexSQL(text)
 	veto := ""
 	if unread {
 		if veto = catalogUnread(toks); veto != "" {
@@ -946,6 +959,11 @@ var copyFuncs = map[string]bool{
 	// around one, checked value by value (packMixedScale).
 	pgRoundDiv: true, pgRoundAvg: true, pgRoundK: true, pgRoundNeg: true, pgRoundWhole: true,
 	pgPack: true, pgPackN: true, pgUnpack: true,
+	// avg(x) of numerics or whole numbers and a division on their own, as
+	// RewriteForCopyTyped writes them: PostgreSQL's quotient rounded to 16
+	// decimals (#3219), where every side is shown to be a numeric or a whole
+	// number (divisionVeto, avgVeto).
+	pgAvgN: true, pgDiv: true,
 	// floor(a / b), as RewriteForCopy writes it, and ntile(n), whose
 	// buckets pgcompare measured the same.
 	pgFloorDiv: true, "ntile": true,
@@ -1629,11 +1647,21 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 					}
 					break
 				}
-				if !copyFuncs[t.text] {
+				// Without the columns' types an avg is not yet told a numeric's
+				// from a float's (retypeForCopy): the typed screen decides it.
+				if !copyFuncs[t.text] && !(untyped && t.text == pgAvg) {
 					return fmt.Sprintf("the function %s()", t.text)
 				}
 				a := args(i + 1)
 				switch t.text {
+				case pgDiv:
+					if why := divisionVeto(a, func(name string) []string { return types[name] }, untyped); why != "" {
+						return why
+					}
+				case pgAvgN:
+					if why := avgVeto(a, func(name string) []string { return types[name] }); why != "" && !untyped {
+						return why
+					}
 				case pgRoundK, pgRoundNeg, pgRoundWhole:
 					// The macro refuses a float; a column known to be one goes
 					// to the source without asking the copy first.

@@ -120,8 +120,10 @@ func TestIntegrationPGCompare(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open the copy: %v", err)
 	}
-	// Measured as the PostgreSQL port runs it.
-	cp.Rewrite = pgshim.RewriteForCopy
+	// Measured as the PostgreSQL port runs it: what the columns' types
+	// decide is written too (#3219).
+	types := copyColumnTypes(t, ctx, cp)
+	cp.Rewrite = func(s string) string { return pgshim.RewriteForCopyTyped(s, types) }
 	src, err := OpenSource(ctx, baseDSN, "public")
 	if err != nil {
 		t.Fatalf("open the source: %v", err)
@@ -169,6 +171,10 @@ func TestIntegrationPGCompare(t *testing.T) {
 		t.Fatalf("open the copy: %v", err)
 	}
 	checkNumericAlone(t, ctx, src, alone)
+
+	// A division and an avg() on their own (#3219): PostgreSQL's quotient
+	// with other decimals, compared as numbers.
+	checkCloseNumbers(t, ctx, src, cp, types)
 
 	// The read-only transaction is the lock behind IsQuery and ReadOnlyVeto.
 	// Straight to the source, past both: a statement that turns the session
@@ -393,7 +399,9 @@ func expectations() []expectation {
 		eq(`(SELECT id FROM ` + o + ` ORDER BY id)`),
 		// Numbers.
 		eq(`SELECT sum(qty), min(qty), max(qty) FROM ` + o),
-		refused("avg()", "by design: avg() of a numeric has PostgreSQL's own decimals", `SELECT sum(amount), avg(amount) FROM `+o),
+		// avg of a numeric on its own: PostgreSQL's quotient to 16 decimals
+		// since #3219, which is PostgreSQL's own text from 1 to 9999.
+		eq(`SELECT sum(amount), avg(amount) FROM ` + o),
 		eq(`SELECT max(amount) FROM ` + o),
 		eq(`SELECT id FROM ` + o + ` WHERE qty > 9`),
 		eq(`SELECT id FROM ` + o + ` WHERE amount BETWEEN 5 AND 50`),
@@ -402,8 +410,13 @@ func expectations() []expectation {
 		// Two integers divide to an integer, cut toward zero (#2786); with
 		// a float on a side the fraction stays.
 		eq(`SELECT id, qty / 2 AS half FROM ` + o),
-		eq(`SELECT id, (0 - qty) / 2 AS half FROM ` + o),
-		eq(`SELECT customer_id, sum(qty) / count(*) FROM ` + o + ` GROUP BY customer_id`),
+		// Two whole numbers that are not a column over a number written in
+		// the text: since #3219 such a division is the copy's macro, which
+		// answers a numeric and refuses two whole numbers (PostgreSQL divides
+		// them as whole numbers). The port's screen shows both to be whole
+		// and sends them to the source before the copy is asked.
+		refused("both sides of the division are whole numbers", "by design: PostgreSQL divides them as whole numbers", `SELECT id, (0 - qty) / 2 AS half FROM `+o),
+		refused("both sides of the division are whole numbers", "by design: PostgreSQL divides them as whole numbers", `SELECT customer_id, sum(qty) / count(*) FROM `+o+` GROUP BY customer_id`),
 		eq(`SELECT id, ratio / 2 FROM ` + o),
 		// The source fails a division by zero. The copy would answer NULL
 		// (sqlsandbox pins that); here the statement stops at the source.
@@ -496,7 +509,7 @@ func expectations() []expectation {
 		eq(`SELECT upper('é'), lower('É')`),
 		eq(`SELECT lower(name) FROM ` + c),
 		{stmt: `SELECT id, amount / qty FROM ` + o + ` WHERE id = 6`, verdict: sqlcompare.SourceError},
-		refused("avg()", "by design: avg() of whole numbers is a numeric with PostgreSQL's own decimals", `SELECT avg(qty) FROM `+o),
+		eq(`SELECT avg(qty) FROM ` + o),
 		still("rows", "", route, `SELECT id FROM `+o+` WHERE status ~ '^p'`),
 		still("rows", "", route, `SELECT id FROM `+o+` WHERE status SIMILAR TO 'p%'`),
 		refused("syntax error", route, `SELECT id FROM `+o+` WHERE attrs ? 'n'`),
@@ -618,8 +631,6 @@ func expectations() []expectation {
 		eq(`SELECT id, lag(qty) OVER (ORDER BY id) FROM ` + o),
 		eq(`SELECT id, ratio * 2.5 FROM ` + o),
 		eq(`SELECT id, amount * 1.5 FROM ` + o),
-		still("precision", "", route, `SELECT id, amount / 2 FROM `+o),
-		still("precision", "", route, `SELECT id, qty / 2.0 FROM `+o),
 		eq(`SELECT sum(ratio) FROM ` + o),
 		still("precision", "", route, `SELECT sum(qty)::numeric / 3 FROM `+o),
 		still("precision", "", route, `SELECT stddev(qty) FROM `+o),
@@ -635,7 +646,6 @@ func expectations() []expectation {
 		eq(`SELECT id, position('i' in note) FROM ` + o),
 		still("rows", "", route, `SELECT generate_series(1, 3)`),
 		eq(`SELECT id, payload FROM ` + o + ` ORDER BY payload NULLS LAST, id`),
-		still("precision", "", route, `SELECT id, fixed / 3 FROM `+odd),
 		// Not compared.
 		{stmt: `SELECT * FROM pgcmp_missing`, verdict: sqlcompare.SourceError},
 		{stmt: `DELETE FROM ` + o, verdict: sqlcompare.Skipped, kind: "not_a_query"},
