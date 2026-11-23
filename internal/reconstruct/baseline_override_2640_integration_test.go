@@ -51,9 +51,9 @@ func writeOrdersShaped(t *testing.T, path string, at time.Time, pos uint64, rows
 		Compression:  "none",
 		RowGroupSize: 100,
 		Metadata: map[string]string{
-			baseline.MetaKeyCreateTableSQL: ordersCreateSQL,
-			baseline.MetaKeyBinlogFile:     "binlog.000003",
-			baseline.MetaKeyBinlogPos:      strconv.FormatUint(pos, 10),
+			baseline.MetaKeyCreateTableSQL:    ordersCreateSQL,
+			baseline.MetaKeyBinlogFile:        "binlog.000003",
+			baseline.MetaKeyBinlogPos:         strconv.FormatUint(pos, 10),
 			baseline.MetaKeySnapshotTimestamp: at.UTC().Format(time.RFC3339),
 			baseline.MetaKeySnapshotProducer:  baseline.ProducerDump,
 		},
