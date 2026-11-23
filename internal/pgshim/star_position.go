@@ -27,13 +27,13 @@ func withColumnOrder(types map[string][]string, tables []CatalogTable) map[strin
 	}
 	for i := range tables {
 		t := &tables[i]
+		// The copy's own types: a char(n) is text there, which is all a
+		// position asks. No mark of a padded column is put here: paddedUse
+		// reads the marks of the tables a statement reads, and this is every
+		// table.
 		cols := make([]string, 0, len(t.Columns))
 		for _, c := range t.Columns {
-			typ := strings.ToUpper(c.Type)
-			if m := sourceMark(c); m != "" {
-				typ = m
-			}
-			cols = append(cols, typ)
+			cols = append(cols, strings.ToUpper(c.Type))
 		}
 		SetColumnOrder(types, t.Name, cols)
 	}

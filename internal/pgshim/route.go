@@ -1165,7 +1165,11 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 	// position or an alias in ORDER BY can stand for: a text column or
 	// literal, a parameter, or an expression that makes text of anything.
 	anyText := false
-	for _, t := range toks {
+	for j, t := range toks {
+		if orderModifier(toks, j) {
+			// NULLS LAST is no column, whatever a table names its columns.
+			continue
+		}
 		if textish(t) || t.kind == rtParam || t.kind == rtOp && t.text == "||" || t.kind == rtWord && textMakers[t.text] {
 			anyText = true
 			break
@@ -1691,6 +1695,33 @@ func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, fa
 		return
 	}
 	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed})
+}
+
+// orderModifier reports whether the token at j is a word that says how a
+// key is sorted, not a name: ASC, DESC, NULLS before FIRST or LAST, and
+// FIRST or LAST after NULLS. A copy with a text column named last would
+// otherwise make every ORDER BY ... NULLS LAST read as holding text.
+func orderModifier(toks []rtToken, j int) bool {
+	word := func(k int, words ...string) bool {
+		if k < 0 || k >= len(toks) || toks[k].kind != rtWord {
+			return false
+		}
+		for _, w := range words {
+			if toks[k].text == w {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case word(j, "asc", "desc"):
+		return true
+	case word(j, "nulls"):
+		return word(j+1, "first", "last")
+	case word(j, "first", "last"):
+		return word(j-1, "nulls")
+	}
+	return false
 }
 
 // compareOps compare two values.

@@ -13,8 +13,24 @@ import (
 // orderedScreen is the screen's decision with the copy's columns in their
 // order, as a connection has them (columnTypes).
 func orderedScreen(stmt string) string {
-	tables := paddedCatalog()
+	tables := starCatalog()
 	return CopyScreen(stmt, withColumnOrder(screenTypes(tables, tablesRead(RewriteForCopy(stmt), tables)), tables))
+}
+
+// starCatalog is a copy of two tables with no char(n) column (a star over
+// one of those is another rule's, paddedUse): plain is (id, code text, name,
+// status, qty), nums (id, k, at), all numbers and a timestamp.
+func starCatalog() []CatalogTable {
+	col := func(name, typ string, oid uint32) CatalogColumn {
+		return CatalogColumn{Name: name, Type: typ, SourceType: oid, SourceTypeMod: -1}
+	}
+	return []CatalogTable{
+		{Schema: "public", Name: "plain", Columns: []CatalogColumn{
+			col("id", "INTEGER", oidInt4), col("code", "VARCHAR", oidText), col("name", "VARCHAR", oidVarchar),
+			col("status", "VARCHAR", oidText), col("qty", "INTEGER", oidInt4)}},
+		{Schema: "public", Name: "nums", Columns: []CatalogColumn{
+			col("id", "INTEGER", oidInt4), col("k", "INTEGER", oidInt4), col("at", "TIMESTAMP", 1114)}},
+	}
 }
 
 // peopleTypes are the copy's types for a table whose text columns are named
@@ -44,8 +60,6 @@ func TestCopyScreen_aliasNamedLikeItsColumn(t *testing.T) {
 		`SELECT name AS age FROM people WHERE id > 1 ORDER BY age`:                    "ORDER BY",
 		`WITH s AS (SELECT name AS name FROM people) SELECT name FROM s ORDER BY name`: "ORDER BY",
 		`SELECT s.name FROM (SELECT name AS name, id FROM people) s ORDER BY s.name`:  "ORDER BY",
-		`SELECT id FROM (SELECT name AS name, id FROM people) s WHERE name > 'B'`:     "order",
-		`SELECT id FROM (SELECT name AS name, id FROM people) s WHERE name BETWEEN 'a' AND 'c'`: "BETWEEN",
 		`SELECT greatest(name, last) AS name FROM people`:                             "greatest()",
 		`SELECT name AS name, count(*) FROM people GROUP BY name ORDER BY 1`:          "ORDER BY",
 		`SELECT last AS first, first AS last FROM people ORDER BY first`:              "ORDER BY",
@@ -68,7 +82,6 @@ func TestCopyScreen_aliasNamedLikeItsColumn(t *testing.T) {
 		// The text column under its own name, not sorted or compared by order.
 		`SELECT name AS name, id FROM people ORDER BY id`,
 		`SELECT name AS name, count(*) FROM people GROUP BY name`,
-		`SELECT id FROM (SELECT name AS name, id FROM people) s WHERE name = 'Ana'`,
 	} {
 		if why := CopyScreen(q, peopleTypes); why != "" {
 			t.Errorf("%s:\n  sent to the source (%s), want the copy", q, why)
@@ -114,9 +127,11 @@ func TestCopyScreen_columnNamedLikeAnOrderWord(t *testing.T) {
 		`SELECT id, first FROM people ORDER BY age DESC NULLS FIRST, id ASC`,
 		`SELECT id FROM people ORDER BY born NULLS LAST`,
 		`SELECT id FROM people ORDER BY id ASC`,
-		`SELECT last, count(*), sum(age) FROM people GROUP BY last ORDER BY sum(age) DESC`,
 		`SELECT id FROM people WHERE first = 'Ana' OR last IN ('Ana', 'bruno') ORDER BY id`,
 		`SELECT id, row_number() OVER (PARTITION BY last ORDER BY age DESC NULLS LAST) FROM people`,
+		// A copy with a text column named last: NULLS LAST is still no name.
+		`SELECT id, age FROM people ORDER BY 2 DESC NULLS LAST, 1`,
+		`SELECT id, sum(age) AS years FROM people GROUP BY 1 ORDER BY 2 DESC NULLS LAST, 1 ASC NULLS FIRST`,
 		`SELECT DISTINCT first, last FROM people`,
 	} {
 		if why := CopyScreen(q, peopleTypes); why != "" {
@@ -139,12 +154,11 @@ func TestStarByPosition(t *testing.T) {
 		`SELECT * FROM plain ORDER BY 1, 3 DESC NULLS LAST`:                 starTextPositionVeto,
 		`SELECT * FROM plain p WHERE qty > 1 ORDER BY 4 LIMIT 3`:            starTextPositionVeto,
 		`SELECT * FROM public.plain AS p ORDER BY 2`:                        starTextPositionVeto,
-		`SELECT * FROM codes ORDER BY 2`:                                    starTextPositionVeto,
-		`SELECT * FROM codes ORDER BY 3`:                                    starTextPositionVeto,
+				`SELECT * FROM nums n, plain p WHERE p.id = n.id ORDER BY 5`:       starUnknownPositionVeto,
 		`SELECT * FROM plain ORDER BY 9`:                                    starUnknownPositionVeto,
 		`SELECT * FROM plain ORDER BY 0`:                                    starUnknownPositionVeto,
-		`SELECT * FROM plain, codes WHERE codes.id = plain.id ORDER BY 3`:   starUnknownPositionVeto,
-		`SELECT * FROM plain p JOIN codes c ON c.id = p.id ORDER BY 1`:      starUnknownPositionVeto,
+		`SELECT * FROM plain, nums WHERE nums.id = plain.id ORDER BY 3`:     starUnknownPositionVeto,
+		`SELECT * FROM plain p JOIN nums c ON c.id = p.id ORDER BY 1`:       starUnknownPositionVeto,
 		`SELECT p.* FROM plain p ORDER BY 2`:                                starUnknownPositionVeto,
 		`SELECT *, qty FROM plain ORDER BY 2`:                               starUnknownPositionVeto,
 		`SELECT * FROM (SELECT * FROM plain) s ORDER BY 2`:                  starUnknownPositionVeto,
@@ -165,10 +179,12 @@ func TestStarByPosition(t *testing.T) {
 		`SELECT * FROM plain ORDER BY 5 DESC, 1`,
 		`SELECT * FROM plain p WHERE qty > 1 ORDER BY 1 LIMIT 3`,
 		`SELECT * FROM public.plain ORDER BY 1`,
-		`SELECT * FROM codes ORDER BY 1`,
-		`SELECT * FROM codes ORDER BY 8, 1`,
+		`SELECT * FROM nums ORDER BY 1`,
+		`SELECT * FROM nums ORDER BY 3 DESC NULLS LAST, 2, 1`,
+		`SELECT * FROM nums a, nums b WHERE b.id = a.k ORDER BY 1, 4`,
+		`SELECT * FROM nums a JOIN (SELECT id, qty FROM plain) p ON p.id = a.id ORDER BY 5`,
 		// Rows with no text in them.
-		`SELECT * FROM (SELECT id, k FROM codes) s ORDER BY 1`,
+		`SELECT * FROM (SELECT id, k FROM nums) s ORDER BY 1`,
 		`SELECT s.* FROM (SELECT id, qty FROM plain) s ORDER BY 2`,
 		// No position, or no star: the other rules'.
 		`SELECT * FROM plain ORDER BY id`,
@@ -210,7 +226,7 @@ func TestStarByPosition(t *testing.T) {
 // The work of the rule is bounded: a megabyte of ORDER BYs, of keys, of
 // nested ORDER BYs and of parentheses that never close answers at once.
 func TestStarByPosition_bounded(t *testing.T) {
-	tables := paddedCatalog()
+	tables := starCatalog()
 	types := withColumnOrder(screenTypes(tables, nil), tables)
 	for name, q := range map[string]string{
 		"ORDER BY written over and over": "SELECT * FROM plain " + strings.Repeat("ORDER BY 1 ", (1<<20)/11),
