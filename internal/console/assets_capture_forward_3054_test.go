@@ -213,9 +213,9 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
 			Ticked bool
 			Again  ran
 		}
-		Now                                                                                                 map[string]string
-		PgReaderText, Ask, Hint, PgRemoveExtra                                                              string
-		Said                                                                                                map[string]line
+		Now                                    map[string]string
+		PgReaderText, Ask, Hint, PgRemoveExtra string
+		Said                                   map[string]line
 	}
 	s := strings.TrimSpace(string(raw))
 	if err := json.Unmarshal([]byte(s[strings.LastIndex(s, "\n")+1:]), &got); err != nil {
