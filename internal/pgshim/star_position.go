@@ -70,7 +70,9 @@ const colsKey = relKey + relKey + relKey
 // BY stands and however it is written: a statement this does not follow is
 // sent to the source when it sorts by position, never left to the copy.
 func starMayBeText(toks []rtToken, types map[string][]string) bool {
-	word := func(i int, w string) bool { return i >= 0 && i < len(toks) && toks[i].kind == rtWord && toks[i].text == w }
+	word := func(i int, w string) bool {
+		return i >= 0 && i < len(toks) && toks[i].kind == rtWord && toks[i].text == w
+	}
 	var stars []int
 	for i := 1; i < len(toks); i++ {
 		if !isOpTok(toks, i, "*") || isOpTok(toks, i-1, "(") && isOpTok(toks, i+1, ")") {
@@ -190,7 +192,9 @@ func starMayBeText(toks []rtToken, types map[string][]string) bool {
 // one SELECT, no set operation, no WITH. cols are the table's column types
 // in their order.
 func starOverOneTable(toks []rtToken, types map[string][]string) (cols []string, ok bool) {
-	word := func(i int, w string) bool { return i >= 0 && i < len(toks) && toks[i].kind == rtWord && toks[i].text == w }
+	word := func(i int, w string) bool {
+		return i >= 0 && i < len(toks) && toks[i].kind == rtWord && toks[i].text == w
+	}
 	if !(word(0, "select") && isOpTok(toks, 1, "*") && word(2, "from")) {
 		return nil, false
 	}

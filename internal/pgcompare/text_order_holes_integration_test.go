@@ -60,7 +60,7 @@ func textOrderHoles() []expectation {
 		// Outside the one statement read exactly, a position behind a star
 		// over rows with text goes to the source, whichever column it is.
 		{stmt: `(SELECT * FROM ` + c + `) ORDER BY 1`, verdict: sqlcompare.Equal},
-		stay(`SELECT * FROM `+c+` ORDER BY (1)`),
+		stay(`SELECT * FROM ` + c + ` ORDER BY (1)`),
 		stay(`SELECT * FROM ` + c + ` ORDER BY 1`),
 		stay(`SELECT * FROM ` + c + ` ORDER BY 5 NULLS LAST, 1 DESC`),
 		stay(`SELECT * FROM ` + pe + ` WHERE age > 10 ORDER BY 4, 1`),

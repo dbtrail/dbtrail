@@ -304,7 +304,7 @@ func TestCopyScreen_noTextFromANameThatIsNoValue(t *testing.T) {
 	types := map[string][]string{"id": {"INTEGER"}, "k": {"INTEGER"}, "c": {"VARCHAR"}, "pad": {"VARCHAR"}, "d": {"DATE"}, "born": {"TIMESTAMP"}}
 	for _, q := range []string{
 		`SELECT c.id, c.k FROM sbtest1 AS c ORDER BY 1`,
-		`SELECT c.id, count(*) AS n FROM sbtest1 c GROUP BY 1 ORDER BY 2 DESC NULLS LAST`,
+		`SELECT c.id, count(*) AS n FROM sbtest1 AS c GROUP BY 1 ORDER BY 2 DESC NULLS LAST`,
 		`SELECT c.id, k.k FROM sbtest1 c, sbtest2 k WHERE k.id = c.id ORDER BY 1`,
 		`SELECT born::date AS d, count(*) FROM sbtest1 GROUP BY 1 ORDER BY 1`,
 		`SELECT id AS k, k AS id FROM sbtest1 ORDER BY 1, 2`,
