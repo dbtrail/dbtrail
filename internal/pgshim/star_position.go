@@ -153,8 +153,12 @@ func starByPosition(toks []rtToken, types map[string][]string) string {
 				}
 				position := true
 				for _, u := range toks[k[0]+1 : k[1]] {
+					if budget--; budget < 0 {
+						return starUnknownPositionVeto
+					}
 					if u.kind != rtWord || !(u.text == "asc" || u.text == "desc" || u.text == "nulls" || u.text == "first" || u.text == "last") {
 						position = false
+						break
 					}
 				}
 				if !position {
