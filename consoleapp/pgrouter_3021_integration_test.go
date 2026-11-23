@@ -95,9 +95,11 @@ func TestIntegrationPGRouterStatusStatement(t *testing.T) {
 			if st["last_answer"] != "copy" || st["last_answer_error"] != "no" || st["last_answer_reason"] == "" {
 				t.Errorf("the copy answered, and the status says: %v", order)
 			}
-			// Fast mode: the answer is as old as the snapshot it read, and
-			// the status says so instead of a number.
-			if st["last_answer_age_seconds"] != "unknown" || st["last_answer_indexed_through"] != "unknown" || !strings.Contains(st["last_answer_age_unknown_reason"], "snapshot") {
+			// Fast mode: the answer is as old as the snapshot it read,
+			// which its file says (#3125): a minute before the full read
+			// began, a moment ago.
+			age, err := strconv.Atoi(st["last_answer_age_seconds"])
+			if _, perr := time.Parse(time.RFC3339, st["last_answer_indexed_through"]); err != nil || perr != nil || age < 60 || age > 600 || st["last_answer_age_unknown_reason"] != "" {
 				t.Errorf("the copy's answer's age: %v", order)
 			}
 		case "4":
