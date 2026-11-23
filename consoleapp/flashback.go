@@ -95,6 +95,12 @@ type flashbackConfig struct {
 	// encryption (#2636). nil: the one go-mysql makes up at start, which no
 	// client can verify (shim.NewMySQLServer).
 	TLS *shim.PortTLS
+	// MaxConns is how many clients may be connected at once (#3162); one
+	// more is refused with error 1040 before the handshake, as a MySQL
+	// server at its max_connections does. 0 = no limit. The router sets it
+	// (--max-connections): applications connect to it. The port inside
+	// watch leaves it at 0.
+	MaxConns int
 	// ResultBudget bounds the SQL-on-the-copy results the port holds while
 	// it sends them (#2241). nil = withDefaults makes one of
 	// defaultFlashbackResultBudget; a test passes its own to read it.
@@ -111,6 +117,14 @@ const (
 	// connections, is what a burst of clients reading large results costs.
 	defaultFlashbackResultBudget = 256 << 20
 )
+
+// flashbackLoginTimeout is how long a client has, from connecting, to finish
+// the handshake and log in (#3162); past it the connection is closed. The
+// PostgreSQL port gives the same 30 seconds. A client that connects and
+// sends nothing would otherwise hold a connection, and one of the places
+// MaxConns counts, for as long as it liked. A variable so a test can shorten
+// it.
+var flashbackLoginTimeout = 30 * time.Second
 
 // withDefaults resolves the zero-value fields to their production defaults.
 // QueryTimeout is the load-bearing one: 0 means "unbounded", and a client
@@ -197,9 +211,14 @@ func serveFlashback(ctx context.Context, srv *console.Server, ln net.Listener, c
 		_ = ln.Close()
 	}()
 
-	// No per-connection cap (the standalone shim's --max-connections has no
-	// equivalent here): this is a loopback-default, token-gated operator port,
-	// and the shared FullTableGate already bounds the memory-heavy queries.
+	// cfg.MaxConns bounds the clients connected at once, the way the
+	// standalone shim's --max-connections does (#3162): a place is taken
+	// here, before the goroutine starts, and given back when the connection
+	// ends however it ends, so a refused connection costs neither.
+	var connSem chan struct{}
+	if cfg.MaxConns > 0 {
+		connSem = make(chan struct{}, cfg.MaxConns)
+	}
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
@@ -220,9 +239,23 @@ func serveFlashback(ctx context.Context, srv *console.Server, ln net.Listener, c
 			continue
 		}
 		backoff = 0
+		if connSem != nil {
+			select {
+			case connSem <- struct{}{}:
+			default:
+				logger.Warn("flashback connection refused: the connection limit is reached",
+					"remote", conn.RemoteAddr(), "max_connections", cfg.MaxConns)
+				shim.RefuseTooManyConnections(conn)
+				_ = conn.Close()
+				continue
+			}
+		}
 		wg.Add(1)
 		go func(c net.Conn) {
 			defer wg.Done()
+			if connSem != nil {
+				defer func() { <-connSem }()
+			}
 			handleFlashbackConn(ctx, srv, c, mysrv, creds, gate, cfg, logger)
 		}(conn)
 	}
@@ -266,10 +299,24 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 	// (console.Server.LoginEpoch).
 	loginEpoch := srv.LoginEpoch()
 	cc := &connCreds{AuthenticationHandler: creds}
+	// A client has flashbackLoginTimeout to log in (#3162): the socket is
+	// closed under a handshake that takes longer, which fails it below.
+	var loginTimedOut atomic.Bool
+	loginTimer := time.AfterFunc(flashbackLoginTimeout, func() {
+		loginTimedOut.Store(true)
+		_ = c.Close()
+	})
 	// shim.NewConn: the handshake announces autocommit (#2110).
 	mysqlConn, err := shim.NewConn(wc, mysrv, cc, proxy)
+	loginTimer.Stop()
 	if err != nil {
 		level := slog.LevelWarn
+		if loginTimedOut.Load() {
+			// One line per connection that stalls: not a WARN each, which a
+			// client that opens many would fill the log with.
+			logger.Debug("flashback connection closed: the client did not log in in time", "timeout", flashbackLoginTimeout, "remote", c.RemoteAddr())
+			return
+		}
 		if isFlashbackProbe(err) {
 			// Bare TCP probes (health checks, port scanners) close before the
 			// handshake completes; don't log those at WARN.
