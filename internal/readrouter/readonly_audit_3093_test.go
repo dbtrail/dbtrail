@@ -242,6 +242,11 @@ func TestReadOnlyMark_3093(t *testing.T) {
 		// With quoted text the rest cannot be rebuilt from the screen's reading.
 		{"SET @a = 'x', transaction_read_only = 0", MarkRefuse, ""},
 		{"SET sql_mode = `ansi`, tx_read_only = 0", MarkRefuse, ""},
+		// One reading of the backslash holds only the mark, another holds
+		// more: not answered OK with that part dropped.
+		{`SET transaction_read_only = '\', @a = 1 -- '`, MarkRefuse, ""},
+		{`SET tx_read_only = "\", autocommit = 0 -- "`, MarkRefuse, ""},
+		{`SET transaction_read_only = '\\'`, MarkAnswer, ""},
 		// One reading of the backslash holds the mark and another does not.
 		{`SET @a = '\', transaction_read_only = 0 -- '`, MarkRefuse, ""},
 		{`SET @a = "\", @@session.tx_read_only = 0 -- "`, MarkRefuse, ""},

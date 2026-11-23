@@ -596,18 +596,19 @@ var roMarkVars = map[string]bool{"transaction_read_only": true, "tx_read_only": 
 // statement the screen refuses is MarkNone: the screen answers it.
 //
 // It reads the statement as the screen does, under every reading of a
-// backslash. The text of a rewrite is the screen's own reading (lower-cased,
-// comments gone), which says the same as the original only when the
-// statement holds no quoted text; with quotes, or with a backslash, a
-// statement that changes the mark together with something else is refused
-// rather than rebuilt from a guess.
+// backslash, and the reading that finds the most decides: OK is answered
+// only when no reading holds anything but the mark. The text of a rewrite
+// is the screen's own reading (lower-cased, comments gone), which says the
+// same as the original only when the statement holds no quoted text; with
+// quotes (and so with any backslash inside a string), a statement that
+// changes the mark together with something else is refused rather than
+// rebuilt from a guess.
 func ReadOnlyMark(stmt string) (MarkAction, string) {
 	if ReadOnlyRefusal(stmt) != "" {
 		return MarkNone, ""
 	}
 	readings := [][2]bool{{true, true}}
-	backslash := strings.IndexByte(stmt, '\\') >= 0
-	if backslash {
+	if strings.IndexByte(stmt, '\\') >= 0 {
 		readings = [][2]bool{{true, true}, {true, false}, {false, true}, {false, false}}
 	}
 	action, send := MarkNone, ""
@@ -621,13 +622,7 @@ func ReadOnlyMark(stmt string) (MarkAction, string) {
 			action, send = a, text
 		}
 	}
-	switch {
-	case action == MarkNone, action == MarkRefuse:
-		return action, ""
-	case backslash:
-		// The readings may not agree on what else the statement holds.
-		return MarkRefuse, ""
-	case action == MarkRewrite && strings.ContainsAny(stmt, "'\"`"):
+	if action == MarkRewrite && strings.ContainsAny(stmt, "'\"`") {
 		return MarkRefuse, ""
 	}
 	return action, send
