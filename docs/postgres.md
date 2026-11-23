@@ -1326,8 +1326,9 @@ listener, its own workers, its own memory.
 
   `sum` also stays a `numeric` where PostgreSQL has a `bigint` when its
   argument is a name the statement defines itself (`SELECT sum(n) FROM (SELECT
-  qty AS n ...)`), a column that is an `integer` in one table and another type
-  in another, or anything but whole-number columns, numbers, casts, `CASE` and
+  qty AS n ...)`), a prepared statement's argument with no cast of its own in
+  the value being summed (`sum(qty + $1)`; write `$1::int`), a column that is
+  an `integer` in one table and another type in another, or anything but whole-number columns, numbers, casts, `CASE` and
   `+ - * / %` between them, and in a statement of more than a few thousand
   words or one that names columns in a list (`AS t(a, b)`). If the port reads
   a sum's argument as a whole number and the copy finds it is not one, the
