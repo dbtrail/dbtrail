@@ -1240,6 +1240,19 @@ listener, its own workers, its own memory.
   - **Waiting for the source** (`BINTRAIL_SQL_FRESH_WAIT`) does not apply to
     PostgreSQL yet: a statement does not wait for the newest changes to
     arrive before it reads.
+- **During an update of the recent changes, a statement does not wait, and
+  may answer from the version before that update, with no notice.** That is
+  usually seconds behind, and a minute or more in a long update. On
+  PostgreSQL there is no switch to make it wait. What does protect is partial:
+  a connection the source already answered about a table waits for the copy
+  to reach that answer, or goes to the source, so it does not read back in
+  time; that does not cover an application that writes on one connection and
+  reads on another. A table with no version yet (the first statement on it,
+  the first after a new snapshot) does wait for the running update, for at
+  most half of the statement's time limit (30 of 60 seconds by default); past
+  that it goes on as described above. While the index holds no captured
+  change at all, the first change can be missing from statements that run
+  during the update that brings it.
 - **If capture falls behind, the copy falls behind with it, as a replica
   does.** The port keeps answering from the copy and does not tell the
   client. A server's lag limit, `max_behind_source_seconds`, is off by

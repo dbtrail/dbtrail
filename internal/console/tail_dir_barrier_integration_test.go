@@ -13,6 +13,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
+	"github.com/dbtrail/dbtrail/internal/views"
 )
 
 // An update longer than a statement may wait for it: the statement is not
@@ -199,9 +200,19 @@ func TestIntegrationTailDirFreshWaitReadsYourWriteDuringAnUpdate(t *testing.T) {
 		return saved, false, nil
 	}
 	q := &SQLOnCopy{s: r.s, b: r.b, user: "u", id: e.ID}
-	for i, sess := range []sqlsandbox.Session{{}, {StrictStar: true}} {
-		t.Run(fmt.Sprintf("session %d", i), func(t *testing.T) {
-			tbl := r.table(nil)
+	// Written before the copy is first read: a routed statement is vouched
+	// for by what the snapshot records of each table.
+	tables := []views.BaselineTable{r.table(nil), r.table(nil)}
+	for i, tc := range []struct {
+		name string
+		sess sqlsandbox.Session
+	}{
+		{"a connection that does not route", sqlsandbox.Session{}},
+		{"a routed connection", sqlsandbox.Session{StrictStar: true}},
+	} {
+		sess := tc.sess
+		t.Run(tc.name, func(t *testing.T) {
+			tbl := tables[i]
 			at := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 			base := uint64(1000 * (i + 1))
 			r.change(tbl.Table, event.EventUpdate, "1", "old", "binlog.000008", base, at)
@@ -214,9 +225,7 @@ func TestIntegrationTailDirFreshWaitReadsYourWriteDuringAnUpdate(t *testing.T) {
 			stmt := "SELECT CAST(id AS VARCHAR) || '=' || status FROM shop." + tbl.Table + " ORDER BY id"
 			limit := time.Now().Add(30 * time.Second)
 			for {
-				// Read as a connection that does not route: this rig's table has
-				// no definition a routed statement could be vouched by.
-				res, err := q.Run(context.Background(), stmt, "", sqlsandbox.Session{})
+				res, err := q.Run(context.Background(), stmt, "", sess)
 				if err == nil && fmt.Sprint(res.Rows) == "[[1=old]]" {
 					break
 				}
@@ -259,12 +268,6 @@ func TestIntegrationTailDirFreshWaitReadsYourWriteDuringAnUpdate(t *testing.T) {
 			after := r.s.freshWaits.of(e.ID).numbers(r.s.freshWait, time.Now())
 			if after.Reached != before.Reached+1 || after.RanOut != before.RanOut {
 				t.Errorf("the wait for the source: reached %d to %d, ran out %d to %d: want it reached", before.Reached, after.Reached, before.RanOut, after.RanOut)
-			}
-			var differ *sqlsandbox.ColumnsDifferError
-			if sess.StrictStar && errors.As(err, &differ) {
-				// This rig's table, refused after the wait, which is what is
-				// asked here.
-				return
 			}
 			if err != nil {
 				t.Fatal(err)

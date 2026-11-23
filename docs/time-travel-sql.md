@@ -1494,6 +1494,20 @@ complete transactions wait before they are written (`BINTRAIL_COMMIT_WITHIN`),
 so a statement there often runs out of a 200 ms wait. Not yet per server
 (environment only). PostgreSQL sources do not wait.
 
+**During an update of the recent changes, a statement does not wait, and may
+answer from the version before that update, with no notice.** That is usually
+seconds behind, and a minute or more in a long update. The way out on this
+port is the wait above: with `BINTRAIL_SQL_FRESH_WAIT` on, a statement the
+wait applies to first waits for the running update, for at most half of the
+statement's time limit (30 of 60 seconds by default), and only then for the
+source, so a client reads its own last write. A table with no version yet
+(the first statement on it, the first after a new snapshot) waits for the
+running update under the same limit, with the switch on or off; past it the
+statement goes on: under routing MySQL answers, and on a connection that does
+not route the copy answers from the snapshot with a warning. While the index
+holds no captured change at all, the first change can be missing from
+statements that run during the update that brings it.
+
 Two budgets bound the tails, because they live in the router's memory:
 
 - `BINTRAIL_SQL_TAIL_MAX_KEYS` is the most keys one table's tail holds,
