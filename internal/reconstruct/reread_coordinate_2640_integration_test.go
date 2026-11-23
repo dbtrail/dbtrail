@@ -25,6 +25,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/parser"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
+	"github.com/dbtrail/dbtrail/internal/snapshotdir"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
@@ -51,6 +52,16 @@ import (
 // runner has. BINTRAIL_TEST_MYDUMPER is the mydumper to run (a wrapper around
 // the pinned image works: the output directory is the last argument).
 const mydumperEnv = "BINTRAIL_TEST_MYDUMPER"
+
+// mysqlContainer is the Docker container of the test server, whose binary
+// logs are copied out of it: the name the other tests use, unless
+// BINTRAIL_TEST_MYSQL_CONTAINER names another.
+func mysqlContainer() string {
+	if c := os.Getenv("BINTRAIL_TEST_MYSQL_CONTAINER"); c != "" {
+		return c
+	}
+	return "bintrail-test-mysql"
+}
 
 func TestRereadCoordinate_tablesListDumpUnderWrites(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
@@ -195,11 +206,21 @@ func measureRereadCoordinate(t *testing.T, mydumper string, mode baseline.LockMo
 	if _, err := baseline.Run(ctx, baseline.Config{InputDir: dumpDir, OutputDir: staging, Compression: "zstd", RowGroupSize: 10000}); err != nil {
 		t.Fatalf("baseline.Run: %v", err)
 	}
-	dirs, err := os.ReadDir(staging)
-	if err != nil || len(dirs) != 1 {
-		t.Fatalf("the staging folder holds %v (err %v), want the one read", dirs, err)
+	// baseline.Run also leaves its `current` link and lock beside the read.
+	entries, err := os.ReadDir(staging)
+	if err != nil {
+		t.Fatal(err)
 	}
-	staged := filepath.Join(staging, dirs[0].Name(), sourceName, "t.parquet")
+	var reads []string
+	for _, e := range entries {
+		if _, ok := snapshotdir.ParseTime(e.Name()); ok && e.IsDir() {
+			reads = append(reads, e.Name())
+		}
+	}
+	if len(reads) != 1 {
+		t.Fatalf("the staging folder holds %v, want one read", entries)
+	}
+	staged := filepath.Join(staging, reads[0], sourceName, "t.parquet")
 	meta, err := baseline.ReadParquetMetadata(staged)
 	if err != nil {
 		t.Fatalf("ReadParquetMetadata: %v", err)
@@ -350,7 +371,7 @@ func indexBinlogsFrom(t *testing.T, sourceDB, indexDB *sql.DB, res *metadata.Res
 	idx := indexer.New(indexDB, 1000)
 	p := parser.New(tmpDir, res, parser.Filters{Schemas: map[string]bool{schema: true}}, nil)
 	for _, f := range files {
-		cp := exec.Command("docker", "cp", "bintrail-test-mysql:/var/lib/mysql/"+f, filepath.Join(tmpDir, f))
+		cp := exec.Command("docker", "cp", mysqlContainer()+":/var/lib/mysql/"+f, filepath.Join(tmpDir, f))
 		if out, err := cp.CombinedOutput(); err != nil {
 			t.Fatalf("docker cp %s: %v\n%s", f, err, out)
 		}
