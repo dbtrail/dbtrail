@@ -116,8 +116,8 @@ func fromListItem(toks []rtToken, i int) bool {
 // existsStars answers, for a statement, which stars are the whole select
 // list of the subquery of an EXISTS that reads none of its rows' values:
 // EXISTS (SELECT * FROM ...) with, in the subquery, no set operation (UNION,
-// INTERSECT and EXCEPT compare the star's rows), and no DISTINCT, GROUP BY,
-// HAVING or window, which put rows of equal values together: for a bpchar
+// INTERSECT and EXCEPT compare the star's rows), no ORDER BY, and no
+// DISTINCT, GROUP BY, HAVING or window, which put rows of equal values together: for a bpchar
 // without a length PostgreSQL finds 'ab' and 'ab ' equal and the copy does
 // not, so EXISTS (SELECT * FROM t GROUP BY 1 HAVING count(*) > 1) is true
 // there and false here.
@@ -137,6 +137,9 @@ type existsStars struct {
 var existsBarred = map[string]bool{
 	"union": true, "intersect": true, "except": true,
 	"distinct": true, "group": true, "having": true, "over": true, "window": true,
+	// An ORDER BY there changes no answer, but it may sort by a position of
+	// the star, which the rule on sorted text does not look at under EXISTS.
+	"order": true,
 }
 
 func (e *existsStars) star(toks []rtToken, i int) bool {

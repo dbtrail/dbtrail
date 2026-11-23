@@ -97,6 +97,7 @@ func TestPaddedLists_toTheSource(t *testing.T) {
 		`SELECT p.id FROM plain p WHERE EXISTS (SELECT * FROM codes c WHERE c.k IN (SELECT DISTINCT qty FROM plain))`,
 		`SELECT p.id FROM plain p WHERE EXISTS (SELECT * FROM codes c WHERE c.k = (SELECT count(*) OVER () FROM plain LIMIT 1))`,
 		`SELECT p.id FROM plain p WHERE NOT EXISTS (SELECT * FROM codes WINDOW w AS (ORDER BY id))`,
+		`SELECT p.id FROM plain p WHERE EXISTS (SELECT * FROM codes ORDER BY 2)`,
 		// A table's alias that the port reads as a keyword: its use as the
 		// whole row could not be told.
 		`SELECT p.id FROM plain p, codes last WHERE last = last`,
