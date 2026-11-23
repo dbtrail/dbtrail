@@ -130,7 +130,9 @@ func TestCopyScreen_reportShapes3219(t *testing.T) {
 	// differ, and it stays the source's as a key.
 	free := screenTypes([]CatalogTable{{Schema: "public", Name: "codes", Columns: []CatalogColumn{
 		{Name: "id", Type: "INTEGER", SourceType: 23, SourceTypeMod: -1}, {Name: "u", Type: "VARCHAR", SourceType: oidBpchar, SourceTypeMod: -1}}}}, nil)
-	if why := CopyScreen(`SELECT u, count(*) FROM codes GROUP BY u`, free); why == "" {
-		t.Error("a bpchar without a length as the key of GROUP BY: left to the copy")
+	for _, q := range []string{`SELECT u, count(*) FROM codes GROUP BY u`, `SELECT count(*) FROM codes GROUP BY u`, `SELECT count(*) FROM codes c GROUP BY c.u HAVING count(*) > 1`} {
+		if why := CopyScreen(q, free); why == "" {
+			t.Errorf("a bpchar without a length as the key of GROUP BY, left to the copy: %s", q)
+		}
 	}
 }

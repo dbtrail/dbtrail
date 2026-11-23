@@ -134,6 +134,7 @@ func charCases() []charCase {
 		// A bpchar without a length keeps each value's own blanks: two
 		// groups on the copy where PostgreSQL makes one.
 		differs(`SELECT u, count(*) FROM ` + x + ` GROUP BY u`),
+		differs(`SELECT count(*) FROM ` + x + ` GROUP BY u`),
 		// The key used again, or inside an expression: the source's.
 		sent(`SELECT c, count(*) FROM ` + x + ` GROUP BY c HAVING c IS NOT NULL`),
 		sent(`SELECT count(DISTINCT c), count(c) FROM ` + x),
