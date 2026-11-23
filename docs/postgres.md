@@ -1299,8 +1299,55 @@ listener, its own workers, its own memory.
   the count PostgreSQL sends (the largest and smallest 32-bit day for a `date`,
   64-bit microsecond for a timestamp), in arrays too.
 
-  An expression's type is the one the copy computes it with, which is not
-  always PostgreSQL's: a `round()` the copy answers is PostgreSQL's
+  An expression's type is the one the copy computes it with. Where that is
+  not PostgreSQL's, the port converts these to PostgreSQL's type before it
+  answers, so a driver reads the same whole number type from the port as from
+  the source, in text and in binary:
+  - `length`, `char_length`, `character_length`, `position`, `strpos` and
+    `ntile` are an `integer`;
+  - `sum` of a `smallint` or an `integer` is a `bigint` (of a `bigint` it is a
+    `numeric`, as on PostgreSQL).
+
+  That holds under an alias, in a subquery or a `WITH`, behind `SELECT *`,
+  as a window (`sum(x) OVER (...)`), inside another expression
+  (`length(x) + 1` is an `integer`, `sum(x) + 1` a `bigint`) and in what a
+  prepared statement announces before it runs. No value and no column heading
+  changes with it. A function is converted at every place a statement calls
+  it, or at none; it is at none, and keeps the copy's type, when the
+  statement:
+  - calls it in an item with no `AS` of a subquery's select list, or of a
+    select list that holds a `*` (`SELECT *, length(x) FROM t`): give the
+    item a name (`length(x) AS n`) to get PostgreSQL's type;
+  - also calls it inside a `round()`, `floor()` or `avg()` the port rewrites;
+  - uses its name where a table's may stand (`FROM (...) length(a)`,
+    `substring(x FROM length(x))`);
+  - is longer than the port takes once converted, or nests the calls more
+    than 32 deep.
+
+  `sum` also stays a `numeric` where PostgreSQL has a `bigint` when its
+  argument is a name the statement defines itself (`SELECT sum(n) FROM (SELECT
+  qty AS n ...)`), a prepared statement's argument with no cast of its own in
+  the value being summed (`sum(qty + $1)`; write `$1::int`), a column that is
+  an `integer` in one table and another type in another, or anything but whole-number columns, numbers, casts, `CASE` and
+  `+ - * / %` between them, and in a statement of more than a few thousand
+  words or one that names columns in a list (`AS t(a, b)`). If the port reads
+  a sum's argument as a whole number and the copy finds it is not one, the
+  statement fails with `the copy cannot tell this sum's type as PostgreSQL
+  would; cast its argument (sum(x::numeric))` rather than answer a rounded
+  sum: write the cast the message names (with a forwarding account the source
+  answers instead).
+
+  These carry another type than on PostgreSQL, with the same value:
+  - `extract` of a whole field (`year`, `month`, `day`...) and `date_part`
+    are a `bigint` (PostgreSQL: `numeric` and `double precision`);
+  - a `NULL` alone in the select list is an `integer` (PostgreSQL: `text`);
+  - a `date` less a `date` is a `bigint` (PostgreSQL: `integer`);
+  - a `smallint` with a number (`s + 1`) stays a `smallint` (PostgreSQL:
+    `integer`), and is an error where the result passes 32767;
+  - arithmetic over a `real` column is a `real` (PostgreSQL: `double
+    precision`), and `sum` of one a `double precision` (PostgreSQL: `real`).
+
+  Also not PostgreSQL's: a `round()` the copy answers is PostgreSQL's
   `numeric`, with exactly the decimals PostgreSQL writes, on every
   connection (`avg()` of a `numeric` or of whole numbers, which PostgreSQL
   writes with 16 to 20 decimals, is refused on the copy), and an aggregate or a literal of a `numeric` keeps its

@@ -380,7 +380,7 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		// does not run one it would answer from the snapshot alone (#3086).
 		opts := s.runOptions()
 		opts.NeedTails = s.holdsBackCopy(apart && named > 0)
-		res, err = s.bound.Run(ctx, text, opts)
+		res, err = s.bound.Run(ctx, s.asPostgresTypes(text), opts)
 		var changed *sqlsandbox.MayHaveChangedError
 		if opts.NeedTails && errors.As(err, &changed) {
 			s.logger.Debug("pgshim: the copy's recent changes for a statement were not ready; it did not run there, and the source answers it", "why", changed.Reason)

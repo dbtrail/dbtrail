@@ -120,8 +120,9 @@ func TestIntegrationPGCompare(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open the copy: %v", err)
 	}
-	// Measured as the PostgreSQL port runs it.
-	cp.Rewrite = pgshim.RewriteForCopy
+	// Measured as the PostgreSQL port runs it: with PostgreSQL's type cast
+	// around the expressions the copy types otherwise (#3073).
+	cp.Rewrite = func(s string) string { return pgshim.AsPostgresTypes(pgshim.RewriteForCopy(s), nil) }
 	src, err := OpenSource(ctx, baseDSN, "public")
 	if err != nil {
 		t.Fatalf("open the source: %v", err)

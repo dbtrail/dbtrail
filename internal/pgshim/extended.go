@@ -608,14 +608,14 @@ func (s *session) describeWith(st *preparedStatement, untyped string) (cols []sq
 		}
 		return nil, nil, s.paddedError(veto)
 	}
-	// On lines of their own: a statement that ends in a -- comment must not
-	// comment out the closing parenthesis.
 	// Held to the statement as the screen read it, as its portals are
 	// (copyText): a typed NULL inside a round() makes it one the port leaves
 	// as written, whose type is the engine's and not PostgreSQL's. The source
 	// describes such a statement, and answers it.
 	s.screened = st.query
-	cols, err = s.columnsOf("SELECT * FROM (\n" + body + "\n) AS dbtrail_describe LIMIT 0")
+	// On lines of their own (describeHead, describeTail): a statement that
+	// ends in a -- comment must not comment out the closing parenthesis.
+	cols, err = s.columnsOf(describeHead + body + describeTail)
 	s.screened = ""
 	return cols, nil, err
 }
@@ -693,7 +693,7 @@ func (s *session) columnsOf(text string) ([]sqlsandbox.Column, error) {
 	var res sqlsandbox.Result
 	runText, err := s.copyText(text)
 	if err == nil {
-		res, err = s.bound.Run(ctx, runText, s.runOptions())
+		res, err = s.bound.Run(ctx, s.asPostgresTypes(runText), s.runOptions())
 	}
 	if s.bound.Answered != nil && ctx.Err() == nil {
 		s.bound.Answered(time.Since(started), err != nil)

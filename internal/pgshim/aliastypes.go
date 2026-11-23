@@ -387,8 +387,26 @@ func exprNotText(e []rtToken, types map[string][]string) bool {
 // caseNotText reports whether every answer of a CASE (each THEN and the
 // ELSE, a missing ELSE being NULL) is known not to be text.
 func caseNotText(e []rtToken, types map[string][]string) bool {
-	if e[len(e)-1].kind != rtWord || e[len(e)-1].text != "end" {
+	answers := caseAnswers(e)
+	if len(answers) == 0 {
 		return false
+	}
+	for _, a := range answers {
+		if len(a) == 1 && a[0].kind == rtWord && a[0].text == "null" {
+			continue
+		}
+		if !exprNotText(a, types) {
+			return false
+		}
+	}
+	return true
+}
+
+// caseAnswers are the answers of e, a CASE ... END: what follows each THEN
+// and the ELSE. Nil when e does not end in END.
+func caseAnswers(e []rtToken) [][]rtToken {
+	if len(e) == 0 || e[len(e)-1].kind != rtWord || e[len(e)-1].text != "end" {
+		return nil
 	}
 	var answers [][]rtToken
 	var cur []rtToken
@@ -432,18 +450,7 @@ func caseNotText(e []rtToken, types map[string][]string) bool {
 	if in {
 		answers = append(answers, cur)
 	}
-	if len(answers) == 0 {
-		return false
-	}
-	for _, a := range answers {
-		if len(a) == 1 && a[0].kind == rtWord && a[0].text == "null" {
-			continue
-		}
-		if !exprNotText(a, types) {
-			return false
-		}
-	}
-	return true
+	return answers
 }
 
 // splitArgs splits a call's arguments at their top-level commas.
