@@ -90,6 +90,18 @@ func TestIntegrationPGRouterSumPrepared3073(t *testing.T) {
 			}
 			out = append(out, fmt.Sprintf("format %d: type %d cell %x", format, res.FieldDescriptions[0].DataTypeOID, res.Rows[0][0]))
 		}
+		// With no name, its portal described instead of the statement: what
+		// is announced is what the run with the argument written in gives.
+		for _, format := range []int16{0, 1} {
+			res := c.ExecParams(ctx, stmt, [][]byte{[]byte(arg)}, []uint32{oid}, []int16{0}, []int16{format}).Read()
+			if res.Err != nil {
+				return "portal error " + pgCode(res.Err)
+			}
+			if len(res.Rows) != 1 || len(res.FieldDescriptions) != 1 {
+				return fmt.Sprintf("portal: %d rows", len(res.Rows))
+			}
+			out = append(out, fmt.Sprintf("portal format %d: type %d cell %x", format, res.FieldDescriptions[0].DataTypeOID, res.Rows[0][0]))
+		}
 		return strings.Join(out, "; ")
 	}
 	for _, tc := range []struct {
@@ -101,7 +113,8 @@ func TestIntegrationPGRouterSumPrepared3073(t *testing.T) {
 		{"argument outside the sum", "SELECT sum(qty) AS s FROM " + table + " WHERE id < $1", int8OID, "9", int8OID},
 		{"argument in a CASE's condition", "SELECT sum(CASE WHEN qty > $1 THEN 1 ELSE 0 END) AS s FROM " + table, int4OID, "2", int8OID},
 		{"argument in the value, a bigint", "SELECT sum(qty + $1) AS s FROM " + table, int8OID, "5", numericOID},
-		{"a total past a bigint", "SELECT sum(qty + $1) AS s FROM " + table, int8OID, "900000000000000000", numericOID},
+		{"argument in the value, a numeric", "SELECT sum(qty + $1) AS s FROM " + table, numericOID, "5", numericOID},
+		{"a large bigint argument", "SELECT sum(qty + $1) AS s FROM " + table, int8OID, "900000000000000000", numericOID},
 	} {
 		want := run(source, tc.stmt, tc.oid, tc.arg)
 		if !strings.HasPrefix(want, fmt.Sprintf("described %d;", tc.announced)) {
