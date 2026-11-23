@@ -166,6 +166,9 @@ func (s *Server) pgReadThrough(read []views.BaselineTable) (time.Time, string) {
 // asked, so a quiet source never reads as caught up here.
 func (s *Server) statementBehindFor(ctx context.Context, b *bundle, id string, in views.Input, read []views.BaselineTable,
 	tailThrough time.Time, tailThroughID uint64, allTailed bool) (time.Duration, string) {
+	if pgCatalogRead(ctx) {
+		return 0, ""
+	}
 	if allTailed || b == nil || !s.SourceIsPostgres(id) {
 		return s.statementBehind(ctx, b, id, in, read, tailThrough, tailThroughID, allTailed)
 	}
