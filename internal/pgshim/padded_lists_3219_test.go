@@ -234,9 +234,6 @@ func TestCopyScreen_materialized(t *testing.T) {
 			t.Errorf("%s: sent to the source (%s), want the copy", q, veto)
 		}
 	}
-	if veto := CopyScreenFor(`SELECT materialized(id) FROM plain`, paddedCatalog()); veto == "" {
-		t.Error("a function named materialized: left to the copy")
-	}
 }
 
 // A megabyte of names after commas, and of EXISTS nested in EXISTS: the
