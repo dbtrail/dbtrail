@@ -31,6 +31,7 @@ const (
 	itRound     = "pgcmp_round"
 	itWords     = "pgcmp_words"
 	itEpoch     = "pgcmp_epoch"
+	itExact     = "pgcmp_exact"
 	itPub       = "pgcmp_pub"
 	itSlot      = "pgcmp_slot"
 )
@@ -46,6 +47,9 @@ type expectation struct {
 	// says is a piece of the copy's refusal, for NOT_ON_COPY: a statement
 	// refused for another reason is another finding.
 	says string
+	// stay: the port's screen must leave this statement to the copy
+	// (checkRouting). For a rule's other side: what it must not send away.
+	stay bool
 }
 
 // TestIntegrationPGCompare takes a snapshot of a PostgreSQL source the way
@@ -56,9 +60,10 @@ type expectation struct {
 func TestIntegrationPGCompare(t *testing.T) {
 	baseDSN := testutil.SkipIfNoPostgres(t)
 	// Under -race, as CI runs it, the list and the numeric statements again
-	// without a forwarding account take about six minutes; under the ten
-	// go test gives the package.
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	// without a forwarding account take about nine minutes (a statement
+	// takes a second there, and the list holds some 450); CI gives the
+	// package 20 (-timeout, ci.yml), go test's own ten are not enough.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
 	setup, err := pgx.Connect(ctx, baseDSN)
@@ -69,7 +74,7 @@ func TestIntegrationPGCompare(t *testing.T) {
 	dropAll := func() {
 		bg := context.Background()
 		_, _ = setup.Exec(bg, "DROP PUBLICATION IF EXISTS "+itPub)
-		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS "+itOrders+", "+itCustomers+", "+itOdd+", "+itArrays+", "+itTimes+", "+itRound+", "+itWords+", "+itEpoch+", pivot")
+		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS "+itOrders+", "+itCustomers+", "+itOdd+", "+itArrays+", "+itTimes+", "+itRound+", "+itWords+", "+itEpoch+", "+itExact+", pivot")
 		_, _ = setup.Exec(bg, "SELECT pg_drop_replication_slot($1) WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)", itSlot)
 	}
 	dropAll()
@@ -123,6 +128,7 @@ func TestIntegrationPGCompare(t *testing.T) {
 	t.Cleanup(func() { src.Close(context.Background()) })
 
 	want := append(append(expectations(), numericForward()...), zoneAndBetween()...)
+	want = append(want, screenExactness()...)
 	stmts := make([]string, len(want))
 	for i, e := range want {
 		stmts[i] = e.stmt
@@ -265,7 +271,19 @@ func seedSQL() []string {
 			(11, interval '10999999988 seconds' + interval '999999 microseconds'),
 			(12, interval '-10999999989 seconds' - interval '5 microseconds'),
 			(13, interval '-10999999989 seconds' - interval '1 microsecond')) v(id, d)`,
-		`CREATE PUBLICATION ` + itPub + ` FOR TABLE ` + itCustomers + `, ` + itOrders + `, ` + itOdd + `, ` + itArrays + `, ` + itTimes + `, ` + itRound + `, ` + itWords + `, ` + itEpoch + `, pivot`,
+		// #3069 to #3072: a real beside a double precision, numerics of two
+		// scales, text to cut, and a date, a timestamp and a time. The
+		// column names are this table's alone: the screen reads a column's
+		// type by its name.
+		`CREATE TABLE ` + itExact + ` (id int PRIMARY KEY, rl real, dbl double precision, amt numeric(10,2), amt4 numeric(10,4),
+			whole int, word text, day date, stamp timestamp, clock time)`,
+		`INSERT INTO ` + itExact + ` VALUES
+			(1, -0.1, -0.1, 10.50, 10.5000, 1,    'apple', '2026-01-05', '2026-01-05 10:30:00.123457', '10:30:00'),
+			(2, 1.5,  1.5,  2.00,  3.2500,  5,    'kiwi',  '2026-02-10', '2026-01-05 10:30:00.123456', '23:59:59'),
+			(3, 3,    3,    4.25,  0.0001,  -2,   '',      '2026-01-06', '2026-01-06 00:00:00',        '00:00:00'),
+			(4, NULL, NULL, NULL,  NULL,    NULL, NULL,    NULL,         NULL,                         NULL),
+			(5, 0.1,  0.1,  0.00,  0.0000,  0,    'fig',   '2026-12-31', '2026-12-31 23:59:59.5',      '12:00:00')`,
+		`CREATE PUBLICATION ` + itPub + ` FOR TABLE ` + itCustomers + `, ` + itOrders + `, ` + itOdd + `, ` + itArrays + `, ` + itTimes + `, ` + itRound + `, ` + itWords + `, ` + itEpoch + `, ` + itExact + `, pivot`,
 	}
 }
 

@@ -1653,7 +1653,9 @@ The source answers:
 
 - **A function, operator, cast or construct the copy answers differently or
   not at all.** The copy takes `count`, `sum`, `min`, `max`, `coalesce`,
-  `nullif`, `greatest`, `least`, `length`, `substring`, `trim`, `position`,
+  `nullif`, `greatest`, `least`, `length`, `substring` (with its start, and
+  its length when given, written as whole numbers above zero:
+  `substring(name, 1, 3)`, `substring(name FROM 2 FOR 3)`), `trim`, `position`,
   `concat`, `abs`, `bool_and`, `string_agg`, `row_number`, `rank`, `lag`, and
   `extract`, `date_part` and `date_trunc` of a year, month or day;
   `round(a / b, k)` and `round(avg(x), k)` (also `round(100 * avg(x), k)`, or
@@ -1676,8 +1678,15 @@ The source answers:
   the
   operators `=`, `<>`, `<`, `>`, `<=`, `>=`, `+`, `-`, `*`, `||`, `LIKE`
   (a pattern without a backslash), `IN`, `BETWEEN`, `IS [NOT] DISTINCT FROM`,
-  `ANY`, `EXISTS`, an array subscript by a positive whole number; `::date` and `CAST(... AS date)`; `DATE`, `TIMESTAMP`, `TIME` and
-  `INTERVAL` literals; joins, `GROUP BY`, `HAVING`, `DISTINCT [ON]`, `UNION`,
+  `ANY`, `EXISTS`, an array subscript by a positive whole number; `::date` and `CAST(... AS date)`; `INTERVAL` literals, and `DATE`,
+  `TIMESTAMP` and `TIME` literals written in one form: a date as `YYYY-MM-DD`,
+  a time as `HH:MM` or `HH:MM:SS` with at most six decimals and an hour below
+  24, a timestamp as the date alone or the date, a blank or a `T`, and the
+  time (`DATE '2026-01-05'`, `TIMESTAMP '2026-01-05 10:30:00.123456'`). A
+  string written in the statement and compared with a `date`, `timestamp`
+  or `time` column (`=`, `<`, `BETWEEN`, `IN`) is held to the same form; a
+  value that arrives as a parameter of a prepared statement is not read by
+  this rule; joins, `GROUP BY`, `HAVING`, `DISTINCT [ON]`, `UNION`,
   `INTERSECT`, `EXCEPT`, `WITH`, window functions, `FILTER`, `LIMIT` and
   `OFFSET`. Anything else goes to the source. Some of what the harness found
   answering otherwise, and why each one goes there: `avg()` and division of a
@@ -1694,7 +1703,20 @@ The source answers:
   (the copy matched no row), `->` and `->>` (PostgreSQL answers `json`, and
   writes a nested value with spaces), a number with an exponent (a `numeric`
   on PostgreSQL), `::text` of a
-  float, a `DATE`, `TIMESTAMP` or `TIME` literal written with a time zone
+  float, `substring` with a start of zero or below, or one that is not a
+  number written in the statement (`substring('apple', -1, 3)` is `a` on
+  PostgreSQL; the copy counts a negative start from the end and answers `e`;
+  `substr`, `left`, `right` and `overlay` always go to the source), a date or
+  time literal in any other form (`'26-01-05'::date` is 2026-01-05 on
+  PostgreSQL and the year 26 on the copy, a seventh decimal of a second is
+  rounded there and cut here, `TIME '24:00:00'` is a time there and midnight
+  here), arithmetic (`+`, `-`, `*`, `/`) and `sum()` over a `real` column
+  (PostgreSQL computes it as a `double precision`, so `r + 1` with `r = -0.1`
+  is `0.8999999985098839` there and `0.9` on the copy, and answers `sum(r)`
+  as a `real`; a `real` that is only read, compared, counted or taken the
+  `min` or `max` of stays on the copy, and so does arithmetic over a
+  `double precision`, a whole number or a `numeric`), a `DATE`, `TIMESTAMP` or
+  `TIME` literal written with a time zone
   (`TIMESTAMP '2026-03-02 10:00:00+02'`: the type holds none and PostgreSQL
   does not read it, so the literal is 10:00 there) and a string with one in
   either bound of a `BETWEEN` on a `timestamp` column, `upper`, `lower` and `ILIKE` (PostgreSQL folds case by the database's
@@ -2516,6 +2538,18 @@ Three things still answer differently from PostgreSQL, with no error:
 
 A numeric with no precision prints with all 18 decimals (`12345.678` as
 `12345.678000000000000000`); it compares, sorts and sums as the same number.
+
+A `CASE`, `COALESCE`, `GREATEST` or `LEAST` whose values are numbers of
+different scales can print more zeros on the copy than on PostgreSQL, for the
+same value: PostgreSQL writes each value with its own decimals, the copy
+gives them all one type and writes every one with that type's. Over a
+`numeric(12,2)` column, `coalesce(sum(amount), 0)` of no rows is `0` on
+PostgreSQL and `0.00` on the copy, and `CASE WHEN ... THEN amount ELSE 0 END`
+writes `0.00` for the rows that take the `0`. The number is the same; a
+client that reads it as a number sees no difference. Writing the other value
+with the column's decimals (`coalesce(sum(amount), 0.00)`) makes both sides
+print the same. (Around a `round()` the port does check this, value by
+value, and sends a statement whose decimals would differ to the source.)
 
 ---
 

@@ -1087,6 +1087,11 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 	if why := scaleMixRisk(in); why != "" {
 		return why
 	}
+	if !untyped {
+		if why := realUse(in, types); why != "" {
+			return why
+		}
+	}
 	types = withAliasTypes(in, types)
 	// A typed literal (DATE '...', '...'::date) is one value, never text:
 	// its string is folded into one token.
@@ -1097,6 +1102,9 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 			if zonedTyped(t.text, in[j+1].text) {
 				return zonedTypedVeto
 			}
+			if !strictTyped(t.text, in[j+1].text) {
+				return looseTypedVeto
+			}
 			toks = append(toks, rtToken{rtTyped, t.text})
 			j++
 			continue
@@ -1104,6 +1112,9 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 		if t.kind == rtString && j+2 < len(in) && in[j+1].kind == rtOp && in[j+1].text == "::" && in[j+2].kind == rtWord && typedLiterals[in[j+2].text] {
 			if zonedTyped(in[j+2].text, t.text) {
 				return zonedTypedVeto
+			}
+			if !strictTyped(in[j+2].text, t.text) {
+				return looseTypedVeto
 			}
 			t = rtToken{rtTyped, in[j+2].text}
 		}
@@ -1377,6 +1388,25 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 	zonedAgainst := func(col, lit rtToken) bool {
 		return timeCol(col) && lit.kind == rtString && zonedLiteral.MatchString(lit.text)
 	}
+	// looseAgainst: a string compared with a date, timestamp or time column,
+	// which takes the column's type, not written in the form both sides read
+	// alike (strictTyped).
+	looseAgainst := func(col, lit rtToken) bool {
+		if lit.kind != rtString || col.kind != rtWord {
+			return false
+		}
+		ts := types[col.text]
+		if len(ts) == 0 {
+			return false
+		}
+		family := literalFamily(ts[0])
+		for _, ty := range ts {
+			if literalFamily(ty) != family {
+				return false
+			}
+		}
+		return family != "" && !strictTyped(family, lit.text)
+	}
 	// betweenAnd finds the AND of the BETWEEN at i: the first one outside
 	// any parenthesis and any CASE ... END opened after it, since a lower
 	// bound holds no AND of its own outside those. -1 when the statement
@@ -1462,6 +1492,9 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 					if zonedAgainst(prev, next) || zonedAgainst(next, prev) {
 						return zonedCompareVeto
 					}
+					if looseAgainst(prev, qnext) || looseAgainst(qnext, prev) {
+						return looseTypedVeto
+					}
 				}
 				if orderingOps[t.text] {
 					// Two parameters, or a parameter and a string, compare
@@ -1505,12 +1538,27 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 					if zonedAgainst(prev, bound) {
 						return zonedCompareVeto
 					}
+					if looseAgainst(prev, bound) {
+						return looseTypedVeto
+					}
 					untyped := (prev.kind == rtParam || prev.kind == rtString) && (bound.kind == rtParam || bound.kind == rtString)
 					if !typedBy(prev, bound) && (untyped || operandText(prev) && !endsNeverText(i-1) || operandText(bound) && !startsNeverText(b)) {
 						return "text compared with BETWEEN (the source compares it by its collation)"
 					}
 				}
 			case next.kind == rtOp && next.text == "(":
+				if t.text == "in" {
+					// x IN ('...', ...): each string takes x's type.
+					col := prev
+					if col.kind == rtWord && col.text == "not" {
+						col = at(i - 2)
+					}
+					for _, arg := range args(i + 1) {
+						if len(arg) == 1 && looseAgainst(col, arg[0]) {
+							return looseTypedVeto
+						}
+					}
+				}
 				if parenWords[t.text] {
 					break
 				}
@@ -1529,6 +1577,9 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 					// The same literal as DATE '...' and '...'::date.
 					if in[0].kind == rtString && zonedTyped("date", in[0].text) {
 						return zonedTypedVeto
+					}
+					if len(in) == 3 && in[0].kind == rtString && !strictTyped("date", in[0].text) {
+						return looseTypedVeto
 					}
 					break
 				}
@@ -1557,6 +1608,10 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 					if len(a) != 2 || len(a[0]) != 1 || a[0][0].kind != rtString || !dateFields[strings.ToLower(a[0][0].text)] ||
 						len(a[1]) != 1 || a[1][0].kind != rtWord || !untyped && !all(a[1][0].text, func(ty string) bool { return ty == "TIMESTAMP" }) {
 						return "date_trunc() other than of year, month or day of a timestamp column"
+					}
+				case "substring":
+					if !substringOK(a) {
+						return substringVeto
 					}
 				case "concat":
 					for _, arg := range a {
