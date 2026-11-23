@@ -113,7 +113,7 @@ type pgRouterServerNumbers struct {
 
 // Why the copy's last answer has no age.
 const (
-	pgAgeSnapshotAlone = "the last answer read a table without its newest captured changes (fast mode, a table with none, a statement on the change log, an earlier copy, or a wait for them that ran out), and a snapshot file it read does not record how far it reaches (a full read taken before that was recorded, a file published over a loss of captured changes, a copy that is not in a local folder): it is as old as the snapshot it read"
+	pgAgeSnapshotAlone = "the last answer read a table without its newest captured changes (fast mode, a table with none, a statement on the change log, an earlier copy, or a wait for them that ran out), and a snapshot file it read does not record how far it reaches (a full read taken before that was recorded, a table capture lost or dropped changes of, a copy that is not in a local folder): it is as old as the snapshot it read"
 	pgAgeUnplaced      = "which snapshot files the last answer read could not be told"
 )
 

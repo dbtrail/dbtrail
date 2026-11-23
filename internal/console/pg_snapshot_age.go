@@ -46,11 +46,11 @@ import (
 //
 // A file that records no bound (a full read from before it was recorded),
 // one that is not a file of a local snapshot folder, one published over a
-// known loss of captured changes, and one whose table delta cannot be read
-// have no age: unknown, as before.
+// known loss of captured changes, and one of a table capture dropped changes
+// of since its rows were read (an update can have stamped it with a new
+// bound over them) have no age: unknown, as before.
 
-// pgFileThrough is the instant the file (or the last pair of a table delta)
-// whose footer is md holds every change committed before, in the snapshot
+// pgFileThrough is the instant the file whose footer is md holds every change committed before, in the snapshot
 // folder taken at dirAt, or why it has none.
 func pgFileThrough(md baseline.DumpMetadata, dirAt time.Time) (time.Time, string) {
 	switch {
@@ -73,12 +73,11 @@ func pgFileThrough(md baseline.DumpMetadata, dirAt time.Time) (time.Time, string
 }
 
 // pgTableThroughOf is the instant a table holds every change committed
-// before, as a statement reads it from the snapshot folder taken at dirAt:
-// from its file's footer, or from the footer of the last pair of the table
-// delta beside it (#2757; nil for none), which holds every change up to its
-// own cut and records the bound that goes with it. Both bounds are true of
-// what the statement reads, so the newer one is the answer.
-func pgTableThroughOf(file baseline.DumpMetadata, pair *baseline.DumpMetadata, dirAt time.Time) (time.Time, string) {
+// before, as a statement reads it from the snapshot folder taken at dirAt,
+// from its file's footer. A table delta beside the file (#2757) only adds
+// changes to what the file holds, so the file's bound is true of the two
+// together, and it is the one used: older than the delta's own, never newer.
+func pgTableThroughOf(file baseline.DumpMetadata, dirAt time.Time) (time.Time, string) {
 	if baseline.ReadConsistencyOf(file) != baseline.ReadConsistent {
 		return time.Time{}, "its file does not say it was read at one moment of the source"
 	}
@@ -86,24 +85,19 @@ func pgTableThroughOf(file baseline.DumpMetadata, pair *baseline.DumpMetadata, d
 	if why != "" {
 		return time.Time{}, "its file " + why
 	}
-	if pair == nil {
-		return through, ""
-	}
-	pairThrough, why := pgFileThrough(*pair, dirAt)
-	switch {
-	case why != "":
-		return time.Time{}, "the table delta beside its file " + why
-	case pair.LSN < file.LSN:
-		return time.Time{}, "the table delta beside its file ends before the file was written"
-	case pairThrough.After(through):
-		return pairThrough, ""
-	}
 	return through, ""
 }
 
-// pgTableThrough is pgTableThroughOf for the table t, its footers read. The
-// detail of a refusal names the table, for the log.
-func (s *Server) pgTableThrough(t views.BaselineTable) (time.Time, string) {
+// pgLossOf says why a table's file cannot be trusted to hold what its footer
+// says, "" when it can: capture dropped changes of the table, or lost
+// events, since its rows were read from the source (pgTailCaptureLoss, the
+// rule a tail refuses by). An update can lay the changes the index has over
+// such a file and stamp it with a new bound, and no footer says so.
+type pgLossOf func(t views.BaselineTable, md baseline.DumpMetadata) string
+
+// pgTableThrough is pgTableThroughOf for the table t, its footer read and
+// asked of loss. The detail of a refusal names the table, for the log.
+func (s *Server) pgTableThrough(t views.BaselineTable, loss pgLossOf) (time.Time, string) {
 	name := t.Schema + "." + t.Table
 	if t.Delta || len(t.DeltaFiles) > 0 {
 		return time.Time{}, name + ": a MySQL table delta is beside its file"
@@ -120,31 +114,22 @@ func (s *Server) pgTableThrough(t views.BaselineTable) (time.Time, string) {
 	if err != nil {
 		return time.Time{}, fmt.Sprintf("%s: its file could not be read: %v", name, err)
 	}
-	var pair *baseline.DumpMetadata
-	rows, err := reconstruct.PGCutLastPair(t.Path)
-	if err != nil {
-		return time.Time{}, fmt.Sprintf("%s: the table delta beside its file is not whole: %v", name, err)
-	}
-	if rows != "" {
-		pmd, err := s.copyCuts.footer(rows)
-		if err != nil {
-			return time.Time{}, fmt.Sprintf("%s: the table delta beside its file could not be read: %v", name, err)
-		}
-		pair = &pmd
-	}
-	through, why := pgTableThroughOf(md, pair, dirAt)
+	through, why := pgTableThroughOf(md, dirAt)
 	if why != "" {
+		return time.Time{}, name + ": " + why
+	}
+	if why := loss(t, md); why != "" {
 		return time.Time{}, name + ": " + why
 	}
 	return through, ""
 }
 
-// pgReadThrough is the oldest pgTableThrough of the tables a statement read,
-// or why one of them has none.
-func (s *Server) pgReadThrough(read []views.BaselineTable) (time.Time, string) {
+// pgReadThroughWith is the oldest pgTableThrough of the tables a statement
+// read, or why one of them has none.
+func (s *Server) pgReadThroughWith(read []views.BaselineTable, loss pgLossOf) (time.Time, string) {
 	var oldest time.Time
 	for _, t := range read {
-		at, why := s.pgTableThrough(t)
+		at, why := s.pgTableThrough(t, loss)
 		if why != "" {
 			return time.Time{}, why
 		}
@@ -156,6 +141,32 @@ func (s *Server) pgReadThrough(read []views.BaselineTable) (time.Time, string) {
 		return time.Time{}, "the statement read no table of the copy"
 	}
 	return oldest, ""
+}
+
+// pgReadThrough is pgReadThroughWith over capture's record of what it lost,
+// read from b's index now (strictly, pgCaptureLossState): an index that
+// cannot be asked leaves the statement with no instant. A capture that has
+// saved no state yet records no loss.
+func (s *Server) pgReadThrough(ctx context.Context, b *bundle, read []views.BaselineTable) (time.Time, string) {
+	if len(read) == 0 {
+		return time.Time{}, "the statement read no table of the copy"
+	}
+	if b == nil || b.db == nil {
+		return time.Time{}, "the server's index, which records what capture lost, could not be reached"
+	}
+	rctx, cancel := context.WithTimeout(ctx, copyUnchangedTimeout)
+	st, unreadable := pgCaptureLossState(rctx, b.db)
+	cancel()
+	if unreadable != "" {
+		return time.Time{}, unreadable
+	}
+	return s.pgReadThroughWith(read, func(t views.BaselineTable, md baseline.DumpMetadata) string {
+		if st == nil {
+			return ""
+		}
+		lsn, at := reconstruct.PGReadPoint(md)
+		return pgTailCaptureLoss(st, lsn, at, t.Schema, t.Table)
+	})
 }
 
 // statementBehindFor is statementBehind for server id's family. A MySQL
@@ -175,13 +186,18 @@ func (s *Server) statementBehindFor(ctx context.Context, b *bundle, id string, i
 	if allTailed || b == nil || !s.SourceIsPostgres(id) {
 		return s.statementBehind(ctx, b, id, in, read, tailThrough, tailThroughID, allTailed)
 	}
-	cut, why := s.pgReadThrough(read)
+	cut, why := s.pgReadThrough(ctx, b, read)
 	if why != "" {
 		if ctx.Err() == nil {
 			s.copyAges.faults.warn(id, "Engine Routing: how far the copy's snapshot reaches is not known, so statements held to the server's lag limit are answered by the source (or refused on a connection that does not route)",
 				"server", id, "reason", why)
 		}
 		return 0, copyAgeWhyNotPlaced
+	}
+	// Kept for the caller that asked how far the statement's files reach,
+	// so the index is not asked twice for one statement.
+	if into, _ := ctx.Value(pgSnapshotAgeKey{}).(*PGSnapshotAge); into != nil {
+		into.set(cut)
 	}
 	return copyAgeOf(time.Now(), olderOf(cut, tailThrough)), ""
 }
@@ -211,6 +227,18 @@ type PGSnapshotAge struct {
 	through time.Time
 }
 
+func (p *PGSnapshotAge) set(through time.Time) {
+	p.mu.Lock()
+	p.through = through
+	p.mu.Unlock()
+}
+
+func (p *PGSnapshotAge) get() time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.through
+}
+
 type pgSnapshotAgeKey struct{}
 
 // WithPGSnapshotAge is ctx for a run on the copy of a PostgreSQL server whose
@@ -225,19 +253,16 @@ func WithPGSnapshotAge(ctx context.Context, into *PGSnapshotAge) context.Context
 }
 
 // notePGSnapshotThrough fills the PGSnapshotAge ctx carries, when it carries
-// one, with pgReadThrough of the tables the statement read.
-func (s *Server) notePGSnapshotThrough(ctx context.Context, read []views.BaselineTable) {
+// one that the lag limit's own measure did not fill already, with
+// pgReadThrough of the tables the statement read.
+func (s *Server) notePGSnapshotThrough(ctx context.Context, b *bundle, read []views.BaselineTable) {
 	into, _ := ctx.Value(pgSnapshotAgeKey{}).(*PGSnapshotAge)
-	if into == nil || len(read) == 0 {
+	if into == nil || len(read) == 0 || !into.get().IsZero() {
 		return
 	}
-	through, why := s.pgReadThrough(read)
-	if why != "" {
-		return
+	if through, why := s.pgReadThrough(ctx, b, read); why == "" {
+		into.set(through)
 	}
-	into.mu.Lock()
-	into.through = through
-	into.mu.Unlock()
 }
 
 // Place is a with the instant its snapshot files reach, when the run read a
@@ -250,9 +275,7 @@ func (p *PGSnapshotAge) Place(a CopyRunAge) CopyRunAge {
 	if p == nil || !a.Snapshot {
 		return a
 	}
-	p.mu.Lock()
-	through := p.through
-	p.mu.Unlock()
+	through := p.get()
 	if through.IsZero() {
 		return a
 	}

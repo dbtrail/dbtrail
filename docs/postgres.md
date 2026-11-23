@@ -1230,8 +1230,9 @@ listener, its own workers, its own memory.
   A file that does not record the instant has no age and its statements go
   to the source under any limit (`copy_age_unknown`): a full read taken by
   a version before 0.137.0 that no snapshot update has written again since,
-  a table published over a known loss of captured changes, a copy that is
-  not in a local folder. The next snapshot update or full read of the table
+  a table capture lost or dropped changes of since its rows were read, a
+  copy that is not in a local folder, an index that cannot be asked what
+  capture lost. The next snapshot update or full read of the table
   records it. In fast mode, pick a limit above the time between
   snapshot updates plus a minute, or the copy answers only right after each
   update.

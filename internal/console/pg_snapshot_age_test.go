@@ -2,12 +2,15 @@ package console
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/snapshotdir"
@@ -24,8 +27,7 @@ func pgAgeFooter(lsn uint64, since string) baseline.DumpMetadata {
 }
 
 // How far one table's snapshot reaches (#3125): the bound its file records,
-// or its table delta's when that is newer, and nothing when a footer does not
-// say. Never the folder's time, and never newer than it.
+// and nothing when the footer does not say. Never the folder's time, and never newer than it.
 func TestPGTableThroughOf(t *testing.T) {
 	at := func(s string) time.Time {
 		v, err := time.Parse(time.RFC3339, s)
@@ -34,7 +36,6 @@ func TestPGTableThroughOf(t *testing.T) {
 		}
 		return v
 	}
-	pair := func(md baseline.DumpMetadata) *baseline.DumpMetadata { return &md }
 	with := func(md baseline.DumpMetadata, change func(*baseline.DumpMetadata)) baseline.DumpMetadata {
 		change(&md)
 		return md
@@ -43,30 +44,24 @@ func TestPGTableThroughOf(t *testing.T) {
 	cases := []struct {
 		name string
 		file baseline.DumpMetadata
-		pair *baseline.DumpMetadata
 		want string // RFC 3339, or a part of the reason for none
 	}{
-		{"a full read: a minute before it began", file, nil, "2026-11-20T11:59:00Z"},
-		{"an update's file", pgAgeFooter(250, "2026-11-20T11:58:30Z"), nil, "2026-11-20T11:58:30Z"},
+		{"a full read: a minute before it began", file, "2026-11-20T11:59:00Z"},
+		{"an update's file", pgAgeFooter(250, "2026-11-20T11:58:30Z"), "2026-11-20T11:58:30Z"},
 		// A table with no change is published again as the file it was: it
 		// is as old as the update that wrote it, not as the folder.
-		{"a file carried from a snapshot three days older", pgAgeFooter(40, "2026-11-17T09:00:00Z"), nil, "2026-11-17T09:00:00Z"},
+		{"a file carried from a snapshot three days older", pgAgeFooter(40, "2026-11-17T09:00:00Z"), "2026-11-17T09:00:00Z"},
 		// PGDeltaWindow never lets a bound pass the folder's time.
-		{"a bound after its folder's time is the folder's time", pgAgeFooter(100, "2026-11-20T12:30:00Z"), nil, "2026-11-20T12:00:00Z"},
-		{"a snapshot from before the bound was recorded", pgAgeFooter(100, ""), nil, "records no bound"},
-		{"a bound that cannot be read", pgAgeFooter(100, "yesterday"), nil, "cannot be read"},
-		{"no floor", pgAgeFooter(0, "2026-11-20T11:59:00Z"), nil, "no LSN"},
-		{"a MySQL file", with(file, func(md *baseline.DumpMetadata) { md.BinlogFile, md.BinlogPos = "binlog.000003", 4 }), nil, "no LSN"},
-		{"published over a loss of captured changes", with(file, func(md *baseline.DumpMetadata) { md.CaptureGap = "lost slot" }), nil, "known loss"},
-		{"no stamp of how it was read", with(file, func(md *baseline.DumpMetadata) { md.LockMode = "" }), nil, "one moment"},
-		{"a table delta newer than its file", file, pair(baseline.DumpMetadata{LSN: 300, PGDeltaSince: "2026-11-20T11:59:40Z"}), "2026-11-20T11:59:40Z"},
-		{"a table delta whose bound is older than its file's", file, pair(baseline.DumpMetadata{LSN: 300, PGDeltaSince: "2026-11-20T11:00:00Z"}), "2026-11-20T11:59:00Z"},
-		{"a table delta that records no bound", file, pair(baseline.DumpMetadata{LSN: 300}), "table delta beside its file records no bound"},
-		{"a table delta that ends before its file", file, pair(baseline.DumpMetadata{LSN: 99, PGDeltaSince: "2026-11-20T11:59:40Z"}), "ends before"},
-		{"a table delta published over a loss", file, pair(baseline.DumpMetadata{LSN: 300, PGDeltaSince: "2026-11-20T11:59:40Z", CaptureGap: "lost slot"}), "known loss"},
+		{"a bound after its folder's time is the folder's time", pgAgeFooter(100, "2026-11-20T12:30:00Z"), "2026-11-20T12:00:00Z"},
+		{"a snapshot from before the bound was recorded", pgAgeFooter(100, ""), "records no bound"},
+		{"a bound that cannot be read", pgAgeFooter(100, "yesterday"), "cannot be read"},
+		{"no floor", pgAgeFooter(0, "2026-11-20T11:59:00Z"), "no LSN"},
+		{"a MySQL file", with(file, func(md *baseline.DumpMetadata) { md.BinlogFile, md.BinlogPos = "binlog.000003", 4 }), "no LSN"},
+		{"published over a loss of captured changes", with(file, func(md *baseline.DumpMetadata) { md.CaptureGap = "lost slot" }), "known loss"},
+		{"no stamp of how it was read", with(file, func(md *baseline.DumpMetadata) { md.LockMode = "" }), "one moment"},
 	}
 	for _, c := range cases {
-		got, why := pgTableThroughOf(c.file, c.pair, pgAgeDir)
+		got, why := pgTableThroughOf(c.file, pgAgeDir)
 		if why != "" {
 			if !got.IsZero() || !strings.Contains(why, c.want) {
 				t.Errorf("%s: no instant (%v) because %q, want %q", c.name, got, why, c.want)
@@ -85,8 +80,11 @@ func TestPGTableThroughOf(t *testing.T) {
 func pgAgeTable(t *testing.T, root string, dirAt time.Time, table string, lsn uint64, since string) views.BaselineTable {
 	t.Helper()
 	md := map[string]string{
-		baseline.MetaKeyLSN:      strconv.FormatUint(lsn, 10),
-		baseline.MetaKeyLockMode: baseline.LockStampPGRepeatableRead,
+		baseline.MetaKeyLSN:              strconv.FormatUint(lsn, 10),
+		baseline.MetaKeyLockMode:         baseline.LockStampPGRepeatableRead,
+		baseline.MetaKeySnapshotProducer: baseline.ProducerDump,
+		baseline.MetaKeyLastDumpAt:       "2026-11-17T08:00:00Z",
+		baseline.MetaKeyFoldGeneration:   "0",
 	}
 	if since != "" {
 		md[baseline.MetaKeyPGDeltaSince] = since
@@ -118,7 +116,7 @@ func TestPGReadThrough(t *testing.T) {
 
 	through := func(read ...views.BaselineTable) string {
 		t.Helper()
-		got, why := s.pgReadThrough(read)
+		got, why := s.pgReadThroughWith(read, func(views.BaselineTable, baseline.DumpMetadata) string { return "" })
 		if why != "" {
 			if !got.IsZero() {
 				t.Fatalf("an instant (%v) with a reason (%s)", got, why)
@@ -141,6 +139,25 @@ func TestPGReadThrough(t *testing.T) {
 	}
 	if got := through(); !strings.HasPrefix(got, "unknown: ") {
 		t.Errorf("no table read: %s", got)
+	}
+	// Capture dropped changes of a table since its rows were read: an update
+	// can have stamped its file with a new bound over them, so the file's
+	// word is not taken, for that table and for no other.
+	dropped := func(t views.BaselineTable, md baseline.DumpMetadata) string {
+		if t.Table == "orders" && md.LSN == 250 {
+			return "capture dropped its changes"
+		}
+		return ""
+	}
+	if got, why := s.pgReadThroughWith([]views.BaselineTable{carried, written}, dropped); why != "public.orders: capture dropped its changes" || !got.IsZero() {
+		t.Errorf("a table capture dropped changes of: %v %q, want no instant", got, why)
+	}
+	if got, why := s.pgReadThroughWith([]views.BaselineTable{carried}, dropped); why != "" || got.IsZero() {
+		t.Errorf("another table of the same server: %v %q, want its instant", got, why)
+	}
+	// With no index to ask what capture lost, nothing is said.
+	if got, why := s.pgReadThrough(context.Background(), &bundle{pgSource: true}, []views.BaselineTable{written}); why == "" || !got.IsZero() {
+		t.Errorf("no index: %v %q, want no instant", got, why)
 	}
 	// Not a table file in a local snapshot folder: nothing is guessed.
 	for name, tbl := range map[string]views.BaselineTable{
@@ -168,13 +185,24 @@ func TestStatementBehindForPostgresSnapshot(t *testing.T) {
 	carried := pgAgeTable(t, root, dirAt, "countries", 40, rfc(-72*time.Hour))
 	old := pgAgeTable(t, root, dirAt, "legacy", 40, "")
 
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.MatchExpectationsInOrder(true)
 	srv := newRegistryServer(t)
-	pg := &bundle{pgSource: true}
+	pg := &bundle{pgSource: true, db: db}
 	srv.cm.mu.Lock()
 	srv.cm.boot = pg
 	srv.cm.mu.Unlock()
 	ctx := context.Background()
 	behind := func(tail time.Time, allTailed bool, read ...views.BaselineTable) (time.Duration, string) {
+		if !allTailed {
+			// What capture lost is asked of the index for each statement.
+			expectStreamState(mock, nil)
+			mock.ExpectQuery("SELECT capture_skips FROM").WillReturnRows(sqlmock.NewRows([]string{"capture_skips"}).AddRow(nil))
+		}
 		return srv.statementBehindFor(ctx, pg, bootServerID, views.Input{Baselines: read}, read, tail, 0, allTailed)
 	}
 	near := func(got, want time.Duration) bool { return got >= want && got < want+time.Minute }
@@ -196,10 +224,32 @@ func TestStatementBehindForPostgresSnapshot(t *testing.T) {
 	if got, why := behind(now.Add(-time.Second), false, recent); why != "" || !near(got, 11*time.Minute) {
 		t.Errorf("a tail a second old beside the snapshot: %v %q, want the snapshot's eleven minutes", got, why)
 	}
+	// The ledger of dropped changes cannot be read: unknown, never an age.
+	expectStreamState(mock, nil)
+	mock.ExpectQuery("SELECT capture_skips FROM").WillReturnError(errors.New("connection refused"))
+	if got, why := srv.statementBehindFor(ctx, pg, bootServerID, views.Input{}, []views.BaselineTable{recent}, time.Time{}, 0, false); why != copyAgeWhyNotPlaced || got != 0 {
+		t.Errorf("the record of dropped changes unreadable: %v %q, want unknown", got, why)
+	}
 	// Every table with its tail: the path fresh mode already took, which
 	// reads capture's state from the index (there is none here).
-	if _, why := behind(now.Add(-time.Second), true, recent); why != copyAgeWhyNoIndex {
+	if _, why := srv.statementBehindFor(ctx, &bundle{pgSource: true}, bootServerID, views.Input{}, []views.BaselineTable{recent}, now.Add(-time.Second), 0, true); why != copyAgeWhyNoIndex {
 		t.Errorf("every table tailed: %q, want the tails' own path", why)
+	}
+	// The measure is kept for a caller that asked for the instant, so the
+	// index is asked once for the statement.
+	var kept PGSnapshotAge
+	expectStreamState(mock, nil)
+	mock.ExpectQuery("SELECT capture_skips FROM").WillReturnRows(sqlmock.NewRows([]string{"capture_skips"}).AddRow(nil))
+	kctx := WithPGSnapshotAge(ctx, &kept)
+	if _, why := srv.statementBehindFor(kctx, pg, bootServerID, views.Input{}, []views.BaselineTable{recent}, time.Time{}, 0, false); why != "" {
+		t.Fatalf("with a holder: %q", why)
+	}
+	srv.notePGSnapshotThrough(kctx, pg, []views.BaselineTable{recent}) // no query expected
+	if kept.get().IsZero() {
+		t.Error("the instant the limit measured by was not kept")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
 	}
 	// The port's own listing of the copy's columns is not held to the limit,
 	// whatever the files say.
@@ -225,10 +275,21 @@ func TestPGSnapshotAgePlace(t *testing.T) {
 	want := time.Date(2026, 11, 20, 11, 58, 30, 0, time.UTC)
 	ran := pgAgeDir.Add(time.Hour)
 	s := &Server{}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	pg := &bundle{pgSource: true, db: db}
+	asked := func() {
+		expectStreamState(mock, nil)
+		mock.ExpectQuery("SELECT capture_skips FROM").WillReturnRows(sqlmock.NewRows([]string{"capture_skips"}).AddRow(nil))
+	}
 
 	var got PGSnapshotAge
 	ctx := WithPGSnapshotAge(context.Background(), &got)
-	s.notePGSnapshotThrough(ctx, []views.BaselineTable{written})
+	asked()
+	s.notePGSnapshotThrough(ctx, pg, []views.BaselineTable{written})
 	if a := got.Place(CopyRunAge{Ran: ran, Snapshot: true}); !a.Through.Equal(want) || !a.Snapshot || a.Tailed {
 		t.Errorf("a snapshot answer: %+v, want through %s", a, want)
 	}
@@ -243,17 +304,21 @@ func TestPGSnapshotAgePlace(t *testing.T) {
 	}
 
 	var none PGSnapshotAge
-	s.notePGSnapshotThrough(WithPGSnapshotAge(context.Background(), &none), []views.BaselineTable{written, old})
+	asked()
+	s.notePGSnapshotThrough(WithPGSnapshotAge(context.Background(), &none), pg, []views.BaselineTable{written, old})
 	if a := none.Place(CopyRunAge{Ran: ran, Snapshot: true}); !a.Through.IsZero() {
 		t.Errorf("a file with no bound, and the answer has an instant: %+v", a)
 	}
-	s.notePGSnapshotThrough(WithPGSnapshotAge(context.Background(), &none), nil)
+	s.notePGSnapshotThrough(WithPGSnapshotAge(context.Background(), &none), pg, nil)
 	if a := none.Place(CopyRunAge{Ran: ran, Snapshot: true}); !a.Through.IsZero() {
 		t.Errorf("no table read, and the answer has an instant: %+v", a)
 	}
 	// No holder in the context (the MySQL port, the web interface): nothing
 	// is read and nothing breaks.
-	s.notePGSnapshotThrough(context.Background(), []views.BaselineTable{written})
+	s.notePGSnapshotThrough(context.Background(), pg, []views.BaselineTable{written})
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
 	if a := (*PGSnapshotAge)(nil).Place(CopyRunAge{Ran: ran, Snapshot: true}); !a.Through.IsZero() {
 		t.Errorf("a nil holder placed an answer: %+v", a)
 	}

@@ -1618,7 +1618,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 		observe.ObserveSQLStatementPhase(phase, d)
 	}
 	readFrom, readFromOK := copyReadFrom(in, readTables)
-	s.notePGSnapshotThrough(ctx, readTables)
+	s.notePGSnapshotThrough(ctx, b, readTables)
 	res.DateScales = dateScales
 	return sqlOutcome{Result: res, CopyUpdatedAt: copyUpdatedAt, Phases: parent,
 		ReadFrom: readFrom, ReadFromOK: readFromOK, TailThrough: tailThrough, TailThroughID: tailThroughID, AllTailed: allTailed,
