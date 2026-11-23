@@ -2,6 +2,8 @@ package pgshim
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/dbtrail/dbtrail/internal/shim"
 )
@@ -363,34 +366,62 @@ func TestPreLogin_aProvedConnectionKeepsItsPlace(t *testing.T) {
 	}
 }
 
+// tenantLogin logs alice in on a port in the first mode (bintrail-pg
+// flashback) and returns her connection, or the SQLSTATE she was refused
+// with.
+func tenantLogin(t *testing.T, addr string) (*pgconn.PgConn, string) {
+	t.Helper()
+	host, port, _ := net.SplitHostPort(addr)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c, err := pgconn.Connect(ctx, fmt.Sprintf("host=%s port=%s user=alice password=alice-pw dbname=public sslmode=disable", host, port))
+	if err == nil {
+		t.Cleanup(func() { _ = c.Close(context.Background()) })
+		return c, ""
+	}
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) {
+		return nil, pe.Code
+	}
+	return nil, err.Error()
+}
+
+func aliceAuth(t *testing.T) shim.TenantAuth {
+	t.Helper()
+	auth, err := shim.NewTenantAuth(map[string]string{"alice": "alice-pw"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return auth
+}
+
+// placeGivenBack waits for the port's one place to be free again: a tenant
+// gets in. The grace is an hour in these tests, so nobody is put out to let
+// her in.
+func placeGivenBack(t *testing.T, addr, after string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		_, code := tenantLogin(t, addr)
+		if code == "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after %s, the place was not given back: a newcomer still gets %q", after, code)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // The first mode (bintrail-pg flashback) keeps the same places: a silent
 // connection loses its own to a newcomer, and a tenant that logged in does
 // not.
 func TestPreLogin_firstMode(t *testing.T) {
 	shortGrace(t, 20*time.Millisecond)
-	auth, err := shim.NewTenantAuth(map[string]string{"alice": "alice-pw"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := serveAddrCfg(t, Config{Auth: auth, MaxConns: 1})
-	host, port, _ := net.SplitHostPort(addr)
-	login := func() (*pgconn.PgConn, string) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		c, err := pgconn.Connect(ctx, fmt.Sprintf("host=%s port=%s user=alice password=alice-pw dbname=public sslmode=disable", host, port))
-		if err == nil {
-			t.Cleanup(func() { _ = c.Close(context.Background()) })
-			return c, ""
-		}
-		var pe *pgconn.PgError
-		if errors.As(err, &pe) {
-			return nil, pe.Code
-		}
-		return nil, err.Error()
-	}
+	addr := serveAddrCfg(t, Config{Auth: aliceAuth(t), MaxConns: 1})
 	quiet := silent(t, addr)
 	time.Sleep(100 * time.Millisecond)
-	tenant, code := login()
+	tenant, code := tenantLogin(t, addr)
 	if code != "" {
 		t.Fatalf("a tenant at a port full of a silent connection: %s, want to be let in", code)
 	}
@@ -398,10 +429,128 @@ func TestPreLogin_firstMode(t *testing.T) {
 		t.Error("the silent connection was not closed")
 	}
 	time.Sleep(100 * time.Millisecond)
-	if _, code := login(); code != "53300" {
+	if _, code := tenantLogin(t, addr); code != "53300" {
 		t.Errorf("a newcomer to a port full of a tenant got %q, want 53300", code)
 	}
 	if closedByPort(tenant.Conn(), 100*time.Millisecond) {
 		t.Error("a tenant that had logged in was closed to make room")
 	}
+}
+
+// A client that leaves in the middle of its login, in the first mode: its
+// place is given back.
+func TestPreLogin_firstModeClientLeavesDuringTheLogin(t *testing.T) {
+	shortGrace(t, time.Hour)
+	addr := serveAddrCfg(t, Config{Auth: aliceAuth(t), MaxConns: 1})
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	startup, err := (&pgproto3.StartupMessage{ProtocolVersion: pgproto3.ProtocolVersionNumber,
+		Parameters: map[string]string{"user": "alice", "database": "public"}}).Encode(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Write(startup); err != nil {
+		t.Fatal(err)
+	}
+	// The port's offer of SCRAM: the login is under way.
+	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, err := c.Read(make([]byte, 1)); err != nil {
+		t.Fatalf("no offer of a login: %v", err)
+	}
+	if _, code := tenantLogin(t, addr); code != "53300" {
+		t.Fatalf("with the one place held by a login under way, a newcomer got %q, want 53300", code)
+	}
+	_ = c.Close()
+	placeGivenBack(t, addr, "a client left during its login")
+}
+
+// hangingIndex is an index server whose every statement waits for its
+// context to end.
+type hangingIndex struct {
+	entered, cancelled chan struct{}
+	release            chan struct{}
+}
+
+func (d *hangingIndex) Connect(context.Context) (driver.Conn, error) { return hangingConn{d}, nil }
+func (d *hangingIndex) Driver() driver.Driver                        { return d }
+func (d *hangingIndex) Open(string) (driver.Conn, error)             { return hangingConn{d}, nil }
+
+type hangingConn struct{ d *hangingIndex }
+
+func (c hangingConn) Prepare(string) (driver.Stmt, error) { return nil, errors.New("not used") }
+func (c hangingConn) Close() error                        { return nil }
+func (c hangingConn) Begin() (driver.Tx, error)           { return nil, errors.New("not used") }
+func (c hangingConn) Ping(context.Context) error          { return nil }
+
+func (c hangingConn) wait(ctx context.Context) error {
+	select {
+	case c.d.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		select {
+		case c.d.cancelled <- struct{}{}:
+		default:
+		}
+		return ctx.Err()
+	case <-c.d.release:
+		return errors.New("the test ended")
+	}
+}
+
+func (c hangingConn) QueryContext(ctx context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
+	return nil, c.wait(ctx)
+}
+
+func (c hangingConn) ExecContext(ctx context.Context, _ string, _ []driver.NamedValue) (driver.Result, error) {
+	return nil, c.wait(ctx)
+}
+
+func (c hangingConn) BeginTx(ctx context.Context, _ driver.TxOptions) (driver.Tx, error) {
+	return nil, c.wait(ctx)
+}
+
+// A client that hangs up in the middle of a statement, in the first mode:
+// the socket is watched while the statement runs (shim.WatchConn), so the
+// connection's context ends, the statement stops on the index server, and
+// the place is given back. Without the watch the connection would hold its
+// place until the statement ended on its own.
+func TestPreLogin_firstModeClientHangsUpDuringAStatement(t *testing.T) {
+	shortGrace(t, time.Hour)
+	idx := &hangingIndex{entered: make(chan struct{}, 1), cancelled: make(chan struct{}, 1), release: make(chan struct{})}
+	db := sql.OpenDB(idx)
+	t.Cleanup(func() { _ = db.Close() })
+	addr := serveAddrCfg(t, Config{Auth: aliceAuth(t), MaxConns: 1, IndexDB: db,
+		ShimConfig: shim.Config{NoArchive: true, IndexDBName: "idx"}})
+	// Registered after the port, so it runs before the port is stopped: no
+	// statement is left waiting.
+	t.Cleanup(func() { close(idx.release) })
+
+	c, code := tenantLogin(t, addr)
+	if code != "" {
+		t.Fatalf("the tenant: %s", code)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = c.Exec(context.Background(), "SELECT * FROM _flashback.users AS OF '2026-01-01 00:00:00' WHERE id = 1").ReadAll()
+	}()
+	select {
+	case <-idx.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the statement did not reach the index server")
+	}
+	// The client is gone, with its statement still running.
+	_ = c.Conn().Close()
+	select {
+	case <-idx.cancelled:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the client hung up and its connection's context did not end: the statement is still running")
+	}
+	<-done
+	placeGivenBack(t, addr, "a client hung up during its statement")
 }
