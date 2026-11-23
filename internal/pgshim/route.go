@@ -64,6 +64,7 @@ const (
 	ReasonExplainFailed     = "explain_failed"      // the source's plan could not be had: EXPLAIN did not run, or was not asked
 	ReasonCopyTooOld        = "copy_too_old"        // the copy's answer was older than one the source already gave this connection
 	ReasonTableNotCaptured  = "table_not_captured"  // it reads a table whose capture lost or dropped changes since its snapshot (not_captured.go)
+	ReasonResultOverRowCap  = "result_over_row_cap" // an expensive plan whose result is estimated over the copy's row cap: not tried on the copy (route_cost.go)
 
 	// Nobody ran it.
 	ReasonReadOnly        = "read_only"         // not a read, and the port is read-only toward the source
@@ -308,7 +309,8 @@ func (s *session) copyFallback(err error, perr *pgErr) string {
 		return busyReason(err)
 	case errors.Is(err, sqlsandbox.ErrResultTooLarge):
 		// Refused for its size, as before: the source would send it whole,
-		// past every cap the port keeps.
+		// past every cap the port keeps. A statement whose plan says so
+		// beforehand never gets here: the source answers it (overRowCap).
 		return ""
 	case perr.code == "42P01":
 		return ReasonTableNotOnCopy

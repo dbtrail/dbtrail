@@ -1,0 +1,278 @@
+package pgshim
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+)
+
+// A statement the plan sends to the copy whose result the plan estimates
+// above the copy's row cap is not tried there (#3154): the copy would run
+// it, refuse its result for its size, and the client would get that error.
+// The twins of the MySQL port's TestDecideStatement_limitsAndResultRows_2115
+// and TestResultOverRowCap, with PostgreSQL's plan.
+
+// TestResultEstimate holds the plan's estimate of a statement's result to
+// the one shape it is trusted for: one table read alone with nothing checked
+// row by row, under a LIMIT, a sort or a Gather at most.
+func TestResultEstimate(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		top  string
+		want float64
+	}{
+		// Trusted: every row read is a row of the result.
+		{"a table read whole", `{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}`, 2400000},
+		{"an index read by range", `{"Node Type": "Index Scan", "Total Cost": 60000, "Plan Rows": 246857, "Index Cond": "(placed_at >= '2026-01-01')"}`, 246857},
+		{"an index alone read by range", `{"Node Type": "Index Only Scan", "Total Cost": 60000, "Plan Rows": 30000, "Index Cond": "(id > 5)"}`, 30000},
+		{"a bitmap read of a range", `{"Node Type": "Bitmap Heap Scan", "Total Cost": 70000, "Plan Rows": 30000, "Recheck Cond": "(w_id = 5)", "Plans": [
+			{"Node Type": "Bitmap Index Scan", "Total Cost": 300, "Plan Rows": 30000, "Index Cond": "(w_id = 5)"}]}`, 30000},
+		// A LIMIT has cut the top node's rows, whatever is behind it.
+		{"a LIMIT over a table read whole", `{"Node Type": "Limit", "Total Cost": 90000, "Plan Rows": 500, "Plans": [
+			{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}`, 500},
+		{"a LIMIT above the cap", `{"Node Type": "Limit", "Total Cost": 90000, "Plan Rows": 50000, "Plans": [
+			{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}`, 50000},
+		{"a sort of a table read whole", `{"Node Type": "Sort", "Total Cost": 400000, "Plan Rows": 2400000, "Plans": [
+			{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}`, 2400000},
+		{"a LIMIT over a sort", `{"Node Type": "Limit", "Total Cost": 400000, "Plan Rows": 20, "Plans": [
+			{"Node Type": "Incremental Sort", "Total Cost": 400000, "Plan Rows": 2400000, "Plans": [
+				{"Node Type": "Index Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}]}`, 20},
+		// The Gather counts every process; the scan under it one of them.
+		{"a parallel read of a table", `{"Node Type": "Gather", "Total Cost": 90000, "Plan Rows": 1500000, "Workers Planned": 2, "Plans": [
+			{"Node Type": "Seq Scan", "Parallel Aware": true, "Total Cost": 23296, "Plan Rows": 625000}]}`, 1500000},
+		{"a parallel read, sorted", `{"Node Type": "Gather Merge", "Total Cost": 90000, "Plan Rows": 1500000, "Workers Planned": 2, "Plans": [
+			{"Node Type": "Sort", "Total Cost": 80000, "Plan Rows": 625000, "Plans": [
+				{"Node Type": "Seq Scan", "Parallel Aware": true, "Total Cost": 23296, "Plan Rows": 625000}]}]}`, 1500000},
+
+		// Not trusted: a filter checked row by row is a guess (221,203 rows
+		// estimated, 1 returned, on the MySQL port's measured b05).
+		{"a table read with a filter", `{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 221203, "Filter": "(note = 'rare')"}`, 0},
+		{"an index range with a filter left over", `{"Node Type": "Index Scan", "Total Cost": 60000, "Plan Rows": 246857, "Index Cond": "(placed_at >= '2026-01-01')", "Filter": "(qty > 5)"}`, 0},
+		{"a bitmap read with a filter", `{"Node Type": "Bitmap Heap Scan", "Total Cost": 70000, "Plan Rows": 30000, "Recheck Cond": "(w_id = 5)", "Filter": "(qty > 5)", "Plans": [
+			{"Node Type": "Bitmap Index Scan", "Total Cost": 300, "Plan Rows": 30000}]}`, 0},
+		{"a LIMIT over a filtered read", `{"Node Type": "Limit", "Total Cost": 90000, "Plan Rows": 50000, "Plans": [
+			{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 221203, "Filter": "(note = 'rare')"}]}`, 0},
+		{"a parallel read with a filter", `{"Node Type": "Gather", "Total Cost": 90000, "Plan Rows": 221203, "Workers Planned": 2, "Plans": [
+			{"Node Type": "Seq Scan", "Parallel Aware": true, "Total Cost": 23296, "Plan Rows": 92168, "Filter": "(note = 'rare')"}]}`, 0},
+		// Not trusted: what returns something else than the rows it reads.
+		{"an aggregate", `{"Node Type": "Aggregate", "Total Cost": 98367, "Plan Rows": 1, "Plans": [
+			{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}`, 0},
+		{"a GROUP BY", `{"Node Type": "Aggregate", "Strategy": "Hashed", "Total Cost": 98367, "Plan Rows": 200000, "Plans": [
+			{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}`, 0},
+		{"a DISTINCT", `{"Node Type": "Unique", "Total Cost": 98367, "Plan Rows": 200000, "Plans": [
+			{"Node Type": "Sort", "Total Cost": 98000, "Plan Rows": 2400000, "Plans": [
+				{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}]}`, 0},
+		{"a window", `{"Node Type": "WindowAgg", "Total Cost": 98367, "Plan Rows": 2400000, "Plans": [
+			{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}`, 0},
+		{"a join", `{"Node Type": "Hash Join", "Total Cost": 98367, "Plan Rows": 2400000, "Plans": [
+			{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000},
+			{"Node Type": "Hash", "Total Cost": 700, "Plan Rows": 10, "Plans": [{"Node Type": "Seq Scan", "Total Cost": 600, "Plan Rows": 10}]}]}`, 0},
+		{"a LIMIT over a join", `{"Node Type": "Limit", "Total Cost": 98367, "Plan Rows": 50000, "Plans": [
+			{"Node Type": "Nested Loop", "Total Cost": 98367, "Plan Rows": 2400000, "Plans": [
+				{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000},
+				{"Node Type": "Index Scan", "Total Cost": 1, "Plan Rows": 1}]}]}`, 0},
+		{"a UNION ALL or a partitioned table", `{"Node Type": "Append", "Total Cost": 98367, "Plan Rows": 2400000, "Plans": [
+			{"Node Type": "Seq Scan", "Total Cost": 45000, "Plan Rows": 1200000},
+			{"Node Type": "Seq Scan", "Total Cost": 45000, "Plan Rows": 1200000}]}`, 0},
+		{"a subquery read", `{"Node Type": "Subquery Scan", "Total Cost": 98367, "Plan Rows": 2400000, "Plans": [
+			{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}`, 0},
+		{"a WITH read", `{"Node Type": "CTE Scan", "Total Cost": 98367, "Plan Rows": 2400000, "Plans": [
+			{"Node Type": "Seq Scan", "Parent Relationship": "InitPlan", "Total Cost": 90000, "Plan Rows": 2400000}]}`, 0},
+		{"a scan with a subplan of its own", `{"Node Type": "Seq Scan", "Total Cost": 98367, "Plan Rows": 2400000, "Plans": [
+			{"Node Type": "Result", "Parent Relationship": "InitPlan", "Total Cost": 1, "Plan Rows": 1}]}`, 0},
+		{"no table", `{"Node Type": "Result", "Total Cost": 1, "Plan Rows": 1}`, 0},
+		{"a function in FROM", `{"Node Type": "Function Scan", "Total Cost": 98367, "Plan Rows": 2400000}`, 0},
+		// A plan this cannot read gives no estimate, and no error: the cost
+		// and the scans still decide.
+		{"a top node without rows", `{"Node Type": "Index Scan", "Total Cost": 90000}`, 0},
+		{"rows written as text", `{"Node Type": "Index Scan", "Total Cost": 90000, "Plan Rows": "2400000"}`, 0},
+		{"negative rows", `{"Node Type": "Index Scan", "Total Cost": 90000, "Plan Rows": -1}`, 0},
+		{"a LIMIT with nothing under it", `{"Node Type": "Limit", "Total Cost": 90000, "Plan Rows": 50000}`, 0},
+		{"a LIMIT over two nodes", `{"Node Type": "Limit", "Total Cost": 90000, "Plan Rows": 50000, "Plans": [
+			{"Node Type": "Index Scan", "Total Cost": 1, "Plan Rows": 1}, {"Node Type": "Index Scan", "Total Cost": 1, "Plan Rows": 1}]}`, 0},
+		{"a node with no type", `{"Total Cost": 90000, "Plan Rows": 2400000}`, 0},
+	} {
+		pl, err := parsePGPlan([]byte(plan(tc.top)))
+		if err != nil {
+			t.Errorf("%s: %v", tc.name, err)
+			continue
+		}
+		if pl.resultRows != tc.want {
+			t.Errorf("%s: the result is estimated at %v rows, want %v", tc.name, pl.resultRows, tc.want)
+		}
+	}
+	// A chain of sorts deeper than any plan ends without an estimate.
+	deep := strings.Repeat(`{"Node Type": "Sort", "Total Cost": 1, "Plan Rows": 5, "Plans": [`, maxPlanDepth+2) +
+		`{"Node Type": "Index Scan", "Total Cost": 1, "Plan Rows": 5}` + strings.Repeat("]}", maxPlanDepth+2)
+	var top map[string]any
+	if err := json.Unmarshal([]byte(deep), &top); err != nil {
+		t.Fatal(err)
+	}
+	if got := resultEstimate(top); got != 0 {
+		t.Errorf("a plan nested too deep: estimated at %v rows", got)
+	}
+}
+
+func TestCostPolicy_overRowCap(t *testing.T) {
+	capped := CostPolicy{CostThreshold: 50000, ScanRows: 1000000, RowCap: 10000}
+	for _, tc := range []struct {
+		name string
+		pol  CostPolicy
+		rows float64
+		over bool
+	}{
+		{"far over the cap", capped, 2400000, true},
+		{"one row over", capped, 10001, true},
+		{"exactly the cap: the copy returns it", capped, 10000, false},
+		{"under the cap", capped, 500, false},
+		{"no estimate to trust", capped, 0, false},
+		{"a fraction of a row over", capped, 10000.5, true},
+		{"no cap given by the host", CostPolicy{CostThreshold: 50000}, 2400000, false},
+		{"a cap that is not one", CostPolicy{CostThreshold: 50000, RowCap: -1}, 2400000, false},
+	} {
+		why := tc.pol.overRowCap(pgPlan{cost: 90000, resultRows: tc.rows})
+		if (why != "") != tc.over {
+			t.Errorf("%s: %q, want over=%v", tc.name, why, tc.over)
+		}
+		if tc.over && !(strings.Contains(why, "row cap of 10000") && strings.Contains(why, "not tried on the copy")) {
+			t.Errorf("%s: the reason does not say the cap and what was done: %q", tc.name, why)
+		}
+	}
+	if def := DefaultCostPolicy(); def.RowCap != 0 {
+		t.Errorf("the default policy has a row cap of %d: only the host knows the copy's", def.RowCap)
+	}
+}
+
+// rowCapPlans are the source's plans for the statements below. Each
+// expensive one costs 90,000, over the cost threshold.
+var rowCapPlans = map[string]string{
+	"FROM whole":     plan(`{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}`),
+	"FROM atcap":     plan(`{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 1000}`),
+	"FROM bounded":   plan(`{"Node Type": "Limit", "Total Cost": 90000, "Plan Rows": 500, "Plans": [{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}`),
+	"FROM filtered":  plan(`{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 221203, "Filter": "(note = 'rare')"}`),
+	"FROM summed":    plan(`{"Node Type": "Aggregate", "Total Cost": 98367, "Plan Rows": 1, "Plans": [{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}`),
+	"FROM grouped":   plan(`{"Node Type": "Aggregate", "Total Cost": 98367, "Plan Rows": 200000, "Plans": [{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}]}`),
+	"FROM joined":    plan(`{"Node Type": "Hash Join", "Total Cost": 98367, "Plan Rows": 2400000, "Plans": [{"Node Type": "Seq Scan", "Total Cost": 90000, "Plan Rows": 2400000}, {"Node Type": "Seq Scan", "Total Cost": 1, "Plan Rows": 10}]}`),
+	"FROM small":     plan(`{"Node Type": "Seq Scan", "Total Cost": 40, "Plan Rows": 2000}`),
+	"FROM ranged":    plan(`{"Node Type": "Index Scan", "Total Cost": 60000, "Plan Rows": 246857, "Index Cond": "(id > $1)"}`),
+	"FROM scanwide":  plan(`{"Node Type": "Seq Scan", "Total Cost": 30000, "Plan Rows": 1200000}`),
+}
+
+func TestRouteByCost_resultOverRowCap(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	src := startFakeSource(t, rowCapPlans)
+	l := &costLogin{src: src, cost: &CostPolicy{CostThreshold: DefaultCostThreshold, ScanRows: DefaultScanRows, RowCap: 1000}}
+	c := costPortConn(t, ctx, l)
+	toSource := costOutcome{"42", "", RouteSource, ReasonResultOverRowCap}
+	toCopy := costOutcome{"7", "", RouteCopy, ReasonAnswersTheSame}
+	cheap := costOutcome{"42", "", RouteSource, ReasonCheapPlan}
+	for _, tc := range []struct {
+		name, stmt string
+		want       costOutcome
+	}{
+		// The statement of the issue: an expensive read of 2,400,000 rows,
+		// which the copy would run and refuse at its 1,001st row.
+		{"a whole table over the cap", "SELECT n FROM whole", toSource},
+		{"over the cap by the scan rule alone", "SELECT n FROM scanwide", toSource},
+		// What the copy can return, it answers as before.
+		{"exactly the cap", "SELECT n FROM atcap", toCopy},
+		{"a LIMIT under the cap", "SELECT n FROM bounded LIMIT 500", toCopy},
+		// No estimate to trust: tried on the copy, as before.
+		{"a filter checked row by row", "SELECT n FROM filtered WHERE note = 'rare'", toCopy},
+		{"an aggregate", "SELECT sum(n) FROM summed", toCopy},
+		{"a GROUP BY of many groups", "SELECT n, count(*) FROM grouped GROUP BY n", toCopy},
+		{"a join", "SELECT a.n FROM joined a JOIN t b ON b.id = a.id", toCopy},
+		// A cheap plan is the source's for being cheap, whatever it returns.
+		{"a cheap read over the cap", "SELECT n FROM small", cheap},
+	} {
+		explained, ran, runs := len(src.explained()), len(src.ran()), l.runs.Load()
+		got := costSimple(ctx, c, l, tc.stmt)
+		if got != tc.want {
+			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
+		}
+		if asked := src.explained()[explained:]; len(asked) != 1 || asked[0] != "EXPLAIN (FORMAT JSON) "+tc.stmt {
+			t.Errorf("%s: the source was asked %q, want the statement's plan once", tc.name, asked)
+		}
+		onSource, onCopy := len(src.ran())-ran, int(l.runs.Load()-runs)
+		if tc.want.side == RouteSource && (onSource != 1 || onCopy != 0) {
+			t.Errorf("%s: ran %d time(s) on the source and %d on the copy, want once on the source and never on the copy", tc.name, onSource, onCopy)
+		}
+		if tc.want.side == RouteCopy && (onSource != 0 || onCopy != 1) {
+			t.Errorf("%s: ran %d time(s) on the source and %d on the copy, want once on the copy", tc.name, onSource, onCopy)
+		}
+	}
+	if c.TxStatus() != 'I' {
+		t.Errorf("status %c", c.TxStatus())
+	}
+
+	// A host that gives no cap (the policy's zero): nothing changes, the
+	// copy is tried.
+	none := &costLogin{src: startFakeSource(t, rowCapPlans), cost: &CostPolicy{CostThreshold: DefaultCostThreshold, ScanRows: DefaultScanRows}}
+	d := costPortConn(t, ctx, none)
+	if got := costSimple(ctx, d, none, "SELECT n FROM whole"); got != toCopy {
+		t.Errorf("without a row cap: %+v, want the copy", got)
+	}
+}
+
+// A prepared statement is decided once, by its plan without values, and the
+// source answers its Describe and every execution.
+func TestRouteByCost_resultOverRowCap_prepared(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	src := startFakeSource(t, rowCapPlans)
+	l := &costLogin{src: src, cost: &CostPolicy{CostThreshold: DefaultCostThreshold, ScanRows: DefaultScanRows, RowCap: 1000}}
+	c := costPortConn(t, ctx, l)
+	const stmt = "SELECT n FROM ranged WHERE id > $1"
+	if _, err := c.Prepare(ctx, "s", stmt, nil); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		res := c.ExecPrepared(ctx, "s", [][]byte{[]byte("5")}, nil, nil).Read()
+		if res.Err != nil || len(res.Rows) != 1 || string(res.Rows[0][0]) != "42" {
+			t.Errorf("run %d: %v %q, want the source's 42", i, res.Err, res.Rows)
+		}
+		if n := l.last(); n.Side != RouteSource || n.Reason != ReasonResultOverRowCap {
+			t.Errorf("run %d: noted %s/%s", i, n.Side, n.Reason)
+		}
+	}
+	if asked := src.explained(); len(asked) != 1 || asked[0] != "EXPLAIN (GENERIC_PLAN, FORMAT JSON) "+stmt {
+		t.Errorf("the source was asked %q, want the plan without values once", asked)
+	}
+	if n := l.runs.Load(); n != 0 {
+		t.Errorf("the copy ran %d statement(s)", n)
+	}
+}
+
+// A shape the copy answered keeps no side from a statement sent to the
+// source for its size: the next statement of that shape under the cap goes
+// to the copy by its plan, as it would have.
+func TestRouteByCost_resultOverRowCap_leavesNoSide(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	sides := &CostSides{}
+	l := &costLogin{src: startFakeSource(t, rowCapPlans), sides: sides,
+		cost: &CostPolicy{CostThreshold: DefaultCostThreshold, ScanRows: DefaultScanRows, RowCap: 1000}}
+	c := costPortConn(t, ctx, l)
+	if got := costSimple(ctx, c, l, "SELECT n FROM whole"); got.reason != ReasonResultOverRowCap {
+		t.Fatalf("%+v", got)
+	}
+	sides.mu.Lock()
+	n := len(sides.sides)
+	sides.mu.Unlock()
+	if n != 0 {
+		t.Errorf("a statement sent to the source for its size left %d side(s) remembered", n)
+	}
+	if got := costSimple(ctx, c, l, "SELECT n FROM atcap"); got.side != RouteCopy {
+		t.Errorf("the next statement under the cap: %+v, want the copy", got)
+	}
+}
+
+// Every reason the port notes has words in its status.
+func TestResultOverRowCap_statusWords(t *testing.T) {
+	if w := reasonMeans[ReasonResultOverRowCap]; !strings.Contains(w, "more rows than the copy returns") {
+		t.Errorf("status words for %s: %q", ReasonResultOverRowCap, w)
+	}
+}
