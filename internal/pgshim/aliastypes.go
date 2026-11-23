@@ -102,7 +102,7 @@ func mergeAliasTypes(types map[string][]string, defs map[string][][]rtToken, not
 		switch {
 		case notText[name]:
 			out[name] = append(append([]string(nil), column...), notTextType)
-		case !untyped && anyTextType(column) && readsText(defs[name], types):
+		case !untyped && anyTextType(column) && readsText(defs[name], types, defs, notText):
 			out[name] = append(append([]string(nil), column...), maybeTextType)
 		}
 	}
@@ -131,7 +131,19 @@ func anyTextType(types []string) bool {
 // table's alias (FROM t AS c, whose definition is the table's name) reads
 // none, and neither does a name given to something the screen knows nothing
 // of; both stay of unknown type.
-func readsText(exprs [][]rtToken, types map[string][]string) bool {
+//
+// Another name the statement defines counts as text unless it is known not
+// to be (notText): a text column given one name in a subquery and its own
+// name again outside (SELECT u AS name FROM (SELECT name AS u ...)) is read
+// through the name between.
+func readsText(exprs [][]rtToken, types map[string][]string, defs map[string][][]rtToken, notText map[string]bool) bool {
+	named := func(n string) bool {
+		if anyTextType(types[n]) {
+			return true
+		}
+		_, other := defs[n]
+		return other && !notText[n]
+	}
 	for _, e := range exprs {
 		for _, t := range e {
 			switch t.kind {
@@ -142,11 +154,11 @@ func readsText(exprs [][]rtToken, types map[string][]string) bool {
 					return true
 				}
 			case rtWord:
-				if textMakers[t.text] || anyTextType(types[t.text]) {
+				if textMakers[t.text] || named(t.text) {
 					return true
 				}
 			case rtQuoted:
-				if anyTextType(types[strings.ToLower(t.text)]) {
+				if named(strings.ToLower(t.text)) {
 					return true
 				}
 			}

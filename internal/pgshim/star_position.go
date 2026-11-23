@@ -79,6 +79,17 @@ func starMayBeText(toks []rtToken, types map[string][]string) bool {
 			// Not a star, or count(*).
 			continue
 		}
+		if isOpTok(toks, i-1, ".") && isOpTok(toks, i+1, ")") && isOpTok(toks, i-3, "(") {
+			// count(t.*): the row handed to a function, no column of the
+			// answer.
+			continue
+		}
+		if word(i-1, "select") && isOpTok(toks, i-2, "(") && word(i-3, "exists") && !isOpTok(toks, i-4, ".") {
+			// EXISTS (SELECT * ...): PostgreSQL does not read the list of an
+			// EXISTS, and it puts no column in the answer. (IN (SELECT *
+			// ...) is not this: its star decides what is compared.)
+			continue
+		}
 		if i+1 >= len(toks) || isOpTok(toks, i+1, ",") || isOpTok(toks, i+1, ")") || isOpTok(toks, i+1, ";") || word(i+1, "from") {
 			// The star of a list, not a multiplication (a * b).
 			stars = append(stars, i)
