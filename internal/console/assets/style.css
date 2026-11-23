@@ -1210,6 +1210,12 @@ button { font-family: inherit; }
 .form-adv-summary { cursor: pointer; font-family: var(--f-ui); font-size: 13px; font-weight: 500; color: var(--ink-3); list-style: none; }
 .form-adv-summary:hover, .form-advanced[open] > .form-adv-summary { color: var(--accent); }
 .form-adv-summary[hidden] { display: none; }
+/* A PostgreSQL server's box about forwarding as the source user (#3054),
+   set off from the fields above like a fold, and the button that opens the
+   separate forwarding user, drawn as the form's other "Advanced" line. */
+.pg-forward { margin: 18px 0 16px; }
+.pg-forward .form-hint { margin: 6px 0 10px; }
+button.form-adv-summary { background: none; border: 0; padding: 0; }
 .form-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
 .form-grid .field { width: auto; }
 .check { display: flex; align-items: center; gap: 10px; font-size: var(--fs-sm); color: var(--ink); cursor: pointer; }

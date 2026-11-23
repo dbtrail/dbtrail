@@ -18643,11 +18643,11 @@ function buildServerForm(offered, familyLine) {
   // behind the button. A session that may not change servers sees the box
   // and cannot change it.
   const mayWrite = sessionMay("servers:write");
-  mon.append(tagFlavor(el("div", { id: "pg-forward", style: "margin-top:10px" },
+  mon.append(tagFlavor(el("div", { id: "pg-forward", class: "pg-forward" },
     el("label", { class: "check" }, el("input", { type: "checkbox", name: "forward_capture", disabled: !mayWrite }), el("span", { text: PG_FORWARD_ASK })),
     mayWrite ? null : el("p", { class: "form-hint", text: "Changing it needs permission to change servers." }),
     el("p", { class: "form-hint", text: PG_FORWARD_HINT }),
-    el("button", { class: "btn btn-sm btn-ghost", type: "button", id: "route-own-open", text: "Advanced: use a separate forwarding user",
+    el("button", { class: "form-adv-summary", type: "button", id: "route-own-open", text: "Advanced: use a separate forwarding user",
       onclick: () => { form.dataset.routeOwn = "1"; applyFlavor(form); form.elements.route_user.focus(); } })), "postgres"));
   mon.append(tagFlavor(el("div", { id: "route-extra" }), "mysql mariadb postgres"));
   mon.append(tagFlavor(el("p", { class: "form-hint", text: FORWARDING_HINT }), "mysql mariadb"));
