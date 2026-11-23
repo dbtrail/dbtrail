@@ -39,7 +39,8 @@ func reportShapes() []expectation {
 		// PostgreSQL reads a column there, so with no such column it fails,
 		// and with one it sorts by the column, not by the value so named.
 		{stmt: `SELECT status, qty AS q FROM ` + o + ` ORDER BY abs(q)`, verdict: sqlcompare.SourceError, why: "an alias inside an ORDER BY expression"},
-		{stmt: `SELECT status, amount AS qty FROM ` + o + ` ORDER BY abs(qty), id`, verdict: sqlcompare.Different, kind: "order", why: "the column qty, not the alias"},
+		{stmt: `SELECT status, amount AS qty FROM ` + o + ` ORDER BY abs(qty), id`, verdict: sqlcompare.Equal},
+		{stmt: `SELECT id, 100 - qty AS qty FROM ` + o + ` ORDER BY qty + 0, id`, verdict: sqlcompare.Different, kind: "order", why: "the column qty, not the alias"},
 		// The whole key is the alias on both sides.
 		stay(`SELECT id, qty AS q FROM ` + o + ` ORDER BY q, id`),
 		stay(`SELECT customer_id, count(*) AS count FROM ` + o + ` GROUP BY customer_id ORDER BY count(*) DESC, customer_id`),
