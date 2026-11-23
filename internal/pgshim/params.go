@@ -728,6 +728,25 @@ func (a arg) literal(rd reader) (string, *pgErr) {
 			// exact numeric; as a string it takes the type it is compared to.
 			return quoteStandard(a.text), nil
 		}
+		if len(strings.TrimLeft(a.text, "+-")) > 18 {
+			// A number of more than 18 characters is one the port's lexer
+			// does not read (route.go), and a text it does not read is not
+			// rewritten for the copy: a bigint key of 19 digits would leave
+			// the statement's round() as the client wrote it. Each is written
+			// as a cast of a string, which keeps its type: a bigint, or a
+			// numeric of its own decimals.
+			if a.kind == argInt {
+				return "CAST(" + quoteStandard(strings.TrimPrefix(a.text, "+")) + " AS BIGINT)", nil
+			}
+			digits := strings.TrimLeft(a.text, "+-")
+			whole, decimals, _ := strings.Cut(digits, ".")
+			if a.kind == argNumeric && len(whole)+len(decimals) <= 38 && strings.Trim(whole+decimals, "0123456789") == "" {
+				return "CAST(" + quoteStandard(strings.TrimPrefix(a.text, "+")) + " AS DECIMAL(38," + strconv.Itoa(len(decimals)) + "))", nil
+			}
+			// Past the copy's numeric, or not plain digits: written as it was
+			// before, a number the port does not read. A statement with a
+			// rewritten call then goes to the source (copyText).
+		}
 		if strings.HasPrefix(a.text, "-") {
 			// In parentheses: -9223372036854775808::bigint casts before it
 			// negates, and the positive number does not fit.

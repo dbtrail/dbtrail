@@ -177,7 +177,7 @@ func TestRewriteForCopy_leavesOtherShapes(t *testing.T) {
 		"SELECT round(a / 'x', 2)",                    // a string
 		"SELECT round(a / $1, 2)",                     // a parameter
 		"SELECT round(numeric '1.5' / b, 2)",          // a typed literal
-		"SELECT round(date_part('day', d) / 7.0, 2)", // a double precision on PostgreSQL
+		"SELECT round(date_part('day', d) / 7.0, 2)",  // a double precision on PostgreSQL
 		"SELECT pg_catalog.round(a / b, 2)",
 		"SELECT floor(x)",
 		"SELECT floor(a / b * c)",
@@ -342,27 +342,27 @@ func TestCopyText_roundsOnEveryConnection(t *testing.T) {
 // source, and copyText refuses nothing.
 func TestCopyText_refusesWhatTheCopyWouldAnswerOtherwise(t *testing.T) {
 	for q, says := range map[string]string{
-		"SELECT avg(DISTINCT qty) FROM pgcmp_orders":                       "avg(",
-		"SELECT avg(qty) OVER (ORDER BY id) FROM pgcmp_orders":             "avg(",
-		"SELECT round(amount, 16) FROM pgcmp_orders":                       "round(",
-		"SELECT round(amount, $1) FROM pgcmp_orders":                       "round(",
-		"SELECT round(amount / qty + 1, 2) FROM pgcmp_orders":              "round(",
-		"SELECT pg_catalog.round(amount, 2) FROM pgcmp_orders":             "round(",
-		`SELECT "round"(amount, 2) FROM pgcmp_orders`:                      "round(",
-		`SELECT "AVG"(amount) FROM pgcmp_orders`:                           "",
-		"SELECT round(1e2, 2)":                                             "round(",
-		"SELECT E'\\n', avg(qty) FROM pgcmp_orders":                        "avg(",
-		"SELECT round(amount, 2) FROM pgcmp_orders UNION ALL SELECT 0":     "UNION",
-		"SELECT 0 INTERSECT SELECT round(amount, 2) FROM pgcmp_orders":     "INTERSECT",
-		"SELECT greatest(round(amount, 2), 0) FROM pgcmp_orders":           "greatest",
-		"SELECT least(0, round(avg(amount), 2)) FROM pgcmp_orders":         "least",
-		"SELECT nullif(round(amount, 0), 0.5) FROM pgcmp_orders":           "nullif",
-		"SELECT ARRAY[round(amount, 2), 0] FROM pgcmp_orders":              "ARRAY",
-		"SELECT * FROM (VALUES (round(1.5, 2)), (0)) v(x)":                 "VALUES",
-		"SELECT round(amount, 2) FROM pgcmp_orders EXCEPT SELECT 1":        "EXCEPT",
-		"SELECT round(ratio::numeric, 2) FROM pgcmp_orders":                "round(",
-		"SELECT round(ceil(qty), 2) FROM pgcmp_orders":                     "round(",
-		"SELECT round/**/(qty, 2) FROM pgcmp_orders WHERE note <> $$x$$":   "round(",
+		"SELECT avg(DISTINCT qty) FROM pgcmp_orders":                                    "avg(",
+		"SELECT avg(qty) OVER (ORDER BY id) FROM pgcmp_orders":                          "avg(",
+		"SELECT round(amount, 16) FROM pgcmp_orders":                                    "round(",
+		"SELECT round(amount, $1) FROM pgcmp_orders":                                    "round(",
+		"SELECT round(amount / qty + 1, 2) FROM pgcmp_orders":                           "round(",
+		"SELECT pg_catalog.round(amount, 2) FROM pgcmp_orders":                          "round(",
+		`SELECT "round"(amount, 2) FROM pgcmp_orders`:                                   "round(",
+		`SELECT "AVG"(amount) FROM pgcmp_orders`:                                        "",
+		"SELECT round(1e2, 2)":                                                          "round(",
+		"SELECT E'\\n', avg(qty) FROM pgcmp_orders":                                     "avg(",
+		"SELECT round(amount, 2) FROM pgcmp_orders UNION ALL SELECT 0":                  "UNION",
+		"SELECT 0 INTERSECT SELECT round(amount, 2) FROM pgcmp_orders":                  "INTERSECT",
+		"SELECT greatest(round(amount, 2), 0) FROM pgcmp_orders":                        "greatest",
+		"SELECT least(0, round(avg(amount), 2)) FROM pgcmp_orders":                      "least",
+		"SELECT nullif(round(amount, 0), 0.5) FROM pgcmp_orders":                        "nullif",
+		"SELECT ARRAY[round(amount, 2), 0] FROM pgcmp_orders":                           "ARRAY",
+		"SELECT * FROM (VALUES (round(1.5, 2)), (0)) v(x)":                              "VALUES",
+		"SELECT round(amount, 2) FROM pgcmp_orders EXCEPT SELECT 1":                     "EXCEPT",
+		"SELECT round(ratio::numeric, 2) FROM pgcmp_orders":                             "round(",
+		"SELECT round(ceil(qty), 2) FROM pgcmp_orders":                                  "round(",
+		"SELECT round/**/(qty, 2) FROM pgcmp_orders WHERE note <> $$x$$":                "round(",
 		"SELECT greatest(r, 0) FROM (SELECT round(amount, 2) AS r FROM pgcmp_orders) s": "greatest",
 		"SELECT lag(round(amount, 2), 1, 0) OVER (ORDER BY id) FROM pgcmp_orders":       "lag",
 	} {
@@ -390,6 +390,52 @@ func TestCopyText_refusesWhatTheCopyWouldAnswerOtherwise(t *testing.T) {
 	} {
 		if _, err := routeSession(false).copyText(q); err != nil {
 			t.Errorf("%q refused: %v", q, err)
+		}
+	}
+}
+
+// A prepared statement is screened with $1 and run with each argument
+// written in its place: the portal's text must be written for the copy with
+// the same macros as the statement's, or the copy is not handed it.
+func TestCopyText_portalWrittenAsItsStatement(t *testing.T) {
+	const long = "1234567890123456789"
+	for _, c := range []struct {
+		name, screened, bound string
+		refused               bool
+	}{
+		{"an argument outside the round", "SELECT round(amount / 3, 2) FROM t WHERE id < $1", "SELECT round(amount / 3, 2) FROM t WHERE id < 9", false},
+		{"a long argument, as the port writes it", "SELECT round(amount / 3, 2) FROM t WHERE id < $1", "SELECT round(amount / 3, 2) FROM t WHERE id < CAST('" + long + "' AS BIGINT)", false},
+		{"a text the port does not read", "SELECT round(amount / 3, 2) FROM t WHERE id < $1", "SELECT round(amount / 3, 2) FROM t WHERE id < " + long, true},
+		{"unread, with nothing rewritten", "SELECT amount FROM t WHERE id < $1", "SELECT amount FROM t WHERE id < " + long, false},
+		{"a typed NULL inside a round", "SELECT round(coalesce($1, amount), 4) FROM t", "SELECT round(coalesce(CAST(NULL AS BIGINT), amount), 4) FROM t", true},
+		{"a float inside a round", "SELECT round(amount * $1, 2) FROM t", "SELECT round(amount * CAST('1.5' AS DOUBLE), 2) FROM t", true},
+		{"a number inside a round", "SELECT round(amount * $1, 2) FROM t", "SELECT round(amount * 3, 2) FROM t", false},
+		{"a typed NULL inside an avg", "SELECT round(avg(coalesce(qty, $1)), 2) FROM t", "SELECT round(avg(coalesce(qty, CAST(NULL AS BIGINT))), 2) FROM t", true},
+		{"a date inside a floor", "SELECT floor(amount / $1) FROM t", "SELECT floor(amount / CAST('2026-01-01' AS DATE)) FROM t", true},
+		{"one round of two", "SELECT round(amount, 2), round(coalesce($1, amount), 1) FROM t", "SELECT round(amount, 2), round(coalesce(CAST(NULL AS INTEGER), amount), 1) FROM t", true},
+		// A string that spells a macro's name is not one: it neither breaks
+		// a statement written alike nor stands in for a round left as written.
+		{"a string that names a macro", "SELECT round(amount, 2) FROM t WHERE note = $1", "SELECT round(amount, 2) FROM t WHERE note = '_bintrail_pg_round_k'", false},
+		{"a string in place of the macro", "SELECT round(coalesce($1, amount), 4) FROM t WHERE note = $2", "SELECT round(coalesce(CAST(NULL AS BIGINT), amount), 4) FROM t WHERE note = '_bintrail_pg_round_k'", true},
+		// A text the port does not read has no words to tell: a string in it
+		// that spells the macro's name does not make it the statement's.
+		{"unread, with a string in place of the macro", "SELECT round(amount, 2) FROM t WHERE note = $1 AND id < $2", "SELECT round(amount, 2) FROM t WHERE note = '_bintrail_pg_round_k' AND id < " + long, true},
+		{"a quoted name that spells a macro", "SELECT round(coalesce($1, amount), 4) FROM t WHERE note = $2", `SELECT round(coalesce(CAST(NULL AS BIGINT), amount), 4) AS "_bintrail_pg_round_k" FROM t WHERE note = 'x'`, true},
+	} {
+		s := routeSession(true)
+		s.screened = c.screened
+		got, err := s.copyText(c.bound)
+		var own *Error
+		switch {
+		case c.refused && (!errors.As(err, &own) || own.Code != "0A000"):
+			t.Errorf("%s: copyText(%q) = %q, %v; want a 0A000 refusal", c.name, c.bound, got, err)
+		case !c.refused && (err != nil || got != RewriteForCopy(c.bound)):
+			t.Errorf("%s: copyText(%q) = %q, %v; want it written for the copy", c.name, c.bound, got, err)
+		}
+		// A statement of the simple protocol is the text the screen read:
+		// nothing to hold it to.
+		if got, err := routeSession(true).copyText(c.bound); err != nil || got != RewriteForCopy(c.bound) {
+			t.Errorf("%s, with no statement behind it: copyText(%q) = %q, %v", c.name, c.bound, got, err)
 		}
 	}
 }
