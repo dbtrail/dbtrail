@@ -296,14 +296,14 @@ func (j *monitorJob) streamHooks() *streamrun.Hooks {
 // No OnGapAutoAdvance: a lost PG slot is fatal (pgstreamrun.One returns it and
 // the supervisor reconnects), not a continue-after-loss — the durable
 // gap_lost_detail persisted by the capturer is re-hydrated by Start instead.
-// No OnPhase either: the phase that exists (#1690) is the MySQL resume-time
-// dedup, and PG capture has no equivalent — it resumes from the slot's
-// confirmed LSN, so there is no replayed window to delete first.
+// Its one phase is the creation of the replication slot (#3178).
 func (j *monitorJob) pgStreamHooks() *pgstreamrun.Hooks {
 	return &pgstreamrun.Hooks{
 		OnCheckpoint:      j.progressIfConnected,
 		OnIndexed:         func(int64) { j.progress() },
 		OnSourceConnected: j.markSourceConnected,
+		OnPhase:           j.setPhase,
+		OnPhaseDetail:     j.setPhaseDetail,
 	}
 }
 

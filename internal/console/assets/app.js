@@ -137,6 +137,9 @@ const MON_PHASES = {
   // second installation on the same index) is capturing this server. This
   // one starts on its own when that one stops.
   lock_waiting: { text: "WAITING FOR OTHER DBTRAIL", title: "another DBTrail process holds this server's capture lock; this one starts capturing when that one lets go." },
+  // #3178: PostgreSQL ends the creation of a replication slot only once the
+  // write transactions open when it began have ended.
+  creating_slot: { text: "CREATING SLOT", title: "PostgreSQL finishes creating the replication slot once the write transactions open on the source have ended; capture starts then, by itself." },
 };
 
 // A failed state whose cause the daemon names (monitor_error_code) says that

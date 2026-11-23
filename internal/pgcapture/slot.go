@@ -625,7 +625,10 @@ func ListUncoveredCascadeChildren(ctx context.Context, conn *pgx.Conn, publicati
 // silently creating a fresh slot from a new ConsistentPoint would SKIP that data.
 // ensureSlot fails loud in that case rather than skip; the recovery policy
 // (re-baseline) is #532.
-func ensureSlot(ctx context.Context, replConn *pgconn.PgConn, queryConn *pgx.Conn, slotName string, savedLSN pglogrepl.LSN, expectExisting bool) (pglogrepl.LSN, error) {
+//
+// create makes the slot, on replConn; ctx bounds only the catalog read here, so
+// that the creation can outlast it (#3178).
+func ensureSlot(ctx context.Context, replConn *pgconn.PgConn, queryConn *pgx.Conn, slotName string, savedLSN pglogrepl.LSN, expectExisting bool, create func(*pgconn.PgConn, string) (pglogrepl.CreateReplicationSlotResult, error)) (pglogrepl.LSN, error) {
 	// By its identity, not its name alone: a physical slot, a slot of
 	// another plugin or one of another database that happens to be called
 	// this is not the capture's, and resuming "on" it would look healthy
@@ -654,7 +657,7 @@ func ensureSlot(ctx context.Context, replConn *pgconn.PgConn, queryConn *pgx.Con
 		return savedLSN, nil
 	}
 
-	res, err := pglogrepl.CreateReplicationSlot(ctx, replConn, slotName, "pgoutput", pglogrepl.CreateReplicationSlotOptions{Mode: pglogrepl.LogicalReplication})
+	res, err := create(replConn, slotName)
 	if err != nil {
 		// TOCTOU: another capturer or a restart created the slot between the check
 		// and now (SQLSTATE 42710 = duplicate_object). Treat as a resume.
