@@ -15,7 +15,8 @@ import (
 //
 // So the statement is written for the engine with a cast around each such
 // expression, to PostgreSQL's type for it, wherever it stands: in the select
-// list, under an alias, in a subquery or a WITH, inside another expression.
+// list, under an alias, in a subquery or a WITH, inside another expression
+// (extract and date_part only as a whole item of the select list).
 // The engine then works the type of everything built on it out by itself
 // (length(x) + 1, a star over the subquery, a Describe), the announced type
 // follows the engine's as it always did, and a cell's text and binary forms
@@ -35,8 +36,8 @@ import (
 //     that is sure. A sum past a bigint is an error on PostgreSQL too.
 //   - extract of a field that is a whole number (year, month, day, hour...)
 //     is a numeric with no decimals, and date_part of one a double
-//     precision where it is a whole item of the statement's select list.
-//     Fields with a fraction (second, epoch, milliseconds) are left as they
+//     precision, each where it is a whole item of the statement's own
+//     select list. Fields with a fraction (second, epoch, milliseconds) are left as they
 //     are: PostgreSQL writes them with decimals the engine's whole number
 //     does not hold.
 //   - NULL as a whole item of the select list is text.
@@ -78,17 +79,57 @@ const (
 // of whole numbers is of something else: an error, never a rounded sum.
 const notWholeSum = "the copy cannot tell this sum''s type as PostgreSQL would; cast its argument (sum(x::numeric))"
 
+// The bounds of the rewrite. A statement past any of them is handed to the
+// copy as it was written, which is what the port did before this file: its
+// columns keep the engine's types, and nothing here can cost more than a
+// pass over the statement or write more than the port takes in one.
+const (
+	// maxCastDepth is how deep casts may stand one inside another
+	// (length(length(...))).
+	maxCastDepth = 32
+	// maxSumArgument is the most tokens of a sum's argument whose type is
+	// read from the text.
+	maxSumArgument = 64
+	// maxTypedTokens is the longest statement, in tokens, whose names are
+	// worked out for a sum of a column.
+	maxTypedTokens = 4096
+)
+
+// tableCalls are the functions of this file's table.
+var tableCalls = func() map[string]bool {
+	m := map[string]bool{"sum": true, "extract": true, "date_part": true}
+	for f := range int4Calls {
+		m[f] = true
+	}
+	return m
+}()
+
+// selectListEnd are the words that end a select list.
+var selectListEnd = map[string]bool{
+	"from": true, "where": true, "group": true, "having": true, "order": true, "limit": true, "offset": true,
+	"window": true, "fetch": true, "for": true, "union": true, "intersect": true, "except": true,
+}
+
 // asPostgresTypes is text, as the connection is about to hand it to the copy
 // (copyText), with PostgreSQL's type cast around the expressions of this
 // file's table. The copy's column types are read only for a statement with a
 // sum to decide, and what the connection knows of a busy copy is left as it
-// was.
+// was. When they cannot be read now (a busy copy), the last ones this
+// connection read stand in, so the same sum is not a bigint in one answer
+// and a numeric in the next.
 func (s *session) asPostgresTypes(text string) string {
 	return asPostgresTypes(text, func() map[string][]string {
 		busy := s.catalogBusy
-		types, _ := s.columnTypes(text)
+		types, unread := s.columnTypes(text)
 		s.catalogBusy = busy
-		return types
+		if !unread {
+			return types
+		}
+		if s.catalogTables != nil {
+			return screenTypes(s.catalogTables, tablesRead(text, s.catalogTables))
+		}
+		s.logger.Debug("pgshim: the copy's column types could not be read, so a sum of a column is announced with the copy's type (numeric) in this answer")
+		return nil
 	})
 }
 
@@ -101,6 +142,9 @@ func AsPostgresTypes(stmt string, types map[string][]string) string {
 }
 
 func asPostgresTypes(stmt string, types func() map[string][]string) string {
+	if len(stmt) > maxStatementMessage {
+		return stmt
+	}
 	if body, ok := strings.CutPrefix(stmt, describeHead); ok {
 		if body, ok = strings.CutSuffix(body, describeTail); ok {
 			return describeHead + asPostgresTypes(body, types) + describeTail
@@ -113,13 +157,20 @@ func asPostgresTypes(stmt string, types func() map[string][]string) string {
 	if w := firstWord(toks); w != "select" && w != "with" {
 		return stmt
 	}
-	items, combined := selectItems(toks)
-	r := &typeRewrite{q: stmt, toks: toks, spans: spans, columns: types, items: items, off: insideMacros(toks)}
-	if !combined {
-		r.nulls = loneNulls(toks, items)
+	r := &typeRewrite{
+		q: stmt, toks: toks, spans: spans, match: matchParens(toks), columns: types,
+		off: map[string]bool{}, alias: map[int]string{},
+		room: maxStatementMessage - len(stmt), steps: 16*len(toks) + 4096,
 	}
+	var combined bool
+	r.items, combined = selectItems(toks)
+	if !combined {
+		r.nulls = loneNulls(toks, r.items)
+	}
+	r.insideMacros()
+	r.nameItems()
 	out := r.render(0, len(toks))
-	if !r.changed {
+	if r.over || !r.changed {
 		return stmt
 	}
 	return stmt[:spans[0][0]] + out + stmt[spans[len(toks)-1][1]:]
@@ -129,6 +180,9 @@ type typeRewrite struct {
 	q     string
 	toks  []rtToken
 	spans [][2]int
+	// match is each parenthesis' other end (matchParens): found once, never
+	// by walking the statement again.
+	match []int
 	// columns reads the copy's column types; types are those, without the
 	// names the statement may define itself, once a sum asked for them.
 	columns func() map[string][]string
@@ -138,37 +192,177 @@ type typeRewrite struct {
 	// starts; nulls what to write for a NULL that is one (loneNulls).
 	items map[int]bool
 	nulls map[int]string
-	// off are the functions of the table the statement also calls inside
-	// one of the port's macros, where they are left as written: cast in one
-	// place and not in the other, an expression would no longer be the one
-	// GROUP BY names.
+	// off are the functions of the table left as written everywhere in the
+	// statement (insideMacros, nameItems): cast in one place and not in
+	// another, an expression would no longer be the one GROUP BY names.
 	off map[string]bool
+	// alias is the name to give a cast that is a whole select item with no
+	// name of its own, by where the call starts (nameItems).
+	alias map[int]string
 	// inSum: the argument of a sum is being written, which is written twice.
-	inSum   bool
-	changed bool
+	inSum bool
+	depth int
+	// room is how many bytes the casts may still add, steps how much work
+	// the passes over the statement may still do; over, that one of the
+	// bounds was passed, and the statement is handed over as written.
+	room, steps int
+	over        bool
+	changed     bool
 }
 
-// insideMacros are the functions of this file's table called inside one of
-// the port's own macros (RewriteForCopy), which keep their arguments as
-// measured.
-func insideMacros(toks []rtToken) map[string]bool {
-	off := map[string]bool{}
+// step counts one unit of work.
+func (r *typeRewrite) step() bool {
+	if r.steps--; r.steps < 0 {
+		r.over = true
+	}
+	return !r.over
+}
+
+// take counts n bytes a cast adds to the statement.
+func (r *typeRewrite) take(n int) bool {
+	if r.room -= n; r.room < 0 {
+		r.over = true
+	}
+	return !r.over
+}
+
+// insideMacros turns off the functions of the table called inside one of the
+// port's own macros (RewriteForCopy), which keep their arguments as measured.
+func (r *typeRewrite) insideMacros() {
+	toks := r.toks
 	for i := 0; i < len(toks); i++ {
 		if toks[i].kind != rtWord || !strings.HasPrefix(toks[i].text, "_bintrail_pg_") || !isOpTok(toks, i+1, "(") {
 			continue
 		}
-		end := closingParen(toks, i+1)
+		end := r.match[i+1]
 		if end < 0 {
 			end = len(toks) - 1
 		}
 		for j := i + 2; j < end; j++ {
-			if toks[j].kind == rtWord && isOpTok(toks, j+1, "(") {
-				off[toks[j].text] = true
+			if toks[j].kind == rtWord && tableCalls[toks[j].text] && isOpTok(toks, j+1, "(") {
+				r.off[toks[j].text] = true
 			}
 		}
 		i = end
 	}
-	return off
+}
+
+// nameItems keeps the heading of every column as it was, or as PostgreSQL
+// has it. The engine heads an item the statement gives no name with the
+// item's own text, so a cast written into one would show in the heading
+// (CAST(length(t) AS INTEGER)). In the statement's own select list the copy
+// renames such columns the way PostgreSQL does (sqlsandbox PostgresNames),
+// but not when the list holds a star, and never in a subquery's list, whose
+// names a star outside it shows. So in those lists:
+//
+//   - an item with AS, or a call of the table followed by a bare alias, is
+//     cast as anywhere else;
+//   - an item that is one call of the table and nothing else is cast and
+//     given the function's name, which is what PostgreSQL heads it with
+//     (alias), the first of each name in a list;
+//   - any other item is left as written, and so is every call, anywhere in
+//     the statement, of the functions it calls (off).
+func (r *typeRewrite) nameItems() {
+	toks := r.toks
+	depth := 0
+	for s, t := range toks {
+		switch {
+		case isOpTok(toks, s, "(") || isOpTok(toks, s, "["):
+			depth++
+		case isOpTok(toks, s, ")") || isOpTok(toks, s, "]"):
+			depth--
+		}
+		if t.kind != rtWord || t.text != "select" {
+			continue
+		}
+		// The list's items, at the list's own level.
+		var list [][2]int
+		start, i := s+1, s+1
+	items:
+		for ; i < len(toks); i++ {
+			if !r.step() {
+				return
+			}
+			switch {
+			case isOpTok(toks, i, "(") || isOpTok(toks, i, "["):
+				if r.match[i] < 0 {
+					break items
+				}
+				i = r.match[i]
+			case isOpTok(toks, i, ")") || isOpTok(toks, i, "]") || isOpTok(toks, i, ";"):
+				break items
+			case toks[i].kind == rtWord && selectListEnd[toks[i].text]:
+				break items
+			case isOpTok(toks, i, ","):
+				list = append(list, [2]int{start, i})
+				start = i + 1
+			}
+		}
+		list = append(list, [2]int{start, i})
+		if first := &list[0]; first[0] < first[1] && toks[first[0]].kind == rtWord && (toks[first[0]].text == "distinct" || toks[first[0]].text == "all") {
+			first[0]++
+		}
+		star := false
+		for _, it := range list {
+			if it[0] < it[1] && (isOpTok(toks, it[0], "*") || it[1]-it[0] >= 3 && isOpTok(toks, it[0]+1, ".") && isOpTok(toks, it[0]+2, "*")) {
+				star = true
+			}
+		}
+		if depth == 0 && !star {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, it := range list {
+			from, to := it[0], it[1]
+			if to-from >= 3 && toks[to-2].kind == rtWord && toks[to-2].text == "as" {
+				continue
+			}
+			if from < to && toks[from].kind == rtWord && tableCalls[toks[from].text] && isOpTok(toks, from+1, "(") {
+				switch end := r.callEnd(from, to); {
+				case end == to-1 && !seen[toks[from].text]:
+					seen[toks[from].text] = true
+					r.alias[from] = toks[from].text
+					continue
+				case end >= 0 && end == to-2 && (toks[to-1].kind == rtWord || toks[to-1].kind == rtQuoted):
+					continue
+				}
+			}
+			for j := from; j < to; j++ {
+				if !r.step() {
+					return
+				}
+				if toks[j].kind == rtWord && tableCalls[toks[j].text] && isOpTok(toks, j+1, "(") {
+					r.off[toks[j].text] = true
+				}
+			}
+		}
+	}
+}
+
+// callEnd is where the call that starts at toks[name] ends, with what
+// follows it and belongs to it (FILTER (...), OVER (...), OVER w); -1 when
+// it does not end before to.
+func (r *typeRewrite) callEnd(name, to int) int {
+	toks := r.toks
+	end := r.match[name+1]
+	if end < 0 || end >= to {
+		return -1
+	}
+	for end+2 < to && toks[end+1].kind == rtWord && (toks[end+1].text == "filter" || toks[end+1].text == "over") {
+		if isOpTok(toks, end+2, "(") {
+			c := r.match[end+2]
+			if c < 0 || c >= to {
+				return -1
+			}
+			end = c
+			continue
+		}
+		if toks[end+1].text != "over" || toks[end+2].kind != rtWord {
+			break
+		}
+		end += 2 // OVER w
+	}
+	return end
 }
 
 // render is the text of toks[from:to] with the casts written in. Text is
@@ -177,13 +371,21 @@ func (r *typeRewrite) render(from, to int) string {
 	if from >= to {
 		return ""
 	}
+	if r.depth >= maxCastDepth {
+		r.over = true
+	}
+	if r.over {
+		return r.q[r.spans[from][0]:r.spans[to-1][1]]
+	}
+	r.depth++
+	defer func() { r.depth-- }()
 	var b strings.Builder
 	last := r.spans[from][0]
-	for i := from; i < to; i++ {
+	for i := from; i < to && !r.over; i++ {
 		if t := r.toks[i]; t.kind == rtWord && strings.HasPrefix(t.text, "_bintrail_pg_") && isOpTok(r.toks, i+1, "(") {
 			// One of the port's own macros (RewriteForCopy): measured with
 			// its arguments as they are.
-			if end := closingParen(r.toks, i+1); end > 0 && end < to {
+			if end := r.match[i+1]; end > 0 && end < to {
 				i = end
 			}
 			continue
@@ -204,60 +406,51 @@ func (r *typeRewrite) render(from, to int) string {
 // that ends, or -1 when nothing of the table starts there.
 func (r *typeRewrite) castAt(i, to int) (string, int) {
 	toks := r.toks
-	if null, ok := r.nulls[i]; ok {
+	if null, ok := r.nulls[i]; ok && r.take(len(null)) {
 		return null, i
 	}
-	// f(...): a function of a schema (my.length) is not PostgreSQL's own,
-	// and one written pg_catalog.f never reaches the copy.
-	name := i
-	if toks[i].kind != rtWord || r.off[toks[i].text] || isOpTok(toks, i-1, ".") || !isOpTok(toks, name+1, "(") {
+	// f(...) of the table, read by its name before anything else is looked
+	// for: a function of a schema (my.length) is not PostgreSQL's own, and
+	// one written pg_catalog.f never reaches the copy.
+	fn := toks[i].text
+	if toks[i].kind != rtWord || !tableCalls[fn] || r.off[fn] || !isOpTok(toks, i+1, "(") || isOpTok(toks, i-1, ".") {
 		return "", -1
 	}
-	closeAt := closingParen(toks, name+1)
-	if closeAt < 0 || closeAt >= to {
+	closeAt := r.match[i+1]
+	end := r.callEnd(i, to)
+	if end < 0 {
 		return "", -1
 	}
 	// A relation that has a function's name: WITH length(n) AS (...),
-	// FROM f() AS position(a, b).
-	if i > 0 && toks[i-1].kind == rtWord && (toks[i-1].text == "as" || toks[i-1].text == "with" || toks[i-1].text == "from" || toks[i-1].text == "join") ||
+	// FROM f() AS position(a, b), FROM (...) length(a).
+	if isOpTok(toks, i-1, ")") ||
+		i > 0 && toks[i-1].kind == rtWord && (toks[i-1].text == "as" || toks[i-1].text == "with" || toks[i-1].text == "from" || toks[i-1].text == "join") ||
 		closeAt+2 < len(toks) && toks[closeAt+1].kind == rtWord && toks[closeAt+1].text == "as" &&
 			(isOpTok(toks, closeAt+2, "(") || toks[closeAt+2].kind == rtWord && (toks[closeAt+2].text == "materialized" || toks[closeAt+2].text == "not")) {
 		return "", -1
 	}
-	// With what follows the call and belongs to it: FILTER (...), OVER (...).
-	end := closeAt
-	for end+2 < to && toks[end+1].kind == rtWord && (toks[end+1].text == "filter" || toks[end+1].text == "over") {
-		if isOpTok(toks, end+2, "(") {
-			c := closingParen(toks, end+2)
-			if c < 0 || c >= to {
-				return "", -1
-			}
-			end = c
-			continue
-		}
-		if toks[end+1].text != "over" || toks[end+2].kind != rtWord {
-			break
-		}
-		end += 2 // OVER w
-	}
-	a0 := name + 2
+	// extract and date_part only as a whole item of the statement's own
+	// select list, where nothing in the engine reads the value again. Read
+	// again, the cast could change an answer or refuse a statement the copy
+	// took: the engine writes a double precision as text with a decimal
+	// (5.0, where PostgreSQL writes 5), and a function that takes a bigint
+	// (make_date) does not take the wider whole number extract is cast to.
+	whole := r.items[i] && endsItem(toks, end+1)
+	a0 := i + 2
 	as, args := "", ""
-	switch fn := toks[name].text; {
+	switch {
 	case int4Calls[fn]:
 		as = "INTEGER"
 	case fn == "extract":
-		// extract(year FROM x), extract('year' FROM x).
-		if closeAt-a0 >= 3 && (toks[a0].kind == rtWord || toks[a0].kind == rtString) && wholeFields[strings.ToLower(toks[a0].text)] &&
+		// extract(year FROM x), extract('year' FROM x). A whole number wider
+		// than a bigint is announced as a numeric with no precision, which is
+		// how PostgreSQL announces extract, and divides as the bigint did.
+		if whole && closeAt-a0 >= 3 && (toks[a0].kind == rtWord || toks[a0].kind == rtString) && wholeFields[strings.ToLower(toks[a0].text)] &&
 			toks[a0+1].kind == rtWord && toks[a0+1].text == "from" {
-			as = "DECIMAL(18,0)"
+			as = "HUGEINT"
 		}
 	case fn == "date_part":
-		// Only as a whole item of the statement's own select list, where
-		// nothing in the engine reads it again: the engine writes a double
-		// precision as text with a decimal (5.0) where PostgreSQL writes 5,
-		// so date_part(...)::text, or || after it, must keep the whole number.
-		if closeAt-a0 >= 3 && toks[a0].kind == rtString && wholeFields[strings.ToLower(toks[a0].text)] && isOpTok(toks, a0+1, ",") &&
-			r.items[i] && endsItem(toks, end+1) {
+		if whole && closeAt-a0 >= 3 && toks[a0].kind == rtString && wholeFields[strings.ToLower(toks[a0].text)] && isOpTok(toks, a0+1, ",") {
 			as = "DOUBLE"
 		}
 	case fn == "sum":
@@ -268,45 +461,68 @@ func (r *typeRewrite) castAt(i, to int) (string, int) {
 		}
 		// Not a sum inside another's argument: the argument is written
 		// twice, and so would each one inside it be, twice over.
-		if t := wholeType(toks[arg:closeAt], r.columnTypes); !r.inSum && (t == "int2" || t == "int4") {
+		if r.inSum || closeAt-arg > maxSumArgument {
+			break
+		}
+		if t := wholeType(toks[arg:closeAt], r.columnTypes); t == "int2" || t == "int4" {
 			// The engine checks what was read from the text: the sum of
 			// anything but whole numbers must not be cast to one.
 			r.inSum = true
 			x := r.render(arg, closeAt)
 			r.inSum = false
-			args = set + "CASE WHEN typeof(" + x + ") IN ('TINYINT', 'SMALLINT', 'INTEGER', 'BIGINT') THEN " + x + " ELSE error('" + notWholeSum + "') END"
+			if !r.take(len(x) + len(sumGuardText)) {
+				return "", -1
+			}
+			args = set + "CASE WHEN typeof(" + x + ")" + sumGuardText[:sumGuardThen] + x + sumGuardText[sumGuardThen:]
 			as = "BIGINT"
 		}
 	}
-	if as == "" {
+	if as == "" || !r.take(len("CAST( AS )")+len(as)+len(fn)+len(` AS ""`)) {
 		return "", -1
 	}
 	if args == "" {
 		args = r.render(a0, closeAt)
 	}
-	return "CAST(" + r.q[r.spans[i][0]:r.spans[name+1][1]] + args + r.render(closeAt, end+1) + " AS " + as + ")", end
+	out := "CAST(" + r.q[r.spans[i][0]:r.spans[i+1][1]] + args + r.render(closeAt, end+1) + " AS " + as + ")"
+	if name := r.alias[i]; name != "" {
+		out += ` AS "` + name + `"`
+	}
+	if r.over {
+		return "", -1
+	}
+	return out, end
 }
+
+// sumGuardText is what stands around a sum's argument x, after
+// CASE WHEN typeof(x): the whole number types, THEN (x goes at sumGuardThen)
+// and the error for anything else.
+const (
+	sumGuardText = " IN ('TINYINT', 'SMALLINT', 'INTEGER', 'BIGINT') THEN  ELSE error('" + notWholeSum + "') END"
+	sumGuardThen = len(" IN ('TINYINT', 'SMALLINT', 'INTEGER', 'BIGINT') THEN ")
+)
 
 // columnTypes are the types of the columns a sum's argument may name: the
 // copy's, less every name the statement may define itself, which stands for
 // whatever it was defined as. Nil when the copy's are not known, or when the
 // statement names columns in a list (AS t(a, b)), which defines names this
-// does not read.
+// does not read, or is too long to have its names worked out.
 func (r *typeRewrite) columnTypes() map[string][]string {
 	if r.asked {
 		return r.types
 	}
 	r.asked = true
 	types := r.columns()
-	if types == nil || columnList(r.toks) {
+	if types == nil || len(r.toks) > maxTypedTokens || listsColumns(r.toks, r.match) {
 		return nil
 	}
 	out := make(map[string][]string, len(types))
 	for k, v := range withAliasTypes(r.toks, types) {
 		out[k] = v
 	}
-	// A name after AS, or right after a value (SELECT 1.5 i, FROM f(x) i),
-	// and every quoted name: more than the statement defines, never less.
+	// A name after AS, or right after a value (SELECT 1.5 i, FROM f(x) i,
+	// CASE ... END i, NULL i), and every quoted name: more than the
+	// statement defines, never less.
+	valueWord := map[string]bool{"as": true, "end": true, "null": true, "true": true, "false": true}
 	for i, t := range r.toks {
 		switch {
 		case t.kind == rtQuoted:
@@ -315,7 +531,7 @@ func (r *typeRewrite) columnTypes() map[string][]string {
 		default:
 			prev := r.toks[i-1]
 			if prev.kind == rtString || prev.kind == rtNumber || prev.kind == rtQuoted || prev.kind == rtParam || isOpTok(r.toks, i-1, ")") || isOpTok(r.toks, i-1, "]") ||
-				prev.kind == rtWord && (prev.text == "as" || !aliasStop[prev.text]) {
+				prev.kind == rtWord && (valueWord[prev.text] || !aliasStop[prev.text]) {
 				delete(out, t.text)
 			}
 		}
@@ -458,10 +674,6 @@ func operandType(o []rtToken, types func() map[string][]string) string {
 // list starts (not a subquery's), and whether the statement combines selects
 // (UNION, INTERSECT, EXCEPT) or holds a VALUES list.
 func selectItems(toks []rtToken) (starts map[int]bool, combined bool) {
-	listEnd := map[string]bool{
-		"from": true, "where": true, "group": true, "having": true, "order": true, "limit": true, "offset": true,
-		"window": true, "fetch": true, "for": true,
-	}
 	starts = map[int]bool{}
 	depth, list := 0, false
 	for i, t := range toks {
@@ -476,7 +688,7 @@ func selectItems(toks []rtToken) (starts map[int]bool, combined bool) {
 		case t.kind == rtWord && t.text == "select":
 			list = true
 			starts[i+1] = true
-		case t.kind == rtWord && listEnd[t.text]:
+		case t.kind == rtWord && selectListEnd[t.text]:
 			list = false
 		case list && isOpTok(toks, i, ","):
 			starts[i+1] = true

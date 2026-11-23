@@ -84,7 +84,34 @@ func TestAsPostgresTypes(t *testing.T) {
 		{"WITH c AS (SELECT sum(s) AS small FROM v) SELECT small FROM c", "WITH c AS (SELECT CAST(sum(" + sumGuard("s") + ") AS BIGINT) AS small FROM v) SELECT small FROM c"},
 
 		// extract and date_part of a whole field.
-		{"SELECT extract(year FROM ts), EXTRACT('month' FROM d) FROM v", "SELECT CAST(extract(year FROM ts) AS DECIMAL(18,0)), CAST(EXTRACT('month' FROM d) AS DECIMAL(18,0)) FROM v"},
+		{"SELECT extract(year FROM ts), EXTRACT('month' FROM d) AS m FROM v", "SELECT CAST(extract(year FROM ts) AS HUGEINT), CAST(EXTRACT('month' FROM d) AS HUGEINT) AS m FROM v"},
+		// extract, as date_part, only as a whole item of the statement's own
+		// select list: read again by the engine it is left as it was, so a
+		// division of one, a filter or a group over one, and a function that
+		// takes it as an argument answer as before.
+		{"SELECT extract(year FROM d) + 1, make_date(extract(year FROM d), 1, 1), extract(month FROM d) / 3, extract(year FROM d)::text FROM v WHERE extract(month FROM d) / 3 = 1 GROUP BY (extract(month FROM d) - 1) / 3",
+			"SELECT extract(year FROM d) + 1, make_date(extract(year FROM d), 1, 1), extract(month FROM d) / 3, extract(year FROM d)::text FROM v WHERE extract(month FROM d) / 3 = 1 GROUP BY (extract(month FROM d) - 1) / 3"},
+		{"SELECT y FROM (SELECT extract(year FROM d) AS y FROM v) q", "SELECT y FROM (SELECT extract(year FROM d) AS y FROM v) q"},
+		{"SELECT DISTINCT extract(year FROM d) FROM v", "SELECT DISTINCT extract(year FROM d) FROM v"},
+
+		// The heading of a column stays the one it had, or PostgreSQL's: in a
+		// list with a star, and in a subquery's list, an item that is the
+		// call alone takes the function's name, and one with a name keeps it.
+		{"SELECT *, length(t), sum(i) OVER () FROM v",
+			`SELECT *, CAST(length(t) AS INTEGER) AS "length", CAST(sum(` + sumGuard("i") + `) OVER () AS BIGINT) AS "sum" FROM v`},
+		{"SELECT v.*, extract(year FROM d), date_part('year', d), NULL, length(t) AS n FROM v",
+			`SELECT v.*, CAST(extract(year FROM d) AS HUGEINT) AS "extract", CAST(date_part('year', d) AS DOUBLE) AS "date_part", ` + unnamedNull + `, CAST(length(t) AS INTEGER) AS n FROM v`},
+		{"SELECT * FROM (SELECT length(t) FROM v) q", `SELECT * FROM (SELECT CAST(length(t) AS INTEGER) AS "length" FROM v) q`},
+		{"SELECT * FROM (SELECT DISTINCT ntile(2) OVER (ORDER BY i), strpos(t, 'a') n, position('a' in t) AS p FROM v) q",
+			`SELECT * FROM (SELECT DISTINCT CAST(ntile(2) OVER (ORDER BY i) AS INTEGER) AS "ntile", CAST(strpos(t, 'a') AS INTEGER) n, CAST(position('a' in t) AS INTEGER) AS p FROM v) q`},
+		// Two items of one name, or a call inside a larger item with no name:
+		// left as written, and so is every other call of that function, so
+		// GROUP BY still names the item's expression.
+		{"SELECT * FROM (SELECT length(t), length(t || 'x'), strpos(t, 'a') FROM v GROUP BY length(t), 2, 3) q",
+			`SELECT * FROM (SELECT length(t), length(t || 'x'), CAST(strpos(t, 'a') AS INTEGER) AS "strpos" FROM v GROUP BY length(t), 2, 3) q`},
+		{"SELECT *, length(t) + 1 FROM v WHERE length(t) > 1", "SELECT *, length(t) + 1 FROM v WHERE length(t) > 1"},
+		{"SELECT x FROM (SELECT (SELECT sum(i) FROM v) + 1, i AS x FROM v) q WHERE x < (SELECT sum(i) FROM v)",
+			"SELECT x FROM (SELECT (SELECT sum(i) FROM v) + 1, i AS x FROM v) q WHERE x < (SELECT sum(i) FROM v)"},
 		{"SELECT date_part('year', ts), date_part('DOW', d) FROM v", "SELECT CAST(date_part('year', ts) AS DOUBLE), CAST(date_part('DOW', d) AS DOUBLE) FROM v"},
 		{"SELECT extract(epoch FROM ts), extract(second FROM ts), date_part('second', ts), date_part(t, ts), extract(milliseconds FROM ts) FROM v",
 			"SELECT extract(epoch FROM ts), extract(second FROM ts), date_part('second', ts), date_part(t, ts), extract(milliseconds FROM ts) FROM v"},
@@ -95,6 +122,7 @@ func TestAsPostgresTypes(t *testing.T) {
 			"SELECT date_part('month', d)::text, lpad(date_part('month', d)::text, 2, '0'), date_part('year', d) + 1, date_part('year', d) || 'x' FROM v"},
 		{"SELECT y FROM (SELECT date_part('year', d) AS y FROM v) q WHERE date_part('year', now()) > 1", "SELECT y FROM (SELECT date_part('year', d) AS y FROM v) q WHERE date_part('year', now()) > 1"},
 		{"SELECT date_part('year', d) AS y, i FROM v ORDER BY date_part('year', d)", "SELECT CAST(date_part('year', d) AS DOUBLE) AS y, i FROM v ORDER BY date_part('year', d)"},
+		{"SELECT DISTINCT date_part('year', d) FROM v ORDER BY date_part('year', d)", "SELECT DISTINCT date_part('year', d) FROM v ORDER BY date_part('year', d)"},
 
 		// A function called inside one of the port's macros is cast nowhere
 		// in the statement: GROUP BY must still name the same expression.
@@ -107,6 +135,11 @@ func TestAsPostgresTypes(t *testing.T) {
 		{"SELECT ARRAY[1, NULL, 2], [NULL] FROM v", "SELECT ARRAY[1, NULL, 2], [NULL] FROM v"},
 		{"SELECT sum(i ORDER BY b::int) FROM v", "SELECT sum(i ORDER BY b::int) FROM v"},
 		{`SELECT sum(i) FROM (SELECT "Amount" i FROM v) q`, `SELECT sum(i) FROM (SELECT "Amount" i FROM v) q`},
+		// A name right after END, NULL, TRUE or FALSE is an alias too.
+		{"SELECT sum(i) FROM (SELECT CASE WHEN b > 1 THEN n ELSE 0 END i FROM v) q", "SELECT sum(i) FROM (SELECT CASE WHEN b > 1 THEN n ELSE 0 END i FROM v) q"},
+		{"SELECT sum(i), sum(s) FROM (SELECT NULL i, true s) q", "SELECT sum(i), sum(s) FROM (SELECT NULL i, true s) q"},
+		// A table's alias with a column list, named as a function.
+		{"SELECT * FROM (SELECT 1) length(a)", "SELECT * FROM (SELECT 1) length(a)"},
 		// A sum inside a sum's argument is written as it is.
 		{"SELECT sum(length(sum(length('a'))::text))", "SELECT CAST(sum(" + sumGuard("CAST(length(sum(CAST(length('a') AS INTEGER))::text) AS INTEGER)") + ") AS BIGINT)"},
 
@@ -264,5 +297,41 @@ func TestAsPostgresTypes_nestedSumsStaySmall(t *testing.T) {
 	stmt = "SELECT " + stmt
 	if got := AsPostgresTypes(stmt, nil); len(got) > 10*len(stmt) {
 		t.Errorf("%d bytes written for a statement of %d", len(got), len(stmt))
+	}
+}
+
+// The rewrite is bounded: a statement that would be written past the longest
+// one the port takes, that nests casts too deep, or that is only parentheses,
+// is handed over as written, in about the time it takes to read it.
+func TestAsPostgresTypes_bounded(t *testing.T) {
+	const size = 1 << 20
+	types := map[string][]string{"i": {"INTEGER"}}
+	for name, stmt := range map[string]string{
+		"sums":           "SELECT " + strings.Repeat("sum(1),", size/7) + "1",
+		"sums of a name": "SELECT " + strings.Repeat("sum(i),", size/7) + "1 FROM v",
+		"nested calls":   "SELECT " + strings.Repeat("length(", size/7) + "'a'" + strings.Repeat(")", size/7),
+		"nested IN":      "SELECT 1 WHERE 1 " + strings.Repeat("in (1 ", size/6) + strings.Repeat(")", size/6),
+		"nested selects": "SELECT " + strings.Repeat("(SELECT length(t), ", size/18) + "1" + strings.Repeat(")", size/18),
+		"open only":      "SELECT sum" + strings.Repeat("(", size),
+		"too long":       "SELECT length(t) FROM v -- " + strings.Repeat("x", maxStatementMessage),
+	} {
+		started := time.Now()
+		got := AsPostgresTypes(stmt, types)
+		if took := time.Since(started); took > 5*time.Second {
+			t.Errorf("%s: %v for a statement of %d bytes", name, took, len(stmt))
+		}
+		if got != stmt {
+			t.Errorf("%s: a statement past the bounds was rewritten (%d bytes from %d)", name, len(got), len(stmt))
+		}
+	}
+	// Within them it is rewritten, and what is written stays within the
+	// longest statement the port takes.
+	stmt := "SELECT " + strings.Repeat("sum(1),", 1000) + "1"
+	if got := AsPostgresTypes(stmt, nil); got == stmt || len(got) > maxStatementMessage || strings.Count(got, "AS BIGINT") != 1000 {
+		t.Errorf("1000 sums: %d bytes from %d", len(got), len(stmt))
+	}
+	deep := "SELECT " + strings.Repeat("length(", maxCastDepth-1) + "'a'" + strings.Repeat("::text)", maxCastDepth-1)
+	if got := AsPostgresTypes(deep, nil); strings.Count(got, "AS INTEGER") != maxCastDepth-1 {
+		t.Errorf("%d calls one inside another: %d casts", maxCastDepth-1, strings.Count(got, "AS INTEGER"))
 	}
 }

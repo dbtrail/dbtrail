@@ -95,7 +95,7 @@ func tySame() []tyList {
 			"extract(hour FROM ts)", "extract(minute FROM ts)", "extract(quarter FROM d)", "extract(dow FROM d)",
 			"extract(doy FROM d)", "extract(week FROM d)", "extract(isodow FROM d)", "extract(isoyear FROM d)",
 			"extract(decade FROM d)", "extract(century FROM d)", "extract(millennium FROM d)",
-			"extract(year FROM ts) + 1", "extract(year FROM d) AS y",
+			"extract(year FROM d) AS y",
 			"date_part('year', ts)", "date_part('month', d)", "date_part('day', tz)", "DATE_PART('hour', ts)",
 			"date_part('minute', ts)", "date_part('quarter', d)", "date_part('dow', d)", "date_part('doy', d)",
 			"date_part('week', d)", "date_part('month', d)::text", "extract(month FROM d)::text", "lpad(date_part('month', d)::text, 2, '0')",
@@ -120,7 +120,15 @@ func tyStatements() []string {
 		`SELECT total + 1, total FROM (SELECT sum(i) AS total FROM ` + v + `) q`,
 		`WITH c AS (SELECT id % 2 AS g, sum(s) AS small, sum(i) AS total FROM ` + v + ` GROUP BY 1) SELECT g, small, total FROM c ORDER BY g`,
 		`SELECT * FROM (SELECT id, length(t) AS l, position('a' in t) AS p, ntile(2) OVER (ORDER BY id) AS q FROM ` + v + `) x ORDER BY id`,
-		`SELECT l + 1, y FROM (SELECT id, length(t) AS l, extract(year FROM d) AS y FROM ` + v + `) x ORDER BY id`,
+		`SELECT l + 1, m FROM (SELECT id, length(t) AS l, position('a' in t) m FROM ` + v + `) x ORDER BY id`,
+		// The headings: beside a star, and of a subquery's columns read
+		// through one, an item with no name is headed by its function.
+		`SELECT *, length(t), sum(i) OVER (), extract(year FROM d), date_part('month', d), NULL FROM ` + v + ` ORDER BY id`,
+		`SELECT * FROM (SELECT id, length(t), ntile(2) OVER (ORDER BY id), sum(i) OVER (ORDER BY id), strpos(t, 'a') FROM ` + v + `) q ORDER BY id`,
+		`SELECT * FROM (SELECT length(t), count(*), sum(s) FROM ` + v + ` GROUP BY length(t)) q ORDER BY 1`,
+		// What the engine reads again stays as it was: these answered before.
+		`SELECT DISTINCT date_part('year', d) FROM ` + v + ` ORDER BY date_part('year', d)`,
+		`SELECT d - extract(dow FROM d) * interval '1 day' FROM ` + v + ` ORDER BY id`,
 		`SELECT max(l), min(l) + 1 FROM (SELECT length(t) AS l FROM ` + v + `) x`,
 		`SELECT id FROM ` + v + ` WHERE length(t) > 2 AND extract(year FROM d) > 2000 ORDER BY length(t), id`,
 		`SELECT length(t), count(*), sum(i) FROM ` + v + ` GROUP BY length(t) HAVING sum(i) > 0 ORDER BY 1`,
@@ -174,6 +182,9 @@ func tyDifferent() []tyOther {
 		{`SELECT sum(l) FROM (SELECT length(t) AS l FROM ` + v + `) x`, 0, 20, 1700, "the sum of a name the statement defines: its type is not read"},
 		{`SELECT sum(id) FROM (SELECT i AS id FROM ` + v + `) x`, 0, 20, 1700, "the same, under the name of a column"},
 		{`SELECT x FROM (SELECT NULL AS x) q`, 0, 25, 23, "a NULL named in a subquery"},
+		{`SELECT extract(year FROM d) + 1 FROM ` + v + ` ORDER BY id`, 0, 1700, 20, "extract inside an expression: cast, a function that takes a bigint would refuse it"},
+		{`SELECT y FROM (SELECT id, extract(year FROM d) AS y FROM ` + v + `) q ORDER BY id`, 0, 1700, 20, "extract in a subquery, for the same reason"},
+		{`SELECT a FROM (SELECT id, length(t) AS a, length(t) + 1 FROM ` + v + `) q ORDER BY id`, 0, 23, 20, "a subquery calls the function in an item with no name, whose heading must stay"},
 		{`SELECT date_part('year', d) + 1 FROM ` + v + ` ORDER BY id`, 0, 701, 20, "date_part inside an expression: as a double precision the engine would write it 2026.0 where it is read as text"},
 		{`SELECT y FROM (SELECT id, date_part('year', d) AS y FROM ` + v + `) q ORDER BY id`, 0, 701, 20, "date_part in a subquery, for the same reason"},
 		{`SELECT NULL, NULL`, 1, 25, 23, "a second NULL with no name"},
@@ -246,6 +257,14 @@ func tyDiff(mode string, pg, port tyAnswer) []string {
 	}
 	for i, f := range pg.fields {
 		g := port.fields[i]
+		// The type modifier too (numeric(18,0) is not numeric). But for a
+		// numeric with decimals: an expression over one keeps its precision
+		// and scale on the port where PostgreSQL announces none, which
+		// docs/postgres.md says.
+		modifier := f.TypeModifier != g.TypeModifier && !(f.DataTypeOID == 1700 && f.TypeModifier == -1 && (g.TypeModifier-4)&0xFFFF > 0)
+		if modifier {
+			out = append(out, fmt.Sprintf("%s: column %d (%s): PostgreSQL announces type modifier %d, the port %d", mode, i+1, f.Name, f.TypeModifier, g.TypeModifier))
+		}
 		if f.DataTypeOID != g.DataTypeOID || f.DataTypeSize != g.DataTypeSize || f.Format != g.Format {
 			out = append(out, fmt.Sprintf("%s: column %d (%s): PostgreSQL announces %s (size %d, format %d), the port %s (size %d, format %d)",
 				mode, i+1, f.Name, tyName(f.DataTypeOID), f.DataTypeSize, f.Format, tyName(g.DataTypeOID), g.DataTypeSize, g.Format))
