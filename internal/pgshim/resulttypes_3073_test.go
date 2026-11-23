@@ -164,11 +164,11 @@ func TestAsPostgresTypes_columnTypes(t *testing.T) {
 	}
 	asked := 0
 	read := func() map[string][]string { asked++; return map[string][]string{"i": {"INTEGER"}} }
-	asPostgresTypes("SELECT length(t), sum(2), sum(count(*)) FROM v", read)
+	asPostgresTypesOf("SELECT length(t), sum(2), sum(count(*)) FROM v", "", read)
 	if asked != 0 {
 		t.Errorf("the column types were read %d times for a statement without a sum", asked)
 	}
-	asPostgresTypes("SELECT sum(i), sum(i + 1), sum(2) FROM v", read)
+	asPostgresTypesOf("SELECT sum(i), sum(i + 1), sum(2) FROM v", "", read)
 	if asked != 1 {
 		t.Errorf("the column types were read %d times, want once", asked)
 	}

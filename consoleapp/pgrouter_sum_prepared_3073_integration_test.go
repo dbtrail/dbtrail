@@ -31,6 +31,9 @@ func TestIntegrationPGRouterSumPrepared3073(t *testing.T) {
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
+	// Any sequential scan is the copy's: without this, a table this small is
+	// a cheap plan and the source answers, and the test would prove nothing.
+	pol := pgshim.CostPolicy{ScanRows: 1}
 	env := startPGPortFor(t, ctx, nil, pgPortFixture{table: table, slot: "pgsumprep_slot", pub: "pgsumprep_pub",
 		setup: []string{
 			"CREATE TABLE " + table + " (id bigint PRIMARY KEY, qty int)",
@@ -39,7 +42,9 @@ func TestIntegrationPGRouterSumPrepared3073(t *testing.T) {
 		entry: func(e *console.ServerEntry) {
 			e.SourceDSN, e.SourceSlot, e.SourcePublication = pgFwdSourceDSN(t), "pgsumprep_slot", "pgsumprep_pub"
 			e.RouteDSN = withAccount(t, e.SourceDSN, role, pass)
-		}})
+		},
+		cost: &pol,
+	})
 	source, err := pgconn.Connect(ctx, env.sourceDSN)
 	if err != nil {
 		t.Fatal(err)
@@ -47,6 +52,7 @@ func TestIntegrationPGRouterSumPrepared3073(t *testing.T) {
 	t.Cleanup(func() { source.Close(context.Background()) })
 	for _, stmt := range []string{
 		`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '` + role + `') THEN EXECUTE 'DROP OWNED BY ` + role + `'; END IF; END $$`,
+		"ANALYZE " + table,
 		"DROP ROLE IF EXISTS " + role,
 		"CREATE ROLE " + role + " LOGIN PASSWORD '" + pass + "'",
 		"GRANT SELECT ON " + table + " TO " + role,
@@ -108,7 +114,15 @@ func TestIntegrationPGRouterSumPrepared3073(t *testing.T) {
 		if got != want {
 			t.Errorf("%s: the port: %s; PostgreSQL: %s", tc.name, got, want)
 		}
-		if after[pgshim.ReasonCopyRefused] != before[pgshim.ReasonCopyRefused] || after[pgshim.ReasonVeto] != before[pgshim.ReasonVeto] {
+		// Every statement of the exchange counted as the copy's, and none
+		// under a reason the source answers for.
+		onCopy := after[pgshim.ReasonAnswersTheSame] > before[pgshim.ReasonAnswersTheSame]
+		for k, v := range after {
+			if k != pgshim.ReasonAnswersTheSame && v > before[k] {
+				onCopy = false
+			}
+		}
+		if !onCopy {
 			t.Errorf("%s: want the copy to answer; reasons went from %v to %v", tc.name, before, after)
 		}
 	}
