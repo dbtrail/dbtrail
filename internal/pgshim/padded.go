@@ -228,13 +228,32 @@ func paddedWhat(name string, sized bool) string {
 // equal are two on the copy: beside one of those, DISTINCT and GROUP BY are
 // the source's as well.
 func paddedUse(toks []rtToken, types map[string][]string) string {
+	return paddedRead(toks, types, true)
+}
+
+// paddedRead is paddedUse. exemptions false reads the statement without any
+// of the exemptions of padded_star.go and padded_lists.go, to tell whether
+// one of them is what let it pass (paddedForNoSource).
+func paddedRead(toks []rtToken, types map[string][]string, exemptions bool) string {
 	anyPadded, allSized := paddedAmong(types)
 	if !anyPadded {
 		return ""
 	}
 
+	if why := keywordColumnList(toks); why != "" {
+		return why + " on a copy that holds a char(n) column"
+	}
+
 	// The stars whose padded columns the statement never reads (padded_star.go).
-	exempt := paddedExempt(toks, types)
+	var exempt map[int]bool
+	// And the later items of a FROM list and the stars of EXISTS (SELECT *
+	// ...), which read no column (padded_lists.go).
+	lists := false
+	if exemptions {
+		exempt = paddedExempt(toks, types)
+		lists = listsProven(toks, types)
+	}
+	exists := &existsStars{}
 
 	// One SELECT and nothing else, and where its select list's items are.
 	selects, sel := 0, -1
@@ -400,7 +419,7 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 				// A table that holds a padded column, not before a dot: named
 				// in FROM (its alias is noted), or written as a value.
 				p := at(i - 1)
-				if !(p.kind == rtWord && (p.text == "from" || p.text == "join" || p.text == "table") || isOpTok(toks, i-1, ".")) {
+				if !(p.kind == rtWord && (p.text == "from" || p.text == "join" || p.text == "table") || isOpTok(toks, i-1, ".") || lists && fromListItem(toks, i)) {
 					return fmt.Sprintf("the table %q, which holds a char(n) column, written where a value or a second table of a list stands", n) + otherRows
 				}
 				j := i + 1
@@ -409,6 +428,11 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 				}
 				if a := at(j); a.kind == rtQuoted || a.kind == rtWord && !aliasStop[a.text] {
 					relAlias[strings.ToLower(a.text)] = j
+				} else if a.kind == rtWord && (j > i+1 || !fromFollower[a.text]) {
+					// A name PostgreSQL takes as the table's alias and this
+					// reads as a keyword (FROM codes last): its uses as the
+					// whole row could not be told from the keyword's.
+					return fmt.Sprintf("the table %q, which holds a char(n) column, given the name %q, which the port reads as a keyword", n, a.text) + otherRows
 				}
 			}
 			padded, sized := paddedKind(types, n)
@@ -434,7 +458,7 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 				// count(*) counts rows, whatever they hold.
 				continue
 			}
-			if exempt[i] {
+			if exempt[i] || lists && exists.star(toks, i) {
 				continue
 			}
 			if whole, _ := wholeItem(i); !whole {
@@ -554,12 +578,10 @@ func (s *session) paddedVeto(text string) string {
 	case unlexed != "":
 		veto = paddedInText(text, types)
 	default:
-		veto = paddedUse(toks, types)
-		// A star this leaves to a connection with no source to fall back on
-		// passes the whole screen too: it was refused before, and the copy
-		// must not now answer it with text sorted its own way.
-		if padded, _ := paddedAmong(types); veto == "" && padded && !s.canFallBack() && len(paddedExempt(toks, types)) > 0 {
-			veto = screenForCopy(toks, types)
+		if s.canFallBack() {
+			veto = paddedUse(toks, types)
+		} else {
+			veto = paddedForNoSource(toks, types)
 		}
 	}
 	if veto != "" {
@@ -569,6 +591,22 @@ func (s *session) paddedVeto(text string) string {
 		s.logger.Debug("pgshim: not answered by the copy", "construct", veto)
 	}
 	return veto
+}
+
+// paddedForNoSource is paddedUse for a connection with no source to fall back
+// on. A statement that passes only by an exemption (a star nothing reads, a
+// later item of a FROM list, the star of an EXISTS) passes the whole screen
+// too: it was refused before, and the copy must not now answer it with text
+// sorted its own way.
+func paddedForNoSource(toks []rtToken, types map[string][]string) string {
+	veto := paddedUse(toks, types)
+	if padded, _ := paddedAmong(types); veto != "" || !padded {
+		return veto
+	}
+	if len(paddedExempt(toks, types)) > 0 || paddedRead(toks, types, false) != "" {
+		return screenForCopy(toks, types)
+	}
+	return ""
 }
 
 // paddedError is the error of a statement paddedVeto keeps from the copy.

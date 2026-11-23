@@ -84,10 +84,9 @@ func starMayBeText(toks []rtToken, types map[string][]string) bool {
 			// answer.
 			continue
 		}
-		if word(i-1, "select") && isOpTok(toks, i-2, "(") && word(i-3, "exists") && !isOpTok(toks, i-4, ".") {
-			// EXISTS (SELECT * ...): PostgreSQL does not read the list of an
-			// EXISTS, and it puts no column in the answer. (IN (SELECT *
-			// ...) is not this: its star decides what is compared.)
+		if existsListStar(toks, i) {
+			// PostgreSQL does not read the list of an EXISTS, and it puts no
+			// column in the answer.
 			continue
 		}
 		if i+1 >= len(toks) || isOpTok(toks, i+1, ",") || isOpTok(toks, i+1, ")") || isOpTok(toks, i+1, ";") || word(i+1, "from") {
@@ -196,6 +195,16 @@ func starMayBeText(toks []rtToken, types map[string][]string) bool {
 		}
 	}
 	return false
+}
+
+// existsListStar reports whether the star at i opens the list of an EXISTS:
+// EXISTS (SELECT * ...). (IN (SELECT * ...) is not this: its star decides
+// what is compared.)
+func existsListStar(toks []rtToken, i int) bool {
+	word := func(j int, w string) bool {
+		return j >= 0 && j < len(toks) && toks[j].kind == rtWord && toks[j].text == w
+	}
+	return word(i-1, "select") && isOpTok(toks, i-2, "(") && word(i-3, "exists") && !isOpTok(toks, i-4, ".")
 }
 
 // starOverOneTable reports whether the statement is SELECT * FROM one table
