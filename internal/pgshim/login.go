@@ -180,6 +180,13 @@ type RunOptions struct {
 	// of a SET), not as an answer to the client: the host must not count it
 	// as one.
 	Probe bool
+	// NeedTails says the answer is given only if every table it reads has
+	// its recent changes over its snapshot (copyOlderThanSource): when they
+	// are not ready in the copy's wait for them, the host refuses the
+	// statement before running it, with a *sqlsandbox.MayHaveChangedError,
+	// and the source answers it (#3086). Without it a snapshot alone
+	// answers, as on a connection with nowhere else to send the statement.
+	NeedTails bool
 }
 
 // runOptions are the options the connection's next statement runs in.
@@ -363,7 +370,16 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		if waited, stop = s.waitForCopy(ctx, qstr, apart); stop != nil {
 			return nil, nil, nil, "", stop
 		}
-		res, err = s.bound.Run(ctx, text, s.runOptions())
+		// An answer copyOlderThanSource would hold back unless every table it
+		// read had its recent changes: the copy is told before it runs, so it
+		// does not run one it would answer from the snapshot alone (#3086).
+		opts := s.runOptions()
+		opts.NeedTails = s.holdsBackCopy(apart && named > 0)
+		res, err = s.bound.Run(ctx, text, opts)
+		var changed *sqlsandbox.MayHaveChangedError
+		if opts.NeedTails && errors.As(err, &changed) {
+			s.logger.Debug("pgshim: the copy's recent changes for a statement were not ready; it did not run there, and the source answers it", "why", changed.Reason)
+		}
 	}
 	if res.Spool != nil {
 		// Only a bug gets here: this port asks for no result in a file.
