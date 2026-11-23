@@ -126,13 +126,13 @@ func literalFamily(ty string) string {
 type numKind int
 
 const (
-	numUnknown numKind = iota // nothing is known of it
-	numNull                   // NULL
-	numScaled                 // a whole number, or a numeric with a known number of decimals
-	numAnyScale               // a numeric whose number of decimals is not known here
-	numDouble                 // a double precision
-	numReal                   // a real, or something that may be one
-	numNot                    // known not to be a number: text, a date, a boolean
+	numUnknown  numKind = iota // nothing is known of it
+	numNull                    // NULL
+	numScaled                  // a whole number, or a numeric with a known number of decimals
+	numAnyScale                // a numeric whose number of decimals is not known here
+	numDouble                  // a double precision
+	numReal                    // a real, or something that may be one
+	numNot                     // known not to be a number: text, a date, a boolean
 )
 
 type numValue struct {

@@ -20,9 +20,9 @@ func screenExactness() []expectation {
 		return expectation{stmt: stmt, verdict: sqlcompare.Different, kind: kind, why: why}
 	}
 	const (
-		sub   = "#3071: the copy counts a start of zero or below otherwise"
-		lit   = "#3072: the copy reads this date or time literal otherwise"
-		scale = "#3070: PostgreSQL writes each value with its own decimals"
+		sub    = "#3071: the copy counts a start of zero or below otherwise"
+		lit    = "#3072: the copy reads this date or time literal otherwise"
+		scale  = "#3070: PostgreSQL writes each value with its own decimals"
 		asReal = "#3069: PostgreSQL computes a real as a double precision, and sums it as a real"
 	)
 	return []expectation{
@@ -36,18 +36,18 @@ func screenExactness() []expectation {
 		// these rows (the one below zero cuts an empty text): the screen
 		// sends both to the source all the same, since only a start written
 		// as a positive number is known before the statement runs.
-		eq(`SELECT id, substring(word, 0, 3) FROM `+x+` ORDER BY id`),
-		eq(`SELECT id, substring(word, whole, 2) FROM `+x+` ORDER BY id`),
+		eq(`SELECT id, substring(word, 0, 3) FROM ` + x + ` ORDER BY id`),
+		eq(`SELECT id, substring(word, whole, 2) FROM ` + x + ` ORDER BY id`),
 		{stmt: `SELECT id, substring(word, 2, -1) FROM ` + x + ` ORDER BY id`, verdict: sqlcompare.SourceError},
-		stay(`SELECT id, substring(word, 1, 3), substring(word, 2), substring(word, 4, 100) FROM `+x+` ORDER BY id`),
-		stay(`SELECT id, substring(word FROM 2 FOR 3), substring(word FROM 3) FROM `+x+` ORDER BY id`),
+		stay(`SELECT id, substring(word, 1, 3), substring(word, 2), substring(word, 4, 100) FROM ` + x + ` ORDER BY id`),
+		stay(`SELECT id, substring(word FROM 2 FOR 3), substring(word FROM 3) FROM ` + x + ` ORDER BY id`),
 		stay(`SELECT substring('apple', 2, 3), substring('apple' FROM 5)`),
 		// substr, left, right and overlay were never the copy's: the screen
 		// sends each to the source, whatever it is given.
 		differs("text", sub, `SELECT id, substr(word, -1, 3) FROM `+x+` ORDER BY id`),
-		eq(`SELECT id, substr(word, 2, 3) FROM `+x+` ORDER BY id`),
-		eq(`SELECT id, left(word, 2), right(word, 2) FROM `+x+` ORDER BY id`),
-		eq(`SELECT id, left(word, -2), right(word, -2) FROM `+x+` ORDER BY id`),
+		eq(`SELECT id, substr(word, 2, 3) FROM ` + x + ` ORDER BY id`),
+		eq(`SELECT id, left(word, 2), right(word, 2) FROM ` + x + ` ORDER BY id`),
+		eq(`SELECT id, left(word, -2), right(word, -2) FROM ` + x + ` ORDER BY id`),
 		{stmt: `SELECT id, overlay(word placing 'XX' from 2 for 1) FROM ` + x + ` ORDER BY id`, verdict: sqlcompare.NotOnCopy, says: "overlay", why: "the copy has no overlay()"},
 
 		// --- #3072: date and time literals --------------------------------
@@ -62,7 +62,7 @@ func screenExactness() []expectation {
 		differs("rows", lit, `SELECT id FROM `+x+` WHERE stamp = '2026-01-05 10:30:00.1234567'`),
 		// Compared with a time column the copy answers the same; the screen
 		// holds a string to the form of a literal all the same.
-		eq(`SELECT id FROM `+x+` WHERE clock < '24:00:00'`),
+		eq(`SELECT id FROM ` + x + ` WHERE clock < '24:00:00'`),
 		// Other spellings outside the strict form, as they measure.
 		eq(`SELECT DATE '2026-1-5'`),
 		eq(`SELECT DATE '2026-01-05 10:30:00'`),
@@ -72,10 +72,10 @@ func screenExactness() []expectation {
 		stay(`SELECT TIMESTAMP '2026-01-05 10:30:00.123456', TIMESTAMP '2026-01-05 23:59:59', TIMESTAMP '2026-01-05', TIMESTAMP '2026-01-05T10:30:00'`),
 		stay(`SELECT TIMESTAMP '2026-01-05 10:30', TIME '10:30'`),
 		stay(`SELECT TIME '23:59:59.999999', TIME '00:00:00'`),
-		stay(`SELECT id FROM `+x+` WHERE day = '2026-01-05' OR day IN ('2026-02-10', '2026-12-31')`),
-		stay(`SELECT id FROM `+x+` WHERE day BETWEEN DATE '2026-01-01' AND '2026-01-31'`),
-		stay(`SELECT id FROM `+x+` WHERE stamp >= '2026-01-05' AND stamp < '2026-01-06 00:00:00' AND stamp <> TIMESTAMP '2026-01-05 10:30:00.123456'`),
-		stay(`SELECT id FROM `+x+` WHERE clock < '12:00:00' OR clock = TIME '23:59:59'`),
+		stay(`SELECT id FROM ` + x + ` WHERE day = '2026-01-05' OR day IN ('2026-02-10', '2026-12-31')`),
+		stay(`SELECT id FROM ` + x + ` WHERE day BETWEEN DATE '2026-01-01' AND '2026-01-31'`),
+		stay(`SELECT id FROM ` + x + ` WHERE stamp >= '2026-01-05' AND stamp < '2026-01-06 00:00:00' AND stamp <> TIMESTAMP '2026-01-05 10:30:00.123456'`),
+		stay(`SELECT id FROM ` + x + ` WHERE clock < '12:00:00' OR clock = TIME '23:59:59'`),
 
 		// --- #3070: numbers of different decimals in one column -----------
 		differs("precision", scale, `SELECT id, CASE WHEN amt > 3 THEN amt ELSE 0 END FROM `+x+` ORDER BY id`),
@@ -89,15 +89,15 @@ func screenExactness() []expectation {
 		differs("precision", scale, `SELECT coalesce(t.total, 0) FROM (SELECT sum(amt) AS total FROM `+x+` WHERE id < 0) t`),
 		differs("precision", scale, `SELECT id, greatest(amt, 3) FROM `+x+` ORDER BY id`),
 		differs("precision", scale, `SELECT sum(CASE WHEN whole > 0 THEN amt ELSE 0 END) FROM `+x+` WHERE id = 3`),
-		stay(`SELECT id, CASE WHEN amt > 3 THEN amt ELSE 0.00 END FROM `+x+` ORDER BY id`),
-		stay(`SELECT id, coalesce(amt, 0.00), greatest(amt, 3.00), least(amt, 3.00) FROM `+x+` ORDER BY id`),
-		stay(`SELECT id, CASE WHEN whole > 0 THEN whole ELSE 0 END, coalesce(whole, 0), greatest(whole, 2) FROM `+x+` ORDER BY id`),
-		stay(`SELECT id, CASE WHEN amt > 3 THEN amt END, CASE WHEN amt > 3 THEN amt ELSE NULL END FROM `+x+` ORDER BY id`),
-		stay(`SELECT coalesce(max(amt), 0.00), coalesce(sum(amt), 0.00), coalesce(count(amt), 0) FROM `+x+` WHERE id < 0`),
-		stay(`SELECT coalesce(t.total, 0.00), coalesce(t.k, 0) FROM (SELECT sum(amt) AS total, count(*) AS k FROM `+x+` WHERE id < 0) t`),
-		stay(`SELECT sum(CASE WHEN whole > 0 THEN amt ELSE 0.00 END), sum(CASE WHEN whole > 0 THEN 1 ELSE 0 END) FROM `+x),
-		stay(`SELECT id, coalesce(dbl, 0), greatest(dbl, amt), CASE WHEN whole > 0 THEN dbl ELSE 0 END FROM `+x+` ORDER BY id`),
-		stay(`SELECT id, CASE WHEN amt > 3 THEN 'big' ELSE 'small' END FROM `+x+` ORDER BY id`),
+		stay(`SELECT id, CASE WHEN amt > 3 THEN amt ELSE 0.00 END FROM ` + x + ` ORDER BY id`),
+		stay(`SELECT id, coalesce(amt, 0.00), greatest(amt, 3.00), least(amt, 3.00) FROM ` + x + ` ORDER BY id`),
+		stay(`SELECT id, CASE WHEN whole > 0 THEN whole ELSE 0 END, coalesce(whole, 0), greatest(whole, 2) FROM ` + x + ` ORDER BY id`),
+		stay(`SELECT id, CASE WHEN amt > 3 THEN amt END, CASE WHEN amt > 3 THEN amt ELSE NULL END FROM ` + x + ` ORDER BY id`),
+		stay(`SELECT coalesce(max(amt), 0.00), coalesce(sum(amt), 0.00), coalesce(count(amt), 0) FROM ` + x + ` WHERE id < 0`),
+		stay(`SELECT coalesce(t.total, 0.00), coalesce(t.k, 0) FROM (SELECT sum(amt) AS total, count(*) AS k FROM ` + x + ` WHERE id < 0) t`),
+		stay(`SELECT sum(CASE WHEN whole > 0 THEN amt ELSE 0.00 END), sum(CASE WHEN whole > 0 THEN 1 ELSE 0 END) FROM ` + x),
+		stay(`SELECT id, coalesce(dbl, 0), greatest(dbl, amt), CASE WHEN whole > 0 THEN dbl ELSE 0 END FROM ` + x + ` ORDER BY id`),
+		stay(`SELECT id, CASE WHEN amt > 3 THEN 'big' ELSE 'small' END FROM ` + x + ` ORDER BY id`),
 
 		// --- #3069: a real computed with, and summed ----------------------
 		differs("precision", asReal, `SELECT id, rl + 1 FROM `+x+` ORDER BY id`),
@@ -110,22 +110,22 @@ func screenExactness() []expectation {
 		// A real with another real, with a double precision, or with its
 		// sign turned, agrees on these rows. The rule is by the column's type
 		// and sends them to the source with the rest.
-		eq(`SELECT max(rl) - min(rl) FROM `+x),
-		eq(`SELECT id, rl + dbl FROM `+x+` ORDER BY id`),
-		eq(`SELECT id, -rl FROM `+x+` ORDER BY id`),
-		eq(`SELECT sum(rl) FROM `+x),
+		eq(`SELECT max(rl) - min(rl) FROM ` + x),
+		eq(`SELECT id, rl + dbl FROM ` + x + ` ORDER BY id`),
+		eq(`SELECT id, -rl FROM ` + x + ` ORDER BY id`),
+		eq(`SELECT sum(rl) FROM ` + x),
 		// Beside another value in a COALESCE or a GREATEST the answer is a
 		// real or a double precision on both sides.
-		stay(`SELECT id, coalesce(rl, 0), greatest(rl, 1), least(rl, dbl), CASE WHEN whole > 0 THEN rl ELSE 0 END FROM `+x+` ORDER BY id`),
-		stay(`SELECT id, coalesce(rl, amt), greatest(rl, amt) FROM `+x+` ORDER BY id`),
-		stay(`SELECT id, rl, dbl FROM `+x+` ORDER BY id`),
-		stay(`SELECT min(rl), max(rl), count(rl) FROM `+x),
-		stay(`SELECT id, abs(rl) FROM `+x+` ORDER BY id`),
-		stay(`SELECT id FROM `+x+` WHERE rl > 0.1 OR rl = 0.1 ORDER BY id`),
-		stay(`SELECT id FROM `+x+` WHERE rl < dbl OR rl = dbl ORDER BY id`),
-		stay(`SELECT id, dbl + 1, dbl * 2, dbl / 2, dbl - whole, 1 + dbl FROM `+x+` ORDER BY id`),
-		stay(`SELECT sum(dbl), sum(whole), sum(amt) FROM `+x),
-		stay(`SELECT id, whole + 1, whole * 2, amt + 1, amt * 2, amt - whole FROM `+x+` ORDER BY id`),
-		stay(`SELECT id, dbl + amt, dbl * whole FROM `+x+` ORDER BY id`),
+		stay(`SELECT id, coalesce(rl, 0), greatest(rl, 1), least(rl, dbl), CASE WHEN whole > 0 THEN rl ELSE 0 END FROM ` + x + ` ORDER BY id`),
+		stay(`SELECT id, coalesce(rl, amt), greatest(rl, amt) FROM ` + x + ` ORDER BY id`),
+		stay(`SELECT id, rl, dbl FROM ` + x + ` ORDER BY id`),
+		stay(`SELECT min(rl), max(rl), count(rl) FROM ` + x),
+		stay(`SELECT id, abs(rl) FROM ` + x + ` ORDER BY id`),
+		stay(`SELECT id FROM ` + x + ` WHERE rl > 0.1 OR rl = 0.1 ORDER BY id`),
+		stay(`SELECT id FROM ` + x + ` WHERE rl < dbl OR rl = dbl ORDER BY id`),
+		stay(`SELECT id, dbl + 1, dbl * 2, dbl / 2, dbl - whole, 1 + dbl FROM ` + x + ` ORDER BY id`),
+		stay(`SELECT sum(dbl), sum(whole), sum(amt) FROM ` + x),
+		stay(`SELECT id, whole + 1, whole * 2, amt + 1, amt * 2, amt - whole FROM ` + x + ` ORDER BY id`),
+		stay(`SELECT id, dbl + amt, dbl * whole FROM ` + x + ` ORDER BY id`),
 	}
 }
