@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"testing"
 
+	"github.com/dbtrail/dbtrail/internal/pgcapture"
 	"github.com/dbtrail/dbtrail/internal/streamrun"
 )
 
@@ -20,7 +21,7 @@ func TestEveryMonitorPhaseHasWords(t *testing.T) {
 	if block == nil {
 		t.Fatal("MON_PHASES not found in app.js")
 	}
-	for _, phase := range []string{streamrun.PhaseResumeCleanup, streamrun.PhaseResumeCleanupWaiting, monitorPhaseLockWaiting} {
+	for _, phase := range []string{streamrun.PhaseResumeCleanup, streamrun.PhaseResumeCleanupWaiting, monitorPhaseLockWaiting, pgcapture.PhaseCreatingSlot} {
 		if !regexp.MustCompile(`\n\s+` + regexp.QuoteMeta(phase) + `: \{ text: "[^"]+", title: "[^"]+"`).Match(block[1]) {
 			t.Errorf("phase %q has no entry with text and title in MON_PHASES", phase)
 		}

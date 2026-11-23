@@ -143,7 +143,7 @@ func querySlotStanding(ctx context.Context, conn *pgx.Conn, slotName string) (sl
 // A slot that PostgreSQL lists but that has no confirmed_flush_lsn is being
 // created, by capture or by another snapshot (#3078). It is not an anchor yet:
 // what commits before its creation ends is never delivered by it, and it is
-// gone if its creator gives up (capture gives its start 30 seconds). So this
+// gone if its creator is stopped. So this
 // waits, up to wait (DefaultSlotWait when zero or negative), for that slot to
 // have its position. Past the wait the snapshot is refused with a
 // *SlotNotReadyError, before anything was read. A slot that already has its
@@ -151,10 +151,9 @@ func querySlotStanding(ctx context.Context, conn *pgx.Conn, slotName string) (sl
 //
 // An absent slot, or one whose creator gave up during the wait, is created
 // here, and that creation is NOT bounded by wait: only ctx ends it, as it
-// always has. On a source that always holds a write transaction older than
-// capture's 30-second start, this creation is the one way the slot gets made
-// at all; giving it up at a cap would leave such a source with neither a
-// snapshot nor capture. It says at most once a minute how long it has waited
+// always has. On a source that always holds an open write transaction, giving it up at a
+// cap would leave that source with neither a snapshot nor capture; capture's
+// own creation has no cap either (#3178). It says at most once a minute how long it has waited
 // and where to see what holds it.
 //
 // replConnect lazily opens a REPLICATION connection (replication=database)

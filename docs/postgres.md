@@ -926,11 +926,15 @@ in neither the snapshot nor the captured changes. Past the 5 minutes the
 snapshot is refused with nothing read, and running it again once capture is
 attached works. A source whose slot already has its position is read at once,
 as before. When there is no slot yet, the snapshot creates it, and that
-creation has no limit: on a source that always has a write transaction older
-than capture's 30-second start, it is how the slot gets made. While it waits,
-the log says once a minute how long it has waited; the transaction holding it
-is the one with the oldest `xact_start` in `pg_stat_activity` among those with
-a `backend_xid`.
+creation has no limit. Neither has the one capture does when it starts: the
+server shows **CREATING SLOT** with the oldest write transaction open (its
+session and for how long; its user and database when it is in the captured
+database; a prepared transaction without its name, which `pg_prepared_xacts`
+lists), and capture starts by itself when that ends. While either waits, the
+log says once a minute how long it has waited; the transaction holding it is
+the one with the oldest `xact_start` in `pg_stat_activity` among those with a
+`backend_xid`. A snapshot asked for while capture is creating the slot still
+waits only the 5 minutes above.
 
 The slot is looked at again when the tables are read. A snapshot whose slot
 was removed meanwhile, or whose changes start before the position capture
