@@ -252,7 +252,8 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, c
 	if database == "" {
 		database = user
 	}
-	password, err := scramExchange(be, user, encrypted, pt.bindingData())
+	place.spoke.Store(true)
+	password, err := scramExchange(connCtx, be, user, encrypted, pt.bindingData(), place)
 	if err != nil {
 		// Debug: psql itself closes here once, to ask for the password and
 		// connect again. A malformed exchange was told why.
@@ -268,6 +269,10 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, c
 			bound.Close()
 		}
 		bound, refused = nil, &Error{Code: "28P01", Message: fmt.Sprintf("password authentication failed for user %q", user)}
+	}
+	if password.busy && bound == nil {
+		// The proof was not checked: not a wrong password.
+		refused = &Error{Code: busyLoginCode, Message: busyLoginMessage}
 	}
 	if refused != nil || bound == nil {
 		if refused == nil {

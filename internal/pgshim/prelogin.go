@@ -18,11 +18,14 @@ import (
 // So when the port is full and a new connection arrives, the place of the
 // connection that has gone longest without logging in is given to the
 // newcomer, if that one has had more than preLoginGrace to log in (#3097):
-// its socket is closed, and nothing is said to it. A client that is logging
-// in takes far less than that; one that takes longer and loses its place
-// connects again. A connection that has logged in never loses its place: with
-// every place held by one of those the newcomer is told the port is full
-// (53300), as before.
+// its socket is closed, and nothing is said to it. Only a connection that
+// has not done its part loses its place: one whose proof of the password
+// reached the port keeps it from then on (while the proof is checked and the
+// server is opened, however long that takes), and among the others one that
+// sent nothing goes before one that sent its start-up message. A connection
+// that has logged in never loses its place: with every place held by a
+// client, or by one whose proof is being checked, the newcomer is told the
+// port is full (53300), as before.
 
 // preLoginGrace is how long a connection that has not logged in keeps its
 // place whatever happens. A variable so a test can shorten it.
@@ -38,6 +41,9 @@ const (
 // connPlace is one connection's place in the port.
 type connPlace struct {
 	state atomic.Int32
+	// spoke: the client sent its start-up message. One that sent nothing
+	// loses its place before one that did.
+	spoke atomic.Bool
 	since time.Time
 	conn  net.Conn
 	list  *preLogins
@@ -85,17 +91,23 @@ func (p *preLogins) forget(pl *connPlace) {
 func (p *preLogins) takeOldest(grace time.Duration) *connPlace {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for e := p.waiting.Front(); e != nil; e = e.Next() {
-		pl := e.Value.(*connPlace)
-		if time.Since(pl.since) <= grace {
-			// The ones behind it are newer still.
-			return nil
-		}
-		if pl.state.CompareAndSwap(placeWaiting, placeTaken) {
-			p.waiting.Remove(e)
-			pl.at = nil
-			_ = pl.conn.Close()
-			return pl
+	// The oldest that sent nothing first, then the oldest of the rest.
+	for _, spoke := range []bool{false, true} {
+		for e := p.waiting.Front(); e != nil; e = e.Next() {
+			pl := e.Value.(*connPlace)
+			if time.Since(pl.since) <= grace {
+				// The ones behind it are newer still.
+				break
+			}
+			if pl.spoke.Load() != spoke {
+				continue
+			}
+			if pl.state.CompareAndSwap(placeWaiting, placeTaken) {
+				p.waiting.Remove(e)
+				pl.at = nil
+				_ = pl.conn.Close()
+				return pl
+			}
 		}
 	}
 	return nil
@@ -113,18 +125,20 @@ func (p *preLogins) warnTaken(logger *slog.Logger, old *connPlace, c net.Conn, m
 	logger.Debug("pgshim: a connection that had not logged in was closed to make room for a new one", args...)
 }
 
-// loggedIn marks the connection as logged in, which keeps its place for as
-// long as it lasts. False when the place was taken first: the connection is
-// closed, and must not be served.
+// loggedIn marks the connection as having done its part of the login, which
+// keeps its place for as long as it lasts: it is asked when the client's
+// proof is about to be checked (Password.gate), and again when the login is
+// over. False when the place was taken first: the connection is closed, and
+// must not be served, nor its proof checked.
 func (pl *connPlace) loggedIn() bool {
 	if pl == nil {
 		return true
 	}
-	if !pl.state.CompareAndSwap(placeWaiting, placeLoggedIn) {
-		return false
+	if pl.state.CompareAndSwap(placeWaiting, placeLoggedIn) {
+		pl.list.forget(pl)
+		return true
 	}
-	pl.list.forget(pl)
-	return true
+	return pl.state.Load() == placeLoggedIn
 }
 
 // leave is the connection ending. It reports whether the place is still its

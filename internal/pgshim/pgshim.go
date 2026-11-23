@@ -291,7 +291,8 @@ func handleConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, cancel
 	user := startup.Parameters["user"]
 	database := startup.Parameters["database"]
 
-	password, err := authenticate(be, cfg.Auth, user, encrypted, pt.bindingData())
+	place.spoke.Store(true)
+	password, err := authenticate(connCtx, be, cfg.Auth, user, encrypted, pt.bindingData(), place)
 	if err != nil {
 		logger.Info("pgshim auth denied", "user", user, "remote", c.RemoteAddr(), "err", err)
 		return
@@ -450,8 +451,8 @@ func commandLoop(be *pgproto3.Backend, sess *session) {
 // refused with a byte-identical 28P01 message, and in the same time: the proof
 // is checked against as many passwords either way (Password.Matches), so
 // neither the answer nor its timing says which usernames exist.
-func authenticate(be *pgproto3.Backend, auth shim.TenantAuth, user string, encrypted bool, endPoint []byte) (*Password, error) {
-	password, err := scramExchange(be, user, encrypted, endPoint)
+func authenticate(ctx context.Context, be *pgproto3.Backend, auth shim.TenantAuth, user string, encrypted bool, endPoint []byte, place *connPlace) (*Password, error) {
+	password, err := scramExchange(ctx, be, user, encrypted, endPoint, place)
 	if err != nil {
 		return nil, err
 	}
@@ -463,11 +464,23 @@ func authenticate(be *pgproto3.Backend, auth shim.TenantAuth, user string, encry
 		candidates = []string{expected}
 	}
 	if !password.Matches(candidates) {
+		if password.busy {
+			sendFatal(be, busyLoginCode, busyLoginMessage)
+			return nil, fmt.Errorf("the login of user %q was not checked: %w", user, errScramBusy)
+		}
 		sendFatal(be, "28P01", fmt.Sprintf("password authentication failed for user %q", user))
 		return nil, fmt.Errorf("auth failed for user %q", user)
 	}
 	return password, nil
 }
+
+// What a client is told when the port has too many logins to check at once
+// (scramWaitMax): the code of a full port, which a client reads as "try
+// again".
+const (
+	busyLoginCode    = "53300"
+	busyLoginMessage = "the port is checking as many logins as it takes at once; try again in a moment"
+)
 
 // sendSASLFinal sends the server's last SCRAM message, once the password
 // matched: what shows the client the port knows it too.
