@@ -98,7 +98,7 @@ func tySame() []tyList {
 			"extract(year FROM ts) + 1", "extract(year FROM d) AS y",
 			"date_part('year', ts)", "date_part('month', d)", "date_part('day', tz)", "DATE_PART('hour', ts)",
 			"date_part('minute', ts)", "date_part('quarter', d)", "date_part('dow', d)", "date_part('doy', d)",
-			"date_part('week', d)", "date_part('year', d) + 1",
+			"date_part('week', d)", "date_part('month', d)::text", "extract(month FROM d)::text", "lpad(date_part('month', d)::text, 2, '0')",
 			"date_trunc('month', ts)", "date_trunc('day', ts)",
 		}},
 		{"ORDER BY id", []string{
@@ -157,6 +157,15 @@ func tyForwarded() []string {
 	}
 }
 
+// tyForwardedPlain is a statement that calls a function of the table inside
+// one of those macros and names it in GROUP BY: it is cast in neither place,
+// so the two stay one expression.
+func tyForwardedPlain() []string {
+	return []string{
+		`SELECT length(t), round(100.0 * count(*) / length(t), 2) FROM ` + tyVals + ` WHERE length(t) > 0 GROUP BY length(t) ORDER BY 1`,
+	}
+}
+
 func tyDifferent() []tyOther {
 	v := tyVals
 	return []tyOther{
@@ -165,6 +174,8 @@ func tyDifferent() []tyOther {
 		{`SELECT sum(l) FROM (SELECT length(t) AS l FROM ` + v + `) x`, 0, 20, 1700, "the sum of a name the statement defines: its type is not read"},
 		{`SELECT sum(id) FROM (SELECT i AS id FROM ` + v + `) x`, 0, 20, 1700, "the same, under the name of a column"},
 		{`SELECT x FROM (SELECT NULL AS x) q`, 0, 25, 23, "a NULL named in a subquery"},
+		{`SELECT date_part('year', d) + 1 FROM ` + v + ` ORDER BY id`, 0, 701, 20, "date_part inside an expression: as a double precision the engine would write it 2026.0 where it is read as text"},
+		{`SELECT y FROM (SELECT id, date_part('year', d) AS y FROM ` + v + `) q ORDER BY id`, 0, 701, 20, "date_part in a subquery, for the same reason"},
 		{`SELECT NULL, NULL`, 1, 25, 23, "a second NULL with no name"},
 	}
 }
@@ -474,13 +485,13 @@ func TestIntegrationPGCompareAnnouncedTypes3073(t *testing.T) {
 		t.Fatalf("open the source: %v", err)
 	}
 	t.Cleanup(func() { src.Close(context.Background()) })
-	rep, err := Run(ctx, src, cp, Options{NoRerun: true, MaxRows: 100}, tyForwarded())
+	rep, err := Run(ctx, src, cp, Options{NoRerun: true, MaxRows: 100}, append(tyForwarded(), tyForwardedPlain()...))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	for _, r := range rep.Results {
-		if written := cp.Rewrite(r.Statement); r.Verdict != sqlcompare.Equal || !strings.Contains(written, "CAST(") || !strings.Contains(written, "_bintrail_pg_") {
-			t.Errorf("want EQUAL with a cast and a macro written in, got %s %s: %s\n    detail: %s\n    written: %s", r.Verdict, r.Kind, r.Statement, r.Detail, written)
+	for i, r := range rep.Results {
+		if written := cp.Rewrite(r.Statement); r.Verdict != sqlcompare.Equal || strings.Contains(written, "CAST(") != (i < len(tyForwarded())) || !strings.Contains(written, "_bintrail_pg_") {
+			t.Errorf("want EQUAL with a macro written in (and a cast, but for the last), got %s %s: %s\n    detail: %s\n    written: %s", r.Verdict, r.Kind, r.Statement, r.Detail, written)
 		}
 	}
 

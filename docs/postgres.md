@@ -1310,7 +1310,8 @@ listener, its own workers, its own memory.
   - `extract` of a field that is a whole number (`year`, `quarter`, `month`,
     `week`, `day`, `hour`, `minute`, `dow`, `doy`, `isodow`, `isoyear`,
     `decade`, `century`, `millennium`) is a `numeric`, and `date_part` of one
-    a `double precision`;
+    a `double precision` when it is a whole item of the statement's select
+    list;
   - a `NULL` alone in the select list is `text`.
 
   That holds under an alias, in a subquery or a `WITH`, behind `SELECT *`,
@@ -1319,6 +1320,12 @@ listener, its own workers, its own memory.
   prepared statement announces before it runs. These still carry another type
   than on PostgreSQL, with the same value:
   - a `date` less a `date` is a `bigint` (PostgreSQL: `integer`);
+  - `date_part` of a whole field inside another expression or in a subquery
+    (`date_part('year', d) + 1`) is a `bigint` (PostgreSQL: `double
+    precision`);
+  - `length`, `position`, `extract` and the others above keep the copy's type
+    in a statement that also uses the same function inside a `round()`,
+    `floor()` or `avg()` the port rewrites;
   - a `smallint` with a number (`s + 1`) stays a `smallint` (PostgreSQL:
     `integer`), and is an error where the result passes 32767;
   - `sum` is a `numeric` where PostgreSQL has a `bigint` when its argument

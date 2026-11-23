@@ -89,9 +89,30 @@ func TestAsPostgresTypes(t *testing.T) {
 		{"SELECT extract(epoch FROM ts), extract(second FROM ts), date_part('second', ts), date_part(t, ts), extract(milliseconds FROM ts) FROM v",
 			"SELECT extract(epoch FROM ts), extract(second FROM ts), date_part('second', ts), date_part(t, ts), extract(milliseconds FROM ts) FROM v"},
 
+		// date_part only as a whole item of the statement's own select list:
+		// read again by the engine, a double precision would be written 5.0.
+		{"SELECT date_part('month', d)::text, lpad(date_part('month', d)::text, 2, '0'), date_part('year', d) + 1, date_part('year', d) || 'x' FROM v",
+			"SELECT date_part('month', d)::text, lpad(date_part('month', d)::text, 2, '0'), date_part('year', d) + 1, date_part('year', d) || 'x' FROM v"},
+		{"SELECT y FROM (SELECT date_part('year', d) AS y FROM v) q WHERE date_part('year', now()) > 1", "SELECT y FROM (SELECT date_part('year', d) AS y FROM v) q WHERE date_part('year', now()) > 1"},
+		{"SELECT date_part('year', d) AS y, i FROM v ORDER BY date_part('year', d)", "SELECT CAST(date_part('year', d) AS DOUBLE) AS y, i FROM v ORDER BY date_part('year', d)"},
+
+		// A function called inside one of the port's macros is cast nowhere
+		// in the statement: GROUP BY must still name the same expression.
+		{"SELECT length(t), _bintrail_pg_round_div(1, length(t), 2), strpos(t, 'a') FROM v GROUP BY length(t), strpos(t, 'a')",
+			"SELECT length(t), _bintrail_pg_round_div(1, length(t), 2), CAST(strpos(t, 'a') AS INTEGER) FROM v GROUP BY length(t), CAST(strpos(t, 'a') AS INTEGER)"},
+		// A relation with a function's name, a NULL in an array, an ORDER BY
+		// inside a sum, a name defined after a quoted one.
+		{"WITH length(n) AS (SELECT 1) SELECT n FROM length", "WITH length(n) AS (SELECT 1) SELECT n FROM length"},
+		{"SELECT a FROM f() AS position(a, b)", "SELECT a FROM f() AS position(a, b)"},
+		{"SELECT ARRAY[1, NULL, 2], [NULL] FROM v", "SELECT ARRAY[1, NULL, 2], [NULL] FROM v"},
+		{"SELECT sum(i ORDER BY b::int) FROM v", "SELECT sum(i ORDER BY b::int) FROM v"},
+		{`SELECT sum(i) FROM (SELECT "Amount" i FROM v) q`, `SELECT sum(i) FROM (SELECT "Amount" i FROM v) q`},
+		// A sum inside a sum's argument is written as it is.
+		{"SELECT sum(length(sum(length('a'))::text))", "SELECT CAST(sum(" + sumGuard("CAST(length(sum(CAST(length('a') AS INTEGER))::text) AS INTEGER)") + ") AS BIGINT)"},
+
 		// The port's own macros keep their arguments.
-		{"SELECT _bintrail_pg_round_k(sum(i), 2, 0.01), length(t), _bintrail_pg_epoch(ts) FROM v",
-			"SELECT _bintrail_pg_round_k(sum(i), 2, 0.01), CAST(length(t) AS INTEGER), _bintrail_pg_epoch(ts) FROM v"},
+		{"SELECT _bintrail_pg_round_k(sum(i), 2, 0.01), length(t), _bintrail_pg_epoch(ts), sum(s) FROM v",
+			"SELECT _bintrail_pg_round_k(sum(i), 2, 0.01), CAST(length(t) AS INTEGER), _bintrail_pg_epoch(ts), sum(s) FROM v"},
 
 		// A lone NULL is text.
 		{"SELECT NULL", "SELECT " + unnamedNull},
@@ -165,7 +186,7 @@ func TestWholeType(t *testing.T) {
 		"length(n)": "int4", "count(*)": "int8", "abs(s)": "int2", "abs(n)": "", "upper(i)": "", "sum(i)": "",
 		"CASE WHEN i > 1 THEN 1 ELSE 0 END": "int4", "CASE WHEN i > 1 THEN s END": "int2", "CASE WHEN i > 1 THEN s ELSE b END": "int8",
 		"CASE WHEN i > 1 THEN 1 ELSE NULL END": "int4", "CASE WHEN i > 1 THEN NULL END": "", "CASE WHEN i > 1 THEN 1 ELSE 'x' END": "",
-		"CASE i WHEN 1 THEN 1 END + 1": "", "i IS NULL": "", "i AND s": "", "": "", "()": "",
+		"CASE i WHEN 1 THEN 1 END + 1": "", "i IS NULL": "", "i AND s": "", "": "", "()": "", "i ORDER BY b::int": "", "i b::int": "",
 	} {
 		toks, _ := lexSQL(expr)
 		if got := wholeType(toks, types); got != want {
@@ -178,11 +199,16 @@ func TestLoneNulls(t *testing.T) {
 	for stmt, want := range map[string]int{
 		"SELECT NULL": 1, "SELECT NULL, NULL": 1, "SELECT NULL AS a, NULL AS b, NULL": 3, "SELECT NULL AS a, 1 FROM t": 1, "SELECT NULL FROM t WHERE x IS NULL": 1,
 		"SELECT a, NULL FROM t ORDER BY NULL": 1, "SELECT (SELECT NULL)": 0, "SELECT NULL UNION SELECT NULL": 0,
-		"SELECT NULL FROM (VALUES (1)) v": 0, "SELECT x FROM t WHERE y IN (1, NULL)": 0, "SELECT NULL::text": 0,
+		"SELECT NULL FROM (VALUES (1)) v": 0, "SELECT x FROM t WHERE y IN (1, NULL)": 0, "SELECT NULL::text": 0, "SELECT ARRAY[1, NULL, 2]": 0, "SELECT DISTINCT NULL": 0,
 		"SELECT CASE WHEN a THEN 1 END, NULL FROM t": 1, "SELECT 1 ORDER BY 1, NULL": 0, "SELECT a FROM t GROUP BY a, NULL": 0,
 	} {
 		toks, _ := lexSQL(stmt)
-		if got := len(loneNulls(toks)); got != want {
+		items, combined := selectItems(toks)
+		got := 0
+		if !combined {
+			got = len(loneNulls(toks, items))
+		}
+		if got != want {
 			t.Errorf("%s: %d, want %d", stmt, got, want)
 		}
 	}
@@ -225,5 +251,18 @@ func TestAsPostgresTypes_handedToTheCopy(t *testing.T) {
 				t.Errorf("%d statements reached the copy, %d of them a Describe: %q", ran, described, l.statements())
 			}
 		})
+	}
+}
+
+// A statement of sums nested in sums is written in about its own size: the
+// argument of a sum is written twice, and only the outermost one's.
+func TestAsPostgresTypes_nestedSumsStaySmall(t *testing.T) {
+	stmt := "'a'"
+	for range 40 {
+		stmt = "sum(length(" + stmt + "))::text"
+	}
+	stmt = "SELECT " + stmt
+	if got := AsPostgresTypes(stmt, nil); len(got) > 10*len(stmt) {
+		t.Errorf("%d bytes written for a statement of %d", len(got), len(stmt))
 	}
 }
