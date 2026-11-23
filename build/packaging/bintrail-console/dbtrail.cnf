@@ -833,6 +833,13 @@
 # Read by: router.
 #router-concurrency = 8
 
+# How many clients may be connected to the MySQL port at once, 1 to 1024. One
+# more is refused with error 1040 (Too many connections), as a MySQL server at
+# its max_connections does.
+# Default: 256.
+# Read by: router.
+#router-max-connections = 512
+
 # How long a statement waits for a free worker on the copy when all are busy,
 # written with a unit like 30s or 2m. Past it the client gets an error (1040
 # on a routed connection, 1203 otherwise). A bare number without a unit is

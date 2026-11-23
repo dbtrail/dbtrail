@@ -2903,6 +2903,22 @@ as the router applies it:
 - **The line is long.** Up to 4,096 statements may wait at once. One more
   gets error 1040 without waiting (`copy_queue_full`), or error 1203 on a
   connection that is not routed.
+- **How many clients connect.** At most 256 clients are connected to the
+  router at once. One more is refused before it logs in with MySQL error
+  1040, "Too many connections", the answer a MySQL server gives at its
+  `max_connections`, which drivers and pools know. The router's log says
+  so at most once every 10 seconds, with how many were refused. Change the
+  number with `--max-connections` (`BINTRAIL_ROUTER_MAX_CONNECTIONS`, 1 to
+  1024; in the Docker stack, a line under the `router` service's
+  `environment:`). A pool in front of the router (ProxySQL, an application's
+  own) should be given a maximum at or under this number.
+- **30 seconds to log in.** A client that connects and does not finish
+  logging in within 30 seconds is disconnected. When the port is full and
+  a new client arrives, the connection that has gone longest without
+  logging in is closed to make room, if it has gone more than one second;
+  a client that logged in is never closed for this. This is not a firewall: the port
+  forwards statements to your MySQL, so keep it on `127.0.0.1` or on a
+  network only your applications reach.
 - **What else ends a wait.** The client disconnecting: the statement leaves
   the line at once and nothing runs, on the copy or on MySQL (`cancelled`
   in the counter). The router stopping does the same.
