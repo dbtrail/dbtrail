@@ -94,12 +94,6 @@ type routeDecision struct {
 	side, reason string
 }
 
-// toSource reports whether a statement goes to the source.
-func (s *session) toSource(c classified, qstr string) bool {
-	d := s.route(c, qstr)
-	return d.side == RouteSource || d.side == RouteRefused
-}
-
 // CopyScreen says what in stmt the copy is not known to answer as
 // PostgreSQL does, "" when the copy may answer it: the decision a
 // connection with a forwarding account makes for a statement outside a
@@ -182,23 +176,36 @@ func (s *session) routeFree(qstr string) routeDecision {
 		s.logger.Debug("pgshim: sent to the source", "reason", ReasonVeto, "construct", w)
 		return routeDecision{RouteSource, ReasonVeto}
 	}
+	// What no column's type can change. The rest needs the copy's list of
+	// columns, read by the copy's workers, and is asked only of a statement
+	// the source's plan sends to the copy (screenTyped): as on the MySQL
+	// port, a statement the source answers never waits for the copy.
+	if veto := screenUntyped(toks); veto != "" {
+		s.logger.Debug("pgshim: sent to the source", "reason", ReasonVeto, "construct", veto)
+		return routeDecision{RouteSource, ReasonVeto}
+	}
+	return routeDecision{RouteCopy, ReasonAnswersTheSame}
+}
+
+// screenTyped is the rest of the screen for a statement decided for the
+// copy (d): what depends on its columns' types. A statement it vetoes goes
+// to the source. When the copy is too busy to list its columns, nothing of
+// the statement can be told, and it is refused as busy where it would run
+// (screenBusy, withScreenBusy), not handed to the source (#3109). A decision
+// for any other side is returned as it is.
+func (s *session) screenTyped(qstr string, d routeDecision) routeDecision {
+	// Said only of a statement the copy is still to answer.
+	note := s.unreachableNote
+	s.unreachableNote = ""
+	if d.side != RouteCopy {
+		return d
+	}
+	text := RewriteForCopy(qstr)
+	toks, _ := lexSQL(text)
 	types, unread := s.columnTypes(text)
 	if unread && s.catalogBusy != "" {
-		// The copy is too busy to list its columns (#3109), so the screen
-		// cannot be run whole, and nothing of the statement can go to the
-		// copy. What the screen vetoes whatever the columns' types (a
-		// function, a literal with a time zone, an alias in WHERE) goes to
-		// the source, as it always did: it is screened as if every name were
-		// a column of whole numbers, the type that vetoes least. The rest is
-		// decided by the source's plan: what it finds cheap the source
-		// answers, as it would have; what it sends to the copy is refused as
-		// busy, not handed to the source (withScreenBusy).
-		if veto := screenForCopy(toks, untypedAsInteger(toks)); veto != "" {
-			s.logger.Debug("pgshim: sent to the source", "reason", ReasonVeto, "construct", veto)
-			return routeDecision{RouteSource, ReasonVeto}
-		}
 		s.screenBusy = s.catalogBusy
-		return routeDecision{RouteCopy, ReasonAnswersTheSame}
+		return d
 	}
 	veto := ""
 	if unread {
@@ -213,7 +220,10 @@ func (s *session) routeFree(qstr string) routeDecision {
 		s.logger.Debug("pgshim: sent to the source", "reason", ReasonVeto, "construct", veto)
 		return routeDecision{RouteSource, ReasonVeto}
 	}
-	return routeDecision{RouteCopy, ReasonAnswersTheSame}
+	if note != "" {
+		s.notice(note)
+	}
+	return d
 }
 
 // columnTypes is the copy's column types by column name, across its tables
@@ -278,6 +288,7 @@ func (s *session) copyFallback(err error, perr *pgErr) string {
 		return ""
 	}
 	var behind *sqlsandbox.BehindSourceError
+	var changed *sqlsandbox.MayHaveChangedError
 	var stopped *stoppedErr
 	switch {
 	case errors.As(err, &stopped), errors.Is(err, errCanceledByUser), errors.Is(err, errStatementTimeout):
@@ -287,6 +298,11 @@ func (s *session) copyFallback(err error, perr *pgErr) string {
 			return ReasonCopyAgeUnknown
 		}
 		return ReasonCopyBehindSource
+	case errors.As(err, &changed):
+		// The copy's recent changes were not ready for a statement that had
+		// to have them (RunOptions.NeedTails, #3086): the moment's, as the
+		// answer it would have given and copyOlderThanSource held back.
+		return ReasonCopyTooOld
 	case busyReason(err) != "":
 		// Not a fallback: the statement is refused (copyFailed).
 		return busyReason(err)
@@ -441,7 +457,7 @@ func busyOnCopy(d routeDecision) bool { return d.side == RouteCopy && isBusyReas
 // of the copy held, and the statement goes to MySQL as copy_too_old), with
 // the source's answer as the earlier one.
 func (s *session) copyOlderThanSource(waited, apart bool) string {
-	if apart || !s.src.any() || s.bound == nil || s.bound.RunAge == nil || !s.canFallBack() {
+	if !s.holdsBackCopy(apart) {
 		return ""
 	}
 	a := s.bound.RunAge()
@@ -454,6 +470,16 @@ func (s *session) copyOlderThanSource(waited, apart bool) string {
 		return "the copy read a table from its snapshot alone, which can be older than what the source answered this connection before"
 	}
 	return "the copy did not wait for what the source answered this connection before"
+}
+
+// holdsBackCopy reports whether copyOlderThanSource decides on the copy's
+// answer to a statement (apart as it is given there): only then is an
+// answer read from a snapshot alone held back, and only then is the copy
+// told before it runs that it must have the recent changes
+// (RunOptions.NeedTails, #3086). One condition for both, so the copy is never
+// refused a statement whose answer would have been given.
+func (s *session) holdsBackCopy(apart bool) bool {
+	return !apart && s.src.any() && s.bound != nil && s.bound.RunAge != nil && s.canFallBack()
 }
 
 // positionWarnEvery is how often a connection that cannot learn the source's
@@ -1036,6 +1062,20 @@ func typeIsFloat(t string) bool { return t == "DOUBLE" || t == "FLOAT" || t == "
 // types by name (columnTypes); nil when they are not known, and then every
 // name may be a text column.
 func screenForCopy(in []rtToken, types map[string][]string) string {
+	return screenWith(in, types, false)
+}
+
+// screenUntyped is what screenForCopy vetoes whatever the types of the
+// statement's columns: it never vetoes a statement screenForCopy lets through
+// under any types. Every name is taken as a whole number, the type under
+// which the screen vetoes least, and the one rule that asks for a type rather
+// than against one (date_trunc of a timestamp) is left to screenForCopy.
+func screenUntyped(in []rtToken) string {
+	return screenWith(in, untypedAsInteger(in), true)
+}
+
+// screenWith is screenForCopy; untyped: types are not the columns' own.
+func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 	if why := paddedUse(in, types); why != "" {
 		return why
 	}
@@ -1513,7 +1553,7 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 					// On a date PostgreSQL answers a timestamp with time zone,
 					// the copy a timestamp: only a timestamp column is measured.
 					if len(a) != 2 || len(a[0]) != 1 || a[0][0].kind != rtString || !dateFields[strings.ToLower(a[0][0].text)] ||
-						len(a[1]) != 1 || a[1][0].kind != rtWord || !all(a[1][0].text, func(ty string) bool { return ty == "TIMESTAMP" }) {
+						len(a[1]) != 1 || a[1][0].kind != rtWord || !untyped && !all(a[1][0].text, func(ty string) bool { return ty == "TIMESTAMP" }) {
 						return "date_trunc() other than of year, month or day of a timestamp column"
 					}
 				case "concat":
@@ -1560,6 +1600,7 @@ func (s *session) noteIfFailed(st *preparedStatement) {
 // routeNote tells the host how a statement was answered.
 func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, failed bool) {
 	s.noteLast(d, failed)
+	s.settleCostSide(stmt, d, failed)
 	if s.bound == nil || s.bound.Routed == nil || d.side == "" {
 		return
 	}

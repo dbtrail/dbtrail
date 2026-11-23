@@ -50,3 +50,21 @@ func TestStreamLoopPGHooks_idleCheckpointLiveness(t *testing.T) {
 		t.Errorf("OnIndexed fired (%d) with no rows streamed", got)
 	}
 }
+
+// The stream loop's tick says nothing until replication has started (#3178).
+func TestHooksAfterStart(t *testing.T) {
+	var ticks atomic.Int32
+	loop, started := hooksAfterStart(&Hooks{OnCheckpoint: func() { ticks.Add(1) }})
+	loop.OnCheckpoint()
+	if n := ticks.Load(); n != 0 {
+		t.Fatalf("%d ticks before replication started", n)
+	}
+	started()
+	loop.OnCheckpoint()
+	if n := ticks.Load(); n != 1 {
+		t.Fatalf("%d ticks after replication started, want 1", n)
+	}
+	if h, f := hooksAfterStart(nil); h != nil || f == nil {
+		t.Fatalf("nil hooks: %v", h)
+	}
+}

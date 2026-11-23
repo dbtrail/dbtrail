@@ -1,6 +1,7 @@
 package pgshim
 
 import (
+	"context"
 	"strings"
 )
 
@@ -109,10 +110,10 @@ func captureTextRefusal(qstr string, searchPath []string) (stmtReads, string) {
 // tables of the copy ("" when they are). Compared exactly, schema and name:
 // the source's names are its catalog's, and a table the copy holds under
 // another case is not taken to be it.
-func captureTablesRefusal(proven [][2]string, copyTables []CatalogTable) string {
+func captureTablesRefusal(proven [][2]string, copyTables [][2]string) string {
 	held := make(map[[2]string]bool, len(copyTables))
 	for _, t := range copyTables {
-		held[[2]string{t.Schema, t.Name}] = true
+		held[t] = true
 	}
 	for _, p := range proven {
 		if captureSystemSchemas[p[0]] || strings.HasPrefix(p[0], "pg_") {
@@ -165,7 +166,7 @@ func (s *session) captureRefusal(up *upstream, qstr string) *pgErr {
 		return captureRefused("the source did not confirm that the names in it are plain tables and that nothing of a user's runs in it")
 	}
 	ctx, done := s.statementContext()
-	copyTables, err := s.bound.Catalog(ctx)
+	copyTables, err := s.copyTableNames(ctx)
 	done()
 	if err != nil {
 		s.logger.Warn("pgshim: the copy's tables could not be listed for the capture gate; the statement is not sent", "err", err)
@@ -175,6 +176,23 @@ func (s *session) captureRefusal(up *upstream, qstr string) *pgErr {
 		return captureRefused(why)
 	}
 	return nil
+}
+
+// copyTableNames is the copy's tables by schema and name, without one of its
+// workers where the host can say them so (Binding.CopyTableNames).
+func (s *session) copyTableNames(ctx context.Context) ([][2]string, error) {
+	if s.bound.CopyTableNames != nil {
+		return s.bound.CopyTableNames(ctx)
+	}
+	tables, err := s.bound.Catalog(ctx)
+	if err != nil {
+		return nil, err
+	}
+	names := make([][2]string, len(tables))
+	for i, t := range tables {
+		names[i] = [2]string{t.Schema, t.Name}
+	}
+	return names, nil
 }
 
 // capturePass is one statement let through by the capture gate on up, in

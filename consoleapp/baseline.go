@@ -1571,6 +1571,7 @@ func (s *baselineSupervisor) executePG(req console.BaselineRequest) (dumpOutcome
 		TablesProcessed: pgStats.TablesProcessed,
 		RowsWritten:     pgStats.RowsWritten,
 		FilesWritten:    pgStats.FilesWritten,
+		TablesLeftOut:   pgStats.TablesLeftOut,
 	}, at: pgStats.SnapshotTime}
 	if !pgStats.SnapshotTime.IsZero() {
 		out.snapDir = filepath.Join(outputDir, reconstruct.SnapshotDirName(pgStats.SnapshotTime))

@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/event"
+	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/views"
 )
@@ -358,28 +360,6 @@ func TestPGTailChain_aMergeNeverSpansAPrune(t *testing.T) {
 	}
 }
 
-func TestPGSkipTables(t *testing.T) {
-	tb := func(schema, table string) views.BaselineTable {
-		return views.BaselineTable{Schema: schema, Table: table}
-	}
-	ab := pgSkipTables([]views.BaselineTable{tb("s", "a"), tb("s", "b")})
-	if got := pgSkipTables([]views.BaselineTable{tb("s", "b"), tb("s", "a"), tb("s", "b")}); got != ab {
-		t.Errorf("the same tables in another order: %q, %q", got, ab)
-	}
-	for name, other := range map[string][]views.BaselineTable{
-		"fewer":             {tb("s", "a")},
-		"more":              {tb("s", "a"), tb("s", "b"), tb("s", "c")},
-		"another case":      {tb("s", "a"), tb("s", "B")},
-		"another schema":    {tb("s", "a"), tb("t", "b")},
-		"a name that joins": {tb("s", "a\x01s\x00b")},
-		"none":              nil,
-	} {
-		if pgSkipTables(other) == ab {
-			t.Errorf("%s reads as the same tables", name)
-		}
-	}
-}
-
 // costTail counts what a real tail writes and why it wrote it whole.
 type costTail struct {
 	*reconstruct.PGTail
@@ -389,13 +369,14 @@ type costTail struct {
 }
 
 type tailCosts struct {
-	first, prune, eight, ratio, merges, deltaRows, wholeRows, mergeRows int64
+	first, prune, eight, ratio, merges, deltaRows, wholeRows, mergeRows, largest int64
 }
 
 func (c *costTail) WriteSince(path string, afterID uint64) (int64, error) {
 	n, err := c.PGTail.WriteSince(path, afterID)
 	c.costs.merges++
 	c.costs.mergeRows += n
+	c.costs.largest = max(c.costs.largest, n)
 	return n, err
 }
 
@@ -411,6 +392,7 @@ func (c *costTail) WriteFile(path string) (int64, error) {
 	}
 	n, err := c.PGTail.WriteFile(path)
 	c.costs.wholeRows += n
+	c.costs.largest = max(c.costs.largest, n)
 	return n, err
 }
 
@@ -496,5 +478,124 @@ func TestPGTailChainCost(t *testing.T) {
 		t.Logf("RESULT keep_chain=%v changes=%d rows_per_change=%.2f whole_rows=%d delta_rows=%d merge_rows=%d merges=%d whole_by_cause first=%d prune=%d eight=%d ratio=%d lock_total=%s lock_worst=%s avg_files_read=%.1f avg_rows_in_chain=%d",
 			keep, changes, float64(costs.wholeRows+costs.deltaRows+costs.mergeRows)/float64(changes), costs.wholeRows, costs.deltaRows, costs.mergeRows, costs.merges,
 			costs.first, costs.prune, costs.eight, costs.ratio, locked.Round(time.Millisecond), worst.Round(time.Millisecond), float64(files)/cycles, chainRows/cycles)
+	}
+}
+
+// scaleIndex plays an index too large to hold: each event is made from its id
+// when it is read, so the load is limited by the tails and not by the fake.
+type scaleIndex struct {
+	*costIndex
+	newest uint64
+	keys   uint64
+}
+
+func scaleLSN(id uint64) uint64 { return 0x1000 + id*0x10 }
+
+func (f *scaleIndex) event(id uint64) query.ResultRow {
+	key := fmt.Sprint(id * 7919 % f.keys)
+	lsn := scaleLSN(id)
+	return query.ResultRow{EventID: id, SchemaName: "public", TableName: "orders", PKValues: key, EventType: event.EventUpdate,
+		BinlogFile: reconstruct.PGTailLog, StartPos: lsn, EndPos: lsn, EventTimestamp: pgCopyBase.Add(time.Duration(id) * time.Millisecond),
+		RowBefore: map[string]any{"id": key, "status": "before", "note": "n"},
+		RowAfter:  map[string]any{"id": key, "status": fmt.Sprintf("value-%d", id), "note": "a note of an ordinary length for a row"}}
+}
+
+func (f *scaleIndex) Newest(context.Context) (tailMark, error) {
+	if f.newest == 0 {
+		return tailMark{}, nil
+	}
+	ev := f.event(f.newest)
+	return tailMark{ID: f.newest, Pos: reconstruct.PGTailPos(ev.StartPos), At: ev.EventTimestamp}, nil
+}
+
+func (f *scaleIndex) Holds(_ context.Context, m tailMark) (bool, error) {
+	return m.ID >= 1 && m.ID <= f.newest && m.Pos == reconstruct.PGTailPos(scaleLSN(m.ID)), nil
+}
+
+func (f *scaleIndex) hand(from, upTo uint64, page func([]query.ResultRow) error) error {
+	for from < upTo {
+		end := min(from+10000, upTo)
+		rows := make([]query.ResultRow, 0, end-from)
+		for id := from + 1; id <= end; id++ {
+			rows = append(rows, f.event(id))
+		}
+		if err := page(rows); err != nil {
+			return err
+		}
+		from = end
+	}
+	return nil
+}
+
+func (f *scaleIndex) Fill(_ context.Context, t views.BaselineTable, upTo uint64, page func([]query.ResultRow) error) (string, error) {
+	floor := f.floors[t.Path]
+	var from uint64
+	if floor > 0x1000 {
+		from = (floor - 0x1000 - 1) / 0x10
+	}
+	return "", f.hand(from, upTo, page)
+}
+
+func (f *scaleIndex) Since(_ context.Context, _ []views.BaselineTable, from, upTo uint64, page func([]query.ResultRow) error) error {
+	return f.hand(from, upTo, page)
+}
+
+type scaleChainIndex struct{ *scaleIndex }
+
+func (f *scaleChainIndex) KeepsChainOver(_, _ views.BaselineTable) bool { return true }
+
+// TestPGTailChainCostAtScale is the same measurement with tails of hundreds
+// of thousands of keys, the size at which a whole write takes seconds. Run by
+// hand on the test machine (BT_TAIL_COST=scale).
+func TestPGTailChainCostAtScale(t *testing.T) {
+	if os.Getenv("BT_TAIL_COST") != "scale" {
+		t.Skip("a measurement: set BT_TAIL_COST=scale")
+	}
+	const keys, perCycle, cycles, every, behind = 1_000_000, 2000, 600, 300, 60
+	for _, keep := range []bool{false, true} {
+		ctx := context.Background()
+		costs := &tailCosts{}
+		var kp *tailKeeper
+		idx := &scaleIndex{costIndex: &costIndex{pgCopyIndex: &pgCopyIndex{floors: map[string]uint64{}}, k: &kp, costs: costs}, keys: keys, newest: 1}
+		var src tailSource = idx
+		if keep {
+			src = &scaleChainIndex{idx}
+		}
+		root := t.TempDir()
+		cut := pgCopyCut(t, filepath.Join(root, "snap0"), "orders", 0x1000, [3]string{"0", "a", "b"})
+		idx.floors[cut.Path] = 0x1000
+		kp = newTailKeeper(src, t.TempDir(), tailBudget{Keys: 10_000_000}, time.Minute, time.Hour)
+		kp.retryMin, kp.retryMax = 0, 0
+		settled(t, ctx, kp, cut)
+		var locked, worst time.Duration
+		var over3s, files int
+		var peakKeys int
+		for c := 1; c <= cycles; c++ {
+			idx.newest += perCycle
+			if c%every == 0 {
+				floor := scaleLSN(1 + uint64(c-behind)*perCycle)
+				cut = pgCopyCut(t, filepath.Join(root, fmt.Sprintf("snap%d", c)), "orders", floor, [3]string{"0", "a", "b"})
+				idx.floors[cut.Path] = floor
+			}
+			start := time.Now()
+			if _, err := kp.refresh(ctx, []views.BaselineTable{cut}); err != nil {
+				t.Fatal(err)
+			}
+			d := time.Since(start)
+			locked += d
+			worst = max(worst, d)
+			if d >= 3*time.Second {
+				over3s++
+			}
+			if e := kp.tables[tailKey("public", "orders")]; e != nil && e.tail != nil {
+				files += len(e.segs)
+				peakKeys = max(peakKeys, e.tail.Keys())
+			}
+		}
+		kp.close()
+		changes := cycles * perCycle
+		t.Logf("RESULT keep_chain=%v changes=%d peak_keys=%d rows_per_change=%.2f largest_write=%d whole_by_cause first=%d prune=%d eight=%d ratio=%d merges=%d lock_total=%s lock_worst=%s updates_over_3s=%d avg_files_read=%.1f",
+			keep, changes, peakKeys, float64(costs.wholeRows+costs.deltaRows+costs.mergeRows)/float64(changes), costs.largest,
+			costs.first, costs.prune, costs.eight, costs.ratio, costs.merges, locked.Round(time.Millisecond), worst.Round(time.Millisecond), over3s, float64(files)/cycles)
 	}
 }

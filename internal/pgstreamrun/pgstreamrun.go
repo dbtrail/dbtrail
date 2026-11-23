@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pglogrepl"
@@ -99,6 +100,39 @@ type Hooks struct {
 	// the slot (#1606). Unlike OnCheckpoint, which the ticker fires even
 	// before the capturer connects, it means the source was reached.
 	OnSourceConnected func()
+	// OnPhase and OnPhaseDetail report a long startup step, as in
+	// streamrun.Hooks: the creation of the replication slot, which lasts until
+	// the write transactions open on the source have ended (#3178).
+	OnPhase       func(string)
+	OnPhaseDetail func(string)
+}
+
+// phaseHooks are the capturer's OnPhase and OnPhaseDetail; nil when unset.
+func phaseHooks(h *Hooks) (phase, detail func(string)) {
+	if h == nil {
+		return nil, nil
+	}
+	return h.OnPhase, h.OnPhaseDetail
+}
+
+// hooksAfterStart returns the hooks the stream loop uses, whose OnCheckpoint
+// stays silent until started is called. The loop's ticker runs from before the
+// capturer connects, and a supervisor reads that tick as a capture that is up:
+// during a slot creation that lasts minutes it would show the server as
+// running, wipe the phase saying what capture waits for, and keep the
+// capture_stopped alert from firing (#3178).
+func hooksAfterStart(h *Hooks) (loop *Hooks, started func()) {
+	if h == nil || h.OnCheckpoint == nil {
+		return h, func() {}
+	}
+	var on atomic.Bool
+	gated := *h
+	gated.OnCheckpoint = func() {
+		if on.Load() {
+			h.OnCheckpoint()
+		}
+	}
+	return &gated, func() { on.Store(true) }
 }
 
 // sourceConnectedHook adapts Hooks.OnSourceConnected to the capturer's
@@ -344,6 +378,9 @@ func One(ctx context.Context, cfg Config) error {
 	}
 	state.skips = skips
 
+	onPhase, onPhaseDetail := phaseHooks(cfg.Hooks)
+	loopHooks, markStarted := hooksAfterStart(cfg.Hooks)
+	onStarted := startedHook(indexDB, state.serverID, skips, cfg.Hooks, logger)
 	cap := pgcapture.New(pgcapture.Config{
 		ReplDSN:            cfg.ReplDSN,
 		QueryDSN:           cfg.QueryDSN,
@@ -352,7 +389,9 @@ func One(ctx context.Context, cfg Config) error {
 		Filters:            cliutil.BuildIndexFilters(cfg.Schemas, cfg.Tables),
 		StartLSN:           pglogrepl.LSN(startLSN),
 		ExpectExistingSlot: saved != nil, // resuming → the slot must still exist + be valid
-		OnStarted:          startedHook(indexDB, state.serverID, skips, cfg.Hooks, logger),
+		OnStarted:          func() { onStarted(); markStarted() },
+		OnPhase:            onPhase,
+		OnPhaseDetail:      onPhaseDetail,
 		Logger:             logger,
 		// The shapes the index holds (#2441), loaded by the capturer once it
 		// knows where the slot resends from. If they cannot be read, the
@@ -388,7 +427,7 @@ func One(ctx context.Context, cfg Config) error {
 	probe := func(c context.Context) (pgcapture.HealthSnapshot, error) {
 		return pgcapture.ProbeHealth(c, cfg.QueryDSN, cfg.SlotName, cfg.Publication, cliutil.BuildIndexFilters(cfg.Schemas, cfg.Tables))
 	}
-	loopErr := streamLoopPG(ctx, events, idx, indexDB, cap, checkpointInterval, probe, healthPollInterval, state, logger, cfg.Hooks)
+	loopErr := streamLoopPG(ctx, events, idx, indexDB, cap, checkpointInterval, probe, healthPollInterval, state, logger, loopHooks)
 	cancel() // loop exited first → unblock the capturer's emit/receive so it returns
 
 	// Run returns nil on ctx-cancel; only a real capture error matters.

@@ -14,7 +14,10 @@ import (
 // TablesOfNextRun lists, as "schema.table", the tables a snapshot taken now
 // would hold: the publication's tables narrowed by filters, by the discovery
 // Run itself uses (discoverTables), so the answer and the next snapshot
-// cannot disagree about a name or about what is in scope.
+// cannot disagree about a name or about what is in scope. A table whose name
+// a snapshot cannot store (#3113) is not listed: it would read as new at every
+// update and start a full read that leaves it out again. The full read is
+// what reports it.
 //
 // It is what a snapshot update asks to learn which tables were added to the
 // publication after the snapshot it starts from (#2759). One short-lived
@@ -28,10 +31,12 @@ func TablesOfNextRun(ctx context.Context, queryDSN, publication string, filters 
 	defer conn.Close(context.Background())
 	// Discovery warns about partitioned tables each time it runs; a snapshot
 	// says that once, and this is asked at every update.
-	tables, err := discoverTables(ctx, conn, publication, filters, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	tables, err := discoverTables(ctx, conn, publication, filters, quiet)
 	if err != nil {
 		return nil, err
 	}
+	tables, _ = splitStorable(tables, quiet)
 	out := make([]string, 0, len(tables))
 	for _, t := range tables {
 		out = append(out, t.Schema+"."+t.Table)

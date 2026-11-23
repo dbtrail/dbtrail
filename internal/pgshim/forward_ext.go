@@ -33,11 +33,6 @@ func (s *session) stmtRoute(st *preparedStatement) routeDecision {
 	// Classified with a stand-in for each argument, as Parse classifies it;
 	// screened as the client wrote it, each $n a value of its own type.
 	d := s.route(s.classify(st.probeText()), st.query)
-	// The copy too busy to list its columns (#3109, route.go): what the
-	// plan sends to the copy is refused where it would run, and nothing of
-	// it is kept with the statement (st.byCost holds the plan's verdict
-	// only).
-	busy := s.takeScreenBusy()
 	if !byCostApplies(d) {
 		return d
 	}
@@ -45,17 +40,26 @@ func (s *session) stmtRoute(st *preparedStatement) routeDecision {
 	// exists (route_cost.go): its Describe and every execution are answered
 	// by the same side.
 	if st.byCost.side != "" {
-		return withScreenBusy(st.byCost, busy)
+		d = st.byCost
+	} else {
+		var keep bool
+		var stop *pgErr
+		d, keep, stop = s.routeByCost(st.query, len(st.paramOIDs) > 0)
+		if keep || stop != nil && stop.code != "57014" {
+			// A source that could not be reached is kept too: this is asked
+			// again by every message of the statement (its Bind, its note),
+			// and each would wait for the source to answer once more. It goes
+			// there, whose error the client gets.
+			st.byCost = d
+		}
 	}
-	d, keep, stop := s.routeByCost(st.query, len(st.paramOIDs) > 0)
-	if keep || stop != nil && stop.code != "57014" {
-		// A source that could not be reached is kept too: this is asked again
-		// by every message of the statement (its Bind, its note), and each
-		// would wait for the source to answer once more. It goes there, whose
-		// error the client gets.
-		st.byCost = d
-	}
-	return withScreenBusy(d, busy)
+	// Headed for the copy: only now its list of columns is read, which can
+	// wait for one of its workers. The copy too busy to list them (#3109,
+	// route.go): what the plan sends there is refused where it would run, and
+	// nothing of it is kept with the statement (st.byCost holds the plan's
+	// verdict only).
+	d = s.screenTyped(st.query, d)
+	return withScreenBusy(d, s.takeScreenBusy())
 }
 
 // cloneBind copies a Bind message, whose buffers the next message reuses.
@@ -309,7 +313,7 @@ func (s *session) describeOnSource(st *preparedStatement) {
 }
 
 // bindOnSource answers Bind of a statement that runs on the source.
-func (s *session) bindOnSource(st *preparedStatement, m *pgproto3.Bind) {
+func (s *session) bindOnSource(st *preparedStatement, m *pgproto3.Bind, route routeDecision) {
 	if perr := forwardRefusal(st.query); perr != nil {
 		s.extFail(perr)
 		return
@@ -338,7 +342,7 @@ func (s *session) bindOnSource(st *preparedStatement, m *pgproto3.Bind) {
 	s.ext.portals[m.DestinationPortal] = &portal{
 		name: m.DestinationPortal, stmt: st, onSource: true, sourcePath: up.sent["search_path"],
 		resultFormats: append([]int16(nil), m.ResultFormatCodes...),
-		route:         s.stmtRoute(st),
+		route:         route,
 	}
 	s.be.Send(&pgproto3.BindComplete{})
 }
