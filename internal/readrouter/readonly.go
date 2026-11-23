@@ -51,6 +51,9 @@ var (
 	roLocking = regexp.MustCompile(`(?:^|[^a-z_$])(?:for\s+(?:update|share)|lock\s+in)(?:$|[^a-z0-9_$])`)
 	roLocks   = regexp.MustCompile(`(?:^|[^a-z_$])(?:get_lock|release_lock|release_all_locks)\s*\(`)
 	roSeq     = regexp.MustCompile(`(?:^|[^a-z_$])(?:nextval|setval|next\s+value\s+for)(?:$|[^a-z0-9_$])`)
+	// READ WRITE in START TRANSACTION or SET TRANSACTION: it would take back
+	// the read-only mark the port puts on the session at the source.
+	roReadWrite = regexp.MustCompile(`(?:^|[^a-z_$])read\s+write(?:$|[^a-z0-9_$])`)
 	roAnalyze = regexp.MustCompile(`(?:^|[^a-z_$])analyze(?:$|[^a-z0-9_$])`)
 
 	roIdent       = "(?:``|[\\w$\\p{L}]+)"
@@ -87,7 +90,14 @@ var (
 // same. password: the old `SET PASSWORD = ...` spelling fits the assignment
 // shape. gtid_next: followed by an (allowed) empty transaction it writes a
 // GTID into the source's executed set.
-var roDeniedSessionVars = map[string]bool{"password": true, "gtid_next": true, "global": true, "persist": true, "persist_only": true}
+//
+// transaction_read_only (tx_read_only before MySQL 8.0 and on MariaDB): the
+// port marks the session read-only on the source (Forwarder.ReadOnlySession),
+// and a client must not be able to take that back.
+var roDeniedSessionVars = map[string]bool{"password": true, "gtid_next": true, "global": true, "persist": true, "persist_only": true,
+	"transaction_read_only": true, "tx_read_only": true}
+
+const readWriteRefused = "READ WRITE would make the session's transactions writable, and this port keeps them read-only on the source"
 
 // roKnownVerbs are the leading keywords a refusal may name. Any other first
 // word is not repeated back: it is whatever the client typed, and it goes to
@@ -366,6 +376,9 @@ func roScreenOne(kept, s string) string {
 		}
 		return "BEGIN followed by anything but WORK is not transaction control"
 	case "start":
+		if roReadWrite.MatchString(s) {
+			return readWriteRefused
+		}
 		if roStartTxn.MatchString(s) {
 			return ""
 		}
@@ -440,6 +453,9 @@ func roScreenSet(kept, s string) string {
 			return clientForm
 		}
 	case roSetTxn.MatchString(s):
+		if roReadWrite.MatchString(s) {
+			return readWriteRefused
+		}
 		return ""
 	case strings.Contains(s, "character_set_client"):
 		m := roSetCharsetClient.FindStringSubmatch(kept)

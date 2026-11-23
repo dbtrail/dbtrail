@@ -510,6 +510,8 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 		// none outside the character sets its screen reads safely.
 		fw.ClientCollation, fw.GlobalSession = proxy.collation, proxy.globalSession
 		fw.SafeCharsetsOnly = cfg.RouteReadOnly
+		// And the source itself refuses a write the screen did not see.
+		fw.ReadOnlySession = cfg.RouteReadOnly
 	}
 	if fw == nil && cfg.RouteStatus {
 		// SHOW ROUTER STATUS on a connection the copy answers alone: the

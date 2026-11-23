@@ -148,6 +148,40 @@ func TestIntegrationFlashbackReadOnly(t *testing.T) {
 		rows.Close()
 	}
 
+	// #3093: a write the screen cannot see, because it is inside a stored
+	// function a SELECT calls. The port forwards the SELECT, and the SOURCE
+	// refuses the write: the session is read-only there.
+	if _, err := srcDB.Exec("CREATE FUNCTION writes_a_row() RETURNS INT MODIFIES SQL DATA BEGIN INSERT INTO orders SELECT max(id) + 100, 'by function' FROM orders; RETURN 1; END"); err != nil {
+		t.Fatalf("create the function: %v", err)
+	}
+	for _, q := range []string{"SELECT writes_a_row()", "SELECT id, writes_a_row() FROM orders WHERE id = 1"} {
+		rows, err := ro.Query(q)
+		if err == nil {
+			for rows.Next() {
+			}
+			err = rows.Err()
+			rows.Close()
+		}
+		var me *drivermysql.MySQLError
+		if !errors.As(err, &me) || me.Number != 1792 {
+			t.Errorf("%q on the read-only port: got %v, want the source's own error 1792", q, err)
+		}
+		if after := sourceState(); after != before {
+			t.Fatalf("%q wrote to the source through the read-only port: %s, was %s", q, after, before)
+		}
+	}
+	// The client cannot take the mark back.
+	for _, q := range []string{"START TRANSACTION READ WRITE", "SET SESSION TRANSACTION READ WRITE", "SET TRANSACTION READ WRITE", "SET SESSION transaction_read_only = 0", "SET @@transaction_read_only = OFF"} {
+		_, err := ro.Exec(q)
+		var me *drivermysql.MySQLError
+		if !errors.As(err, &me) || me.Number != 1290 {
+			t.Errorf("%q on the read-only port: got %v, want error 1290", q, err)
+		}
+	}
+	if got := scanStrings(t, ro, "SELECT @@session.transaction_read_only"); len(got) != 1 || got[0] != "1" {
+		t.Errorf("the source session's transaction_read_only = %v, want 1", got)
+	}
+
 	// The control: on a read-write port the same kind of statement lands.
 	rw := openFlashback(t, serve(flashbackConfig{RouteMaxCopyAge: time.Hour, RoutePolicy: policy}), ent.ID, "tok", srcName)
 	defer rw.Close()
@@ -156,5 +190,12 @@ func TestIntegrationFlashbackReadOnly(t *testing.T) {
 	}
 	if after := sourceState(); after == before {
 		t.Fatal("the read-write port did not change the source: the read-only checks above prove nothing")
+	}
+	wrote := sourceState()
+	if got := scanStrings(t, rw, "SELECT writes_a_row()"); len(got) != 1 || got[0] != "1" {
+		t.Fatalf("SELECT writes_a_row() on the read-write port = %v", got)
+	}
+	if sourceState() == wrote {
+		t.Fatal("the function did not write through the read-write port: the check of it above proves nothing")
 	}
 }

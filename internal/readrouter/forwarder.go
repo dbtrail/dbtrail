@@ -113,6 +113,13 @@ type Forwarder struct {
 	// them is not given to the session (OnCollation is told), as the screen
 	// refuses a client's own SET NAMES of one.
 	SafeCharsetsOnly bool
+	// ReadOnlySession: the port is read-only, and every new connection to
+	// the source is marked read-only there before anything of the client's
+	// runs (readOnlySession), so the source itself refuses a write the
+	// screen did not see: one inside a stored function, or a statement the
+	// screen read differently from the server (#3093). A connection that
+	// cannot be marked does not open.
+	ReadOnlySession bool
 	// OnSession, when set, is told the state the source opened the session
 	// in (SessionStatusFlags), at most once: with the source's first answer
 	// to a statement, because that is the first packet that shows what an
@@ -382,6 +389,12 @@ func (f *Forwarder) open(ctx context.Context, track bool) (*client.Conn, bool, e
 			err = fmt.Errorf("settle the session's collation: %w", serr)
 		}
 	}
+	if err == nil && f.ReadOnlySession {
+		if rerr := f.readOnlySession(ctx, c); rerr != nil {
+			_ = c.Close()
+			err = rerr
+		}
+	}
 	if err == nil {
 		if eerr := f.explainVersionOne(ctx, c); eerr != nil {
 			_ = c.Close()
@@ -403,6 +416,33 @@ func (f *Forwarder) open(ctx context.Context, track bool) (*client.Conn, bool, e
 		return nil, false, err
 	}
 	return c, tracked, nil
+}
+
+// ReadOnlySessionSet is what a read-only port sends the source on each new
+// connection (readOnlySession): from then on every transaction of the
+// session, the one-statement ones under autocommit included, is read-only,
+// and the source answers a write with its own error 1792. The statement is
+// the same on MySQL and on MariaDB, where the variable behind it is not
+// (transaction_read_only, tx_read_only). It does not stop writes to the
+// session's own temporary tables, which the source allows in a read-only
+// transaction.
+const ReadOnlySessionSet = "SET SESSION TRANSACTION READ ONLY"
+
+// readOnlySession marks a connection the source has just accepted read-only
+// (ReadOnlySession). The screen keeps a client from undoing it: it refuses
+// READ WRITE and a SET of the variable (ReadOnlyRefusal). Unlike a SET the
+// port could do without (explainVersionOne), a source that refuses this one
+// leaves a connection that does not open, as safeClientCharset does: served
+// anyway, the session would be unprotected with nothing said.
+func (f *Forwarder) readOnlySession(ctx context.Context, c *client.Conn) error {
+	defer context.AfterFunc(ctx, func() { _ = c.Conn.Conn.Close() })()
+	if _, err := c.Execute(ReadOnlySessionSet); err != nil {
+		if cause := ctx.Err(); cause != nil {
+			return cause
+		}
+		return fmt.Errorf("this port is read-only and the source refused to mark the session read-only (%s): %w", ReadOnlySessionSet, err)
+	}
+	return nil
 }
 
 // ExplainVersionSet is what the port sends a MySQL 9 source on each new
