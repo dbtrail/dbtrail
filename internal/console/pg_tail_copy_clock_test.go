@@ -54,9 +54,8 @@ func TestPGTailCopy_wholeTimeIsDecidedFromTheDeadline(t *testing.T) {
 		settled(t, ctx, r.k, both...)
 		r.f.update("items", 0x610, "1", pgCopyUnsent, "n")
 		r.f.update("orders", 0x620, "1", pgCopyUnsent, "n")
-		// First update: items goes first and is told it did not fit, so the
-		// next update skips it without reading.
-		r.f.hook(func(context.Context, views.BaselineTable) error { return nil })
+		// items is noted as not fitting more room than there is: it goes
+		// first and the update skips it without reading.
 		ki := tailKey("public", "items")
 		r.k.mu.Lock()
 		tail, ok := r.k.tables[ki].tail.(pgCopyTail)
@@ -66,7 +65,6 @@ func TestPGTailCopy_wholeTimeIsDecidedFromTheDeadline(t *testing.T) {
 		}
 		tail.DeferCopy(1 << 40)
 		pgCopyDelayBeforeReads(t, 5*time.Millisecond)
-		r.f.hooks = nil
 		r.f.hook(pgCopyNeverEnds)
 		if _, err := r.k.refresh(ctx, both); err != nil {
 			t.Fatal(err)
@@ -109,14 +107,22 @@ func TestPGTailCopy_wholeTimeIsDecidedFromTheDeadline(t *testing.T) {
 		r := newPGCopyRig(t, tailBudget{})
 		settled(t, ctx, r.k, r.cut1)
 		r.f.update("orders", 0x610, "1", pgCopyUnsent, "n")
-		r.f.hook(pgCopyNeverEnds)
+		var readEnd time.Time
+		r.f.hook(func(ctx context.Context, tbl views.BaselineTable) error {
+			readEnd, _ = ctx.Deadline()
+			return pgCopyNeverEnds(ctx, tbl)
+		})
 		short, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
+		updateEnd, _ := short.Deadline()
 		if _, err := r.k.refresh(short, []views.BaselineTable{r.cut1}); err != nil {
 			t.Fatal(err)
 		}
 		if e := r.k.tableEntry(r.key); e == nil || e.refused != "" {
 			t.Fatalf("a read cut short by the update's deadline was refused: %+v", e)
+		}
+		if want := updateEnd.Add(-pgCopyReadMargin); readEnd.IsZero() || readEnd.After(want) {
+			t.Fatalf("the read's deadline is %v, want no later than %v", readEnd, want)
 		}
 	})
 }
