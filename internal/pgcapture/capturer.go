@@ -36,6 +36,12 @@ const standbyWriteTimeout = 10 * time.Second
 // deliberately use the full run ctx — they are long-lived.
 const startupTimeout = 30 * time.Second
 
+// sourceConnectTimeout bounds opening one connection to the source, so an
+// address that accepts and never answers ends the attempt and is retried. Long
+// enough for the kernel to give up on a dead address and try the next one. A
+// variable so a test need not wait for it.
+var sourceConnectTimeout = 5 * time.Minute
+
 // beforeStartReplication, when set, runs right before Run starts
 // replication, after it read the slot's position: a test makes the slot's
 // creation end there (SetBeforeStartReplicationForTest).
@@ -160,8 +166,13 @@ func (c *Capturer) AckCommitted(lsn uint64) {
 // Run opens the replication + query connections, validates the publication, ensures
 // the slot, starts replication, and emits event.Event on out until ctx is cancelled.
 // It returns nil on graceful ctx-cancel and does NOT close out (the caller owns the
-// channel, mirroring streamrun).
+// channel, mirroring streamrun). An error that means the source could not be
+// reached is a *SourceUnreachableError (IsSourceUnreachable).
 func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
+	return markSourceUnreachable(c.run(ctx, out), c.cfg.ExpectExistingSlot)
+}
+
+func (c *Capturer) run(ctx context.Context, out chan<- event.Event) error {
 	if c.cfg.ReplDSN == "" || c.cfg.QueryDSN == "" || c.cfg.SlotName == "" || c.cfg.Publication == "" {
 		return fmt.Errorf("pgcapture: Run requires ReplDSN, QueryDSN, SlotName, and Publication")
 	}
@@ -169,13 +180,17 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 	// Pinned rendering GUCs (#593 slice D, gucpin.go): the walsender session's
 	// GUCs determine pgoutput's tuple text, which must byte-match the baseline
 	// COPY text (pinned identically in internal/pgbaseline).
-	replConn, err := ConnectReplPinned(ctx, c.cfg.ReplDSN)
+	connectCtx, cancelConnect := context.WithTimeout(ctx, sourceConnectTimeout)
+	replConn, err := ConnectReplPinned(connectCtx, c.cfg.ReplDSN)
+	cancelConnect()
 	if err != nil {
 		return fmt.Errorf("pgcapture: connect replication: %w", err)
 	}
 	defer closeReplConn(replConn)
 
-	queryConn, err := pgx.Connect(ctx, c.cfg.QueryDSN)
+	connectCtx, cancelConnect = context.WithTimeout(ctx, sourceConnectTimeout)
+	queryConn, err := pgx.Connect(connectCtx, c.cfg.QueryDSN)
+	cancelConnect()
 	if err != nil {
 		return fmt.Errorf("pgcapture: connect query: %w", err)
 	}
@@ -506,7 +521,7 @@ func (c *Capturer) receiveLoop(ctx context.Context, replConn *pgconn.PgConn, dec
 			}
 			ev, emit, err := decoder.Decode(logmsg)
 			if err != nil {
-				return err
+				return &decodeError{err}
 			}
 			if emit {
 				ev.ReadAt = readAt
