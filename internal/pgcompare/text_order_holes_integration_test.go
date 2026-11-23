@@ -29,6 +29,13 @@ func textOrderHoles() []expectation {
 		differs("order", `SELECT s.name FROM (SELECT name AS name, id FROM `+c+`) s ORDER BY s.name`),
 		{stmt: `SELECT id FROM (SELECT name AS name, id FROM ` + c + `) s WHERE name > 'B'`, verdict: sqlcompare.Equal},
 		differs("rows", `SELECT max(name) AS name FROM `+c),
+		// The text column given another name, and its own again further out.
+		differs("order", `SELECT u AS name FROM (SELECT name AS u FROM `+c+`) s ORDER BY name`),
+		differs("order", `WITH w AS (SELECT name AS u FROM `+c+`) SELECT u AS name FROM w ORDER BY name`),
+		differs("order", `SELECT u AS name, id FROM (SELECT name AS u, id FROM `+c+`) s ORDER BY 1`),
+		differs("rows", `SELECT max(u) AS name FROM (SELECT name AS u FROM `+c+`) s`),
+		differs("order", `SELECT id AS name FROM (SELECT name AS id FROM `+c+`) s ORDER BY name`),
+		differs("order", `SELECT v AS name FROM (SELECT u AS v FROM (SELECT name AS u FROM `+c+`) a) b ORDER BY name`),
 		// Under a quoted name that is a number column's elsewhere.
 		differs("order", `SELECT name AS "qty" FROM `+c+` ORDER BY qty`),
 		differs("order", `SELECT name AS "qty" FROM `+c+` ORDER BY "qty"`),
@@ -42,6 +49,10 @@ func textOrderHoles() []expectation {
 		stay(`SELECT customer_id AS customer_id, sum(qty) AS qty FROM ` + o + ` GROUP BY customer_id ORDER BY qty DESC, customer_id`),
 		stay(`SELECT customer_id, sum(amount) AS total FROM ` + o + ` GROUP BY customer_id ORDER BY total DESC NULLS LAST`),
 		stay(`SELECT name AS name, id FROM ` + c + ` ORDER BY id`),
+		stay(`SELECT u AS total FROM (SELECT sum(qty) AS u FROM `+o+`) s ORDER BY total`),
+		stay(`SELECT u AS qty FROM (SELECT qty AS u FROM `+o+`) s ORDER BY qty NULLS LAST`),
+		// The star of an EXISTS puts no column in the answer.
+		stay(`SELECT customer_id, count(*) FROM `+o+` o WHERE EXISTS (SELECT * FROM `+c+` x WHERE x.id = o.customer_id) GROUP BY 1 ORDER BY 2 DESC, 1`),
 
 		// A position behind a star.
 		differs("order", `SELECT * FROM `+c+` ORDER BY 2`),

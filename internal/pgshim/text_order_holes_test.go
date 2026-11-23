@@ -61,6 +61,15 @@ func TestCopyScreen_aliasNamedLikeItsColumn(t *testing.T) {
 		`WITH s AS (SELECT name AS name FROM people) SELECT name FROM s ORDER BY name`: "ORDER BY",
 		`SELECT s.name FROM (SELECT name AS name, id FROM people) s ORDER BY s.name`:   "ORDER BY",
 		`SELECT greatest(name, last) AS name FROM people`:                              "greatest()",
+		// The text column given another name, and its own again further out.
+		`SELECT u AS name FROM (SELECT name AS u FROM people) s ORDER BY name`:                        "ORDER BY",
+		`WITH c AS (SELECT name AS u FROM people) SELECT u AS name FROM c ORDER BY name`:              "ORDER BY",
+		`SELECT u AS name, id FROM (SELECT name AS u, id FROM people) s ORDER BY 1`:                   "ORDER BY",
+		`SELECT min(u) AS name FROM (SELECT name AS u FROM people) s`:                                 "min()",
+		`SELECT id AS name FROM (SELECT name AS id FROM people) s ORDER BY name`:                      "ORDER BY",
+		`SELECT v AS name FROM (SELECT u AS v FROM (SELECT name AS u FROM people) a) b ORDER BY name`: "ORDER BY",
+		`SELECT u AS last FROM (SELECT first AS u FROM people) s ORDER BY last`:                       "ORDER BY",
+		`SELECT u AS "name" FROM (SELECT name AS "u" FROM people) s ORDER BY name`:                    "ORDER BY",
 		`SELECT name AS name, count(*) FROM people GROUP BY name ORDER BY 1`:           "ORDER BY",
 		`SELECT last AS first, first AS last FROM people ORDER BY first`:               "ORDER BY",
 	}
@@ -76,6 +85,11 @@ func TestCopyScreen_aliasNamedLikeItsColumn(t *testing.T) {
 		`SELECT born AS born FROM people ORDER BY born`,
 		`SELECT id AS id, sum(age) AS age FROM people GROUP BY id ORDER BY age DESC`,
 		`SELECT s.age FROM (SELECT age AS age, id FROM people) s WHERE s.age > 3 ORDER BY s.age`,
+		// A number given another name, and the name of a number column or
+		// one of its own further out.
+		`SELECT u AS total FROM (SELECT sum(amount) AS u FROM people) s ORDER BY total`,
+		`SELECT u AS age FROM (SELECT age AS u FROM people) s ORDER BY age`,
+		`SELECT v AS amount FROM (SELECT u AS v FROM (SELECT sum(amount) AS u FROM people) a) b ORDER BY amount DESC`,
 		// A name of its own.
 		`SELECT id, sum(amount) AS total FROM people GROUP BY id ORDER BY total DESC`,
 		`SELECT id, count(*) AS n FROM people GROUP BY id HAVING count(*) > 1 ORDER BY n, id`,
@@ -185,6 +199,9 @@ func TestStarByPosition(t *testing.T) {
 		`SELECT * FROM plain ORDER BY 1, 2 LIMIT 5 OFFSET 1`,
 		`SELECT n.*, p.* FROM nums n, plain p ORDER BY 5`,
 		`SELECT * FROM plain WHERE id IN (SELECT id FROM nums) ORDER BY 2`,
+		// A star that decides what is compared, or the row itself, is one.
+		`SELECT id, qty FROM plain WHERE (id, code, name, status, qty) IN (SELECT * FROM plain) ORDER BY 2`,
+		`SELECT id, (SELECT * FROM (SELECT name FROM plain LIMIT 1) s) FROM plain ORDER BY 2`,
 	} {
 		if got := orderedScreen(q); !strings.Contains(got, "ORDER BY") {
 			t.Errorf("%s:\n  got %q, want it sent to the source for the text it sorts", q, got)
@@ -215,6 +232,11 @@ func TestStarByPosition(t *testing.T) {
 		`SELECT * FROM plain p, nums n WHERE n.id = p.id AND n.k BETWEEN 1 AND (5)`,
 		`SELECT * FROM (SELECT * FROM plain) s WHERE qty > 1`,
 		`SELECT count(*) FROM (SELECT * FROM plain) s GROUP BY (s.qty)`,
+		// The star of an EXISTS, and a row handed to a function, put no
+		// column in the answer.
+		`SELECT id, count(*) FROM nums n WHERE EXISTS (SELECT * FROM plain p WHERE p.id = n.id) GROUP BY 1 ORDER BY 2 DESC`,
+		`SELECT id, k FROM nums n WHERE NOT EXISTS (SELECT * FROM plain p WHERE p.id = n.id) ORDER BY 2, 1`,
+		`SELECT count(n.*) FROM nums n ORDER BY 1`,
 		// No star: the other rules'.
 		`SELECT id, qty FROM plain ORDER BY 2`,
 		`SELECT id, count(*) FROM plain GROUP BY 1 ORDER BY 2`,
