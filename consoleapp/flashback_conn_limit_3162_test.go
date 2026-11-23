@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/shim"
 	"github.com/dbtrail/dbtrail/internal/testutil/mysqlwire"
 )
 
@@ -602,5 +604,50 @@ func TestPreLoginSet_whoIsClosed(t *testing.T) {
 	}
 	if in.evicted() {
 		t.Fatal("a logged-in connection was closed")
+	}
+}
+
+// The moment itself: the decision to close a connection is taken while its
+// handshake completes on the wire (its socket still open, so the client is
+// told it logged in). It is not served: the port hangs up, and its first
+// command gets no answer.
+func TestFlashbackPort_closedToMakeRoomIsNotServedAfterItsLogin(t *testing.T) {
+	srv := newFlashbackConsole(t, "tok")
+	mysrv, err := shim.NewMySQLServerWithTLS("", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	set := newPreLoginSet()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		p := set.add(c, time.Now())
+		// What evictOne decides, without the close that follows it.
+		set.mu.Lock()
+		p.state = preLoginEvicted
+		delete(set.waiting, p)
+		set.mu.Unlock()
+		handleFlashbackConn(context.Background(), srv, p, mysrv, flashbackCreds{srv: srv}, shim.NewGate(0), flashbackConfig{}.withDefaults(), slog.Default())
+	}()
+	c, err := mysqlwire.Dial(ln.Addr().String(), "no-such-server", "tok", "")
+	if err == nil {
+		defer c.Close()
+		if _, err := c.Ping(); err == nil {
+			t.Fatal("a connection closed to make room was served after its login finished")
+		}
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("its goroutine did not end")
 	}
 }
