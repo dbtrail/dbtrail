@@ -18212,14 +18212,17 @@ const FORWARDING_HINT = "Forwarding user and password are optional. They only ma
 
 // FORWARDING_HINT_PG is FORWARDING_HINT for a PostgreSQL source (#2771): what
 // its port, the PostgreSQL router, sends there as this user.
-const FORWARDING_HINT_PG = "A separate forwarding user is optional: it is for a port that should send to this PostgreSQL more than the box above allows. With one, every statement the copy is not known to answer as PostgreSQL does, a transaction block a SQL client opens on the PostgreSQL port (BEGIN to COMMIT or ROLLBACK), and a catalog statement the copy does not answer run on this server as that user, read-only; the copy answers the rest. Create a role that can log in, with SELECT on what the port should read and nothing more. It must be another user than the source user. While the server has one, the port forwards as that user and the box above is not used. Saving a change to it closes the connections open on that port for this server, so that none stays on the previous account; clients reconnect.";
+const FORWARDING_HINT_PG = "For a port that should send this PostgreSQL more than the box allows: transactions, and every statement the copy does not answer as PostgreSQL does. It must be another user than the source user: a role that can log in, with SELECT on what the port should read and nothing more. While it is set, the box above is not used.";
 
 // The capture account (#3054): a PostgreSQL server needs no second user for
 // its port to forward. The box is the yes or no the terminal asks at
 // `server add`, saved the same way (PUT /api/servers/{id}/route with
 // capture_account alone), off until somebody ticks it.
 const PG_FORWARD_ASK = "Let the PostgreSQL port send to this PostgreSQL, read-only and as the source user above, a SELECT the copy does not answer";
-const PG_FORWARD_HINT = "Unticked, the copy answers alone and nothing is sent to this PostgreSQL: a statement the copy cannot answer gets an error. Ticked, the port sends such a statement only when it is a SELECT whose every table is a table of the copy; anything else is refused and not sent, and a server that hides tables or columns sends nothing. No second user is needed. The port then logs in as the source user, so its connections count toward that role's connection limit. Changing the box closes the connections open on that port for this server, unless it has a separate forwarding user; clients reconnect.";
+const PG_FORWARD_HINT = "Unticked: the copy answers alone, and a statement it cannot answer gets an error. Ticked: the port sends that SELECT to this PostgreSQL as the source user, read-only, and only when every table it reads is in the copy. No second user to create.";
+// For a server that hides tables or columns: its port sends nothing to the
+// source, whatever the box holds, so the hint does not say it sends.
+const PG_FORWARD_HINT_HIDES = "This server hides tables or columns, so the port sends nothing to this PostgreSQL, ticked or not: the copy answers alone.";
 
 // captureWas remembers, per form, the answer its server had when the form
 // opened (false for a new server): the answer is sent only when the box
@@ -18646,12 +18649,14 @@ function buildServerForm(offered, familyLine) {
   mon.append(tagFlavor(el("div", { id: "pg-forward", class: "pg-forward" },
     el("label", { class: "check" }, el("input", { type: "checkbox", name: "forward_capture", disabled: !mayWrite }), el("span", { text: PG_FORWARD_ASK })),
     mayWrite ? null : el("p", { class: "form-hint", text: "Changing it needs permission to change servers." }),
-    el("p", { class: "form-hint", text: PG_FORWARD_HINT }),
+    el("p", { class: "form-hint", id: "pg-forward-hint", text: PG_FORWARD_HINT }),
+    docsMore("guides/query-with-a-postgres-client", "with-the-user-dbtrail-already-connects-with", "what the box changes"),
     el("button", { class: "form-adv-summary", type: "button", id: "route-own-open", text: "Advanced: use a separate forwarding user",
       onclick: () => { form.dataset.routeOwn = "1"; applyFlavor(form); form.elements.route_user.focus(); } })), "postgres"));
   mon.append(tagFlavor(el("div", { id: "route-extra" }), "mysql mariadb postgres"));
   mon.append(tagFlavor(el("p", { class: "form-hint", text: FORWARDING_HINT }), "mysql mariadb"));
-  mon.append(tagFlavor(el("p", { class: "form-hint", text: FORWARDING_HINT_PG }), "postgres-own"));
+  mon.append(tagFlavor(el("div", {}, el("p", { class: "form-hint", text: FORWARDING_HINT_PG }),
+    docsMore("guides/query-with-a-postgres-client", "with-a-forwarding-user-of-its-own", "a forwarding user of its own")), "postgres-own"));
   mon.append(el("p", { class: "form-hint", text: "Leave the S3 fields blank for AWS. They apply to the Archive and Snapshots locations set on this server, for uploads and reads alike, not to the default Snapshots location DBTrail was started with. A bucket has one store and one pair of keys, so two servers sharing a bucket must agree. Clearing the access key removes both keys." }));
   // The source user is the #1 friction point — spell out the grant inline,
   // never behind a <details>. REPLICATION SLAVE/CLIENT drive the stream;
@@ -18794,6 +18799,7 @@ function showServerForm(prefill, opts) {
     fillRouteExtra(form, prefill);
     // The saved answer, for a PostgreSQL alone: any other type's box stays
     // unticked and is never sent.
+    if (prefill.flavor === "postgres" && prefill.hidden) $("#pg-forward-hint", form).textContent = PG_FORWARD_HINT_HIDES;
     if (prefill.flavor === "postgres" && prefill.forward_with_capture_account) {
       form.elements.forward_capture.checked = true;
       captureWas.set(form, true);

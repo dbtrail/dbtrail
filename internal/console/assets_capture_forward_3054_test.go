@@ -181,7 +181,14 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
     yesHides: said({ ...pgSaved, forward_with_capture_account: true, hidden: { tables: ["shop.audit"], columns: [] } }),
   };
   out.ask = vm.runInContext("PG_FORWARD_ASK", ctx);
-  out.hint = vm.runInContext("PG_FORWARD_HINT", ctx);
+  // The hint and the two links, read off the form a person gets.
+  const hintOf = (f) => f.querySelector("p#pg-forward-hint").textContent;
+  f = fresh("postgres");
+  out.hint = hintOf(f);
+  out.links = f.querySelectorAll("a.bks-docs").map((a) => a.attrs.href + " | " + a.textContent);
+  out.ownHint = vm.runInContext("FORWARDING_HINT_PG", ctx);
+  f = show({ monitor: true }, { ...pgSaved, forward_with_capture_account: true, hidden: { tables: ["shop.audit"], columns: [] } });
+  out.hintHides = hintOf(f);
   console.log(JSON.stringify(out));
 })();
 `
@@ -215,6 +222,8 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
 		}
 		Now                                    map[string]string
 		PgReaderText, Ask, Hint, PgRemoveExtra string
+		HintHides, OwnHint                     string
+		Links                                  []string
 		Said                                   map[string]line
 	}
 	s := strings.TrimSpace(string(raw))
@@ -391,12 +400,26 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
 	if got.Ask != "Let the PostgreSQL port send to this PostgreSQL, read-only and as the source user above, a SELECT the copy does not answer" {
 		t.Errorf("the box reads %q", got.Ask)
 	}
-	for _, want := range []string{"Unticked, the copy answers alone and nothing is sent to this PostgreSQL", "every table is a table of the copy", "anything else is refused and not sent", "No second user is needed", "connection limit", "closes the connections", "unless it has a separate forwarding user"} {
-		if !strings.Contains(got.Hint, want) {
-			t.Errorf("the box's hint lacks %q: %s", want, got.Hint)
-		}
+	// Two short lines each, the rest behind a link to the docs site.
+	if got.Hint != "Unticked: the copy answers alone, and a statement it cannot answer gets an error. Ticked: the port sends that SELECT to this PostgreSQL as the source user, read-only, and only when every table it reads is in the copy. No second user to create." {
+		t.Errorf("the box's hint reads %q", got.Hint)
 	}
-	for name, text := range map[string]string{"the box": got.Ask, "its hint": got.Hint, "the reader's box": got.PgReaderText} {
+	if got.OwnHint != "For a port that should send this PostgreSQL more than the box allows: transactions, and every statement the copy does not answer as PostgreSQL does. It must be another user than the source user: a role that can log in, with SELECT on what the port should read and nothing more. While it is set, the box above is not used." {
+		t.Errorf("the separate forwarding user's hint reads %q", got.OwnHint)
+	}
+	// A server that hides tables or columns sends nothing: its hint does not
+	// say the port sends.
+	if got.HintHides != "This server hides tables or columns, so the port sends nothing to this PostgreSQL, ticked or not: the copy answers alone." {
+		t.Errorf("the hint of a server that hides tables reads %q", got.HintHides)
+	}
+	wantLinks := []string{
+		"https://dbtrail.com/docs/guides/query-with-a-postgres-client/#with-the-user-dbtrail-already-connects-with | Read more: what the box changes",
+		"https://dbtrail.com/docs/guides/query-with-a-postgres-client/#with-a-forwarding-user-of-its-own | Read more: a forwarding user of its own",
+	}
+	if !reflect.DeepEqual(got.Links, wantLinks) {
+		t.Errorf("the form's links = %q\nwant %q", got.Links, wantLinks)
+	}
+	for name, text := range map[string]string{"the box": got.Ask, "its hint": got.Hint, "the hint of a server that hides": got.HintHides, "the separate user's hint": got.OwnHint, "the reader's box": got.PgReaderText} {
 		if strings.Contains(text, "MySQL") || strings.Contains(text, "Engine Routing") || strings.Contains(text, "—") || strings.Contains(text, "undefined") {
 			t.Errorf("%s speaks of the MySQL port, or holds an em dash or undefined: %s", name, text)
 		}
