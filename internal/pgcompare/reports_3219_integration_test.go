@@ -36,11 +36,12 @@ func reportShapes() []expectation {
 		stay(`SELECT id, date_trunc('year', atz) FROM ` + itEpoch + ` ORDER BY id`),
 
 		// A name of the select list inside an expression of ORDER BY:
-		// PostgreSQL reads a column there, so with no such column it fails,
-		// and with one it sorts by the column, not by the value so named.
+		// PostgreSQL reads a column there, so with no such column it fails
+		// and the copy answers. With a column of that name both sort by the
+		// column (the last two lines, measured with orders that differ).
 		{stmt: `SELECT status, qty AS q FROM ` + o + ` ORDER BY abs(q)`, verdict: sqlcompare.SourceError, why: "an alias inside an ORDER BY expression"},
 		{stmt: `SELECT status, amount AS qty FROM ` + o + ` ORDER BY abs(qty), id`, verdict: sqlcompare.Equal},
-		{stmt: `SELECT id, 100 - qty AS qty FROM ` + o + ` ORDER BY qty + 0, id`, verdict: sqlcompare.Different, kind: "order", why: "the column qty, not the alias"},
+		{stmt: `SELECT id, 100 - qty AS qty FROM ` + o + ` ORDER BY qty + 0, id`, verdict: sqlcompare.Equal},
 		// The whole key is the alias on both sides.
 		stay(`SELECT id, qty AS q FROM ` + o + ` ORDER BY q, id`),
 		stay(`SELECT customer_id, count(*) AS count FROM ` + o + ` GROUP BY customer_id ORDER BY count(*) DESC, customer_id`),

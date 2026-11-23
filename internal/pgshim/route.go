@@ -1805,9 +1805,11 @@ func orderModifier(toks []rtToken, j int) bool {
 // aliasInOrderKey names an alias of the select list written inside an
 // expression of ORDER BY. PostgreSQL reads a name there as an alias only when
 // it is the whole key: inside an expression it is a column of the tables, so
-// ORDER BY abs(q) is an error when q is only an alias, and sorts by the column
-// when a column has the name too. The copy reads the alias in both. A name
-// before a parenthesis is a function (count(*) AS count ... ORDER BY count(*)).
+// ORDER BY abs(q) is an error when q is only an alias, and the copy answers
+// it. With a column of that name too, both sort by the column (measured,
+// internal/pgcompare); this does not look at the columns, so that statement
+// goes to the source as well. A name before a parenthesis is a function
+// (count(*) AS count ... ORDER BY count(*)).
 func aliasInOrderKey(toks []rtToken, names map[string]bool) string {
 	word := func(i int, w string) bool {
 		return i >= 0 && i < len(toks) && toks[i].kind == rtWord && toks[i].text == w
