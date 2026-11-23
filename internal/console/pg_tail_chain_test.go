@@ -309,7 +309,7 @@ func TestPGCheapestMerge(t *testing.T) {
 		{"a big file is left out", []int64{25000, 500, 500, 500, 500, 500, 500, 500}, 1, 3500},
 		{"equal files merge together", []int64{3500, 3500, 3500, 3500, 3500, 3500, 3500, 500}, 0, 25000},
 		{"empty newest files", []int64{100, 0, 0}, 1, 0},
-		{"a tie takes the shorter run", []int64{10, 10, 10}, 1, 20},
+		{"a tie takes the shorter run", []int64{20, 10, 10}, 1, 20},
 	} {
 		if from, rows := pgCheapestMerge(c.sizes); from != c.from || rows != c.rows {
 			t.Errorf("%s: from %d, %d rows; want from %d, %d rows", c.name, from, rows, c.from, c.rows)
@@ -443,7 +443,8 @@ func TestPGTailChainCost(t *testing.T) {
 		lsn := uint64(0x1000)
 		var locked time.Duration
 		var worst time.Duration
-		changes := 0
+		changes, files := 0, 0
+		var chainRows int64
 		lsnAt := map[int]uint64{}
 		for c := 1; c <= cycles; c++ {
 			for i := range perCycle {
@@ -463,9 +464,13 @@ func TestPGTailChainCost(t *testing.T) {
 			d := time.Since(start)
 			locked += d
 			worst = max(worst, d)
+			if e := kp.tables[tailKey("public", "orders")]; e != nil {
+				files += len(e.segs)
+				chainRows += e.segRows
+			}
 		}
-		t.Logf("RESULT keep_chain=%v changes=%d rows_per_change=%.2f whole_rows=%d delta_rows=%d merge_rows=%d merges=%d whole_by_cause first=%d prune=%d eight=%d ratio=%d lock_total=%s lock_worst=%s",
+		t.Logf("RESULT keep_chain=%v changes=%d rows_per_change=%.2f whole_rows=%d delta_rows=%d merge_rows=%d merges=%d whole_by_cause first=%d prune=%d eight=%d ratio=%d lock_total=%s lock_worst=%s avg_files_read=%.1f avg_rows_in_chain=%d",
 			keep, changes, float64(costs.wholeRows+costs.deltaRows+costs.mergeRows)/float64(changes), costs.wholeRows, costs.deltaRows, costs.mergeRows, costs.merges,
-			costs.first, costs.prune, costs.eight, costs.ratio, locked.Round(time.Millisecond), worst.Round(time.Millisecond))
+			costs.first, costs.prune, costs.eight, costs.ratio, locked.Round(time.Millisecond), worst.Round(time.Millisecond), float64(files)/cycles, chainRows/cycles)
 	}
 }
