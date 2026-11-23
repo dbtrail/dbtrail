@@ -72,20 +72,21 @@ func pgQdCopyRows(t *testing.T, snapshotDir string, q pgQdTable) (cols []string,
 	}
 	defer duck.Close()
 	lit := "parquet_scan('" + strings.ReplaceAll(file, "'", "''") + "')"
-	desc, err := duck.Query("SELECT column_name FROM (DESCRIBE SELECT * FROM " + lit + ")")
+	// The file's own column order: a result set's columns, not a query over
+	// DESCRIBE, which does not keep it.
+	head, err := duck.Query("SELECT * FROM " + lit + " LIMIT 0")
+	if err != nil {
+		t.Fatalf("columns of %s: %v", file, err)
+	}
+	cols, err = head.Columns()
+	head.Close()
 	if err != nil {
 		t.Fatalf("columns of %s: %v", file, err)
 	}
 	var sel []string
-	for desc.Next() {
-		var c string
-		if err := desc.Scan(&c); err != nil {
-			t.Fatal(err)
-		}
-		cols = append(cols, c)
+	for _, c := range cols {
 		sel = append(sel, `COALESCE(CAST("`+c+`" AS VARCHAR), 'NULL')`)
 	}
-	desc.Close()
 	res, err := duck.Query("SELECT " + strings.Join(sel, ", ") + " FROM " + lit + " ORDER BY CAST(id AS BIGINT)")
 	if err != nil {
 		t.Fatalf("rows of %s: %v", file, err)
