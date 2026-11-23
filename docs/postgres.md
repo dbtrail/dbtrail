@@ -1910,7 +1910,7 @@ The source answers:
   inside a larger statement and a list that renames the columns (`t AS
   a(i, x)`) go to the source as well. So a comparison (`=`, `<>`, `<`, `BETWEEN`,
   `IN`, `LIKE`, `IS DISTINCT FROM`, `IS NULL`), a join's condition or
-  `USING`, a `GROUP BY` of an expression over it, `ORDER BY` (a `char(n)` is
+  `USING`, a `GROUP BY` of an expression over it or of an array of `char(n)`, `ORDER BY` (a `char(n)` is
   text, sorted by the source's collation), a function, `||`, a cast, a `CASE` or an
   aggregate of such a column goes to the source. A `*` stays on the copy as
   a whole item of that one select list (`SELECT * FROM t WHERE id = 7`), and

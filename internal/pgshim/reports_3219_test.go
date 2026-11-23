@@ -174,3 +174,19 @@ func TestAliasInOrderKey(t *testing.T) {
 		}
 	}
 }
+
+// Only a plain char(n) is a key of GROUP BY the copy groups the same: an
+// array of char(n) stays on the source, alone and beside a list with commas.
+func TestPaddedGroupKey_notAnArray(t *testing.T) {
+	for _, q := range []string{
+		`SELECT count(*) FROM codes GROUP BY tags`,
+		`SELECT count(*) FROM plain p, codes c WHERE c.id = p.id GROUP BY c.tags`,
+	} {
+		if veto := paddedStarScreen(q); !isPaddedVeto(veto) {
+			t.Errorf("%s: %q, want it sent to the source", q, veto)
+		}
+	}
+	if q := `SELECT c.code, count(*) FROM plain p, codes c WHERE c.id = p.id GROUP BY c.code`; paddedStarScreen(q) != "" {
+		t.Errorf("%s: sent to the source (%s), want the copy", q, paddedStarScreen(q))
+	}
+}

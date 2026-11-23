@@ -183,6 +183,17 @@ func paddedKind(types map[string][]string, name string) (padded, sized bool) {
 	return padded, padded && sized
 }
 
+// paddedArray reports whether a column of that name is an array of a padded
+// type. Only a plain char(n) is known to group the same on both sides.
+func paddedArray(types map[string][]string, name string) bool {
+	for _, t := range types[name] {
+		if paddedType(t) && strings.HasSuffix(t, "[]") {
+			return true
+		}
+	}
+	return false
+}
+
 // paddedAmong reports whether any column of the screen's types is padded
 // on the source, and whether every such column is a char(n).
 func paddedAmong(types map[string][]string) (padded, sized bool) {
@@ -501,7 +512,7 @@ func paddedRead(toks []rtToken, types map[string][]string, exemptions bool) stri
 				continue
 			}
 			whole, alias := wholeItem(i)
-			if !whole && sized && wholeKey(i) {
+			if !whole && sized && !paddedArray(types, n) && wholeKey(i) {
 				// A key of GROUP BY: the same groups on both sides.
 				continue
 			}
