@@ -23,7 +23,7 @@ const notTextType = "DERIVED"
 // A definition may name another (a WITH's column read in the next one), so
 // what is known grows until it stops changing. Types not known (nil) stay
 // not known: every name may be text.
-func withAliasTypes(toks []rtToken, types map[string][]string) map[string][]string {
+func withAliasTypes(toks []rtToken, types map[string][]string, untyped bool) map[string][]string {
 	defs := aliasDefinitions(toks)
 	if types == nil || len(defs) == 0 {
 		return types
@@ -32,10 +32,10 @@ func withAliasTypes(toks []rtToken, types map[string][]string) map[string][]stri
 		// Names given in a column list (AS b(n), WITH c(n) AS) are not
 		// among the definitions read here, so one of them may share a name
 		// with a definition that is: nothing defined is known then.
-		return mergeAliasTypes(types, defs, nil)
+		return mergeAliasTypes(types, defs, nil, untyped)
 	}
 	notText := map[string]bool{}
-	cur := mergeAliasTypes(types, defs, notText)
+	cur := mergeAliasTypes(types, defs, notText, untyped)
 	for range len(defs) + 1 {
 		changed := false
 		for name, exprs := range defs {
@@ -43,11 +43,22 @@ func withAliasTypes(toks []rtToken, types map[string][]string) map[string][]stri
 				continue
 			}
 			known := true
+			// Inside its own definition a name is the column of that name
+			// (SELECT amount AS amount), not what the statement makes of it.
+			own, had := cur[name]
+			if column, ok := types[name]; ok {
+				cur[name] = column
+			}
 			for _, e := range exprs {
 				if !exprNotText(e, cur) {
 					known = false
 					break
 				}
+			}
+			if had {
+				cur[name] = own
+			} else {
+				delete(cur, name)
 			}
 			if known {
 				notText[name] = true
@@ -57,12 +68,25 @@ func withAliasTypes(toks []rtToken, types map[string][]string) map[string][]stri
 		if !changed {
 			break
 		}
-		cur = mergeAliasTypes(types, defs, notText)
+		cur = mergeAliasTypes(types, defs, notText, untyped)
 	}
 	return cur
 }
 
-func mergeAliasTypes(types map[string][]string, defs map[string][][]rtToken, notText map[string]bool) map[string][]string {
+// mergeAliasTypes is types with the names the statement defines read as what
+// they stand for. A defined name known not to be text (notText) keeps the
+// types of the columns of that name and gains notTextType. Any other
+// defined name may stand for text: when no column has its name it is of
+// unknown type (absent), as it always was; when a column has, it keeps that
+// column's types and gains maybeTextType, so that it is never read as
+// "not text" for sharing a name with a column that is not, and never loses
+// the text of a column that is (SELECT name AS name ... ORDER BY name sorts
+// text, and so does min(name) AS name).
+//
+// untyped: the types are not the columns' own (screenUntyped), every name
+// is a whole number there, and a defined name is of unknown type as before:
+// that screen may not veto what the typed one lets through.
+func mergeAliasTypes(types map[string][]string, defs map[string][][]rtToken, notText map[string]bool, untyped bool) map[string][]string {
 	out := make(map[string][]string, len(types)+len(defs))
 	for k, v := range types {
 		if _, defined := defs[k]; !defined {
@@ -70,12 +94,21 @@ func mergeAliasTypes(types map[string][]string, defs map[string][][]rtToken, not
 		}
 	}
 	for name := range defs {
-		if notText[name] {
-			out[name] = append(append([]string(nil), types[name]...), notTextType)
+		column, isColumn := types[name]
+		switch {
+		case notText[name]:
+			out[name] = append(append([]string(nil), column...), notTextType)
+		case isColumn && !untyped:
+			out[name] = append(append([]string(nil), column...), maybeTextType)
 		}
 	}
 	return out
 }
+
+// maybeTextType is the type a defined name gains when it shares its name
+// with a column and is not known to stand for something that is not text.
+// typeIsText must take it for text: TestMaybeTextType pins it.
+const maybeTextType = "VARCHAR"
 
 // columnList reports whether the statement names columns in a list: a FROM
 // item's (AS b(n), ) b(n)) or a WITH's (c(n) AS (...)).

@@ -246,7 +246,7 @@ func (s *session) columnTypes(stmt string) (types map[string][]string, unread bo
 	if perr != nil {
 		return nil, true
 	}
-	return screenTypes(v.tables, tablesRead(stmt, v.tables)), false
+	return withColumnOrder(screenTypes(v.tables, tablesRead(stmt, v.tables)), v.tables), false
 }
 
 // untypedAsInteger is a column type for every name in toks: INTEGER, the type
@@ -1092,7 +1092,13 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 			return why
 		}
 	}
-	types = withAliasTypes(in, types)
+	if !untyped {
+		// A position behind a star, which names nothing (star_position.go).
+		if why := starByPosition(in, types); why != "" {
+			return why
+		}
+	}
+	types = withAliasTypes(in, types, untyped)
 	// A typed literal (DATE '...', '...'::date) is one value, never text:
 	// its string is folded into one token.
 	toks := make([]rtToken, 0, len(in))
@@ -1234,17 +1240,40 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 	}
 	// sortKeyText reports whether an ORDER BY key may sort text.
 	sortKeyText := func(key []rtToken) bool {
+		// ASC, DESC and NULLS FIRST or LAST are taken off the end of a key,
+		// and only there, after something: a column may be named first or
+		// last (ORDER BY last), and is then the key itself.
+		keyWord := func(j int, words ...string) bool {
+			if j < 0 || j >= len(key) || key[j].kind != rtWord {
+				return false
+			}
+			for _, w := range words {
+				if key[j].text == w {
+					return true
+				}
+			}
+			return false
+		}
+		if n := len(key); n >= 3 && keyWord(n-2, "nulls") && keyWord(n-1, "first", "last") {
+			key = key[:n-2]
+		}
+		if n := len(key); n >= 2 && keyWord(n-1, "asc", "desc") {
+			key = key[:n-1]
+		}
 		var core []rtToken
 		for j, t := range key {
-			if t.kind == rtWord && (t.text == "asc" || t.text == "desc" || t.text == "nulls" || t.text == "first" || t.text == "last") {
-				continue
-			}
 			// A qualified name (t.col) is its column, and a key of one
 			// column is judged as one: an alias of a WITH may be text.
 			if t.kind == rtWord && isOpTok(key, j+1, ".") || isOpTok(key, j, ".") && j > 0 && key[j-1].kind == rtWord {
 				continue
 			}
 			core = append(core, t)
+		}
+		if len(core) == 0 {
+			// A key the screen read nothing of (a column named like a word
+			// that ends the list of keys: rows, range, groups): not known
+			// not to be text.
+			return true
 		}
 		for _, t := range core {
 			if textish(t) || t.kind == rtParam || t.kind == rtOp && t.text == "||" || t.kind == rtWord && textMakers[t.text] {
