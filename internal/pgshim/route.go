@@ -998,6 +998,8 @@ var parenWords = map[string]bool{
 	"by": true, "with": true, "union": true, "intersect": true, "except": true,
 	"distinct": true, "between": true, "is": true, "having": true, "limit": true, "offset": true,
 	"case": true, "like": true, "partition": true,
+	// WITH x AS [NOT] MATERIALIZED (...).
+	"materialized": true,
 }
 
 // literalWords are the keywords that may stand before a string without
@@ -1102,6 +1104,11 @@ func screenUntyped(in []rtToken) string {
 func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 	if why := paddedUse(in, types); why != "" {
 		return why
+	}
+	if !untyped {
+		if why := starByPosition(in, types); why != "" {
+			return why
+		}
 	}
 	if why := aliasUse(in); why != "" {
 		return why

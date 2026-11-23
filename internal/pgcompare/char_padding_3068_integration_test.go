@@ -138,6 +138,20 @@ func charCases() []charCase {
 		stays(`SELECT b.k, count(*) FROM ` + p + ` b WHERE EXISTS (SELECT * FROM ` + x + ` a, ` + p + ` d WHERE a.id = b.id AND d.k = a.k) GROUP BY b.k ORDER BY b.k`),
 		stays(`SELECT id FROM ` + p + ` WHERE EXISTS (SELECT * FROM ` + x + `) ORDER BY id`),
 		differs(`SELECT b.id FROM ` + p + ` b WHERE EXISTS (SELECT * FROM ` + x + ` a WHERE a.c = b.c) ORDER BY b.id`),
+		// With a GROUP BY the rows' values are put together, and a bpchar
+		// without a length (u) is grouped otherwise on the copy: the
+		// source's, though these rows (each with its own id) agree.
+		sent(`SELECT b.id FROM ` + p + ` b WHERE EXISTS (SELECT * FROM ` + x + ` GROUP BY 1, 2, 3, 4, 5, 6 HAVING count(*) > 1) ORDER BY b.id`),
+		// ORDER BY a position behind a star: a whole number sorts the same,
+		// text by the source's collation.
+		stays(`SELECT * FROM ` + p + ` ORDER BY 1`),
+		stays(`SELECT * FROM ` + x + ` ORDER BY 1`),
+		stays(`SELECT * FROM ` + p + ` WHERE k > 1 ORDER BY 4, 1`),
+		differs(`SELECT * FROM ` + p + ` ORDER BY 2`),
+		differs(`SELECT * FROM ` + p + ` ORDER BY 3, 1`),
+		// WITH ... AS [NOT] MATERIALIZED.
+		stays(`WITH y AS MATERIALIZED (SELECT id, k FROM ` + p + `) SELECT id, k FROM y ORDER BY id`),
+		stays(`WITH y AS NOT MATERIALIZED (SELECT id, k FROM ` + p + `) SELECT id FROM y WHERE k > 2 ORDER BY id`),
 		// Any other subquery reads the star's values: the source's.
 		differs(`SELECT b.id FROM ` + p + ` b WHERE (b.id, b.c, b.t, b.k) IN (SELECT id, c, t, k FROM ` + x + `) ORDER BY b.id`),
 		// A plain select list: both sides write the padded value.

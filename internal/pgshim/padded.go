@@ -99,11 +99,19 @@ func screenTypes(tables []CatalogTable, read func(*CatalogTable) bool) map[strin
 		// The table is in the catalog, by name and by schema.name (paddedExempt).
 		out[listedKey+strings.ToLower(t.Name)] = []string{relType}
 		out[listedKey+strings.ToLower(t.Schema+"."+t.Name)] = []string{relType}
+		// Its columns in their order, for a position that a * stands
+		// behind (starByPosition). A name two schemas share has none.
+		colsOf := colsKey + strings.ToLower(t.Name)
+		_, twice := out[colsOf]
+		out[colsOf] = nil
 		for _, c := range t.Columns {
 			n := strings.ToLower(c.Name)
 			typ := strings.ToUpper(c.Type)
 			if m := sourceMark(c); m != "" && (read == nil || read(t)) {
 				typ = m
+			}
+			if !twice {
+				out[colsOf] = append(out[colsOf], typ)
 			}
 			out[n] = append(out[n], typ)
 			if !provenNotPadded(c) && (read == nil || read(t)) {
@@ -235,6 +243,9 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 
 	// The stars whose padded columns the statement never reads (padded_star.go).
 	exempt := paddedExempt(toks, types)
+	// And the stars of EXISTS (SELECT * ...), which reads no column
+	// (padded_lists.go).
+	exists := &existsStars{}
 
 	// One SELECT and nothing else, and where its select list's items are.
 	selects, sel := 0, -1
@@ -409,6 +420,11 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 				}
 				if a := at(j); a.kind == rtQuoted || a.kind == rtWord && !aliasStop[a.text] {
 					relAlias[strings.ToLower(a.text)] = j
+				} else if a.kind == rtWord && (j > i+1 || !fromFollower[a.text]) {
+					// A name PostgreSQL takes as the table's alias and this
+					// reads as a keyword (FROM codes last): its uses as the
+					// whole row could not be told from the keyword's.
+					return fmt.Sprintf("the table %q, which holds a char(n) column, given the name %q, which the port reads as a keyword", n, a.text) + otherRows
 				}
 			}
 			padded, sized := paddedKind(types, n)
@@ -434,7 +450,7 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 				// count(*) counts rows, whatever they hold.
 				continue
 			}
-			if exempt[i] || existsStar(toks, i) {
+			if exempt[i] || exists.star(toks, i) {
 				continue
 			}
 			if whole, _ := wholeItem(i); !whole {

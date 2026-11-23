@@ -1,6 +1,10 @@
 package pgshim
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+)
 
 // A table with a char(n) column as a later item of a FROM list written with
 // commas, and under the star of an EXISTS (#3219). What the copy answers the
@@ -83,6 +87,22 @@ func TestPaddedLists_toTheSource(t *testing.T) {
 		`SELECT p.id FROM plain p WHERE EXISTS (SELECT * FROM codes NATURAL JOIN plain)`,
 		`SELECT p.id FROM plain p WHERE EXISTS ((SELECT * FROM codes))`,
 		`SELECT p.id FROM plain p WHERE s.exists (SELECT * FROM codes)`,
+		// EXISTS whose subquery puts rows of equal values together: for the
+		// bpchar without a length (free) PostgreSQL finds 'ab' and 'ab '
+		// equal and the copy does not, so the groups differ and with them
+		// whether a row exists.
+		`SELECT p.id FROM plain p WHERE EXISTS (SELECT * FROM codes GROUP BY 1,2,3,4,5,6,7,8 HAVING count(*) > 1)`,
+		`SELECT p.id FROM plain p WHERE EXISTS (SELECT * FROM codes GROUP BY 1 OFFSET 1)`,
+		`SELECT EXISTS (SELECT * FROM codes GROUP BY 5 HAVING count(*) > 1)`,
+		`SELECT p.id FROM plain p WHERE EXISTS (SELECT * FROM codes c WHERE c.k IN (SELECT DISTINCT qty FROM plain))`,
+		`SELECT p.id FROM plain p WHERE EXISTS (SELECT * FROM codes c WHERE c.k = (SELECT count(*) OVER () FROM plain LIMIT 1))`,
+		`SELECT p.id FROM plain p WHERE NOT EXISTS (SELECT * FROM codes WINDOW w AS (ORDER BY id))`,
+		// A table's alias that the port reads as a keyword: its use as the
+		// whole row could not be told.
+		`SELECT p.id FROM plain p, codes last WHERE last = last`,
+		`SELECT p.id FROM plain p JOIN codes AS first ON first.id = p.id`,
+		`SELECT id FROM codes filter WHERE filter IS NULL`,
+		`SELECT id FROM codes AS where`,
 		// A bpchar without a length compared, as ever.
 		`SELECT p.id FROM plain p, codes c WHERE c.free = p.code`,
 	} {
@@ -181,6 +201,131 @@ group by o_ol_cnt order by o_ol_cnt`,
 	} {
 		if veto := CopyScreenFor(q, catalog); !isPaddedVeto(veto) {
 			t.Errorf("%s: %q, want it sent to the source for its padded column", name, veto)
+		}
+	}
+}
+
+// A table followed by a clause's keyword has no alias, and is read as before.
+func TestPaddedLists_noAliasBeforeAClause(t *testing.T) {
+	for _, q := range []string{
+		`SELECT id FROM codes WHERE id = 1`,
+		`SELECT id FROM codes ORDER BY id`,
+		`SELECT id FROM codes LIMIT 5`,
+		`SELECT id, count(*) FROM codes GROUP BY id HAVING count(*) > 1`,
+		`SELECT codes.id FROM codes LEFT JOIN plain p ON p.id = codes.id`,
+		`SELECT codes.id FROM codes JOIN plain p ON p.id = codes.id`,
+		`SELECT codes.id FROM codes CROSS JOIN plain p`,
+		`SELECT c.id FROM codes AS c WHERE c.k > 1`,
+		`SELECT c.id FROM codes c OFFSET 2`,
+	} {
+		if veto := paddedScreen(q); veto != "" {
+			t.Errorf("%s: sent to the source (%s), want the copy", q, veto)
+		}
+	}
+}
+
+// ORDER BY a position, in a SELECT whose list has a *: the column at that
+// position is sorted, and text is sorted by the source's collation.
+func TestStarByPosition(t *testing.T) {
+	// plain is (id, code text, name, status, qty); codes (id, code char(5),
+	// label, tags, free, one, kind, k).
+	for q, want := range map[string]string{
+		`SELECT * FROM plain ORDER BY 2`:                                       starTextPositionVeto,
+		`SELECT * FROM plain ORDER BY 1, 3 DESC NULLS LAST`:                    starTextPositionVeto,
+		`SELECT * FROM plain p WHERE qty > 1 ORDER BY 4 LIMIT 3`:               starTextPositionVeto,
+		`SELECT * FROM public.plain AS p ORDER BY 2`:                           starTextPositionVeto,
+		`SELECT * FROM codes ORDER BY 2`:                                       starTextPositionVeto,
+		`SELECT * FROM codes ORDER BY 3`:                                       starTextPositionVeto,
+		`SELECT * FROM plain ORDER BY 9`:                                       starUnknownPositionVeto,
+		`SELECT * FROM plain ORDER BY 0`:                                       starUnknownPositionVeto,
+		`SELECT * FROM plain, codes WHERE codes.id = plain.id ORDER BY 3`:      starUnknownPositionVeto,
+		`SELECT * FROM plain p JOIN codes c ON c.id = p.id ORDER BY 1`:         starUnknownPositionVeto,
+		`SELECT p.* FROM plain p ORDER BY 2`:                                   starUnknownPositionVeto,
+		`SELECT *, qty FROM plain ORDER BY 2`:                                  starUnknownPositionVeto,
+		`SELECT * FROM (SELECT * FROM plain) s ORDER BY 2`:                     starUnknownPositionVeto,
+		`SELECT * FROM (SELECT id, name FROM plain) s ORDER BY 2`:              starUnknownPositionVeto,
+		`SELECT * FROM (SELECT id, 'x' AS tag FROM plain) s ORDER BY 2`:        starUnknownPositionVeto,
+		`WITH x AS (SELECT id, qty FROM plain) SELECT * FROM x ORDER BY 2`:     starUnknownPositionVeto,
+		`SELECT * FROM nowhere ORDER BY 1`:                                     starUnknownPositionVeto,
+		`SELECT id FROM plain WHERE id IN (SELECT * FROM plain ORDER BY 2)`:    starTextPositionVeto,
+		`SELECT * FROM plain UNION ALL SELECT * FROM plain ORDER BY 2`:         starUnknownPositionVeto,
+	} {
+		if got := CopyScreenFor(q, paddedCatalog()); got != want {
+			t.Errorf("%s:\n  got %q\n  want %q", q, got, want)
+		}
+	}
+	for _, q := range []string{
+		// A whole number at that position: sorted the same on both sides.
+		`SELECT * FROM plain ORDER BY 1`,
+		`SELECT * FROM plain ORDER BY 5 DESC, 1`,
+		`SELECT * FROM plain p WHERE qty > 1 ORDER BY 1 LIMIT 3`,
+		`SELECT * FROM public.plain ORDER BY 1`,
+		`SELECT * FROM codes ORDER BY 1`,
+		`SELECT * FROM codes ORDER BY 8, 1`,
+		// Rows with no text in them.
+		`SELECT * FROM (SELECT id, k FROM codes) s ORDER BY 1`,
+		`SELECT s.* FROM (SELECT id, qty FROM plain) s ORDER BY 2`,
+		// No position, or no star: the other rules'.
+		`SELECT * FROM plain ORDER BY id`,
+		`SELECT * FROM plain`,
+		`SELECT id, qty FROM plain ORDER BY 2`,
+		`SELECT id, count(*) FROM plain GROUP BY 1 ORDER BY 2`,
+		`SELECT id, row_number() OVER (ORDER BY 1) FROM (SELECT * FROM plain) s`,
+		`SELECT count(*) FROM plain ORDER BY 1`,
+		`SELECT id * 2 FROM plain ORDER BY 1`,
+	} {
+		if veto := CopyScreenFor(q, paddedCatalog()); veto != "" {
+			t.Errorf("%s: sent to the source (%s), want the copy", q, veto)
+		}
+		// The screen that runs before the types are known does not have the
+		// columns' order, and says nothing here.
+		if toks, lexWhy := lexSQL(RewriteForCopy(q)); lexWhy == "" {
+			if why := screenUntyped(toks); why != "" {
+				t.Errorf("%s: vetoed without its types (%s)", q, why)
+			}
+		}
+	}
+}
+
+// WITH x AS [NOT] MATERIALIZED (...) is a WITH like any other.
+func TestCopyScreen_materialized(t *testing.T) {
+	for _, q := range []string{
+		`WITH y AS MATERIALIZED (SELECT id, qty FROM plain) SELECT id FROM y WHERE qty > 1`,
+		`WITH y AS NOT MATERIALIZED (SELECT id, qty FROM plain) SELECT id, qty FROM y`,
+	} {
+		if veto := CopyScreenFor(q, paddedCatalog()); veto != "" {
+			t.Errorf("%s: sent to the source (%s), want the copy", q, veto)
+		}
+	}
+	if veto := CopyScreenFor(`SELECT materialized(id) FROM plain`, paddedCatalog()); veto == "" {
+		t.Error("a function named materialized: left to the copy")
+	}
+}
+
+// A megabyte of names after commas, and of EXISTS nested in EXISTS: the
+// screen's rules for char(n) answer at once.
+func TestPaddedLists_bounded(t *testing.T) {
+	types := screenTypes(paddedCatalog(), nil)
+	for name, q := range map[string]string{
+		"names after commas": "SELECT 1 FROM plain" + strings.Repeat(", codes", (1<<20)/7),
+		"nested EXISTS":      "SELECT 1 FROM plain WHERE " + strings.Repeat("EXISTS (SELECT * FROM codes WHERE ", (1<<20)/34) + "true",
+		"stars and ORDER BY": "SELECT * FROM plain " + strings.Repeat("ORDER BY 1 ", (1<<20)/11),
+		"open parentheses":   "SELECT * FROM plain ORDER BY " + strings.Repeat("( ", 1<<19),
+	} {
+		toks, why := lexSQL(q)
+		if why != "" {
+			t.Fatalf("%s: not read: %s", name, why)
+		}
+		done := make(chan struct{})
+		start := time.Now()
+		go func() { paddedUse(toks, types); starByPosition(toks, types); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("a megabyte of %s: no answer in 10 s", name)
+		}
+		if took := time.Since(start); took > 3*time.Second {
+			t.Errorf("a megabyte of %s took %v", name, took)
 		}
 	}
 }
