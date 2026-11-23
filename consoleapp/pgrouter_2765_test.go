@@ -597,23 +597,26 @@ func TestPGRouter_loginNamesAnotherServer(t *testing.T) {
 	if r := pgLoginOtherServer(srv, "app1", staging.ID, prod.ID); r == nil || strings.Contains(r.Message, "staging") || !strings.Contains(r.Message, staging.ID) {
 		t.Errorf("another server named by its id: %+v", r)
 	}
-	// Two servers of the same name (a servers file edited by hand): each
-	// login's own name is its own server first, never the other's.
-	twin, err := f.owner.Add(console.ServerEntry{Name: "twin", Flavor: console.FlavorPostgres, DSN: "u:p@tcp(127.0.0.1:1)/idx_twin"})
+	// A name that selects two servers: a server named like another's id.
+	// The lookup finds the id first, so without its own server being
+	// accepted first this login would be refused under its own name, and
+	// told to connect with the very name it gave.
+	twin, err := f.owner.Add(console.ServerEntry{Name: prod.ID, Flavor: console.FlavorPostgres, DSN: "u:p@tcp(127.0.0.1:1)/idx_twin"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv.RefreshFollowedFiles()
-	for _, db := range []string{"twin", twin.ID} {
+	if id, ok := srv.PGPortDatabaseServer(prod.ID); !ok || id != prod.ID {
+		t.Fatalf("the name %q selects %q, want the server of that id", prod.ID, id)
+	}
+	for _, db := range []string{prod.ID, twin.ID} {
 		if r := pgLoginOtherServer(srv, "app9", db, twin.ID); r != nil {
 			t.Errorf("the login's own server named %q: refused: %s", db, r.Message)
 		}
 	}
-	// Its own name is accepted before the lookup is asked at all: a login
-	// whose server shares the name "prod" with the first one is not sent
-	// round to it.
-	if r := pgLoginOtherServer(srv, "app9", srv.PGPortServerName(prod.ID), prod.ID); r != nil {
-		t.Errorf("the own server by the name the port shows for it: refused: %s", r.Message)
+	// And the other server's login is still its own under that name.
+	if r := pgLoginOtherServer(srv, "app1", prod.ID, prod.ID); r != nil {
+		t.Errorf("prod's login naming prod's id: refused: %s", r.Message)
 	}
 	// No application login, the own server, and no server: nothing refused.
 	for _, db := range []string{"prod", prod.ID, "shop", ""} {
