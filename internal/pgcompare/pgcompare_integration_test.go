@@ -31,6 +31,8 @@ const (
 	itRound     = "pgcmp_round"
 	itWords     = "pgcmp_words"
 	itEpoch     = "pgcmp_epoch"
+	itExact     = "pgcmp_exact"
+	itPeople    = "pgcmp_people"
 	itPub       = "pgcmp_pub"
 	itSlot      = "pgcmp_slot"
 )
@@ -73,7 +75,7 @@ func TestIntegrationPGCompare(t *testing.T) {
 	dropAll := func() {
 		bg := context.Background()
 		_, _ = setup.Exec(bg, "DROP PUBLICATION IF EXISTS "+itPub)
-		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS "+itOrders+", "+itCustomers+", "+itOdd+", "+itArrays+", "+itTimes+", "+itRound+", "+itWords+", "+itEpoch+", pivot")
+		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS "+itOrders+", "+itCustomers+", "+itOdd+", "+itArrays+", "+itTimes+", "+itRound+", "+itWords+", "+itEpoch+", "+itExact+", "+itPeople+", pivot")
 		_, _ = setup.Exec(bg, "SELECT pg_drop_replication_slot($1) WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)", itSlot)
 	}
 	dropAll()
@@ -118,8 +120,10 @@ func TestIntegrationPGCompare(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open the copy: %v", err)
 	}
-	// Measured as the PostgreSQL port runs it.
-	cp.Rewrite = pgshim.RewriteForCopy
+	// Measured as the PostgreSQL port runs it: what the columns' types
+	// decide is written too (#3219).
+	types := copyColumnTypes(t, ctx, cp)
+	cp.Rewrite = func(s string) string { return pgshim.RewriteForCopyTyped(s, types) }
 	src, err := OpenSource(ctx, baseDSN, "public")
 	if err != nil {
 		t.Fatalf("open the source: %v", err)
@@ -127,6 +131,8 @@ func TestIntegrationPGCompare(t *testing.T) {
 	t.Cleanup(func() { src.Close(context.Background()) })
 
 	want := append(append(expectations(), numericForward()...), zoneAndBetween()...)
+	want = append(want, screenExactness()...)
+	want = append(want, textOrderHoles()...)
 	want = append(want, reportShapes()...)
 	stmts := make([]string, len(want))
 	for i, e := range want {
@@ -166,6 +172,10 @@ func TestIntegrationPGCompare(t *testing.T) {
 		t.Fatalf("open the copy: %v", err)
 	}
 	checkNumericAlone(t, ctx, src, alone)
+
+	// A division and an avg() on their own (#3219): PostgreSQL's quotient
+	// with other decimals, compared as numbers.
+	checkCloseNumbers(t, ctx, src, cp, types)
 
 	// The read-only transaction is the lock behind IsQuery and ReadOnlyVeto.
 	// Straight to the source, past both: a statement that turns the session
@@ -270,7 +280,24 @@ func seedSQL() []string {
 			(11, interval '10999999988 seconds' + interval '999999 microseconds'),
 			(12, interval '-10999999989 seconds' - interval '5 microseconds'),
 			(13, interval '-10999999989 seconds' - interval '1 microsecond')) v(id, d)`,
-		`CREATE PUBLICATION ` + itPub + ` FOR TABLE ` + itCustomers + `, ` + itOrders + `, ` + itOdd + `, ` + itArrays + `, ` + itTimes + `, ` + itRound + `, ` + itWords + `, ` + itEpoch + `, pivot`,
+		// #3069 to #3072: a real beside a double precision, numerics of two
+		// scales, text to cut, and a date, a timestamp and a time. The
+		// column names are this table's alone: the screen reads a column's
+		// type by its name.
+		`CREATE TABLE ` + itExact + ` (id int PRIMARY KEY, rl real, dbl double precision, amt numeric(10,2), amt4 numeric(10,4),
+			whole int, word text, day date, stamp timestamp, clock time)`,
+		`INSERT INTO ` + itExact + ` VALUES
+			(1, -0.1, -0.1, 10.50, 10.5000, 1,    'apple', '2026-01-05', '2026-01-05 10:30:00.123457', '10:30:00'),
+			(2, 1.5,  1.5,  2.00,  3.2500,  5,    'kiwi',  '2026-02-10', '2026-01-05 10:30:00.123456', '23:59:59'),
+			(3, 3,    3,    4.25,  0.0001,  -2,   '',      '2026-01-06', '2026-01-06 00:00:00',        '00:00:00'),
+			(4, NULL, NULL, NULL,  NULL,    NULL, NULL,    NULL,         NULL,                         NULL),
+			(5, 0.1,  0.1,  0.00,  0.0000,  0,    'fig',   '2026-12-31', '2026-12-31 23:59:59.5',      '12:00:00')`,
+		// Text columns named like words of ORDER BY (first, last), with
+		// names in mixed case: the source's collation sorts Ana, bruno,
+		// Carla, Dario; bytes sort the capitals first.
+		`CREATE TABLE ` + itPeople + ` (id int PRIMARY KEY, first text, last text, age int)`,
+		`INSERT INTO ` + itPeople + ` VALUES (1, 'Ana', 'dario', 40), (2, 'bruno', 'Carla', 30), (3, 'Carla', 'bruno', 20), (4, 'Dario', 'Ana', 10)`,
+		`CREATE PUBLICATION ` + itPub + ` FOR TABLE ` + itCustomers + `, ` + itOrders + `, ` + itOdd + `, ` + itArrays + `, ` + itTimes + `, ` + itRound + `, ` + itWords + `, ` + itEpoch + `, ` + itExact + `, ` + itPeople + `, pivot`,
 	}
 }
 
@@ -373,7 +400,9 @@ func expectations() []expectation {
 		eq(`(SELECT id FROM ` + o + ` ORDER BY id)`),
 		// Numbers.
 		eq(`SELECT sum(qty), min(qty), max(qty) FROM ` + o),
-		refused("avg()", "by design: avg() of a numeric has PostgreSQL's own decimals", `SELECT sum(amount), avg(amount) FROM `+o),
+		// avg of a numeric on its own: PostgreSQL's quotient to 16 decimals
+		// since #3219, which is PostgreSQL's own text from 1 to 9999.
+		eq(`SELECT sum(amount), avg(amount) FROM ` + o),
 		eq(`SELECT max(amount) FROM ` + o),
 		eq(`SELECT id FROM ` + o + ` WHERE qty > 9`),
 		eq(`SELECT id FROM ` + o + ` WHERE amount BETWEEN 5 AND 50`),
@@ -382,8 +411,13 @@ func expectations() []expectation {
 		// Two integers divide to an integer, cut toward zero (#2786); with
 		// a float on a side the fraction stays.
 		eq(`SELECT id, qty / 2 AS half FROM ` + o),
-		eq(`SELECT id, (0 - qty) / 2 AS half FROM ` + o),
-		eq(`SELECT customer_id, sum(qty) / count(*) FROM ` + o + ` GROUP BY customer_id`),
+		// Two whole numbers that are not a column over a number written in
+		// the text: since #3219 such a division is the copy's macro, which
+		// answers a numeric and refuses two whole numbers (PostgreSQL divides
+		// them as whole numbers). The port's screen shows both to be whole
+		// and sends them to the source before the copy is asked.
+		refused("both sides of the division are whole numbers", "by design: PostgreSQL divides them as whole numbers", `SELECT id, (0 - qty) / 2 AS half FROM `+o),
+		refused("both sides of the division are whole numbers", "by design: PostgreSQL divides them as whole numbers", `SELECT customer_id, sum(qty) / count(*) FROM `+o+` GROUP BY customer_id`),
 		eq(`SELECT id, ratio / 2 FROM ` + o),
 		// The source fails a division by zero. The copy would answer NULL
 		// (sqlsandbox pins that); here the statement stops at the source.
@@ -476,7 +510,7 @@ func expectations() []expectation {
 		eq(`SELECT upper('é'), lower('É')`),
 		eq(`SELECT lower(name) FROM ` + c),
 		{stmt: `SELECT id, amount / qty FROM ` + o + ` WHERE id = 6`, verdict: sqlcompare.SourceError},
-		refused("avg()", "by design: avg() of whole numbers is a numeric with PostgreSQL's own decimals", `SELECT avg(qty) FROM `+o),
+		eq(`SELECT avg(qty) FROM ` + o),
 		still("rows", "", route, `SELECT id FROM `+o+` WHERE status ~ '^p'`),
 		still("rows", "", route, `SELECT id FROM `+o+` WHERE status SIMILAR TO 'p%'`),
 		refused("syntax error", route, `SELECT id FROM `+o+` WHERE attrs ? 'n'`),
@@ -598,8 +632,6 @@ func expectations() []expectation {
 		eq(`SELECT id, lag(qty) OVER (ORDER BY id) FROM ` + o),
 		eq(`SELECT id, ratio * 2.5 FROM ` + o),
 		eq(`SELECT id, amount * 1.5 FROM ` + o),
-		still("precision", "", route, `SELECT id, amount / 2 FROM `+o),
-		still("precision", "", route, `SELECT id, qty / 2.0 FROM `+o),
 		eq(`SELECT sum(ratio) FROM ` + o),
 		still("precision", "", route, `SELECT sum(qty)::numeric / 3 FROM `+o),
 		still("precision", "", route, `SELECT stddev(qty) FROM `+o),
@@ -615,7 +647,6 @@ func expectations() []expectation {
 		eq(`SELECT id, position('i' in note) FROM ` + o),
 		still("rows", "", route, `SELECT generate_series(1, 3)`),
 		eq(`SELECT id, payload FROM ` + o + ` ORDER BY payload NULLS LAST, id`),
-		still("precision", "", route, `SELECT id, fixed / 3 FROM `+odd),
 		// Not compared.
 		{stmt: `SELECT * FROM pgcmp_missing`, verdict: sqlcompare.SourceError},
 		{stmt: `DELETE FROM ` + o, verdict: sqlcompare.Skipped, kind: "not_a_query"},

@@ -196,7 +196,10 @@ page:
 
 Give the keys to the router alone with `ROUTER_AWS_ACCESS_KEY_ID` and
 `ROUTER_AWS_SECRET_ACCESS_KEY` in `.env` (see [Read-only keys for the
-router](docker.md#read-only-keys-for-the-router)).
+router](docker.md#read-only-keys-for-the-router)). The PostgreSQL router
+(`pg-router`) makes the same calls for time travel on the PostgreSQL port, and
+takes the same policy with `PG_ROUTER_AWS_ACCESS_KEY_ID` and
+`PG_ROUTER_AWS_SECRET_ACCESS_KEY`.
 
 | What the router calls | Permission |
 |---|---|

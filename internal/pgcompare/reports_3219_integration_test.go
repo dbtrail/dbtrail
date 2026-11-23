@@ -29,6 +29,21 @@ func reportShapes() []expectation {
 		{stmt: `SELECT date_trunc('month', signup) FROM ` + c, verdict: sqlcompare.Different, kind: "rows", why: "#2770: date_trunc of a date"},
 		{stmt: `SELECT id, date_trunc('hour', seen_at) FROM ` + o + ` ORDER BY id`, verdict: sqlcompare.Equal},
 
+		// Before 1970 and before 1900: the start of the day, month and year
+		// of a timestamp with time zone, in UTC, on both sides.
+		stay(`SELECT id, date_trunc('day', atz) FROM ` + itEpoch + ` ORDER BY id`),
+		stay(`SELECT id, date_trunc('month', atz) FROM ` + itEpoch + ` ORDER BY id`),
+		stay(`SELECT id, date_trunc('year', atz) FROM ` + itEpoch + ` ORDER BY id`),
+
+		// A name of the select list inside an expression of ORDER BY:
+		// PostgreSQL reads a column there, so with no such column it fails,
+		// and with one it sorts by the column, not by the value so named.
+		{stmt: `SELECT status, qty AS q FROM ` + o + ` ORDER BY abs(q)`, verdict: sqlcompare.SourceError, why: "an alias inside an ORDER BY expression"},
+		{stmt: `SELECT status, amount AS qty FROM ` + o + ` ORDER BY abs(qty), id`, verdict: sqlcompare.Different, kind: "order", why: "the column qty, not the alias"},
+		// The whole key is the alias on both sides.
+		stay(`SELECT id, qty AS q FROM ` + o + ` ORDER BY q, id`),
+		stay(`SELECT customer_id, count(*) AS count FROM ` + o + ` GROUP BY customer_id ORDER BY count(*) DESC, customer_id`),
+
 		// A sort key that is a sum or a count is never text, whatever text
 		// the statement reads elsewhere.
 		stay(`SELECT c.name, sum(o.qty) AS units FROM ` + o + ` o JOIN ` + c + ` c ON c.id = o.customer_id GROUP BY c.name ORDER BY sum(o.qty) DESC`),

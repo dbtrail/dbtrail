@@ -86,6 +86,10 @@ type SQLExportRequest struct {
 	IndexDSN    string
 	BaselineSrc string // local directory or s3:// prefix
 	At          time.Time
+	// Flavor is the server's source flavor (ServerEntry.SourceFlavor). It
+	// selects what the build writes: FlavorPostgres gets the SQL files psql
+	// loads, every other value a mydumper-format dump (#3157).
+	Flavor string
 }
 
 // handleSQLExportTrigger enqueues a build for the selected server:
@@ -139,6 +143,7 @@ func (s *Server) handleSQLExportTrigger(w http.ResponseWriter, r *http.Request) 
 	}
 	req := SQLExportRequest{
 		ServerID: e.ID, ServerName: e.Name, IndexDSN: e.DSN, BaselineSrc: src, At: at,
+		Flavor: e.SourceFlavor(),
 	}
 	if err := s.sqlExport.TriggerSQLExport(req); err != nil {
 		if errors.Is(err, ErrBaselineRunning) {

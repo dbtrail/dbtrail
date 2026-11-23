@@ -67,8 +67,11 @@ func numericCases() []numericCase {
 		// Sums.
 		both(`SELECT sum(amount), round(sum(amount), 2), round(sum(amount), 3), round(sum(qty), 2), round(sum(id), 1) FROM `+o, eq),
 		// avg of a numeric or a whole number: PostgreSQL's 16 to 20 decimals.
-		both(`SELECT avg(amount) FROM `+o, refused("avg()")),
-		both(`SELECT customer_id, avg(qty) FROM `+o+` GROUP BY customer_id ORDER BY customer_id`, refused("avg()")),
+		// A connection that can reach its source answers the quotient to 16
+		// decimals (#3219), PostgreSQL's own text for these; alone it is
+		// refused as before.
+		{`SELECT avg(amount) FROM ` + o, eq, refused("avg()")},
+		{`SELECT customer_id, avg(qty) FROM ` + o + ` GROUP BY customer_id ORDER BY customer_id`, eq, refused("avg()")},
 		// NULL.
 		both(`SELECT round(avg(amount), 2), round(amount, 2), round(amount), round(amount, -1) FROM `+o+` WHERE id = 7 GROUP BY amount`, eq),
 		// Inside a CASE or a COALESCE: each value keeps its decimals on

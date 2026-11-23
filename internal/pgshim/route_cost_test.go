@@ -189,6 +189,11 @@ type fakeSource struct {
 	hangDiscard bool
 	// realDSN, when set, is a real PostgreSQL the port forwards to.
 	realDSN string
+	// emptyRows, when set, answers a statement that names "manyempty" with
+	// that many rows of one NULL cell, then waits for emptyGate to close
+	// before it ends the answer.
+	emptyRows int
+	emptyGate chan struct{}
 	// conns are the connections it serves now (dropConns).
 	conns map[net.Conn]bool
 }
@@ -448,6 +453,21 @@ func (f *fakeSource) serve(c net.Conn) {
 					be.Send(rowShape)
 					row()
 					be.Send(&pgproto3.ErrorResponse{Severity: "ERROR", Code: "22012", Message: "division by zero"})
+					break
+				}
+				if strings.Contains(q, "manyempty") && f.emptyRows > 0 {
+					be.Send(rowShape)
+					for range f.emptyRows {
+						be.Send(&pgproto3.DataRow{Values: [][]byte{nil}})
+					}
+					if be.Flush() != nil {
+						return
+					}
+					select {
+					case <-f.emptyGate:
+					case <-time.After(30 * time.Second):
+					}
+					be.Send(&pgproto3.CommandComplete{CommandTag: []byte(fmt.Sprintf("SELECT %d", f.emptyRows))})
 					break
 				}
 				if strings.Contains(q, "nosuch") {

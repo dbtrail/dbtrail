@@ -75,6 +75,16 @@ setup](#postgresql-side-setup) below first, then:
    failure, and the server is not added until it is fixed). Capture resumes
    automatically on restart.
 
+The form also holds one box, unticked: **Let the PostgreSQL port send to this
+PostgreSQL, read-only and as the source user above, a SELECT the copy does not
+answer**. It is the question `server add` asks on a terminal
+([forwarding with the capture account](#forwarding-with-the-capture-account)),
+and nothing is sent to your PostgreSQL until somebody ticks it. Tick it when
+adding the server, or later (**Servers**, **Edit**); unticking takes it back.
+No second role is needed for it. A forwarding user of its own, for a port that
+should send more than that, is behind **Advanced: use a separate forwarding
+user** in the same form.
+
 From a terminal, the same thing is one command (the publication is the one
 you created above; the slot is created for you and named `bintrail_<database>`
 unless you give `--slot`):
@@ -920,6 +930,40 @@ takes one full read of the source to bring it into the copy, as it does for a
 new table on a MySQL source: where the schedule may take full reads, and no
 more than a few times for the same table.
 
+In that same read of the source, each update also asks the catalog what
+columns every table of the publication has now, and compares them with the
+columns the table's file in the previous snapshot records: names, types, and
+each column's position number, which tells a column that was dropped and added
+again under the same name from the one the snapshot holds values for.
+PostgreSQL's change stream describes a table only when it next carries a
+change of it, so a column dropped, added, renamed or retyped on a table that
+nothing has written to since is recorded nowhere else. A table that differs
+stops the update the way a column change the stream did record stops it: no
+snapshot is published by that update, the run names each such table with what
+changed (`dropped amount`, `added region`, `retyped total`), and the schedule
+takes a full read of the source in its place where it may take full reads.
+Where it may not, updates stay refused, with the tables named, until a full
+read is taken. An index, a default, `NOT NULL`, a comment or a grant changes
+no column and stops nothing. Only the catalog is read: nothing is created or
+written on the source.
+
+Two limits. The catalog is read once, at the start of the update: a column
+changed after that read and before the snapshot is published is in that
+snapshot with its old columns, and the next update sees it. And when the
+source cannot be reached for that read, the update still publishes from the
+changes it captured, as it does for new tables, and the run says that neither
+new tables nor changed columns were looked for. An update that has no captured
+change to apply is skipped before it reads anything, so on a source with no
+writes at all a changed column is seen at the first update after the next
+write to any table. `bintrail baseline refresh` on the command line does not
+read the source and makes no such comparison.
+
+A full read copies tables in parallel, each on a connection of its own to the
+source. One started by DBTrail itself (the Create button, a schedule,
+`snapshot run`) copies four tables at once, as a MySQL full read does, so at
+most four connections to the source copy tables at a time. `bintrail-pg baseline` takes its number from `--parallelism`, one per
+CPU of the machine it runs on unless set.
+
 A full read starts from the replication slot's position, so it needs the slot
 to have one. On a busy source capture can take a while to get its slot:
 PostgreSQL finishes creating a slot only when every write transaction that was
@@ -960,7 +1004,9 @@ What to know:
   the loaded rows. Not made: other indexes and constraints, collations,
   comments, grants, and any type or sequence a default refers to that the table
   does not own; a snapshot taken before these facts were recorded is refused
-  (take a new one). `--output-format mydumper` is refused.
+  (take a new one). `--output-format mydumper` is refused. The web
+  interface's **Build a .sql backup for any moment** on a PostgreSQL server
+  builds these same files, and its download is one `.tar.gz` of them.
 - **A change to the table's columns or primary key refuses**, a type-only
   change included: the fold compares the shape the snapshot recorded with every
   shape the stream saw up to the point, and the key the changes were captured
@@ -1106,8 +1152,18 @@ listener, its own workers, its own memory.
 
 - **The database name picks the server**: its id or its name, as the web
   interface shows them. The username is free, except that a server's
-  application login, used as the username, opens that server whatever database
-  is named.
+  application login, used as the username, opens that server and no other. With
+  an application login the database name does not pick the server, but it is
+  checked: a name that is **another server** (its id or its name) is refused
+  with `28000` and an error that names the login's own server, for example
+  `user "app" is the application login of server "prod" and opens that server
+  only, and database "staging" is another server; connect with
+  dbname=prod, or use the other server's login`. Before, such a connection was
+  made to the login's own server and nothing said so. The login's own server
+  (by id or name) connects, and so does a name that is no server at all (the
+  database of your application behind a proxy, `postgres`, no database): it
+  opens the login's own server, as before. Names are matched as written, so
+  `STAGING` is not the server `staging`.
 - **The password** is the one created for SQL clients in the web interface
   (`dbtrail port on`), the access token, or the application login's own. The
   port is open while the port for SQL clients is turned on in the web
@@ -1119,8 +1175,9 @@ listener, its own workers, its own memory.
 - **Who answers depends on what the server forwards with.** `server add` asks
   once whether the port may forward as the user DBTrail connects with;
   `--forward-user`, or `[dbtrail-forward]` in the option file, names a
-  forwarding user of its own instead, and the web interface's form has that
-  user's two fields. With the capture account, a `SELECT` whose every table
+  forwarding user of its own instead. The web interface's form has a box for
+  the first, unticked until somebody ticks it, and the user's two fields
+  behind **Advanced: use a separate forwarding user**. With the capture account, a `SELECT` whose every table
   is a table of the copy, and that the copy is not known to answer as
   PostgreSQL does, runs on your PostgreSQL, read-only
   ([forwarding with the capture account](#forwarding-with-the-capture-account)).
@@ -1135,8 +1192,8 @@ listener, its own workers, its own memory.
   [compared, measured or concatenated](#which-side-answers-a-statement-on-the-postgresql-port),
   refused with `0A000`), until one is set
   (`bintrail-console server forward-user <server> --capture-account`, or
-  `-u <user> -p` for a user of its own, or the server's Forwarding user in the
-  web interface).
+  `-u <user> -p` for a user of its own, or the box and the Forwarding user on
+  the server's form in the web interface).
 - **Fresh or fast, per server, as on the MySQL port.** In fresh mode, the
   default, each table's newest changes captured from PostgreSQL are laid over
   its snapshot, so a row written a moment ago shows without waiting for the
@@ -1194,6 +1251,19 @@ listener, its own workers, its own memory.
   - **Waiting for the source** (`BINTRAIL_SQL_FRESH_WAIT`) does not apply to
     PostgreSQL yet: a statement does not wait for the newest changes to
     arrive before it reads.
+- **During an update of the recent changes, a statement does not wait, and
+  may answer from the version before that update, with no notice.** That is
+  usually seconds behind, and a minute or more in a long update. On
+  PostgreSQL there is no switch to make it wait. What does protect is partial:
+  a connection the source already answered about a table waits for the copy
+  to reach that answer, or goes to the source, so it does not read back in
+  time; that does not cover an application that writes on one connection and
+  reads on another. A table with no version yet (the first statement on it,
+  the first after a new snapshot) does wait for the running update, for at
+  most half of the statement's time limit (30 of 60 seconds by default); past
+  that it goes on as described above. While the index holds no captured
+  change at all, the first change can be missing from statements that run
+  during the update that brings it.
 - **If capture falls behind, the copy falls behind with it, as a replica
   does.** The port keeps answering from the copy and does not tell the
   client. A server's lag limit, `max_behind_source_seconds`, is off by
@@ -1216,7 +1286,13 @@ listener, its own workers, its own memory.
   written PostgreSQL's way on every connection (see
   [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port)):
   `round(avg(amount), 2)` of a `numeric` is `500.00`, as on the source, not
-  `500`. Without a forwarding user, a `round()` or an `avg()` the copy would
+  `500`. A division or an `avg()` of a `numeric` written without a `round()`
+  is the one place where the copy's text is not always the source's: the
+  copy answers the same quotient, a `numeric`, with 16 decimals, where
+  PostgreSQL writes 12 for a quotient of 10000 and more and 20 for one
+  below 1 (see
+  [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port)).
+  Without a forwarding user, a `round()` or an `avg()` the copy would
   write otherwise (`avg()` of a `numeric`, `round()` of a `double precision`,
   a `round()` beside a `UNION`) is refused with error `0A000`, never answered
   with other digits. A statement that is not a
@@ -1256,8 +1332,10 @@ listener, its own workers, its own memory.
   An expression's type is the one the copy computes it with, which is not
   always PostgreSQL's: a `round()` the copy answers is PostgreSQL's
   `numeric`, with exactly the decimals PostgreSQL writes, on every
-  connection (`avg()` of a `numeric` or of whole numbers, which PostgreSQL
-  writes with 16 to 20 decimals, is refused on the copy), and an aggregate or a literal of a `numeric` keeps its
+  connection (`avg()` of a `numeric` or of whole numbers and a division of a
+  `numeric`, which PostgreSQL writes with 12 to 20 decimals, are a `numeric`
+  of 16 decimals on the copy; without a forwarding user such an `avg()` is
+  refused), and an aggregate or a literal of a `numeric` keeps its
   precision and scale here (`numeric(10,2)`) where PostgreSQL reports none. A
   `numeric` declared without precision is a `numeric(38,18)` here and is
   written with its 18 decimals (`12345.678000000000000000` where the source
@@ -1306,6 +1384,25 @@ listener, its own workers, its own memory.
   TLS the port also offers SCRAM-SHA-256-PLUS, which binds the login to the
   certificate the client saw, so a client with `channel_binding=require`
   refuses anything that relays between it and the port.
+- **Before the login.** A connection holds one of the port's places
+  (`--max-connections`) from the moment it is accepted. It has **30 seconds**
+  to finish logging in, and then it is closed. Until it has logged in, one
+  message from it may be at most **64 KB** (a larger one ends the
+  connection); after the login a statement may be up to 16 MB. When every
+  place is taken and a new connection arrives, the port looks for a
+  connection that has held its place for **more than 1 second without
+  sending its proof of the password**: the one that has waited longest loses
+  its place to the newcomer (one that sent nothing at all before one that
+  started its login), and is closed without a word. A client that was only
+  slow connects again. A connection whose proof reached the port keeps its
+  place while the proof is checked and its server is opened, and a
+  connection that has logged in is never closed to make room: when every
+  place is a client's, the newcomer gets `53300` (the limit is reached), as
+  before. The port still belongs behind a firewall or a proxy that limits
+  who may connect. Closing the connection that waited longest protects the
+  port from connections that sit idle; it does not protect it from a client
+  that connects again as fast as it is closed, and it is not a limit per
+  address.
 - **TLS with the MySQL port's certificate.** Give the same files the MySQL port
   takes (`router --tls-cert`) with `--tls-cert` and `--tls-key`, and a client
   that trusts their CA connects with `sslmode=verify-ca`, or
@@ -1453,7 +1550,8 @@ To set or change it on a server that is already added:
 bintrail-console server forward-user <server> -u app_ro -p
 ```
 
-or in the web interface, edit the server (Forwarding user and password). It is
+or in the web interface, edit the server (**Advanced: use a separate forwarding
+user**, then Forwarding user and password). It is
 laid over the source's own address, database and parameters (`sslmode`
 included), and must be another user than the one DBTrail captures with: the
 port never runs anything as that one, which holds `REPLICATION` and reads every
@@ -1570,9 +1668,30 @@ bintrail-console server forward-user <server> --capture-account
 bintrail-console server forward-user <server> --no-capture-account   # takes it back
 ```
 
+In the web interface it is the box on the server's form (**Servers**,
+**Edit**, or the form a PostgreSQL is added with): **Let the PostgreSQL port
+send to this PostgreSQL, read-only and as the source user above, a SELECT the
+copy does not answer**. It saves the same answer the two commands do. A
+session that may not change servers sees the box and cannot change it, and
+the SQL clients page says, for the server picked in the sidebar, what the port
+sends to its PostgreSQL.
+
 It is saved on the server and off until somebody says yes: a server added
 before this existed, or one nobody answered for, does not forward with it. A
-forwarding user of its own, when the server has one, is used instead.
+forwarding user of its own, when the server has one, is used instead. An edit
+that points the source at another user or address takes the yes back, and the
+form says so: the box has to be ticked again for the new one.
+
+Removing the forwarding user is not the same in the two places. In the web
+interface, **Remove the forwarding account** says the port then stops
+forwarding for the server, so it also takes the yes back, before the user is
+removed: nothing is sent to your PostgreSQL afterwards, and the save says so
+from what DBTrail answered. To forward as the source user instead, tick the
+box once the removal is saved. On a terminal, `server forward-user <server>
+--remove` removes the user alone: with a yes saved, the source user takes its
+place, and the command says so and names `--no-capture-account`. A server
+that hides tables or columns sends nothing to your PostgreSQL whatever is
+saved, and both the form and the SQL clients page say that for it.
 
 That role can read more than the copy holds (it can be the database owner, or
 the master user on a managed service, and read the system catalog), so with
@@ -1635,7 +1754,9 @@ The source answers:
 
 - **A function, operator, cast or construct the copy answers differently or
   not at all.** The copy takes `count`, `sum`, `min`, `max`, `coalesce`,
-  `nullif`, `greatest`, `least`, `length`, `substring`, `trim`, `position`,
+  `nullif`, `greatest`, `least`, `length`, `substring` (with its start, and
+  its length when given, written as whole numbers above zero:
+  `substring(name, 1, 3)`, `substring(name FROM 2 FOR 3)`), `trim`, `position`,
   `concat`, `abs`, `bool_and`, `string_agg`, `row_number`, `rank`, `lag`, and
   `extract`, `date_part` and `date_trunc` of a year, month or day
   (`date_trunc` of a `timestamp` or a `timestamp with time zone` column,
@@ -1653,6 +1774,31 @@ The source answers:
   value (PostgreSQL writes `CASE WHEN c THEN round(x, 2) ELSE 0 END` as `0`
   where the copy would write `0.00`, so a row that takes the `0` sends the
   statement to the source);
+  a division `a / b` and `avg(x)` written without a `round()`, of numerics
+  and whole numbers: the exact quotient rounded to 16 decimals, a `numeric`
+  as PostgreSQL's is. PostgreSQL writes its own with 16 significant digits or
+  more, so the two are the same number with other decimals. The copy always
+  writes 16; PostgreSQL's count depends on the value and on both sides: often
+  16 for a quotient from 1 to 9999 (`7.5000000000000000`, the same text), 12
+  for a larger one, 20 for a smaller one (`0.3333333333333333` for
+  `0.33333333333333333333`), and 20 for `2.00 / 2`. A quotient that ends
+  within 16 decimals is exact (`0.3 / 3` is `0.1000000000000000`). A quotient
+  under 0.000001 that is not zero is answered by the source, because 16
+  decimals would keep too few of its digits. A quotient that does not end is
+  cut at the sixteenth decimal here and later on PostgreSQL, and what is
+  worked out from it carries that: a comparison, a sort, a `sum` or a
+  `GROUP BY` that turns on a digit past the sixteenth can come out otherwise
+  on the copy. `amount / 3 = 33333.333333333333` can match a row on one side
+  and not on the other, `a / b * b = a` can be true on one and false on the
+  other, and a `GROUP BY a / b` of two quotients that differ only past the
+  sixteenth decimal can be one group on one side and two on the other. Write `round(a / b, k)` or
+  `round(avg(x), k)` for PostgreSQL's text exactly. The copy answers when
+  the statement shows each side to be a `numeric` or a whole number:
+  numbers, columns of whole numbers or of a `numeric` of at most 20 digits
+  and 8 decimals, `+`, `-`, `*`, parentheses, `count`,
+  `sum`, `min`, `max`, `abs`, `coalesce`, `nullif`, `greatest`, `least` and
+  `length` over them. A divisor of zero is PostgreSQL's error, from the
+  source;
   `floor(a / b)` of numerics, as PostgreSQL takes it (`95`, not `95.0`);
   `ntile(n)`; `extract(epoch from x)` of a timestamp (a `numeric` with six
   decimals, as on PostgreSQL 14 and later) and `to_timestamp(n)` of a whole
@@ -1661,12 +1807,28 @@ The source answers:
   the
   operators `=`, `<>`, `<`, `>`, `<=`, `>=`, `+`, `-`, `*`, `||`, `LIKE`
   (a pattern without a backslash), `IN`, `BETWEEN`, `IS [NOT] DISTINCT FROM`,
-  `ANY`, `EXISTS`, an array subscript by a positive whole number; `::date` and `CAST(... AS date)`; `DATE`, `TIMESTAMP`, `TIME` and
-  `INTERVAL` literals; joins, `GROUP BY`, `HAVING`, `DISTINCT [ON]`, `UNION`,
+  `ANY`, `EXISTS`, an array subscript by a positive whole number; `::date` and `CAST(... AS date)`; `INTERVAL` literals, and `DATE`,
+  `TIMESTAMP` and `TIME` literals written in one form: a date as `YYYY-MM-DD`,
+  a time as `HH:MM` or `HH:MM:SS` with at most six decimals and an hour below
+  24, a timestamp as the date alone or the date, a blank or a `T`, and the
+  time (`DATE '2026-01-05'`, `TIMESTAMP '2026-01-05 10:30:00.123456'`). A
+  string written in the statement and compared with a `date`, `timestamp`
+  or `time` column (`=`, `<`, `BETWEEN`, `IN`) is held to the same form; a
+  value that arrives as a parameter of a prepared statement is not read by
+  this rule; joins, `GROUP BY`, `HAVING`, `DISTINCT [ON]`, `UNION`,
   `INTERSECT`, `EXCEPT`, `WITH`, window functions, `FILTER`, `LIMIT` and
   `OFFSET`. Anything else goes to the source. Some of what the harness found
-  answering otherwise, and why each one goes there: `avg()` and division of a
-  `numeric` outside that `round` (PostgreSQL keeps more decimals), a `round`
+  answering otherwise, and why each one goes there: a division of two whole
+  numbers other than a column over a number (`sum(qty) / count(*)`:
+  PostgreSQL divides them as whole numbers, and the copy's division answers
+  a `numeric`), a division or an `avg()` with a side the statement does not
+  show to be a `numeric` or a whole number (a `double precision` or a
+  `real`, a `numeric` without precision or past 20 digits or 8 decimals, a name from a subquery or a `WITH`, `sum()` of a `bigint`, which
+  PostgreSQL sums to a `numeric`, a function not in the list above, a
+  `CASE`, a cast, a parameter), a division more than two deep in others
+  (`a / b / c / d`), a division in `LIMIT` or `OFFSET` or inside `ceil` or
+  `trunc` (the quotient could fall on the other side of the cut),
+  `avg(DISTINCT x)` and an `avg` with `FILTER` or `OVER`, a `round`
   of a division of two whole numbers (PostgreSQL divides them as whole
   numbers), a `round` whose quotient lands so close to a half that
   PostgreSQL's own rounding of the division could reach it (the copy refuses
@@ -1674,12 +1836,25 @@ The source answers:
   `double precision` (it rounds a half to even) and of a whole number (a
   `double precision` on PostgreSQL), a `round` beside other values in one
   column (`UNION`, `VALUES`, `ARRAY`, `greatest`, `least`, `nullif`: PostgreSQL keeps each
-  value's own decimals), a division by a column or by
-  zero (the copy answers NULL where PostgreSQL fails), `~` and `SIMILAR TO`
+  value's own decimals), a division by a zero written in the statement
+  (PostgreSQL fails it), `~` and `SIMILAR TO`
   (the copy matched no row), `->` and `->>` (PostgreSQL answers `json`, and
   writes a nested value with spaces), a number with an exponent (a `numeric`
   on PostgreSQL), `::text` of a
-  float, a `DATE`, `TIMESTAMP` or `TIME` literal written with a time zone
+  float, `substring` with a start of zero or below, or one that is not a
+  number written in the statement (`substring('apple', -1, 3)` is `a` on
+  PostgreSQL; the copy counts a negative start from the end and answers `e`;
+  `substr`, `left`, `right` and `overlay` always go to the source), a date or
+  time literal in any other form (`'26-01-05'::date` is 2026-01-05 on
+  PostgreSQL and the year 26 on the copy, a seventh decimal of a second is
+  rounded there and cut here, `TIME '24:00:00'` is a time there and midnight
+  here), arithmetic (`+`, `-`, `*`, `/`) and `sum()` over a `real` column
+  (PostgreSQL computes it as a `double precision`, so `r + 1` with `r = -0.1`
+  is `0.8999999985098839` there and `0.9` on the copy, and answers `sum(r)`
+  as a `real`; a `real` that is only read, compared, counted or taken the
+  `min` or `max` of stays on the copy, and so does arithmetic over a
+  `double precision`, a whole number or a `numeric`), a `DATE`, `TIMESTAMP` or
+  `TIME` literal written with a time zone
   (`TIMESTAMP '2026-03-02 10:00:00+02'`: the type holds none and PostgreSQL
   does not read it, so the literal is 10:00 there) and a string with one in
   either bound of a `BETWEEN` on a `timestamp` column, `upper`, `lower` and `ILIKE` (PostgreSQL folds case by the database's
@@ -1694,9 +1869,20 @@ The source answers:
   stays on the copy. A sort key that is one call of `count`, `sum`, `rank`
   and the like is a number whatever text the statement reads elsewhere
   (`ORDER BY sum(amount) DESC` beside a selected name stays on the copy), and
-  the field of a `date_trunc` or a `date_part` (`'day'`) is not text. A key
-  given by its position (`ORDER BY 1`) in a statement that reads text
-  anywhere may be that text, and goes to the source. A name the statement gives a value itself (`SUM(x) AS
+  the field of a `date_trunc` or a `date_part` (`'day'`) is not text. The port finds the text by what the statement names,
+  and reads three ways of sorting text that name none. A position behind a
+  `*`: in `SELECT * FROM t ORDER BY 2`, one table and nothing else, the
+  port looks the position up in the table's columns, so it goes to the
+  source when the second column is text and stays on the copy when it is a
+  number or a date; in any other statement with a `*` in a select list (a
+  join, a subquery, a `WITH`, a `UNION`, parentheses around the `SELECT`),
+  an `ORDER BY` by position goes to the source when the rows under the `*`
+  may hold text, whichever column the position is, and stays when they hold
+  none. A name the statement gives a value that is also a text column's
+  name (`SELECT name AS name ... ORDER BY name`, `min(name) AS name`,
+  quoted or not; a name given to a number, `sum(qty) AS qty`, stays). And a
+  text column named like a word of `ORDER BY` (`ORDER BY last`, `ORDER BY
+  first DESC`). A name the statement gives a value itself (`SUM(x) AS
   units`, a column of a `WITH` or a subquery, read as `s.units`) is judged by
   what it stands for: a count, a sum, an average, a rank, arithmetic, a
   `CASE` that answers only numbers, or a number column renamed is not text;
@@ -1725,11 +1911,21 @@ The source answers:
   a(i, x)`) go to the source as well. So a comparison (`=`, `<>`, `<`, `BETWEEN`,
   `IN`, `LIKE`, `IS DISTINCT FROM`, `IS NULL`), a join's condition or
   `USING`, a `GROUP BY` of an expression over it, `ORDER BY` (a `char(n)` is
-  text, sorted by the source's collation), a function, `||`, a cast, a
-  `CASE` or an aggregate of such a column goes to the source, and so does a `*` that
-  stands for it anywhere but as a whole item of that one select list
-  (`SELECT * FROM t WHERE id = 7` stays on the copy; `SELECT count(*) FROM
-  (SELECT * FROM t) s` does not). The rule is by where the column stands,
+  text, sorted by the source's collation), a function, `||`, a cast, a `CASE` or an
+  aggregate of such a column goes to the source. A `*` stays on the copy as
+  a whole item of that one select list (`SELECT * FROM t WHERE id = 7`), and
+  inside a `WITH` or a subquery in `FROM` when nothing goes on to read the
+  `char(n)` column (`SELECT count(*) FROM (SELECT * FROM t) s`, `WITH x AS
+  (SELECT * FROM t) SELECT id FROM x`). It goes to the source when the column
+  is then named, when another `*` hands it to the client, when the row is
+  used whole, when the block with the `*` has `DISTINCT`, `GROUP BY`, `ORDER
+  BY` or a window, in a set operation, in a subquery used as a value, and in
+  any shape the port does not follow. It also goes there when the statement
+  casts to `char(n)`, takes arguments, or reads a table with a column of a
+  domain, an enum or another type that is not built in. A `char(n)` column named in the last
+  `SELECT` of a `WITH` goes to the source even when returned as it is: the
+  bytes match, but the port would announce it as `text`, not `bpchar(n)`.
+  The rule is by where the column stands,
   not by what it would give: `WHERE code IS NULL` answers the same on both
   sides and goes to the source all the same. Only the tables the statement
   reads count, so a table without a `char(n)` column is answered as before,
@@ -1800,7 +1996,31 @@ sends it to the copy only when:
   scan run by parallel workers counts the rows of all of them.
 
 Anything else is answered by the source (`cheap_plan` in `/status`). 0 turns
-one rule off; both cannot be 0. In the compose `.env` they are
+one rule off; both cannot be 0.
+
+An expensive statement the copy could not return is answered by the source
+too (`result_over_row_cap` in `/status`). The copy returns at most
+`--sql-port-max-rows` rows for one statement (10,000 by default) and refuses a
+larger result, it does not cut it. So when the plan says the statement
+returns more rows than that, the port does not run it on the copy only to
+refuse it: your PostgreSQL answers it, and sends every row. The plan's
+estimate is used for one kind of statement, the one where it can be trusted:
+one table read alone, whole or by an index, with nothing left to check row
+by row (no `Filter` in the plan), under a `LIMIT` or a sort at most
+(`SELECT * FROM orders`, `SELECT * FROM orders WHERE id > 5000 ORDER BY id`).
+A `LIMIT` at or under the cap, written as a number, keeps the statement on
+the copy. A prepared statement with parameters (`LIMIT $1`, `WHERE id > $1`)
+is never sent to the source for its size: its plan is asked for once,
+without its values, PostgreSQL then estimates by fixed guesses (a `LIMIT $1`
+is taken to return a tenth of the rows), and the port does not take a guess
+for the size of a result. It is tried on the copy, as before. For anything
+else (a filter no index serves, a join, an aggregate, `GROUP BY`, `DISTINCT`,
+a window, a `UNION`, a partitioned table) the estimate is a guess, so the
+statement is tried on the copy as before, and one that does return more rows
+than the cap still gets the copy's error (`54000`, "the result has more than
+N rows"). A statement that the source answers this way runs there in full:
+it is the read of a whole table or a wide index range that the client asked
+for, and it loads the source as it would without the port. In the compose `.env` they are
 `PG_ROUTER_COST_THRESHOLD` and `PG_ROUTER_SCAN_ROWS`. The defaults come from a
 TPC-C source of 97 million rows on PostgreSQL 16: reads by a primary key cost
 1 to 12, an order's lines by an index 12, the stock level join 712, a
@@ -2083,6 +2303,11 @@ address asks for no password: whoever reaches it reads the counts, and with
 `--status-statements` the names of the tables and columns your clients query.
 `/metrics` on the same address is this process's Prometheus metrics.
 
+An address that cannot be opened (something else is listening there) does not
+stop the router: it prints a `WARNING` at start-up, writes it to its log, and
+serves the PostgreSQL port without `/status` and `/metrics`. Free the address
+or set another, then restart the router.
+
 The reasons, with the MySQL port's names where they mean the same:
 
 | Side | Reason | Why |
@@ -2093,6 +2318,7 @@ The reasons, with the MySQL port's names where they mean the same:
 | copy | `hidden_rules` | the server hides tables or columns: nothing is sent to its source |
 | copy | `capture_gate` | the server forwards with the capture account, and the statement did not pass that account's check, so the copy answered it without asking the source for its plan |
 | source | `cheap_plan` | its plan on the source is under both thresholds: the source answers it, by its indexes |
+| source | `result_over_row_cap` | its plan on the source is expensive and says it returns more rows than the copy returns for one statement (`--sql-port-max-rows`): the copy would refuse the result, so it is not tried there |
 | source | `explain_failed` | its plan could not be had (the source refused the `EXPLAIN`, a text of more than one statement): the source answers it, its error included |
 | source | `in_transaction` | the client's transaction block |
 | source | `veto` | a construct the copy answers differently, or is not known to answer the same |
@@ -2161,8 +2387,17 @@ one of them lists the same schemas, tables and columns. Up to DBTrail
   writes differently, until its statements are added.
 - `\d` of an index is refused: the copy has no index; `\d <table>` shows the
   primary key. A connection reads the catalog once for a burst of statements:
-  a table hidden while it is connected leaves its listing within 10 seconds,
-  and is never readable.
+  a table or a column hidden while it is connected leaves its listing within
+  10 seconds, and is not readable in the meantime: a statement that reads the
+  table or the column fails as soon as the rule applies.
+- **A rule saved while a client is half way through a result does not reach
+  the rest of that result.** A client of the extended protocol can ask for
+  some rows of a statement and for the rest later (a cursor, a driver's fetch
+  size). The port computes the whole result when the statement runs and keeps
+  it for that client, so the rows it asks for after a rule that hides a
+  column was saved still carry that column: they are rows of a statement it
+  was allowed to run when it ran it. Its next statement is answered under the
+  rule.
 
 ### Interactive `AS OF` from `psql`
 
@@ -2473,6 +2708,18 @@ Three things still answer differently from PostgreSQL, with no error:
 A numeric with no precision prints with all 18 decimals (`12345.678` as
 `12345.678000000000000000`); it compares, sorts and sums as the same number.
 
+A `CASE`, `COALESCE`, `GREATEST` or `LEAST` whose values are numbers of
+different scales can print more zeros on the copy than on PostgreSQL, for the
+same value: PostgreSQL writes each value with its own decimals, the copy
+gives them all one type and writes every one with that type's. Over a
+`numeric(12,2)` column, `coalesce(sum(amount), 0)` of no rows is `0` on
+PostgreSQL and `0.00` on the copy, and `CASE WHEN ... THEN amount ELSE 0 END`
+writes `0.00` for the rows that take the `0`. The number is the same; a
+client that reads it as a number sees no difference. Writing the other value
+with the column's decimals (`coalesce(sum(amount), 0.00)`) makes both sides
+print the same. (Around a `round()` the port does check this, value by
+value, and sends a statement whose decimals would differ to the source.)
+
 ---
 
 ### A proxy in front of the port
@@ -2481,8 +2728,12 @@ A proxy such as ProxySQL logs into the port twice:
 
 - **With your application's login**, for every statement it sends. Save that
   username and password as the server's **application login** (the same one
-  the MySQL port takes): it opens that server whatever database the
-  connection names.
+  the MySQL port takes): it opens that server, whatever database the proxy's
+  client named, unless that name is another server of this DBTrail (its id or
+  its name), which the port refuses with `28000` so that a login never reads
+  one server under another's name. If your application's database is called
+  like another server here, rename that server, or have the proxy connect
+  with the login's own server as the database.
 - **With its monitor login**, for its health checks (ProxySQL's
   `pgsql-monitor_username` and `pgsql-monitor_password`). The port takes the
   **monitor login** saved for the MySQL port: one username and password for

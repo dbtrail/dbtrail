@@ -76,6 +76,11 @@ type session struct {
 	// fallback is why the statement the copy just failed goes to the
 	// source instead (route.go), "" when it does not; set by runFree.
 	fallback string
+	// screened is the text of the prepared statement a portal is running,
+	// as the client wrote it and the screen read it, with its $n
+	// (runPortal); "" for a statement of the simple protocol, whose text is
+	// the one the screen read. copyText holds the portal's text to it.
+	screened string
 	// busyRefused is the busy reason the statement the copy just failed
 	// was refused for instead (copyFailed, #3109), "" when it was not.
 	busyRefused string
@@ -86,6 +91,10 @@ type session struct {
 	// be read for at its last read (catalog), "" when it was read or failed
 	// otherwise.
 	catalogBusy string
+	// argsBound: the statement being decided holds arguments already written
+	// into its text, whose declared types the text no longer shows, so no
+	// star of it is exempted (paddedExempt).
+	argsBound bool
 	// costVerdicts are the source's plans' verdicts this connection
 	// remembers, by statement shape (route_cost.go).
 	costVerdicts map[string]costVerdict

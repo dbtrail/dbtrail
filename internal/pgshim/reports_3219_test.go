@@ -136,3 +136,32 @@ func TestCopyScreen_reportShapes3219(t *testing.T) {
 		}
 	}
 }
+
+// PostgreSQL reads a name inside an expression of ORDER BY as a column, never
+// as an alias of the select list; the copy reads the alias.
+func TestAliasInOrderKey(t *testing.T) {
+	types := map[string][]string{"id": {"INTEGER"}, "qty": {"INTEGER"}, "amount": {"DECIMAL(12,2)"}, "name": {"VARCHAR"}}
+	for _, q := range []string{
+		`SELECT name, qty AS q FROM t ORDER BY abs(q)`,
+		`SELECT name, qty q, id FROM t ORDER BY q + 1`,
+		`SELECT name, amount AS qty FROM t ORDER BY abs(qty), id`,
+		`SELECT id, qty AS q FROM t ORDER BY id, abs(q) DESC NULLS LAST`,
+		`SELECT id, qty AS q FROM t ORDER BY (q + 1) * 2 LIMIT 3`,
+		`SELECT id, qty AS "q" FROM t ORDER BY abs("q")`,
+	} {
+		if veto := CopyScreen(q, types); !strings.Contains(veto, "inside an expression of ORDER BY") {
+			t.Errorf("%s: %q, want it sent to the source for the alias", q, veto)
+		}
+	}
+	for _, q := range []string{
+		`SELECT id, qty AS q FROM t ORDER BY q`,
+		`SELECT id, qty AS q FROM t ORDER BY q DESC NULLS LAST, id`,
+		`SELECT id, count(*) AS count FROM t GROUP BY id ORDER BY count(*) DESC`,
+		`SELECT id, sum(qty) AS sum FROM t GROUP BY id ORDER BY sum(qty), id`,
+		`SELECT t.id, t.qty AS q FROM t ORDER BY abs(t.qty)`,
+	} {
+		if veto := CopyScreen(q, types); strings.Contains(veto, "ORDER BY") {
+			t.Errorf("%s: sent to the source (%s), want the copy", q, veto)
+		}
+	}
+}
