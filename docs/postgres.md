@@ -1114,8 +1114,18 @@ listener, its own workers, its own memory.
 
 - **The database name picks the server**: its id or its name, as the web
   interface shows them. The username is free, except that a server's
-  application login, used as the username, opens that server whatever database
-  is named.
+  application login, used as the username, opens that server and no other. With
+  an application login the database name does not pick the server, but it is
+  checked: a name that is **another server** (its id or its name) is refused
+  with `28000` and an error that names the login's own server, for example
+  `user "app" is the application login of server "prod" and opens that server
+  only, and database "staging" is another server; connect with
+  dbname=prod, or use the other server's login`. Before, such a connection was
+  made to the login's own server and nothing said so. The login's own server
+  (by id or name) connects, and so does a name that is no server at all (the
+  database of your application behind a proxy, `postgres`, no database): it
+  opens the login's own server, as before. Names are matched as written, so
+  `STAGING` is not the server `staging`.
 - **The password** is the one created for SQL clients in the web interface
   (`dbtrail port on`), the access token, or the application login's own. The
   port is open while the port for SQL clients is turned on in the web
@@ -2515,8 +2525,12 @@ A proxy such as ProxySQL logs into the port twice:
 
 - **With your application's login**, for every statement it sends. Save that
   username and password as the server's **application login** (the same one
-  the MySQL port takes): it opens that server whatever database the
-  connection names.
+  the MySQL port takes): it opens that server, whatever database the proxy's
+  client named, unless that name is another server of this DBTrail (its id or
+  its name), which the port refuses with `28000` so that a login never reads
+  one server under another's name. If your application's database is called
+  like another server here, rename that server, or have the proxy connect
+  with the login's own server as the database.
 - **With its monitor login**, for its health checks (ProxySQL's
   `pgsql-monitor_username` and `pgsql-monitor_password`). The port takes the
   **monitor login** saved for the MySQL port: one username and password for
