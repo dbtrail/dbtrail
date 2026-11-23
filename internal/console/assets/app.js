@@ -18232,6 +18232,11 @@ const captureWas = new WeakMap();
 function captureChoice(form) {
   const f = form.elements;
   if (!f.forward_capture || f.flavor.value !== "postgres") return undefined;
+  // Removing the forwarding account says the port stops forwarding for the
+  // server. With a yes saved the source user would take the account's place,
+  // so a removal always takes the yes back too; ticking the box afterwards
+  // gives it again, on purpose.
+  if (f.route_remove && f.route_remove.checked) return false;
   const on = !!f.forward_capture.checked;
   return on === !!captureWas.get(form) ? undefined : on;
 }
@@ -18239,8 +18244,11 @@ function captureChoice(form) {
 // captureFormProblem stops a save that says two things about who the port
 // forwards as: the box newly ticked, and a forwarding user typed beside it.
 function captureFormProblem(form) {
-  if (captureChoice(form) !== true) return "";
   const f = form.elements, was = routePrefill.get(form) || { user: "" };
+  if (f.forward_capture && f.flavor.value === "postgres" && f.route_remove && f.route_remove.checked && f.forward_capture.checked && !captureWas.get(form)) {
+    return "Remove the forwarding account is ticked, which stops the port forwarding for this server, and the box that lets it forward as the source user was ticked too. Untick one: to forward as the source user, save the removal first, then tick the box.";
+  }
+  if (captureChoice(form) !== true) return "";
   if (!f.route_user || (f.route_user.value.trim() === was.user && f.route_password.value === "")) return "";
   return "The box that lets the port forward as the source user is ticked, and a separate forwarding user was typed too. Both say who the port forwards as: untick the box, or clear the forwarding user and its password.";
 }
@@ -19852,6 +19860,7 @@ function fillRouteExtra(form, prefill) {
   }
   box.append(el("label", { class: "check" }, el("input", { type: "checkbox", name: "route_remove" }),
     el("span", { text: "Remove the forwarding account (the port then stops forwarding for this server)" })));
+  if (prefill.flavor === "postgres") box.append(el("p", { class: "form-hint", text: "Removing it also unticks, for this server, the box that lets the port forward as the source user: nothing is sent to this PostgreSQL afterwards. To forward as the source user instead, tick that box once the removal is saved." }));
 }
 
 // keep-password semantics: omit password fields when blank (= keep stored).
@@ -19917,6 +19926,15 @@ async function saveServer(form) {
   const routeProblem = routeFormProblem(form) || captureFormProblem(form);
   if (routeProblem) { formMsg(routeProblem, true); form.elements.route_user.focus(); return; }
   const body = serverFormBody(form);
+  // A PostgreSQL's forwarding account removed: the yes about the source user
+  // is taken back FIRST, so the port never forwards as the source user in
+  // between, and a removal that cannot take it back removes nothing.
+  const removing = !!id && captureChoice(form) === false && !!form.elements.route_remove && form.elements.route_remove.checked;
+  let captureNote = { said: "" };
+  if (removing) {
+    captureNote = await saveCaptureChoice(form, { id, name: body.name }, true);
+    if (captureNote.failed) { formMsg("Nothing was saved: the forwarding account was not removed.", true); return; }
+  }
   let saved;
   try {
     saved = await api(id ? "/api/servers/" + encodeURIComponent(id) : "/api/servers", { method: id ? "PUT" : "POST", body });
@@ -19926,8 +19944,14 @@ async function saveServer(form) {
     openNotice({ tone: "err", title: "Could not save", lines: [why], button: "Back to the form" });
     return;
   }
-  const captureNote = await saveCaptureChoice(form, saved);
-  if (captureNote.server) saved = captureNote.server;
+  if (!removing) {
+    captureNote = await saveCaptureChoice(form, saved);
+    if (captureNote.server) saved = captureNote.server;
+  } else {
+    // What the server answered the removal with is who forwards now.
+    captureNote.said = " " + pgForwardSaid(saved);
+    if (saved.has_route || saved.forward_with_capture_account) { toastError((saved.name || "This server") + ": the removal was saved, and the port still forwards. " + pgForwardSaid(saved)); captureNote.said = ""; }
+  }
   // The pending password now belongs to the server just saved; the next new
   // server gets its own.
   if (!id && body.source_password && body.source_password === pendingSourcePassword) pendingSourcePassword = "";
@@ -19992,7 +20016,9 @@ async function saveServer(form) {
 // message that stays, and the box can be tried again from the server's form.
 // It returns { server, said }: the server as the answer left it (absent when
 // nothing was saved), and the line to add to the save's own message.
-async function saveCaptureChoice(form, saved) {
+// before: called ahead of the save that removes the forwarding account; a
+// failure then stops that save (failed), so the message says nothing changed.
+async function saveCaptureChoice(form, saved, before) {
   const on = captureChoice(form);
   if (on === undefined) {
     // The box was ticked when the form opened and nobody touched it, and the
@@ -20007,8 +20033,11 @@ async function saveCaptureChoice(form, saved) {
     after = await api("/api/servers/" + encodeURIComponent(saved.id) + "/route", { method: "PUT", body: { capture_account: on } });
     if (!after || !!after.forward_with_capture_account !== on) throw new Error("DBTrail took the request and did not save the answer");
   } catch (err) {
-    toastError((saved.name || "This server") + " was saved, and the box about forwarding as the source user was not: " + ((err && err.message) || err) + ". Edit the server to try again.");
-    return { said: "" };
+    const why = (err && err.message) || err;
+    toastError(before
+      ? (saved.name || "This server") + ": the forwarding account was not removed. Removing it also turns off forwarding as the source user, and that could not be saved: " + why + ". Nothing was changed."
+      : (saved.name || "This server") + " was saved, and the box about forwarding as the source user was not: " + why + ". Edit the server to try again.");
+    return { said: "", failed: true };
   }
   const said = captureSaid(after);
   if (said.tone === "err") { toastError(said.text); return { server: after, said: "" }; }

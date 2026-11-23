@@ -115,6 +115,26 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
   f = show({ monitor: true, permissions: { "servers:write": false } }, { ...pgSaved, forward_with_capture_account: true });
   out.pgReaderLook = look(f);
   out.pgReaderText = f.querySelector("div#pg-forward").textContent.replace(/\s+/g, " ").trim();
+  // Removing the forwarding account says the port stops forwarding: with a
+  // yes saved, the yes is taken back first, then the account is removed.
+  const own = { ...pgSaved, has_route: true, route_user: "app_ro", has_route_password: true };
+  f = show({ monitor: true }, { ...own, forward_with_capture_account: true }); f.elements.route_remove.checked = true;
+  out.pgRemoveExtra = f.querySelector("div#route-extra").textContent.replace(/\s+/g, " ").trim();
+  out.pgRemoveYes = await run(f, pgSaved, "ok");
+  f = show({ monitor: true }, own); f.elements.route_remove.checked = true;
+  out.pgRemoveNo = await run(f, pgSaved, "ok");
+  f = show({ monitor: true }, { ...own, forward_with_capture_account: true }); f.elements.route_remove.checked = true;
+  out.pgRemoveFails = await run(f, pgSaved, "fail");
+  f = show({ monitor: true }, { ...own, forward_with_capture_account: true }); f.elements.route_remove.checked = true;
+  out.pgRemoveKept = await run(f, { ...pgSaved, forward_with_capture_account: true }, "ok");
+  f = show({ monitor: true }, own); f.elements.route_remove.checked = true; f.elements.forward_capture.checked = true;
+  out.pgRemoveAndTick = await run(f, pgSaved, "ok");
+  f = show({ monitor: true }, { ...mySaved, has_route: true, route_user: "app_ro", has_route_password: true, forward_with_capture_account: true }); f.elements.route_remove.checked = true;
+  out.myRemove = await run(f, mySaved, "ok");
+  // Who forwards now, from what the server answered: nobody, the account of
+  // its own, the source user.
+  const now = (x) => { ctx.__s = x; return vm.runInContext("pgForwardSaid(__s)", ctx); };
+  out.now = { nobody: now(pgSaved), own: now(own), source: now({ ...pgSaved, forward_with_capture_account: true }) };
   // 3. A new MySQL. The box ticked while PostgreSQL was picked stays behind.
   f = fresh("mysql");
   out.myNewLook = look(f);
@@ -172,7 +192,9 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
 		PgNewUnticked, PgNewTicked, PgNewRouteFails, PgNewRouteIgnored, PgNewBoth, PgNewOwnUser             ran
 		PgEditYesUntouched, PgEditUnticked, PgEditNoUntouched, PgEditTicked, PgEditSourceChanged            ran
 		PgEditOwnTicked, MyNew, MyNewAfterPGTick, MariaNew, MyEdit, MyEditYes                               ran
-		PgReaderText, Ask, Hint                                                                             string
+		PgRemoveYes, PgRemoveNo, PgRemoveFails, PgRemoveKept, PgRemoveAndTick, MyRemove                     ran
+		Now                                                                                                 map[string]string
+		PgReaderText, Ask, Hint, PgRemoveExtra                                                              string
 		Said                                                                                                map[string]line
 	}
 	s := strings.TrimSpace(string(raw))
@@ -261,6 +283,35 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
 	}
 	calls("an edited PostgreSQL with its own user, ticked", got.PgEditOwnTicked, `PUT /api/servers/x {} flavor=postgres`, at(yes, "x"))
 	says("an edited PostgreSQL with its own user, ticked", got.PgEditOwnTicked, "shop: saved. The PostgreSQL port keeps forwarding as its forwarding user, app_ro, while that one is set. Once it is removed, the source user takes its place.")
+	// Removing the forwarding account: the control says the port stops
+	// forwarding, so the yes about the source user goes first, and the save
+	// says who forwards now from what the server answered.
+	const nobody = "For shop, nothing is sent to your PostgreSQL: the copy answers alone, and a statement it cannot answer gets an error. To change it, edit the server (Servers, Edit)."
+	for name, g := range map[string]ran{"a yes saved": got.PgRemoveYes, "no yes saved": got.PgRemoveNo} {
+		calls("removing a PostgreSQL's forwarding account, "+name, g, at(no, "x"), `PUT /api/servers/x {"route_user":""} flavor=postgres`)
+		says("removing a PostgreSQL's forwarding account, "+name, g, "toast: Server updated. "+nobody)
+	}
+	if !strings.Contains(got.PgRemoveExtra, "Removing it also unticks, for this server, the box that lets the port forward as the source user: nothing is sent to this PostgreSQL afterwards.") {
+		t.Errorf("the remove control of a PostgreSQL does not say it takes the yes back: %s", got.PgRemoveExtra)
+	}
+	calls("a removal whose yes cannot be taken back", got.PgRemoveFails, at(no, "x"))
+	says("a removal whose yes cannot be taken back", got.PgRemoveFails, "stays: shop: the forwarding account was not removed. Removing it also turns off forwarding as the source user, and that could not be saved: this session may not change servers. Nothing was changed.", "form: Nothing was saved: the forwarding account was not removed.")
+	says("a removal after which the server still says yes", got.PgRemoveKept, "stays: shop: the removal was saved, and the port still forwards. For shop, a SELECT the copy does not answer runs on your PostgreSQL, read-only and as the source user (dbtrail)")
+	if strings.Contains(strings.Join(got.PgRemoveKept.Said, "\n"), "nothing is sent") {
+		t.Errorf("the server still forwards, and the save says nothing is sent: %v", got.PgRemoveKept.Said)
+	}
+	calls("remove ticked and the box newly ticked", got.PgRemoveAndTick)
+	says("remove ticked and the box newly ticked", got.PgRemoveAndTick, "form: Remove the forwarding account is ticked, which stops the port forwarding for this server, and the box that lets it forward as the source user was ticked too.")
+	calls("removing a MySQL's forwarding account, a yes saved from a terminal", got.MyRemove, `PUT /api/servers/y {"route_user":""} flavor=mysql`)
+	silent("removing a MySQL's forwarding account", got.MyRemove)
+	wantNow := map[string]string{
+		"nobody": nobody,
+		"own":    "For shop, every other statement, and a transaction block (BEGIN to COMMIT or ROLLBACK), runs on your PostgreSQL as its forwarding user, app_ro, read-only. To change it, edit the server (Servers, Edit).",
+		"source": "For shop, a SELECT the copy does not answer runs on your PostgreSQL, read-only and as the source user (dbtrail), when every table it reads is a table of the copy; anything else is refused and not sent. To change it, edit the server (Servers, Edit).",
+	}
+	if !reflect.DeepEqual(got.Now, wantNow) {
+		t.Errorf("who forwards now = %v\nwant %v", got.Now, wantNow)
+	}
 	// A session that may not change servers sees the box and cannot change it.
 	if !got.PgReaderLook.Disabled || !got.PgReaderLook.Ticked || !strings.Contains(got.PgReaderText, "Changing it needs permission to change servers.") {
 		t.Errorf("without servers:write = %+v, %q: want the saved answer shown, disabled, and why", got.PgReaderLook, got.PgReaderText)
