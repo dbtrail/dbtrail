@@ -224,69 +224,6 @@ func TestPaddedLists_noAliasBeforeAClause(t *testing.T) {
 	}
 }
 
-// ORDER BY a position, in a SELECT whose list has a *: the column at that
-// position is sorted, and text is sorted by the source's collation.
-func TestStarByPosition(t *testing.T) {
-	// plain is (id, code text, name, status, qty); codes (id, code char(5),
-	// label, tags, free, one, kind, k).
-	for q, want := range map[string]string{
-		`SELECT * FROM plain ORDER BY 2`:                                       starTextPositionVeto,
-		`SELECT * FROM plain ORDER BY 1, 3 DESC NULLS LAST`:                    starTextPositionVeto,
-		`SELECT * FROM plain p WHERE qty > 1 ORDER BY 4 LIMIT 3`:               starTextPositionVeto,
-		`SELECT * FROM public.plain AS p ORDER BY 2`:                           starTextPositionVeto,
-		`SELECT * FROM codes ORDER BY 2`:                                       starTextPositionVeto,
-		`SELECT * FROM codes ORDER BY 3`:                                       starTextPositionVeto,
-		`SELECT * FROM plain ORDER BY 9`:                                       starUnknownPositionVeto,
-		`SELECT * FROM plain ORDER BY 0`:                                       starUnknownPositionVeto,
-		`SELECT * FROM plain, codes WHERE codes.id = plain.id ORDER BY 3`:      starUnknownPositionVeto,
-		`SELECT * FROM plain p JOIN codes c ON c.id = p.id ORDER BY 1`:         starUnknownPositionVeto,
-		`SELECT p.* FROM plain p ORDER BY 2`:                                   starUnknownPositionVeto,
-		`SELECT *, qty FROM plain ORDER BY 2`:                                  starUnknownPositionVeto,
-		`SELECT * FROM (SELECT * FROM plain) s ORDER BY 2`:                     starUnknownPositionVeto,
-		`SELECT * FROM (SELECT id, name FROM plain) s ORDER BY 2`:              starUnknownPositionVeto,
-		`SELECT * FROM (SELECT id, 'x' AS tag FROM plain) s ORDER BY 2`:        starUnknownPositionVeto,
-		`WITH x AS (SELECT id, qty FROM plain) SELECT * FROM x ORDER BY 2`:     starUnknownPositionVeto,
-		`SELECT * FROM nowhere ORDER BY 1`:                                     starUnknownPositionVeto,
-		`SELECT id FROM plain WHERE id IN (SELECT * FROM plain ORDER BY 2)`:    starTextPositionVeto,
-		`SELECT * FROM plain UNION ALL SELECT * FROM plain ORDER BY 2`:         starUnknownPositionVeto,
-	} {
-		if got := CopyScreenFor(q, paddedCatalog()); got != want {
-			t.Errorf("%s:\n  got %q\n  want %q", q, got, want)
-		}
-	}
-	for _, q := range []string{
-		// A whole number at that position: sorted the same on both sides.
-		`SELECT * FROM plain ORDER BY 1`,
-		`SELECT * FROM plain ORDER BY 5 DESC, 1`,
-		`SELECT * FROM plain p WHERE qty > 1 ORDER BY 1 LIMIT 3`,
-		`SELECT * FROM public.plain ORDER BY 1`,
-		`SELECT * FROM codes ORDER BY 1`,
-		`SELECT * FROM codes ORDER BY 8, 1`,
-		// Rows with no text in them.
-		`SELECT * FROM (SELECT id, k FROM codes) s ORDER BY 1`,
-		`SELECT s.* FROM (SELECT id, qty FROM plain) s ORDER BY 2`,
-		// No position, or no star: the other rules'.
-		`SELECT * FROM plain ORDER BY id`,
-		`SELECT * FROM plain`,
-		`SELECT id, qty FROM plain ORDER BY 2`,
-		`SELECT id, count(*) FROM plain GROUP BY 1 ORDER BY 2`,
-		`SELECT id, row_number() OVER (ORDER BY 1) FROM (SELECT * FROM plain) s`,
-		`SELECT count(*) FROM plain ORDER BY 1`,
-		`SELECT id * 2 FROM plain ORDER BY 1`,
-	} {
-		if veto := CopyScreenFor(q, paddedCatalog()); veto != "" {
-			t.Errorf("%s: sent to the source (%s), want the copy", q, veto)
-		}
-		// The screen that runs before the types are known does not have the
-		// columns' order, and says nothing here.
-		if toks, lexWhy := lexSQL(RewriteForCopy(q)); lexWhy == "" {
-			if why := screenUntyped(toks); why != "" {
-				t.Errorf("%s: vetoed without its types (%s)", q, why)
-			}
-		}
-	}
-}
-
 // WITH x AS [NOT] MATERIALIZED (...) is a WITH like any other.
 func TestCopyScreen_materialized(t *testing.T) {
 	for _, q := range []string{
@@ -309,8 +246,7 @@ func TestPaddedLists_bounded(t *testing.T) {
 	for name, q := range map[string]string{
 		"names after commas": "SELECT 1 FROM plain" + strings.Repeat(", codes", (1<<20)/7),
 		"nested EXISTS":      "SELECT 1 FROM plain WHERE " + strings.Repeat("EXISTS (SELECT * FROM codes WHERE ", (1<<20)/34) + "true",
-		"stars and ORDER BY": "SELECT * FROM plain " + strings.Repeat("ORDER BY 1 ", (1<<20)/11),
-		"open parentheses":   "SELECT * FROM plain ORDER BY " + strings.Repeat("( ", 1<<19),
+		"open EXISTS":        "SELECT 1 FROM plain WHERE " + strings.Repeat("EXISTS (SELECT * FROM codes WHERE EXISTS ( ", (1<<20)/42),
 	} {
 		toks, why := lexSQL(q)
 		if why != "" {
@@ -318,7 +254,7 @@ func TestPaddedLists_bounded(t *testing.T) {
 		}
 		done := make(chan struct{})
 		start := time.Now()
-		go func() { paddedUse(toks, types); starByPosition(toks, types); close(done) }()
+		go func() { paddedUse(toks, types); close(done) }()
 		select {
 		case <-done:
 		case <-time.After(10 * time.Second):

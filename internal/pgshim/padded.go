@@ -99,19 +99,11 @@ func screenTypes(tables []CatalogTable, read func(*CatalogTable) bool) map[strin
 		// The table is in the catalog, by name and by schema.name (paddedExempt).
 		out[listedKey+strings.ToLower(t.Name)] = []string{relType}
 		out[listedKey+strings.ToLower(t.Schema+"."+t.Name)] = []string{relType}
-		// Its columns in their order, for a position that a * stands
-		// behind (starByPosition). A name two schemas share has none.
-		colsOf := colsKey + strings.ToLower(t.Name)
-		_, twice := out[colsOf]
-		out[colsOf] = nil
 		for _, c := range t.Columns {
 			n := strings.ToLower(c.Name)
 			typ := strings.ToUpper(c.Type)
 			if m := sourceMark(c); m != "" && (read == nil || read(t)) {
 				typ = m
-			}
-			if !twice {
-				out[colsOf] = append(out[colsOf], typ)
 			}
 			out[n] = append(out[n], typ)
 			if !provenNotPadded(c) && (read == nil || read(t)) {

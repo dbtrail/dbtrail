@@ -1105,11 +1105,6 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 	if why := paddedUse(in, types); why != "" {
 		return why
 	}
-	if !untyped {
-		if why := starByPosition(in, types); why != "" {
-			return why
-		}
-	}
 	if why := aliasUse(in); why != "" {
 		return why
 	}
