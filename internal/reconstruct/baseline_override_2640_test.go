@@ -202,6 +202,27 @@ func TestBaselineOverride_refusals(t *testing.T) {
 		{"staged inside another output root", func(t *testing.T, s *setup) {
 			s.cfg.OutputDir = s.staging
 		}, ErrBaselineOverride, "inside the snapshots root"},
+		{"inside a snapshots root given as a relative path", func(t *testing.T, s *setup) {
+			t.Chdir(filepath.Dir(s.staging))
+			s.cfg.OutputDir = filepath.Base(s.staging)
+		}, ErrBaselineOverride, "inside the snapshots root"},
+		{"inside the snapshots root through a link", func(t *testing.T, s *setup) {
+			real := stagedRead(t, filepath.Join(s.root, "staging"), base, "shop", "orders")
+			link := filepath.Join(t.TempDir(), "link")
+			if err := os.Symlink(filepath.Join(s.root, "staging"), link); err != nil {
+				t.Fatal(err)
+			}
+			s.cfg.BaselineOverride["shop.orders"] = filepath.Join(link, filepath.Base(filepath.Dir(filepath.Dir(real))), "shop", "orders.parquet")
+		}, ErrBaselineOverride, "inside the snapshots root"},
+		{"a link where the file would be", func(t *testing.T, s *setup) {
+			other := stagedRead(t, t.TempDir(), base, "shop", "orders")
+			if err := os.Remove(s.path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(other, s.path); err != nil {
+				t.Fatal(err)
+			}
+		}, ErrBaselineOverride, "is not a file"},
 		{"a table delta beside the file", func(t *testing.T, s *setup) {
 			posdel, upserts := baseline.TableDeltaPaths(s.path, 0)
 			mustWrite(t, posdel)
@@ -266,10 +287,13 @@ func TestBaselineOverride_aRefusedRunCreatesNothing(t *testing.T) {
 }
 
 func TestCheckOverrideReached(t *testing.T) {
+	readAt := time.Date(2026, 11, 23, 10, 0, 0, 0, time.UTC)
 	at := func(file string, pos int64) baseline.DumpMetadata {
-		return baseline.DumpMetadata{BinlogFile: file, BinlogPos: pos}
+		return baseline.DumpMetadata{BinlogFile: file, BinlogPos: pos, Producer: baseline.ProducerDump, SnapshotTimestamp: readAt}
 	}
+	with := func(m baseline.DumpMetadata, f func(*baseline.DumpMetadata)) baseline.DumpMetadata { f(&m); return m }
 	cut := func(file string, pos uint64) *query.BinlogPos { return &query.BinlogPos{File: file, Pos: pos} }
+	ok := at("binlog.000003", 700)
 	cases := []struct {
 		name     string
 		meta     baseline.DumpMetadata
@@ -277,23 +301,28 @@ func TestCheckOverrideReached(t *testing.T) {
 		cut      *query.BinlogPos
 		want     error
 	}{
-		{"the cut is past the read", at("binlog.000003", 700), false, cut("binlog.000003", 900), nil},
-		{"the cut is exactly the read", at("binlog.000003", 700), false, cut("binlog.000003", 700), nil},
-		{"the cut is in a later file", at("binlog.000003", 700), false, cut("binlog.000004", 4), nil},
+		{"the cut is past the read", ok, false, cut("binlog.000003", 900), nil},
+		{"the cut is exactly the read", ok, false, cut("binlog.000003", 700), nil},
+		{"the cut is in a later file", ok, false, cut("binlog.000004", 4), nil},
 		{"the cut is past a file name that grew", at("binlog.999999", 700), false, cut("binlog.1000000", 4), nil},
-		{"capture is behind the read, same file", at("binlog.000003", 700), false, cut("binlog.000003", 699), ErrBaselineOverrideAhead},
-		{"capture is behind the read, earlier file", at("binlog.000003", 700), false, cut("binlog.000002", 9000), ErrBaselineOverrideAhead},
+		{"capture is behind the read, same file", ok, false, cut("binlog.000003", 699), ErrBaselineOverrideAhead},
+		{"capture is behind the read, earlier file", ok, false, cut("binlog.000002", 9000), ErrBaselineOverrideAhead},
 		{"capture is behind a file name that grew", at("binlog.1000000", 4), false, cut("binlog.999999", 9000), ErrBaselineOverrideAhead},
-		{"the index holds no change", at("binlog.000003", 700), false, nil, ErrBaselineOverrideAhead},
-		{"the file records no coordinate", baseline.DumpMetadata{}, false, cut("binlog.000003", 900), ErrBaselineOverride},
+		{"the index holds no change", ok, false, nil, ErrBaselineOverrideAhead},
+		{"the file records no coordinate", at("", 0), false, cut("binlog.000003", 900), ErrBaselineOverride},
 		{"the file records a file and no position", at("binlog.000003", 0), false, cut("binlog.000003", 900), ErrBaselineOverride},
-		{"a PostgreSQL file", baseline.DumpMetadata{LSN: 42}, false, cut("binlog.000003", 900), ErrBaselineOverride},
-		{"a PostgreSQL index", at("binlog.000003", 700), true, cut("binlog.000003", 900), ErrBaselineOverride},
-		{"a cut that is an LSN", at("binlog.000003", 700), false, cut("0/16B3748", 23803720), ErrBaselineOverrideAhead},
+		{"a PostgreSQL file", with(ok, func(m *baseline.DumpMetadata) { m.LSN = 42 }), false, cut("binlog.000003", 900), ErrBaselineOverride},
+		{"a PostgreSQL index", ok, true, cut("binlog.000003", 900), ErrBaselineOverride},
+		{"a cut that is an LSN", ok, false, cut("0/16B3748", 23803720), ErrBaselineOverrideAhead},
+		{"the output of a fold", with(ok, func(m *baseline.DumpMetadata) { m.Producer = baseline.ProducerReconstruct }), false, cut("binlog.000003", 900), ErrBaselineOverride},
+		{"a file that does not say what wrote it", with(ok, func(m *baseline.DumpMetadata) { m.Producer = "" }), false, cut("binlog.000003", 900), ErrBaselineOverride},
+		{"a file written before its folder's time", with(ok, func(m *baseline.DumpMetadata) { m.SnapshotTimestamp = readAt.Add(-time.Minute) }), false, cut("binlog.000003", 900), ErrBaselineOverride},
+		{"a file written after its folder's time", with(ok, func(m *baseline.DumpMetadata) { m.SnapshotTimestamp = readAt.Add(time.Second) }), false, cut("binlog.000003", 900), ErrBaselineOverride},
+		{"a file that records no time", with(ok, func(m *baseline.DumpMetadata) { m.SnapshotTimestamp = time.Time{} }), false, cut("binlog.000003", 900), ErrBaselineOverride},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkOverrideReached("shop", "orders", tc.meta, tc.postgres, tc.cut)
+			err := checkOverrideReached("shop", "orders", tc.meta, readAt, tc.postgres, tc.cut)
 			if tc.want == nil {
 				if err != nil {
 					t.Fatalf("refused: %v", err)

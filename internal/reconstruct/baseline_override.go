@@ -111,11 +111,16 @@ func baselineOverrideFor(ctx context.Context, cfg FullTableConfig, schema, table
 	// Outside every root this run reads snapshots from or writes them to: in
 	// there, the folder would be found as a snapshot of its own, holding only
 	// these tables, and the next refresh would take its table list from it.
+	realDir := resolvedPath(dir)
 	for _, root := range []string{cfg.BaselineSrc, cfg.OutputDir} {
 		if root == "" || strings.HasPrefix(root, "s3://") {
 			continue
 		}
-		if rel, err := filepath.Rel(filepath.Clean(root), dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		rel, err := filepath.Rel(resolvedPath(root), realDir)
+		if err != nil {
+			return refuse(ErrBaselineOverride, "cannot tell whether the folder %s is inside the snapshots root %s: %v", dir, root, err)
+		}
+		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return refuse(ErrBaselineOverride, "the folder %s is inside the snapshots root %s, where it would be found as a snapshot holding only its own tables", dir, root)
 		}
 	}
@@ -132,7 +137,8 @@ func baselineOverrideFor(ctx context.Context, cfg FullTableConfig, schema, table
 	case !errors.Is(err, os.ErrNotExist):
 		return refuse(ErrBaselineOverride, "cannot tell whether the folder %s is marked as an unfinished read: %v", dir, err)
 	}
-	fi, err := os.Stat(p)
+	// Lstat: a link to a file somewhere else is not this read's file.
+	fi, err := os.Lstat(p)
 	if err != nil {
 		return refuse(ErrBaselineOverride, "its file cannot be read: %v", err)
 	}
@@ -157,6 +163,18 @@ func baselineOverrideFor(ctx context.Context, cfg FullTableConfig, schema, table
 	return overrideBase{path: p, dir: dir, at: at}, true, nil
 }
 
+// resolvedPath is p made absolute with its links followed, as far as it
+// exists: a root that is not created yet has no link to follow.
+func resolvedPath(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	if real, err := filepath.EvalSymlinks(p); err == nil {
+		return real
+	}
+	return filepath.Clean(p)
+}
+
 // checkOverrideReached refuses a BaselineOverride file whose footer does not
 // show the run's cut has reached the coordinate it was read at. postgres says
 // the index records a PostgreSQL source.
@@ -165,12 +183,25 @@ func baselineOverrideFor(ctx context.Context, cfg FullTableConfig, schema, table
 // folded from its own coordinate. At or before the cut, the table ends at the
 // cut like the others. Past it, the fold would have an empty window and the
 // table would be published as of its own, later, coordinate.
-func checkOverrideReached(schema, table string, bmeta baseline.DumpMetadata, postgres bool, cut *query.BinlogPos) error {
+//
+// The footer must also say the file IS the read its folder is named after: a
+// read of the source, stamped with the folder's time. The capture-gap check
+// looks from that time on, so a file older than its folder's name (a table
+// carried forward, the output of a fold, a file copied from an earlier
+// snapshot) would be folded across a loss the check never looked at.
+func checkOverrideReached(schema, table string, bmeta baseline.DumpMetadata, readAt time.Time, postgres bool, cut *query.BinlogPos) error {
 	refuse := func(sentinel error, format string, args ...any) error {
 		return fmt.Errorf("%w: %s.%s: %s", sentinel, schema, table, fmt.Sprintf(format, args...))
 	}
 	if postgres || bmeta.LSN != 0 {
 		return refuse(ErrBaselineOverride, "a PostgreSQL table is not read again this way")
+	}
+	if bmeta.Producer != baseline.ProducerDump {
+		return refuse(ErrBaselineOverride, "the file does not say it was read from the source (it records %q as what wrote it)", bmeta.Producer)
+	}
+	if !bmeta.SnapshotTimestamp.Equal(readAt) {
+		return refuse(ErrBaselineOverride, "the file was written by the read of %s, not the one its folder is named after (%s)",
+			bmeta.SnapshotTimestamp.UTC().Format(time.RFC3339), readAt.UTC().Format(time.RFC3339))
 	}
 	anchor := AnchorOf(bmeta)
 	if anchor == nil || anchor.IsLSN() {

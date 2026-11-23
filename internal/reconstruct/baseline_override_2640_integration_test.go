@@ -54,7 +54,8 @@ func writeOrdersShaped(t *testing.T, path string, at time.Time, pos uint64, rows
 			baseline.MetaKeyCreateTableSQL: ordersCreateSQL,
 			baseline.MetaKeyBinlogFile:     "binlog.000003",
 			baseline.MetaKeyBinlogPos:      strconv.FormatUint(pos, 10),
-			"bintrail.snapshot_timestamp":  at.UTC().Format(time.RFC3339),
+			baseline.MetaKeySnapshotTimestamp: at.UTC().Format(time.RFC3339),
+			baseline.MetaKeySnapshotProducer:  baseline.ProducerDump,
 		},
 	})
 	if err != nil {
@@ -368,5 +369,29 @@ func TestBaselineOverride_aRereadTableStartsANewDeltaChain(t *testing.T) {
 	out, _ = published(t, root, "orders", base.Add(61*time.Second))
 	if got, want := readOrdersState(t, out), []string{"7=B", "8=C"}; !equalStrings(got, want) {
 		t.Fatalf("the table after the next refresh = %v, want %v", got, want)
+	}
+}
+
+// A file that is not the read its folder is named after: a table file of an
+// earlier read, placed in a folder with a later name. The capture-gap check
+// looks from the folder's time on, so the run refuses instead of folding
+// across what that check did not look at.
+func TestBaselineOverride_aFileOlderThanItsFolderIsRefused(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dsn, root, base := lateDDLIndex(t)
+	change(t, db, "orders", 800, 900, base.Add(20*time.Second), "7", `{"id":7,"status":"B"}`)
+	staging := t.TempDir()
+	dir := filepath.Join(staging, reconstruct.SnapshotDirName(base.Add(15*time.Second)))
+	p := filepath.Join(dir, "shop", "orders.parquet")
+	writeOrdersShaped(t, p, base.Add(2*time.Second), 520, [][]string{{"7", "fresh"}})
+	if err := baseline.WriteSuccessMarker(dir); err != nil {
+		t.Fatal(err)
+	}
+	run := rereadRun{dsn: dsn, root: root, tables: []string{"shop.orders"}, override: map[string]string{"shop.orders": p}}
+	if _, err := run.at(base.Add(30 * time.Second)); !errors.Is(err, reconstruct.ErrBaselineOverride) {
+		t.Fatalf("got %v, want ErrBaselineOverride", err)
+	}
+	if _, ts := published(t, root, "orders", base.Add(31*time.Second)); !ts.Equal(base) {
+		t.Fatalf("a snapshot was published at %s from a file older than its folder", ts)
 	}
 }

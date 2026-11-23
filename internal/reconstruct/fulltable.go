@@ -189,7 +189,9 @@ type FullTableConfig struct {
 	// read past the point the run reaches refuses with
 	// ErrBaselineOverrideAhead; the table is never folded from the snapshot
 	// instead. The caller keeps the folder until the run returns: nothing
-	// here holds it against a cleanup, and nothing here removes it. Nil, the
+	// here holds it against a cleanup, and nothing here removes it. The
+	// published snapshot may share the file with it by hard link, so the
+	// folder is removed afterwards, never written again in place. Nil, the
 	// zero value: every table is folded from the snapshot found for it.
 	//
 	// Not for every table of a run at once: the record of skipped views is
@@ -1500,7 +1502,7 @@ func ReconstructTable(
 	// Before either path: the read must be one the run's cut has reached, and
 	// a PostgreSQL table takes none.
 	if overridden {
-		if err := checkOverrideReached(schema, table, bmeta, query.SourceFlavor(db) == "postgres", cfg.cut); err != nil {
+		if err := checkOverrideReached(schema, table, bmeta, snapshotTime, query.SourceFlavor(db) == "postgres", cfg.cut); err != nil {
 			return nil, err
 		}
 	}
