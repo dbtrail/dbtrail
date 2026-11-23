@@ -131,21 +131,33 @@ func rereadTableList(tables []string) ([]string, error) {
 // rereadNotInDump is the tables of want the dump in dir does not hold under
 // their real names. A dump that cannot be listed answers none: the conversion
 // reads the same files and reports what is wrong with them.
-func rereadNotInDump(dir string, want []string) []string {
-	found, _, _, err := baseline.DiscoverDumpNames(dir)
+//
+// leftOut is why the dump's conversion would leave tables out, when it would:
+// such a table may well exist on the source, so the error must not say it was
+// dropped.
+func rereadNotInDump(dir string, want []string) (missing, leftOut []string) {
+	found, _, left, err := baseline.DiscoverDumpNames(dir)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	var missing []string
 	for _, st := range want {
 		if !slices.ContainsFunc(found, func(tf baseline.TableFiles) bool { return tf.Database+"."+tf.Table == st }) {
 			missing = append(missing, st)
 		}
 	}
-	return missing
+	if len(missing) > 0 {
+		for _, l := range left {
+			leftOut = append(leftOut, l.Table+": "+l.Reason)
+		}
+	}
+	return missing, leftOut
 }
 
-func rereadMissingError(missing []string) error {
+func rereadMissingError(missing, leftOut []string) error {
+	if len(leftOut) > 0 {
+		return fmt.Errorf("%w: %s (the dump holds tables it cannot store under their real names: %s)",
+			errRereadTableMissing, strings.Join(missing, ", "), strings.Join(leftOut, "; "))
+	}
 	return fmt.Errorf("%w: %s (dropped from the source since, or a name mydumper does not match)", errRereadTableMissing, strings.Join(missing, ", "))
 }
 
@@ -155,8 +167,10 @@ func rereadMissingError(missing []string) error {
 //
 // errRereadUnavailable says no table of this server (or not these) can be
 // read alone, and the caller takes a full read: a PostgreSQL server, a lock
-// mode other than ftwrl and lock-all, a mydumper that cannot be told the
-// mode, a comma or a dot in a name.
+// mode other than ftwrl and lock-all, a mydumper that cannot be told ftwrl, a
+// comma or a dot in a name. A mydumper too old for lock-all fails with the
+// error a full read gets from it, which is not errRereadUnavailable: a full
+// read would fail the same way.
 func (s *baselineSupervisor) stageReread(req console.BaselineRequest, tables []string) (stagedReread, error) {
 	want, err := rereadTableList(tables)
 	if err != nil {
@@ -180,11 +194,18 @@ func (s *baselineSupervisor) stageReread(req console.BaselineRequest, tables []s
 	if err != nil {
 		return stagedReread{}, err
 	}
-	defer os.RemoveAll(att.dir)
+	defer func() {
+		// The journal entry goes when the job ends, so a restart would not
+		// remove this folder either: the log is the only trace of it.
+		if rmErr := os.RemoveAll(att.dir); rmErr != nil {
+			slog.Error("console snapshot: could not remove the dump of a read of some tables; it still takes room in the working folder",
+				"server", req.ServerID, "path", att.dir, "error", rmErr)
+		}
+	}()
 	// Before the conversion: a dump that holds none of the tables would fail
 	// there as "no tables found", which does not say a table is gone.
-	if missing := rereadNotInDump(att.dir, want); len(missing) > 0 {
-		return stagedReread{}, rereadMissingError(missing)
+	if missing, leftOut := rereadNotInDump(att.dir, want); len(missing) > 0 {
+		return stagedReread{}, rereadMissingError(missing, leftOut)
 	}
 
 	root, err := os.MkdirTemp(s.stagingDir, rereadDirPrefix)
@@ -209,9 +230,12 @@ func (s *baselineSupervisor) stageReread(req console.BaselineRequest, tables []s
 	if _, err := rereadConvert(s.ctx, cfg); err != nil {
 		if errors.Is(err, syscall.ENOSPC) {
 			// The same disk the dump is on, filled a step later (#1938).
-			free, _, _ := measureFree(s.stagingDir)
-			rmErr := os.RemoveAll(att.dir)
-			return fail(&workingFolderFullError{err: fmt.Errorf("convert: %w", err), folder: s.stagingDir, free: free, dumpDir: att.dir, rmErr: rmErr, someTables: true})
+			// Free space that cannot be measured is not "0 B free": the error
+			// keeps its own words, and ENOSPC still reads as a disk failure.
+			if free, ok, _ := measureFree(s.stagingDir); ok {
+				rmErr := os.RemoveAll(att.dir)
+				return fail(&workingFolderFullError{err: fmt.Errorf("convert: %w", err), folder: s.stagingDir, free: free, dumpDir: att.dir, rmErr: rmErr, someTables: true})
+			}
 		}
 		return fail(fmt.Errorf("convert: %w", err))
 	}
@@ -225,14 +249,19 @@ func (s *baselineSupervisor) stageReread(req console.BaselineRequest, tables []s
 		schema, table, _ := strings.Cut(st, ".")
 		p := filepath.Join(folder, schema, table+".parquet")
 		// Lstat, and a regular file: what the fold asks of it.
-		if fi, err := os.Lstat(p); err != nil || !fi.Mode().IsRegular() {
+		fi, err := os.Lstat(p)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			// A file that cannot be looked at is not a table that is gone.
+			return fail(fmt.Errorf("check the staged file of %s: %w", st, err))
+		}
+		if err != nil || !fi.Mode().IsRegular() {
 			missing = append(missing, st)
 			continue
 		}
 		files[st] = p
 	}
 	if len(missing) > 0 {
-		return fail(rereadMissingError(missing))
+		return fail(rereadMissingError(missing, nil))
 	}
 	// To the second, as the folder's name and each file's footer carry it.
 	return stagedReread{files: files, root: root, at: att.startedAt.UTC().Truncate(time.Second)}, nil

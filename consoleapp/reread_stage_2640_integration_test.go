@@ -47,6 +47,12 @@ func TestIntegrationStageReread_realMydumperNames_2640(t *testing.T) {
 	testutil.MustExec(t, db, "CREATE TABLE emptied (id INT PRIMARY KEY, label VARCHAR(20))")
 	testutil.MustExec(t, db, "CREATE TABLE `Órdenes` (id INT PRIMARY KEY, label VARCHAR(20))")
 	testutil.MustExec(t, db, "INSERT INTO `Órdenes` VALUES (1, 'uno')")
+	// A schema with an accent: mydumper makes up its file name too.
+	accentedSchema := name + "_ñ"
+	testutil.MustExec(t, db, "CREATE DATABASE `"+accentedSchema+"`")
+	t.Cleanup(func() { _, _ = db.Exec("DROP DATABASE IF EXISTS `" + accentedSchema + "`") })
+	testutil.MustExec(t, db, "CREATE TABLE `"+accentedSchema+"`.t (id INT PRIMARY KEY, label VARCHAR(20))")
+	testutil.MustExec(t, db, "INSERT INTO `"+accentedSchema+"`.t VALUES (1, 'uno'), (2, 'dos')")
 	// A table that is not asked for: it must not be read.
 	testutil.MustExec(t, db, "CREATE TABLE bystander (id INT PRIMARY KEY)")
 	ddb, err := sql.Open("duckdb", "")
@@ -96,7 +102,7 @@ func TestIntegrationStageReread_realMydumperNames_2640(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			for st, rows := range map[string]int{emptied: 0, accented: 1} {
+			for st, rows := range map[string]int{emptied: 0, accented: 1, accentedSchema + ".t": 2} {
 				one, err := s.stageReread(req, []string{st})
 				if err != nil {
 					t.Fatalf("stageReread(%s): %v", st, err)

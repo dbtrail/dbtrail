@@ -231,6 +231,50 @@ func TestStageReread_theOnlyTableIsGone(t *testing.T) {
 	}
 }
 
+// A table the dump holds under a real name that cannot be a file name: it
+// exists, so the failure gives the reason and does not say it was dropped.
+func TestStageReread_aTableLeftOutIsNotCalledDropped(t *testing.T) {
+	stage := t.TempDir()
+	stubRereadDump(t, func(_ int, c rereadDumpCall) error {
+		writeRereadDump(t, c.dir, []string{"shop.mydumper_0"})
+		body := dumpHeader + "CREATE TABLE `a/b` (\n  `id` int(11) NOT NULL,\n  `label` varchar(30) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB;\n"
+		return os.WriteFile(filepath.Join(c.dir, "shop.mydumper_0-schema.sql"), []byte(body), 0o644)
+	})
+	s := newBaselineSupervisor(context.Background(), stage, baseline.LockModeFTWRL)
+	got, err := s.stageReread(rereadReq(nil), []string{"shop.a/b"})
+	if !errors.Is(err, errRereadTableMissing) || strings.Contains(err.Error(), "dropped") || !strings.Contains(err.Error(), "cannot store") {
+		t.Fatalf("err = %v, want the reason the table was left out", err)
+	}
+	if len(got.files) != 0 {
+		t.Fatalf("files = %v", got.files)
+	}
+	if left := rereadLeft(t, stage); len(left) != 0 {
+		t.Fatalf("the working folder holds %v", left)
+	}
+}
+
+// Free space that cannot be measured is not reported as none: the failure
+// keeps its own words and still reads as a full disk.
+func TestStageReread_aFullDiskThatCannotBeMeasured(t *testing.T) {
+	stage := t.TempDir()
+	stubRereadDump(t, func(_ int, c rereadDumpCall) error { writeRereadDump(t, c.dir, c.tables); return nil })
+	prevDisk, prevConv := diskSpaceFn, rereadConvert
+	t.Cleanup(func() { diskSpaceFn, rereadConvert = prevDisk, prevConv })
+	diskSpaceFn = func(string) (uint64, uint64, error) { return 0, 0, errors.New("statfs failed") }
+	rereadConvert = func(context.Context, baseline.Config) (baseline.Stats, error) {
+		return baseline.Stats{}, fmt.Errorf("write: %w", syscall.ENOSPC)
+	}
+	s := newBaselineSupervisor(context.Background(), stage, baseline.LockModeFTWRL)
+	_, err := s.stageReread(rereadReq(nil), []string{"shop.big"})
+	var full *workingFolderFullError
+	if errors.As(err, &full) || !foldDiskRefused(err) {
+		t.Fatalf("err = %v, want a disk failure with no measured free space", err)
+	}
+	if left := rereadLeft(t, stage); len(left) != 0 {
+		t.Fatalf("the working folder holds %v", left)
+	}
+}
+
 // A table emptied by a TRUNCATE, the usual reason to read one again: mydumper
 // writes its definition and no data file. It is a table with no rows, not a
 // table that is gone.
