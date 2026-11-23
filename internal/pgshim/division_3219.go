@@ -701,7 +701,7 @@ func callClass(name string, args []rtToken, typesOf func(string) []string) exact
 	switch name {
 	case "count":
 		return clsWhole64
-	case "length", "char_length", "octet_length", "position":
+	case "length", "char_length", "octet_length", "position", pgAscii:
 		return clsWhole32
 	case pgDiv, pgAvgN, pgRoundDiv, pgRoundAvg, pgRoundK, pgRoundNeg, pgRoundWhole:
 		return clsDecimal

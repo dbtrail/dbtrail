@@ -30,6 +30,14 @@ func quoteCopyWords(q string) string {
 	var b strings.Builder
 	last, changed := 0, false
 	for i, t := range toks {
+		if t.kind == rtWord && t.text == "ascii" && isOpTok(toks, i+1, "(") && !isOpTok(toks, i-1, ".") {
+			// PostgreSQL's ascii is the copy's macro (mod_ascii_3219.go).
+			b.WriteString(q[last:spans[i][0]])
+			b.WriteString(pgAscii)
+			last = spans[i][1]
+			changed = true
+			continue
+		}
 		if t.kind != rtWord || !copyOwnWords[t.text] || keepCopyWord(toks, i) {
 			continue
 		}

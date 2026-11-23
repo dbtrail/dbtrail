@@ -26,6 +26,21 @@ func screenExactness() []expectation {
 		asReal   = "#3069: PostgreSQL computes a real as a double precision, and sums it as a real"
 	)
 	return []expectation{
+		// --- mod and ascii (#3219): the sign of the dividend, a code point ---
+		stay(`SELECT id, mod(id, 7), mod(qty, 3), mod(-qty, 3), mod(qty, -3) FROM pgcmp_orders ORDER BY id`),
+		stay(`SELECT id, mod(customer_id * qty, 10000) FROM pgcmp_orders ORDER BY id`),
+		stay(`SELECT mod(-7, 3), mod(7, -3), mod(-7, -3), mod(0, 5)`),
+		stay(`SELECT id, mod(amount, 3) FROM pgcmp_orders ORDER BY id`),
+		stay(`SELECT ascii('A'), ascii('a'), ascii(''), ascii('abc')`),
+		stay(`SELECT id, ascii(status), ascii(note) FROM pgcmp_orders ORDER BY id`),
+		eq(`SELECT mod(-7.5, 2), mod(7.25, -3), mod(0.00, 5)`),
+		eq(`SELECT mod(2147483648, 7), mod(9223372036854775807, 10), mod(-9223372036854775807, 10)`),
+		eq(`SELECT id, mod(amount, 3) + 1 FROM pgcmp_orders ORDER BY id`),
+		eq(`SELECT mod(qty, 3), count(*) FROM pgcmp_orders GROUP BY mod(qty, 3) ORDER BY 1`),
+		// PostgreSQL's own errors: a divisor of zero, and no mod of a float.
+		{stmt: `SELECT id, mod(qty, 0) FROM pgcmp_orders WHERE id = 1`, verdict: sqlcompare.SourceError},
+		{stmt: `SELECT id, mod(qty, qty) FROM pgcmp_orders ORDER BY id`, verdict: sqlcompare.SourceError},
+		{stmt: `SELECT mod(ratio, 2) FROM pgcmp_orders WHERE id = 1`, verdict: sqlcompare.SourceError},
 		// --- the main ORDER BY of text (#3219): the copy's, by bytes ----------
 		// Known and accepted: 'Ana, bruno, Carla' on PostgreSQL is 'Ana, Carla,
 		// bruno' here, and a LIMIT then keeps other rows.

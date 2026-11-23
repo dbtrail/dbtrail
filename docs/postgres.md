@@ -1762,7 +1762,9 @@ The source answers:
   PostgreSQL `b`, and a comparison of that cut (`substr(code, 1, 3) = 'b'`)
   can miss the row on the copy; a cut inside the part with data is the same
   on both. `trim`, `position`,
-  `concat`, `abs`, `bool_and`, `string_agg`, `row_number`, `rank`, `lag`, and
+  `concat`, `abs`, `mod(x, n)` of `integer`, `bigint` or `numeric` columns and
+  numbers by a whole number written in the statement (not 0 or -1), `ascii`
+  of text whose first character is below 128, `bool_and`, `string_agg`, `row_number`, `rank`, `lag`, and
   `extract`, `date_part` and `date_trunc` of a year, month or day
   (`date_trunc` of a `timestamp` or a `timestamp with time zone` column,
   written with or without its table: a series by day over a `timestamptz`

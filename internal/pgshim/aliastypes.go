@@ -237,7 +237,7 @@ var definitionStart = map[string]bool{
 // are given: counts, sums, averages, ranks, numbers of a date, roundings,
 // booleans of a group.
 var neverText = map[string]bool{
-	"count": true, "sum": true, "avg": true, "row_number": true, "rank": true, "dense_rank": true,
+	"count": true, "sum": true, "avg": true, pgAscii: true, "row_number": true, "rank": true, "dense_rank": true,
 	"ntile": true, "percent_rank": true, "cume_dist": true, "abs": true, "length": true,
 	"char_length": true, "octet_length": true, "position": true, "extract": true, "date_part": true,
 	"round": true, "floor": true, "ceil": true, "ceiling": true, "trunc": true, "stddev": true,
