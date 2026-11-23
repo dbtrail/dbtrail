@@ -298,6 +298,25 @@ func TestPGTailChain_eightFilesMergeTheNewest(t *testing.T) {
 	}
 }
 
+func TestPGCheapestMerge(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		sizes []int64
+		from  int
+		rows  int64
+	}{
+		{"two files", []int64{5, 7}, 0, 12},
+		{"a big file is left out", []int64{25000, 500, 500, 500, 500, 500, 500, 500}, 1, 3500},
+		{"equal files merge together", []int64{3500, 3500, 3500, 3500, 3500, 3500, 3500, 500}, 0, 25000},
+		{"empty newest files", []int64{100, 0, 0}, 1, 0},
+		{"a tie takes the shorter run", []int64{10, 10, 10}, 1, 20},
+	} {
+		if from, rows := pgCheapestMerge(c.sizes); from != c.from || rows != c.rows {
+			t.Errorf("%s: from %d, %d rows; want from %d, %d rows", c.name, from, rows, c.from, c.rows)
+		}
+	}
+}
+
 // A merge never takes in a file from before a prune: the keys that prune
 // dropped are in no later write, and would be lost with the file.
 func TestPGTailChain_aMergeNeverSpansAPrune(t *testing.T) {

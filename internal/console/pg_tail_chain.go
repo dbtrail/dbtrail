@@ -132,8 +132,8 @@ func (k *tailKeeper) pgPruneKeepingChain(e *tailEntry, t views.BaselineTable, cu
 }
 
 // pgMergeNewest is the write of a chain at tailMaxSegments files: instead of
-// the whole tail, one file replaces the newest files of similar size, so a
-// key is written about log2(files) times and not once per eight writes. It
+// the whole tail, one file replaces the newest files that are cheapest to
+// merge (pgCheapestMerge), so a key is not written again every eight writes. It
 // says whether it took the write (with the write's error, nothing changed on
 // one). Not when the chain is not this cut's, when its files are mostly
 // overridden rows (the whole write is what shrinks them), or when fewer than
@@ -153,12 +153,12 @@ func (k *tailKeeper) pgMergeNewest(e *tailEntry, path string) (bool, error) {
 			return false, nil
 		}
 	}
-	from := len(e.segs) - 2
-	rows := e.segHigh[e.segs[from]].rows + e.segHigh[e.segs[from+1]].rows
-	for from > e.pgPruned && e.segHigh[e.segs[from-1]].rows <= 2*rows {
-		from--
-		rows += e.segHigh[e.segs[from]].rows
+	sizes := make([]int64, len(e.segs)-e.pgPruned)
+	for i, p := range e.segs[e.pgPruned:] {
+		sizes[i] = e.segHigh[p].rows
 	}
+	first, rows := pgCheapestMerge(sizes)
+	from := e.pgPruned + first
 	var after uint64
 	if from > 0 {
 		s, known := e.segHigh[e.segs[from-1]]
@@ -182,4 +182,24 @@ func (k *tailKeeper) pgMergeNewest(e *tailEntry, path string) (bool, error) {
 	e.dirty = false
 	k.pgNoteSegment(e, path, n)
 	return true, nil
+}
+
+// pgCheapestMerge picks which newest files to merge, given the rows of each,
+// oldest first (at least two): the run ending at the newest file that costs
+// the fewest rows per file it takes off the chain, and those rows. A big old
+// file is then rewritten only once the small ones after it have grown to its
+// size, which is what makes a key's writes grow with the logarithm of the
+// files and not with their number. On a tie, the shorter run.
+func pgCheapestMerge(sizes []int64) (from int, rows int64) {
+	n := len(sizes)
+	from, rows = n-2, sizes[n-2]+sizes[n-1]
+	sum := rows
+	for i := n - 3; i >= 0; i-- {
+		sum += sizes[i]
+		// sum/(n-i-1) < rows/(n-from-1), without dividing.
+		if sum*int64(n-from-1) < rows*int64(n-i-1) {
+			from, rows = i, sum
+		}
+	}
+	return from, rows
 }
