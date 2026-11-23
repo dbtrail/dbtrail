@@ -1146,7 +1146,10 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 	// position or an alias in ORDER BY can stand for: a text column or
 	// literal, a parameter, or an expression that makes text of anything.
 	anyText := false
-	for _, t := range toks {
+	for j, t := range toks {
+		if fieldName(toks, j) {
+			continue
+		}
 		if textish(t) || t.kind == rtParam || t.kind == rtOp && t.text == "||" || t.kind == rtWord && textMakers[t.text] {
 			anyText = true
 			break
@@ -1229,6 +1232,9 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 			// A qualified name (t.col) is its column, and a key of one
 			// column is judged as one: an alias of a WITH may be text.
 			if t.kind == rtWord && isOpTok(key, j+1, ".") || isOpTok(key, j, ".") && j > 0 && key[j-1].kind == rtWord {
+				continue
+			}
+			if fieldName(key, j) {
 				continue
 			}
 			core = append(core, t)
@@ -1626,6 +1632,14 @@ func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, fa
 		return
 	}
 	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed})
+}
+
+// fieldName reports whether the token at j is the field a date_trunc or a
+// date_part is taken with ('day' in date_trunc('day', x)): a word of the
+// call, not a text value of the statement (#3219).
+func fieldName(toks []rtToken, j int) bool {
+	return toks[j].kind == rtString && isOpTok(toks, j-1, "(") && j >= 2 && toks[j-2].kind == rtWord &&
+		(toks[j-2].text == "date_trunc" || toks[j-2].text == "date_part") && !isOpTok(toks, j-3, ".")
 }
 
 // compareOps compare two values.

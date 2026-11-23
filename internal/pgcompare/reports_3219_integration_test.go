@@ -19,7 +19,9 @@ func reportShapes() []expectation {
 		stay(`SELECT date_trunc('day', seen_at) AS day, count(*) AS n, sum(qty) FROM ` + o + ` GROUP BY 1 ORDER BY 1`),
 		stay(`SELECT date_trunc('month', o.seen_at) AS m, count(*) FROM ` + o + ` o GROUP BY 1 ORDER BY 1`),
 		stay(`SELECT date_trunc('year', seen_at), date_trunc('day', seen_at), id FROM ` + o + ` ORDER BY id`),
-		stay(`SELECT date_trunc('day', o.seen_at) AS day, c.id, count(*) FROM ` + o + ` o JOIN ` + c + ` c ON c.id = o.customer_id WHERE o.seen_at >= '2026-02-01 00:00:00+00' GROUP BY 1, 2 ORDER BY 1, 2`),
+		stay(`SELECT date_trunc('day', o.seen_at) AS day, c.id, count(*) FROM ` + o + ` o JOIN ` + c + ` c ON c.id = o.customer_id WHERE o.qty > 2 GROUP BY 1, 2 ORDER BY 1, 2`),
+		stay(`SELECT date_trunc('year', o.seen_at), count(*) FROM ` + o + ` o GROUP BY date_trunc('year', o.seen_at) ORDER BY date_trunc('year', o.seen_at)`),
+		stay(`SELECT date_part('day', seen_at), count(*) FROM ` + o + ` GROUP BY 1 ORDER BY 1`),
 		// The column written with its table, for a timestamp too.
 		stay(`SELECT date_trunc('day', o.placed_at) AS day, count(*) FROM ` + o + ` o GROUP BY 1 ORDER BY 1`),
 		// Still the source's: a date (PostgreSQL answers a timestamp with

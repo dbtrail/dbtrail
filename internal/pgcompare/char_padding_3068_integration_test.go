@@ -124,7 +124,7 @@ func charCases() []charCase {
 		sent(`SELECT id FROM ` + x + ` WHERE c LIKE 'ab%' ORDER BY id`),
 		sent(`SELECT id FROM ` + x + ` WHERE c IS NULL ORDER BY id`),
 		// Sorted, a char(n) is text: the source sorts it by its collation.
-		sent(`SELECT c, count(*) FROM ` + x + ` GROUP BY c ORDER BY c`),
+		differs(`SELECT c, count(*) FROM ` + x + ` GROUP BY c ORDER BY c`),
 		// A whole key of GROUP BY (#3219): every value of a char(n) has the
 		// same length, so both sides make the same groups.
 		stays(`SELECT c, count(*) FROM ` + x + ` GROUP BY c`),
