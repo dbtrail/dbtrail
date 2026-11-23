@@ -246,7 +246,7 @@ func (s *session) columnTypes(stmt string) (types map[string][]string, unread bo
 	if perr != nil {
 		return nil, true
 	}
-	types = screenTypes(v.tables, tablesRead(stmt, v.tables))
+	types = withColumnOrder(screenTypes(v.tables, tablesRead(stmt, v.tables)), v.tables)
 	if s.argsBound {
 		types[starUnprovenKey] = []string{relType}
 	}
@@ -1096,7 +1096,11 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 			return why
 		}
 	}
-	types = withAliasTypes(in, types)
+	// A position of ORDER BY may be a text column that a * put there, which
+	// nothing in the statement names (star_position.go). Not asked without
+	// the columns' own types.
+	starText := !untyped && starMayBeText(in, types)
+	types = withAliasTypes(in, types, untyped)
 	// A typed literal (DATE '...', '...'::date) is one value, never text:
 	// its string is folded into one token.
 	toks := make([]rtToken, 0, len(in))
@@ -1163,7 +1167,11 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 	// position or an alias in ORDER BY can stand for: a text column or
 	// literal, a parameter, or an expression that makes text of anything.
 	anyText := false
-	for _, t := range toks {
+	for j, t := range toks {
+		if orderModifier(toks, j) {
+			// NULLS LAST is no column, whatever a table names its columns.
+			continue
+		}
 		if textish(t) || t.kind == rtParam || t.kind == rtOp && t.text == "||" || t.kind == rtWord && textMakers[t.text] {
 			anyText = true
 			break
@@ -1238,11 +1246,28 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 	}
 	// sortKeyText reports whether an ORDER BY key may sort text.
 	sortKeyText := func(key []rtToken) bool {
+		// ASC, DESC and NULLS FIRST or LAST are taken off the end of a key,
+		// and only there, after something: a column may be named first or
+		// last (ORDER BY last), and is then the key itself.
+		keyWord := func(j int, words ...string) bool {
+			if j < 0 || j >= len(key) || key[j].kind != rtWord {
+				return false
+			}
+			for _, w := range words {
+				if key[j].text == w {
+					return true
+				}
+			}
+			return false
+		}
+		if n := len(key); n >= 3 && keyWord(n-2, "nulls") && keyWord(n-1, "first", "last") {
+			key = key[:n-2]
+		}
+		if n := len(key); n >= 2 && keyWord(n-1, "asc", "desc") {
+			key = key[:n-1]
+		}
 		var core []rtToken
 		for j, t := range key {
-			if t.kind == rtWord && (t.text == "asc" || t.text == "desc" || t.text == "nulls" || t.text == "first" || t.text == "last") {
-				continue
-			}
 			// A qualified name (t.col) is its column, and a key of one
 			// column is judged as one: an alias of a WITH may be text.
 			if t.kind == rtWord && isOpTok(key, j+1, ".") || isOpTok(key, j, ".") && j > 0 && key[j-1].kind == rtWord {
@@ -1250,13 +1275,29 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 			}
 			core = append(core, t)
 		}
+		if len(core) == 0 {
+			// A key the screen read nothing of (a column named like a word
+			// that ends the list of keys: rows, range, groups): not known
+			// not to be text.
+			return true
+		}
 		for _, t := range core {
 			if textish(t) || t.kind == rtParam || t.kind == rtOp && t.text == "||" || t.kind == rtWord && textMakers[t.text] {
 				return true
 			}
 		}
-		if len(core) == 1 && (core[0].kind == rtNumber || unknownWord(core[0])) {
-			// A position or an alias: it may be any column of the answer.
+		// A position, written with parentheses or without (PostgreSQL reads
+		// ORDER BY (2) as ORDER BY 2): it may be any column of the answer,
+		// one a * stands for included.
+		inner := core
+		for len(inner) >= 3 && isOpTok(inner, 0, "(") && isOpTok(inner, len(inner)-1, ")") {
+			inner = inner[1 : len(inner)-1]
+		}
+		if len(inner) == 1 && inner[0].kind == rtNumber {
+			return anyText || starText
+		}
+		if len(core) == 1 && unknownWord(core[0]) {
+			// An alias: it may be any column of the answer.
 			return anyText
 		}
 		for _, t := range core {
@@ -1369,8 +1410,10 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 		case rtNumber:
 			return !strings.ContainsAny(t.text, ".eE")
 		case rtWord:
+			// A name that only may be text (maybeTextType) is not known to
+			// write the same on both sides: it may be a float.
 			return all(t.text, func(ty string) bool {
-				return typeIsText(ty) || typeIsInteger(ty) || ty == "DATE"
+				return ty != maybeTextType && (typeIsText(ty) || typeIsInteger(ty) || ty == "DATE")
 			})
 		}
 		return false
@@ -1668,6 +1711,33 @@ func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, fa
 	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed})
 }
 
+// orderModifier reports whether the token at j is a word that says how a
+// key is sorted, not a name: ASC, DESC, NULLS before FIRST or LAST, and
+// FIRST or LAST after NULLS. A copy with a text column named last would
+// otherwise make every ORDER BY ... NULLS LAST read as holding text.
+func orderModifier(toks []rtToken, j int) bool {
+	word := func(k int, words ...string) bool {
+		if k < 0 || k >= len(toks) || toks[k].kind != rtWord {
+			return false
+		}
+		for _, w := range words {
+			if toks[k].text == w {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case word(j, "asc", "desc"):
+		return true
+	case word(j, "nulls"):
+		return word(j+1, "first", "last")
+	case word(j, "first", "last"):
+		return word(j-1, "nulls")
+	}
+	return false
+}
+
 // compareOps compare two values.
 var compareOps = map[string]bool{"=": true, "<>": true, "!=": true, "<": true, ">": true, "<=": true, ">=": true}
 
@@ -1720,7 +1790,11 @@ var aliasStop = map[string]bool{
 func aliases(toks []rtToken) (names map[string]bool, at map[int]bool) {
 	names, at = map[string]bool{}, map[int]bool{}
 	for i, t := range toks {
-		if t.kind != rtWord || aliasStop[t.text] || i == 0 {
+		// A quoted alias is one too (AS "amount"): written in small
+		// letters it is the same name as amount. One with capitals is
+		// another name on PostgreSQL, and the screen sends it to the source.
+		quoted := t.kind == rtQuoted && strings.ToLower(t.text) == t.text
+		if !quoted && (t.kind != rtWord || aliasStop[t.text]) || i == 0 {
 			continue
 		}
 		prev := toks[i-1]

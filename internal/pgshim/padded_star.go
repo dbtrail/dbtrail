@@ -32,7 +32,7 @@ const listedKey = relKey + relKey
 // over char(n) is recorded under the domain's own type, so it carries no mark:
 // paddedUse's veto of the star is then all that keeps such a column from the
 // copy, and no star is exempted.
-const starUnprovenKey = listedKey + relKey
+const starUnprovenKey = listedKey + listedKey
 
 // firstUserOID is the first OID PostgreSQL gives an object made after initdb.
 const firstUserOID = 16384

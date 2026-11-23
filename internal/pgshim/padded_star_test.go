@@ -8,9 +8,9 @@ import (
 // A star that stands for a char(n) column vetoes only if the statement can
 // read that column; anything the analysis cannot follow keeps the veto.
 
-// starCatalog is paddedCatalog with every column of codes of a built-in type:
+// paddedStarCatalog is paddedCatalog with every column of codes of a built-in type:
 // its enum column alone would keep every star over codes on the source.
-func starCatalog() []CatalogTable {
+func paddedStarCatalog() []CatalogTable {
 	tables := paddedCatalog()
 	var cols []CatalogColumn
 	for _, c := range tables[0].Columns {
@@ -22,7 +22,7 @@ func starCatalog() []CatalogTable {
 	return tables
 }
 
-func starScreen(stmt string) string { return CopyScreenFor(stmt, starCatalog()) }
+func paddedStarScreen(stmt string) string { return CopyScreenFor(stmt, paddedStarCatalog()) }
 
 func TestPaddedStar_leftToTheCopy(t *testing.T) {
 	for _, q := range []string{
@@ -41,11 +41,10 @@ func TestPaddedStar_leftToTheCopy(t *testing.T) {
 		// A star over columns none of which is a char(n).
 		`WITH x AS (SELECT id, k FROM codes) SELECT * FROM x`,
 		`WITH x AS (SELECT id, k FROM codes), y AS (SELECT x.*, row_number() OVER (ORDER BY x.k) AS r FROM x) SELECT y.id, y.r FROM y`,
-		`SELECT * FROM (SELECT id, k FROM codes) s ORDER BY 1`,
 		`SELECT DISTINCT s.* FROM (SELECT id, k FROM codes) s`,
 		`SELECT * FROM plain WHERE id IN (SELECT id FROM codes)`,
 	} {
-		if veto := starScreen(q); veto != "" {
+		if veto := paddedStarScreen(q); veto != "" {
 			t.Errorf("%s: sent to the source (%s), want the copy", q, veto)
 		}
 	}
@@ -159,7 +158,7 @@ func TestPaddedStar_toTheSource(t *testing.T) {
 		// Pinned by #3068, without a WITH.
 		`SELECT code FROM codes WHERE id IN (SELECT id FROM plain)`,
 	} {
-		if veto := starScreen(q); !isPaddedVeto(veto) {
+		if veto := paddedStarScreen(q); !isPaddedVeto(veto) {
 			t.Errorf("%s: %q, want it sent to the source for its padded column", q, veto)
 		}
 	}
@@ -170,7 +169,7 @@ func TestPaddedStar_toTheSource(t *testing.T) {
 func TestPaddedStar_aDottedKeyword(t *testing.T) {
 	for _, w := range []string{"where", "group", "having", "order", "limit", "offset", "window", "fetch", "for", "from", "distinct", "on", "join", "left", "cross"} {
 		q := `WITH x AS (SELECT * FROM plain u JOIN plain v ON u.` + w + ` = v.id JOIN codes t ON t.k = u.id) SELECT count(*) FROM x`
-		if veto := starScreen(q); !isPaddedVeto(veto) {
+		if veto := paddedStarScreen(q); !isPaddedVeto(veto) {
 			t.Errorf("%s: %q, want it sent to the source", q, veto)
 		}
 	}
@@ -182,7 +181,7 @@ func TestPaddedStar_aKeywordAsLabel(t *testing.T) {
 	// Such a statement is not read whole, so every table counts as read:
 	// without the table of unrecorded types, only the label's rule refuses it.
 	var tables []CatalogTable
-	for _, tb := range starCatalog() {
+	for _, tb := range paddedStarCatalog() {
 		if tb.Name != "legacy" {
 			tables = append(tables, tb)
 		}
@@ -200,13 +199,41 @@ func TestPaddedStar_aKeywordAsLabel(t *testing.T) {
 	}
 }
 
+// A star left to the copy still meets the rule on sorted text: the padded
+// screen passing it says nothing of how its text is ordered.
+func TestPaddedStar_sortedTextStaysOnTheSource(t *testing.T) {
+	tables := paddedStarCatalog()
+	screen := func(q string) string {
+		return CopyScreen(q, withColumnOrder(screenTypes(tables, tablesRead(RewriteForCopy(q), tables)), tables))
+	}
+	for _, q := range []string{
+		`SELECT * FROM (SELECT id, label FROM codes) s ORDER BY 2`,
+		`SELECT * FROM (SELECT id, label FROM codes) s ORDER BY (2) DESC NULLS LAST`,
+		`SELECT * FROM (SELECT id, label AS n FROM codes) s ORDER BY n`,
+		`SELECT * FROM (SELECT id, n FROM (SELECT id, label AS n FROM codes) a) s ORDER BY n`,
+		`WITH x AS (SELECT * FROM codes) SELECT id, label FROM x ORDER BY 2`,
+		`WITH x AS (SELECT * FROM codes) SELECT id, label FROM x ORDER BY label`,
+		`WITH x AS (SELECT id, label FROM codes) SELECT * FROM x ORDER BY 2`,
+		`SELECT count(*) FROM (SELECT * FROM codes ORDER BY 2) s`,
+		`SELECT id FROM codes WHERE EXISTS (SELECT * FROM plain ORDER BY 2)`,
+	} {
+		if veto := screen(q); veto == "" {
+			t.Errorf("%s: left to the copy, which sorts text by bytes", q)
+		}
+	}
+	// A position over whole numbers is no text.
+	if q := `SELECT * FROM (SELECT id, k FROM codes) s ORDER BY 1`; screen(q) != "" {
+		t.Errorf("%s: sent to the source (%s), want the copy", q, screen(q))
+	}
+}
+
 // An argument's declared type is not in the text.
 func TestPaddedStar_anArgument(t *testing.T) {
 	for _, q := range []string{
 		`SELECT s.id FROM (SELECT * FROM codes) s WHERE s.label = $1`,
 		`WITH x AS (SELECT * FROM codes) SELECT id FROM x WHERE id = $1`,
 	} {
-		if veto := starScreen(q); !isPaddedVeto(veto) {
+		if veto := paddedStarScreen(q); !isPaddedVeto(veto) {
 			t.Errorf("%s: %q, want it sent to the source", q, veto)
 		}
 	}
@@ -218,7 +245,7 @@ func TestPaddedStar_anArgument(t *testing.T) {
 func TestPaddedStar_aTypeNotProven(t *testing.T) {
 	const domain = 16500
 	base := func(extra CatalogColumn) []CatalogTable {
-		return append(starCatalog(), CatalogTable{Schema: "public", Name: "dom", Columns: []CatalogColumn{
+		return append(paddedStarCatalog(), CatalogTable{Schema: "public", Name: "dom", Columns: []CatalogColumn{
 			{Name: "id", Type: "INTEGER", SourceType: oidInt4, SourceTypeMod: -1},
 			{Name: "other", Type: "VARCHAR", SourceType: oidBpchar, SourceTypeMod: 6},
 			extra,

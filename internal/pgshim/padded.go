@@ -555,6 +555,12 @@ func (s *session) paddedVeto(text string) string {
 		veto = paddedInText(text, types)
 	default:
 		veto = paddedUse(toks, types)
+		// A star this leaves to a connection with no source to fall back on
+		// passes the whole screen too: it was refused before, and the copy
+		// must not now answer it with text sorted its own way.
+		if padded, _ := paddedAmong(types); veto == "" && padded && !s.canFallBack() && len(paddedExempt(toks, types)) > 0 {
+			veto = screenForCopy(toks, types)
+		}
 	}
 	if veto != "" {
 		if unread {
