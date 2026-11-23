@@ -117,8 +117,14 @@ var selectListEnd = map[string]bool{
 // When they cannot be read now (a busy copy), the last ones this connection
 // read stand in, so the same sum is not a bigint in one answer and a numeric
 // in the next.
+//
+// For a prepared statement (session.screened), a sum is cast only when the
+// statement as the client wrote it is a sum of whole numbers. Its arguments
+// are written into text as bare numbers, whatever their declared type: a
+// bigint 5 reads as an integer there, and a cast to bigint would refuse a
+// total that PostgreSQL's numeric holds.
 func (s *session) asPostgresTypes(text string) string {
-	return asPostgresTypes(text, func() map[string][]string {
+	return asPostgresTypesOf(text, s.screened, func() map[string][]string {
 		busy := s.catalogBusy
 		types, unread := s.columnTypes(text)
 		s.catalogBusy = busy
@@ -138,16 +144,16 @@ func (s *session) asPostgresTypes(text string) string {
 // column types by lowercased name (CopyScreen's); nil when not known, and
 // then no sum of a column is decided. For internal/pgcompare.
 func AsPostgresTypes(stmt string, types map[string][]string) string {
-	return asPostgresTypes(stmt, func() map[string][]string { return types })
+	return asPostgresTypesOf(stmt, "", func() map[string][]string { return types })
 }
 
-func asPostgresTypes(stmt string, types func() map[string][]string) string {
+func asPostgresTypesOf(stmt, screened string, types func() map[string][]string) string {
 	if len(stmt) > maxStatementMessage {
 		return stmt
 	}
 	if body, ok := strings.CutPrefix(stmt, describeHead); ok {
 		if body, ok = strings.CutSuffix(body, describeTail); ok {
-			return describeHead + asPostgresTypes(body, types) + describeTail
+			return describeHead + asPostgresTypesOf(body, screened, types) + describeTail
 		}
 	}
 	toks, spans, why := lexSQLSpans(stmt)
@@ -162,6 +168,9 @@ func asPostgresTypes(stmt string, types func() map[string][]string) string {
 		off: map[string]bool{}, steps: 16*len(toks) + 4096,
 	}
 	r.leftAsWritten()
+	if screened != "" {
+		r.holdSumsTo(screened)
+	}
 	out := r.render(0, len(toks))
 	if r.over || !r.changed {
 		return stmt
@@ -188,6 +197,9 @@ type typeRewrite struct {
 	// off are the functions of the table left as written at every call in
 	// the statement (leftAsWritten).
 	off map[string]bool
+	// sumOK, when not nil, are the sums that may be cast, by the token their
+	// name is at (holdSumsTo).
+	sumOK map[int]bool
 	// inSum: the argument of a sum is being written, which is written twice.
 	inSum bool
 	depth int
@@ -402,7 +414,7 @@ func (r *typeRewrite) castAt(i, to int) (string, int) {
 			set = strings.ToUpper(toks[arg].text) + " "
 			arg++
 		}
-		if closeAt-arg > maxSumArgument {
+		if closeAt-arg > maxSumArgument || r.sumOK != nil && !r.sumOK[i] {
 			return "", -1
 		}
 		if t := wholeType(toks[arg:closeAt], r.columnTypes); t != "int2" && t != "int4" {
@@ -438,6 +450,54 @@ func (r *typeRewrite) castAt(i, to int) (string, int) {
 		return "", -1
 	}
 	return out, end
+}
+
+// sumCalls are the tokens at which a call of sum starts.
+func sumCalls(toks []rtToken) []int {
+	var at []int
+	for i, t := range toks {
+		if t.kind == rtWord && t.text == "sum" && isOpTok(toks, i+1, "(") && !isOpTok(toks, i-1, ".") {
+			at = append(at, i)
+		}
+	}
+	return at
+}
+
+// holdSumsTo lets a sum be cast only when the same call in screened, the
+// statement with its $n still in it, is surely of smallints or integers. A
+// $n has no type there, so a sum whose value comes from one keeps the
+// engine's type. When the two texts' sums cannot be paired, none is cast.
+func (r *typeRewrite) holdSumsTo(screened string) {
+	r.sumOK = map[int]bool{}
+	here := sumCalls(r.toks)
+	if len(here) == 0 {
+		return
+	}
+	toks, why := lexSQL(RewriteForCopy(screened))
+	if why != "" {
+		return
+	}
+	there := sumCalls(toks)
+	if len(there) != len(here) {
+		return
+	}
+	match := matchParens(toks)
+	for k, at := range there {
+		closeAt := match[at+1]
+		if closeAt < 0 {
+			return
+		}
+		arg := at + 2
+		if arg < closeAt && toks[arg].kind == rtWord && (toks[arg].text == "distinct" || toks[arg].text == "all") {
+			arg++
+		}
+		if closeAt-arg > maxSumArgument {
+			continue
+		}
+		if t := wholeType(toks[arg:closeAt], r.columnTypes); t == "int2" || t == "int4" {
+			r.sumOK[here[k]] = true
+		}
+	}
 }
 
 // columnTypes are the types of the columns a sum's argument may name: the

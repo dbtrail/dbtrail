@@ -608,13 +608,13 @@ func (s *session) describeWith(st *preparedStatement, untyped string) (cols []sq
 		}
 		return nil, nil, s.paddedError(veto)
 	}
-	// On lines of their own: a statement that ends in a -- comment must not
-	// comment out the closing parenthesis.
 	// Held to the statement as the screen read it, as its portals are
 	// (copyText): a typed NULL inside a round() makes it one the port leaves
 	// as written, whose type is the engine's and not PostgreSQL's. The source
 	// describes such a statement, and answers it.
 	s.screened = st.query
+	// On lines of their own (describeHead, describeTail): a statement that
+	// ends in a -- comment must not comment out the closing parenthesis.
 	cols, err = s.columnsOf(describeHead + body + describeTail)
 	s.screened = ""
 	return cols, nil, err

@@ -296,3 +296,65 @@ func TestAsPostgresTypes_bounded(t *testing.T) {
 		t.Errorf("%d calls one inside another: %d casts", maxCastDepth-1, strings.Count(got, "AS INTEGER"))
 	}
 }
+
+// The screen's types hold more than columns since #3237: a table's column
+// order under a key no statement can write, and a mark on names that only
+// may be text. Neither is a whole number to a sum.
+func TestWholeType_screenMarks(t *testing.T) {
+	types := map[string][]string{
+		colsKey + "t": {"INTEGER", "INTEGER"},
+		relKey + "t":  {relType},
+		"maybe":       {maybeTextType},
+		"mixed":       {"INTEGER", maybeTextType},
+		"qty":         {"INTEGER"},
+	}
+	read := func() map[string][]string { return types }
+	for expr, want := range map[string]string{
+		"maybe": "", "mixed": "", "t": "", "t.maybe": "", "maybe + 1": "", "qty": "int4",
+	} {
+		toks, why := lexSQL(expr)
+		if why != "" {
+			t.Fatalf("%s: %s", expr, why)
+		}
+		if got := wholeType(toks, read); got != want {
+			t.Errorf("wholeType(%s) = %q, want %q", expr, got, want)
+		}
+	}
+	for _, key := range []string{colsKey + "t", relKey + "t"} {
+		if got := operandType([]rtToken{{kind: rtWord, text: key}}, func() map[string][]string {
+			return map[string][]string{key: {relType}}
+		}); got != "" {
+			t.Errorf("operandType(%q) = %q, want none", key, got)
+		}
+	}
+}
+
+// A prepared statement's sum is decided on the text with its $n: the number
+// written in its place says nothing of the argument's declared type.
+func TestAsPostgresTypes_heldToTheStatement(t *testing.T) {
+	types := func() map[string][]string { return map[string][]string{"qty": {"INTEGER"}, "amount": {"DECIMAL(12,2)"}} }
+	for _, tc := range []struct {
+		name, screened, filled string
+		casts                  int
+	}{
+		{"argument outside the sum", "SELECT sum(qty) FROM t WHERE id < $1", "SELECT sum(qty) FROM t WHERE id <  9 ", 1},
+		{"argument in the condition of a CASE", "SELECT sum(CASE WHEN qty > $1 THEN 1 ELSE 0 END) FROM t", "SELECT sum(CASE WHEN qty >  2  THEN 1 ELSE 0 END) FROM t", 1},
+		{"argument with a cast", "SELECT sum(qty + $1::int) FROM t", "SELECT sum(qty +  5 ::int) FROM t", 1},
+		{"argument in the value", "SELECT sum(qty + $1) FROM t", "SELECT sum(qty +  5 ) FROM t", 0},
+		{"the argument is the value", "SELECT sum($1) FROM t", "SELECT sum( 5 ) FROM t", 0},
+		{"one of two sums", "SELECT sum(qty), sum(qty + $1) FROM t", "SELECT sum(qty), sum(qty +  5 ) FROM t", 1},
+		{"a string that spells a sum", "SELECT sum(qty), $1 FROM t", "SELECT sum(qty),  'sum(1)'  FROM t", 1},
+		{"statement unlike its text", "SELECT sum(qty) FROM t", "SELECT sum(qty), sum(qty) FROM t", 0},
+	} {
+		for _, wrap := range []bool{false, true} {
+			filled := tc.filled
+			if wrap {
+				filled = describeHead + filled + describeTail
+			}
+			got := asPostgresTypesOf(filled, tc.screened, types)
+			if n := strings.Count(got, "AS BIGINT)"); n != tc.casts {
+				t.Errorf("%s (in a Describe: %v): %d casts, want %d: %s", tc.name, wrap, n, tc.casts, got)
+			}
+		}
+	}
+}
