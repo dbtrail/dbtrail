@@ -502,7 +502,7 @@ func (c hangingConn) QueryContext(ctx context.Context, q string, _ []driver.Name
 	c.d.mu.Unlock()
 	switch {
 	case strings.Contains(q, "information_schema.PARTITIONS"):
-		return noRows{"PARTITION_NAME", "PARTITION_DESCRIPTION"}, nil
+		return emptyIndexRows{"PARTITION_NAME", "PARTITION_DESCRIPTION"}, nil
 	case !strings.Contains(q, "binlog_events"):
 		return nil, errors.New("this index server holds nothing but events")
 	}
@@ -522,12 +522,12 @@ func (c hangingConn) QueryContext(ctx context.Context, q string, _ []driver.Name
 	}
 }
 
-// noRows is an empty result with these columns.
-type noRows []string
+// emptyIndexRows is an empty result with these columns.
+type emptyIndexRows []string
 
-func (r noRows) Columns() []string         { return r }
-func (r noRows) Close() error              { return nil }
-func (r noRows) Next([]driver.Value) error { return io.EOF }
+func (r emptyIndexRows) Columns() []string         { return r }
+func (r emptyIndexRows) Close() error              { return nil }
+func (r emptyIndexRows) Next([]driver.Value) error { return io.EOF }
 
 // A client that hangs up in the middle of a statement, in the first mode:
 // the socket is watched while the statement runs (shim.WatchConn), so the
