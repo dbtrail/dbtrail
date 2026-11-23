@@ -2070,6 +2070,11 @@ address asks for no password: whoever reaches it reads the counts, and with
 `--status-statements` the names of the tables and columns your clients query.
 `/metrics` on the same address is this process's Prometheus metrics.
 
+An address that cannot be opened (something else is listening there) does not
+stop the router: it prints a `WARNING` at start-up, writes it to its log, and
+serves the PostgreSQL port without `/status` and `/metrics`. Free the address
+or set another, then restart the router.
+
 The reasons, with the MySQL port's names where they mean the same:
 
 | Side | Reason | Why |

@@ -544,17 +544,35 @@ func runPGRouter(cmd *cobra.Command, _ []string) error {
 	// One line a minute per server in this service's log (pgrouter_statuslog.go).
 	startPGPortStatusLog(ctx, func() map[string]pgRouterServerNumbers { return routes.doc(st.Listen).Servers }, srv.ServerName)
 	if st.StatusAddr != "" {
-		stopStatus, err := streamrun.StartMetricsServerWith(st.StatusAddr, map[string]http.Handler{
+		defer startPGRouterStatus(st.StatusAddr, map[string]http.Handler{
 			"GET " + routerStatusPath: pgRouterStatusHandler(routes, st.Listen),
-		})
-		if err != nil {
-			return fmt.Errorf("the PostgreSQL router cannot serve its status on %s: %w", st.StatusAddr, err)
-		}
-		defer stopStatus()
+		}, os.Stderr)()
 	}
 	port := &pgRouterPort{srv: srv, addr: st.Listen, maxConns: st.MaxConns, poll: console.DefaultFollowInterval, out: os.Stderr, tls: served.Config,
 		sources: newPGSourceSlots(st.MaxSourceConns), routes: routes, cost: &st.Cost}
 	return port.serve(ctx)
+}
+
+// pgRouterStatusOffLine says that the router's status could not be served on
+// addr, and that the PostgreSQL port is served all the same.
+func pgRouterStatusOffLine(addr string, err error) string {
+	return fmt.Sprintf("WARNING: the PostgreSQL router's status and metrics are OFF: %s could not be opened (%v). The PostgreSQL port is served without them, and the web interface cannot say which mode the router answers each server in. Free that address or set another (BINTRAIL_PG_ROUTER_STATUS_ADDR or --status-addr, and the same in BINTRAIL_CONSOLE_PG_ROUTER_URL where the web interface runs), then restart the router.\n", addr, err)
+}
+
+// startPGRouterStatus serves the router's status on addr and returns what
+// stops it. An address that cannot be opened is said on out and in the log,
+// and is not a reason to leave the PostgreSQL port closed (#3119): the
+// status is an extra, and its address may simply be taken. The MySQL router
+// does the same with its numbers.
+func startPGRouterStatus(addr string, handlers map[string]http.Handler, out io.Writer) (stop func()) {
+	stop, err := streamrun.StartMetricsServerWith(addr, handlers)
+	if err != nil {
+		fmt.Fprint(out, pgRouterStatusOffLine(addr, err))
+		// In the log as well: the startup lines are plain text on stderr.
+		slog.Warn("PostgreSQL router: its status and metrics are off, the address could not be opened; the port is served without them", "addr", addr, "error", err)
+		return func() {}
+	}
+	return stop
 }
 
 // newPGRouterConsole is newRouterConsole for the PostgreSQL router: the same
