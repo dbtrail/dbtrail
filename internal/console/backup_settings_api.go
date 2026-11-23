@@ -257,6 +257,17 @@ type backupSettingsServerDTO struct {
 	// back" line multiplies the count by it: the schedule alone would promise
 	// days where an hourly refresh leaves hours.
 	SnapshotEveryMinutes int `json:"snapshot_every_minutes,omitempty"`
+	// UnboundedFolderBytes is what this server's folder takes on disk, set
+	// only where this process runs the cleanup and no cleanup reaches the
+	// folder (#2475). Absent while it is unmeasured or cannot be measured.
+	UnboundedFolderBytes uint64 `json:"unbounded_folder_bytes,omitempty"`
+}
+
+// unboundedFolderDTO is the daemon's own folder when no cleanup reaches it and
+// no server row already reports it (#2475).
+type unboundedFolderDTO struct {
+	Dir   string `json:"dir"`
+	Bytes uint64 `json:"bytes"`
 }
 
 // The verdicts a server's backup location can have. The page DRAWS them
@@ -286,6 +297,9 @@ type backupSettingsDTO struct {
 	// this machine" saves depends on it, so the page can only promise the
 	// saving where this is true.
 	ReuseUnchanged bool `json:"reuse_unchanged"`
+	// UnboundedDaemonFolder is the --baseline-dir folder when nothing limits
+	// it and no server row below names it.
+	UnboundedDaemonFolder *unboundedFolderDTO `json:"unbounded_daemon_folder,omitempty"`
 }
 
 // lockModeRowErr appends the operational consequence to a lock-mode
@@ -340,7 +354,42 @@ func (s *Server) handleBackupSettingsGet(w http.ResponseWriter, r *http.Request)
 			dto.Servers = append(dto.Servers, s.backupSettingsServerDTO(e))
 		}
 	}
+	read := s.fillFolderSizes(dto.Servers, s.cm.defaultBaselineDir)
+	dto.UnboundedDaemonFolder = unboundedDaemonFolder(s.cm.defaultBaselineDir, dto.Servers, read)
 	writeJSON(w, http.StatusOK, dto)
+}
+
+// fillFolderSizes sets what each row's folder holds, where no cleanup reaches
+// it, from the measurements in the background: nothing here touches a folder.
+// One deadline covers the rows and the extra folders together.
+func (s *Server) fillFolderSizes(rows []backupSettingsServerDTO, extra ...string) map[string]folderReading {
+	dirs := append([]string{}, extra...)
+	for _, r := range rows {
+		dirs = append(dirs, r.BaselineDir)
+	}
+	read := s.folderUsage.readAll(dirs, s.folderPlan())
+	for i := range rows {
+		if r := read[rows[i].BaselineDir]; r.Measured && r.KeepsEvery {
+			rows[i].UnboundedFolderBytes = r.Bytes
+		}
+	}
+	return read
+}
+
+// unboundedDaemonFolder is the daemon's own folder, for the page, when no
+// server row reports it already.
+func unboundedDaemonFolder(dir string, rows []backupSettingsServerDTO, read map[string]folderReading) *unboundedFolderDTO {
+	r := read[dir]
+	if dir == "" || !r.Measured || !r.KeepsEvery || r.Bytes == 0 {
+		return nil
+	}
+	for _, row := range rows {
+		other := read[row.BaselineDir]
+		if row.BaselineDir == dir || (other.Canonical != "" && other.Canonical == r.Canonical) {
+			return nil
+		}
+	}
+	return &unboundedFolderDTO{Dir: dir, Bytes: r.Bytes}
 }
 
 // backupSettingsServerDTO is one entry's row. The location is the entry's
@@ -648,6 +697,13 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 	}
 	s.cm.rebuildDerived(entry)
 	dto := s.backupSettingsServerDTO(entry)
+	// This route needs servers:write only; what a folder holds is read under
+	// settings:read, like the rest of GET /api/backup-settings.
+	if pol := policyFrom(r.Context()); pol == nil || pol.Allows(ext.PermSettingsRead) {
+		rows := []backupSettingsServerDTO{dto}
+		s.fillFolderSizes(rows)
+		dto = rows[0]
+	}
 	if strings.TrimSpace(before.BaselineS3) == "" && entry.BaselineS3 != "" && entry.BackupSchedule != nil && entry.BackupSchedule.UploadEvery != "" &&
 		(before.BackupSchedule == nil || strings.TrimSpace(before.BackupSchedule.UploadEvery) == "") && before.BackupSchedule != nil {
 		dto.ScheduleUploadSet = entry.BackupSchedule.UploadEvery

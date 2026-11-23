@@ -25,6 +25,9 @@ import (
 // schema files, INSERT chunks and the coordinates `metadata` file — that
 // `myloader` (or the mysql client, applying mydumper's session assumptions)
 // loads directly, no bintrail needed on the restore side.
+// For a PostgreSQL server the result is the engine's psql output instead
+// (#3157): one <schema>.<table>.sql file per table that psql loads. The
+// staging, the completeness marker and the download are the same.
 //
 // Same engine as `reconstruct --output-format mydumper --at T`, same
 // posture as the other supervisor folds: all-or-nothing (the #842
@@ -956,7 +959,7 @@ func sqlExportFoldConfig(req console.SQLExportRequest, dir string, tableList []s
 		Tables:             tableList,
 		At:                 req.At.UTC(),
 		OutputDir:          dir,
-		OutputFormat:       reconstruct.OutputFormatMydumper,
+		OutputFormat:       sqlExportFormat(req.Flavor),
 		Parallelism:        daemonFoldParallelism,
 		WarnEventThreshold: daemonFoldWarnEventThreshold,
 		MaxTouchedRows:     daemonFoldMaxTouchedRows,
@@ -969,6 +972,58 @@ func sqlExportFoldConfig(req console.SQLExportRequest, dir string, tableList []s
 		// AllowGaps stays FALSE: a dump the operator will load somewhere is
 		// the last artifact that may be knowingly incomplete.
 	}
+}
+
+// sqlExportFormat is what a build writes for a server of this flavor: the
+// SQL files psql loads for a PostgreSQL one (#3157), whose tables the engine
+// refuses to write as a mydumper dump, and a mydumper dump for every other.
+func sqlExportFormat(flavor string) string {
+	if flavor == console.FlavorPostgres {
+		return reconstruct.OutputFormatPsql
+	}
+	return reconstruct.OutputFormatMydumper
+}
+
+// sqlExportWebWords rewrites the engine's two refusals that are about the
+// output format. Their own text names the terminal command's options, which
+// nobody on the web interface chose or can change: the format follows the
+// server's flavor (sqlExportFormat), so either one means the flavor the
+// server was added with and what its index holds disagree. Each is said
+// once, however many tables were refused with it. Every other error is kept
+// as it is, in the order the run joined them.
+func sqlExportWebWords(err error) error {
+	var out []error
+	said := map[error]bool{}
+	var walk func(error)
+	walk = func(e error) {
+		if j, ok := e.(interface{ Unwrap() []error }); ok {
+			for _, inner := range j.Unwrap() {
+				walk(inner)
+			}
+			return
+		}
+		for refusal, words := range sqlExportFormatRefusals {
+			if errors.Is(e, refusal) {
+				if !said[refusal] {
+					said[refusal] = true
+					out = append(out, errors.New(words))
+				}
+				return
+			}
+		}
+		out = append(out, e)
+	}
+	if err != nil {
+		walk(err)
+	}
+	return errors.Join(out...)
+}
+
+// sqlExportFormatRefusals is what the web interface says for each of the
+// engine's refusals about the output format.
+var sqlExportFormatRefusals = map[error]string{
+	reconstruct.ErrPsqlNeedsPostgres:   "this server was added as a PostgreSQL server, but its index holds nothing captured from PostgreSQL, so its tables cannot be written as SQL files for PostgreSQL; check that capture is running for this server, then build again",
+	reconstruct.ErrPGFullTableMydumper: "this server's tables were captured from PostgreSQL, but the server was not added as a PostgreSQL server, so its files were asked for in MySQL's format, which cannot hold them; add the server again as a PostgreSQL server to build its SQL files",
 }
 
 // sqlExportRunError folds the engine's verdict into the run verdict. A table
@@ -991,7 +1046,7 @@ func sqlExportRunError(reports []*reconstruct.TableReport, runErr error) error {
 			runErr = errors.Join(runErr, sqlExportNoSnapshotError(rep.Schema, rep.Table))
 		}
 	}
-	return runErr
+	return sqlExportWebWords(runErr)
 }
 
 func sqlExportNoSnapshotError(schema, table string) error {

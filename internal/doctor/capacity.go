@@ -85,6 +85,10 @@ type CapacityProbe struct {
 	// surface reporting "not measurable" can say what would make it
 	// measurable instead of asserting a topology it inferred (#1527).
 	FreeReason CapacityFreeReason
+	// FreePath is the directory FreeBytes was measured through, empty when
+	// FreeKnown is false. A surface uses it to tell whether another folder
+	// is on the same disk; the verdict never reads it.
+	FreePath string
 }
 
 // CapacityFreeReason names the branch indexDatadirFree landed on. The two
@@ -174,7 +178,7 @@ func ProbeCapacity(ctx context.Context, db *sql.DB, dsn, dbName string) (Capacit
 		}
 		probe.TableVisible = visible
 	}
-	probe.FreeBytes, probe.FreeKnown, probe.FreeReason = indexDatadirFree(ctx, db, dsn)
+	probe.FreeBytes, probe.FreeKnown, probe.FreeReason, probe.FreePath = measureIndexDatadir(ctx, db, dsn)
 	return probe, nil
 }
 
@@ -731,16 +735,23 @@ func loadPartitionSamples(ctx context.Context, db *sql.DB, dbName string) ([]Cap
 // return value says WHICH doubt it was, so the surface reporting it can name
 // the fix instead of guessing a topology (#1527).
 func indexDatadirFree(ctx context.Context, db *sql.DB, dsn string) (uint64, bool, CapacityFreeReason) {
+	free, ok, reason, _ := measureIndexDatadir(ctx, db, dsn)
+	return free, ok, reason
+}
+
+// measureIndexDatadir is indexDatadirFree plus the directory the free space
+// was measured through, empty when it was not measured.
+func measureIndexDatadir(ctx context.Context, db *sql.DB, dsn string) (uint64, bool, CapacityFreeReason, string) {
 	// Decided from the operator's declaration and the DSN's SHAPE, before any
 	// query runs, so every branch that gives up below returns the same
 	// considered answer.
 	unmeasured := unmeasurableFreeReason(dsn)
 	if free, ok := indexDatadirFreeFromEnv(); ok {
-		return free, true, CapacityFreeFromMount
+		return free, true, CapacityFreeFromMount, os.Getenv(datadirMountEnv)
 	}
 	cfg, err := mysql.ParseDSN(dsn)
 	if err != nil || !dsnTargetsLocalhost(cfg) {
-		return 0, false, unmeasured
+		return 0, false, unmeasured, ""
 	}
 	// Every exit from here to the hostname comparison leaves locality
 	// UNCONFIRMED, and each one must say so: a probe that erred or timed out
@@ -750,22 +761,22 @@ func indexDatadirFree(ctx context.Context, db *sql.DB, dsn string) (uint64, bool
 	// here in exactly the case that must not get unqualified mount advice.
 	var serverHost string
 	if err := db.QueryRowContext(ctx, "SELECT @@hostname").Scan(&serverHost); err != nil {
-		return 0, false, unconfirmedLocality(unmeasured)
+		return 0, false, unconfirmedLocality(unmeasured), ""
 	}
 	localHost, err := os.Hostname()
 	if err != nil || !sameHostname(serverHost, localHost) {
-		return 0, false, unconfirmedLocality(unmeasured)
+		return 0, false, unconfirmedLocality(unmeasured), ""
 	}
 	// Locality is confirmed below this line: the server is this machine, so
 	// mount_unset's unqualified advice is earned.
 	var varName, datadir string
 	if err := db.QueryRowContext(ctx, "SHOW VARIABLES LIKE 'datadir'").Scan(&varName, &datadir); err != nil {
-		return 0, false, unmeasured
+		return 0, false, unmeasured, ""
 	}
 	if free, ok := statfsDir(datadir); ok {
-		return free, true, CapacityFreeFromDatadir
+		return free, true, CapacityFreeFromDatadir, datadir
 	}
-	return 0, false, unmeasured
+	return 0, false, unmeasured, ""
 }
 
 // unmeasurableFreeReason names what stands in the way of a measurement, from

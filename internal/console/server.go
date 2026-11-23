@@ -628,6 +628,9 @@ type Server struct {
 	baselineRefreshDefaults BaselineRefreshDefaults
 	// localPruneLoop is Config.LocalPruneLoop.
 	localPruneLoop bool
+	// folderUsage measures snapshot folders for the pages that report what
+	// they hold (#2475).
+	folderUsage folderUsageCache
 	// mayCreateFolders is Config.MayCreateFolders.
 	mayCreateFolders bool
 	// version is the running build's version string (Config.Version).
