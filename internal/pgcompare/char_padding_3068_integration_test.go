@@ -142,6 +142,9 @@ func charCases() []charCase {
 		// without a length (u) is grouped otherwise on the copy: the
 		// source's, though these rows (each with its own id) agree.
 		sent(`SELECT b.id FROM ` + p + ` b WHERE EXISTS (SELECT * FROM ` + x + ` GROUP BY 1, 2, 3, 4, 5, 6 HAVING count(*) > 1) ORDER BY b.id`),
+		// A table alias spelled like a keyword, with a list that renames the
+		// columns: the renamed char(n) column is compared.
+		differs(`SELECT count(*) FROM ` + x + ` AS materialized(p, q) WHERE q = 'ab'`),
 		// WITH ... AS [NOT] MATERIALIZED.
 		stays(`WITH y AS MATERIALIZED (SELECT id, k FROM ` + p + `) SELECT id, k FROM y ORDER BY id`),
 		stays(`WITH y AS NOT MATERIALIZED (SELECT id, k FROM ` + p + `) SELECT id FROM y WHERE k > 2 ORDER BY id`),

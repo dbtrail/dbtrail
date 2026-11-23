@@ -35,6 +35,27 @@ func listsProven(toks []rtToken, types map[string][]string) bool {
 	return true
 }
 
+// keywordColumnList names a table alias spelled like a keyword that may stand
+// before a parenthesis, with a list of column names after it: codes AS
+// materialized(p). Those two words are not read as functions, so the rename
+// would go unseen and p would not be known for the column it is. As keywords
+// they open a subquery, which starts with SELECT, WITH or another parenthesis.
+func keywordColumnList(toks []rtToken) string {
+	for i, t := range toks {
+		if t.kind != rtWord || t.text != "materialized" && t.text != "exists" || !isOpTok(toks, i+1, "(") {
+			continue
+		}
+		if isOpTok(toks, i+2, "(") {
+			continue
+		}
+		if i+2 < len(toks) && toks[i+2].kind == rtWord && (toks[i+2].text == "select" || toks[i+2].text == "with") {
+			continue
+		}
+		return "a list of column names after a table named " + t.text + ": it gives the columns other names"
+	}
+	return ""
+}
+
 // fromListReach is how many tokens back from a name its FROM is looked for.
 const fromListReach = 4096
 

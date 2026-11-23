@@ -240,6 +240,10 @@ func paddedRead(toks []rtToken, types map[string][]string, exemptions bool) stri
 		return ""
 	}
 
+	if why := keywordColumnList(toks); why != "" {
+		return why + " on a copy that holds a char(n) column"
+	}
+
 	// The stars whose padded columns the statement never reads (padded_star.go).
 	var exempt map[int]bool
 	// And the later items of a FROM list and the stars of EXISTS (SELECT *

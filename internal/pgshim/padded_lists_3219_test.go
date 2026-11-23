@@ -331,3 +331,34 @@ func TestPaddedLists_noSourcePassesTheWholeScreen(t *testing.T) {
 		}
 	}
 }
+
+// A table alias spelled like a keyword that may stand before a parenthesis
+// does not hide a list that renames the columns.
+func TestPaddedLists_keywordAliasWithColumns(t *testing.T) {
+	for _, q := range []string{
+		`SELECT count(*) FROM codes AS materialized(p) WHERE p = 'ab'`,
+		`SELECT count(*) FROM plain, codes AS materialized(p) WHERE p = 'ab'`,
+		`SELECT count(*) FROM plain WHERE EXISTS (SELECT * FROM codes AS materialized(p) WHERE p = 'ab')`,
+		`SELECT count(*) FROM codes AS exists(p) WHERE p = 'ab'`,
+		`SELECT count(*) FROM plain, codes AS exists(p) WHERE p = 'ab'`,
+	} {
+		if veto := paddedStarScreen(q); veto == "" {
+			t.Errorf("%s: left to the copy, which compares the renamed column's blanks", q)
+		}
+		toks, _ := lexSQL(q)
+		tables := paddedStarCatalog()
+		if veto := paddedUse(toks, screenTypes(tables, tablesRead(q, tables))); veto == "" {
+			t.Errorf("%s: paddedUse alone lets it through", q)
+		}
+	}
+	for _, q := range []string{
+		`WITH y AS MATERIALIZED (SELECT id FROM plain) SELECT id FROM y`,
+		`WITH y AS NOT MATERIALIZED (SELECT id FROM plain) SELECT id FROM y`,
+		`SELECT id FROM plain WHERE EXISTS (SELECT * FROM codes)`,
+		`SELECT id FROM plain WHERE EXISTS ((SELECT 1))`,
+	} {
+		if why := keywordColumnList(func() []rtToken { toks, _ := lexSQL(q); return toks }()); why != "" {
+			t.Errorf("%s: %s", q, why)
+		}
+	}
+}
