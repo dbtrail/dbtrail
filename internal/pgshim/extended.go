@@ -610,7 +610,7 @@ func (s *session) describeWith(st *preparedStatement, untyped string) (cols []sq
 	}
 	// On lines of their own: a statement that ends in a -- comment must not
 	// comment out the closing parenthesis.
-	cols, err = s.columnsOf("SELECT * FROM (\n" + body + "\n) AS dbtrail_describe LIMIT 0")
+	cols, err = s.columnsOf(describeHead + body + describeTail)
 	return cols, nil, err
 }
 
@@ -687,7 +687,7 @@ func (s *session) columnsOf(text string) ([]sqlsandbox.Column, error) {
 	var res sqlsandbox.Result
 	runText, err := s.copyText(text)
 	if err == nil {
-		res, err = s.bound.Run(ctx, runText, s.runOptions())
+		res, err = s.bound.Run(ctx, s.asPostgresTypes(runText), s.runOptions())
 	}
 	if s.bound.Answered != nil && ctx.Err() == nil {
 		s.bound.Answered(time.Since(started), err != nil)

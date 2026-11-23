@@ -72,14 +72,14 @@ func tySame() []tyList {
 			// numeric: the port said numeric for all three.
 			"sum(s)", "sum(i)", "sum(b)", "sum(n)", "sum(f)",
 			"SUM(i)", "sum(DISTINCT i)", "sum(i) FILTER (WHERE id > 1)", "sum(" + tyVals + ".i)", "sum(i) AS total",
-			"sum(i) + 1", "coalesce(sum(i), 0)", "sum(i + 1)", "sum(s * 2)", "sum(i - s)", "sum(-i)",
+			"sum(i) + 1", "coalesce(sum(i), 0)", "sum(i + 1)", "sum(i - s)", "sum(-i)", "sum(abs(s))",
 			"sum(CASE WHEN id > 1 THEN 1 ELSE 0 END)", "sum(i::bigint)", "sum(s::int)", "sum(length(t))", "sum(2)",
-			"count(*)", "count(i)", "min(s)", "max(i)", "max(b)", "min(n)", "max(f)", "min(d)", "max(t)", "bool_and(id > 0)",
+			"sum(r)", "count(*)", "count(i)", "min(s)", "max(i)", "max(b)", "min(n)", "max(f)", "min(d)", "max(t)", "bool_and(id > 0)",
 		}},
 		{"ORDER BY id", []string{
 			// length, position and ntile are integers: the port said bigint.
 			"length(t)", "LENGTH(t)", "char_length(t)", "character_length(t)", "position('a' in t)", "strpos(t, 'a')",
-			"length(t) + 1", "length(t) AS n", "coalesce(length(t), 0)", "length(t) * b", "octet_length(t)",
+			"length(t) + 1", "length(t) AS n", "coalesce(length(t), 0)", "length(t) * b", "pg_catalog.length(t)",
 			"ntile(2) OVER (ORDER BY id)", "ntile(3) OVER (PARTITION BY id % 2 ORDER BY id) AS bucket",
 			"row_number() OVER (ORDER BY id)", "rank() OVER (ORDER BY id)", "dense_rank() OVER (ORDER BY id)",
 			"count(*) OVER ()", "lag(i) OVER (ORDER BY id)",
@@ -105,6 +105,7 @@ func tySame() []tyList {
 			"d + 1", "d - 1", "id > 2", "t || 'x'", "coalesce(t, 'none')", "nullif(i, 10)",
 			"CASE WHEN id > 2 THEN i ELSE 0 END", "i::bigint", "s::int", "i::text", "n::int",
 			"1", "1.5", "'a'", "true", "NULL::int", "1 + 1", "3000000000", "DATE '2026-01-01'",
+			"d - e", "s + 1", "s + s", "s * 2", "r + 1", "r * 2", "r + r", "r + f",
 		}},
 	}
 }
