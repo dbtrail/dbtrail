@@ -92,6 +92,9 @@ type session struct {
 	// pendingSide is a plan's verdict for the copy on the statement being
 	// answered, remembered once the copy answers it (settleCostSide).
 	pendingSide *pendingCostSide
+	// unreachableNote is what the client is told if the copy answers a
+	// statement whose plan could not be asked (screenTyped).
+	unreachableNote string
 	// sourceAnsweredAt is when the source last answered a statement of this
 	// connection: the copy may not answer it with data older than that
 	// (copyOlderThanSource). Zero when the source never answered one.
@@ -201,7 +204,6 @@ func (s *session) handleSimpleQuery(qstr string) error {
 	screenBusy := ""
 	if s.abortedRefusal(qstr) == nil {
 		d = s.route(s.classify(qstr), qstr)
-		screenBusy = s.takeScreenBusy()
 	}
 	if byCostApplies(d) {
 		// The screen lets the copy answer it: the source's plan says
@@ -212,6 +214,10 @@ func (s *session) handleSimpleQuery(qstr string) error {
 			s.routeNote(qstr, d, time.Since(started), true)
 			return s.readyFlush()
 		}
+		// Headed for the copy: only now its list of columns is read, which
+		// can wait for one of its workers.
+		d = s.screenTyped(qstr, d)
+		screenBusy = s.takeScreenBusy()
 	}
 	if busyOnCopy(withScreenBusy(d, screenBusy)) {
 		// For the copy, which was too busy to list its columns (#3109,

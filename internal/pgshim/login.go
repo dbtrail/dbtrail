@@ -74,6 +74,11 @@ type Binding struct {
 	// type, and what the source recorded of each. Nil: such statements are
 	// refused.
 	Catalog func(ctx context.Context) ([]CatalogTable, error)
+	// CopyTableNames, when set, is the schema and name of each table a
+	// statement on the copy can read, read without one of the copy's workers:
+	// what the capture gate asks of every statement sent to the source, which
+	// must not wait behind the copy's reports. Nil: Catalog is read.
+	CopyTableNames func(ctx context.Context) ([][2]string, error)
 	// TimeTravel, when set, answers the time-travel statements of this
 	// connection (single-row _flashback and _snapshot AS OF, as the first
 	// mode serves them). It reads the index and the snapshot directly. Nil:

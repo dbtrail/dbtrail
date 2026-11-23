@@ -283,7 +283,7 @@ func (s *session) handleBind(m *pgproto3.Bind) {
 				return
 			}
 		}
-		s.bindOnSource(st, m)
+		s.bindOnSource(st, m, route)
 		s.noteIfFailed(st)
 		return
 	}

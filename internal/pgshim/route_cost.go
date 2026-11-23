@@ -504,7 +504,7 @@ func sourceUnreachable(perr *pgErr) bool {
 // which needs no source (waitForCopy).
 func (s *session) copyWhileUnreachable(why string) routeDecision {
 	s.logger.Debug("pgshim: the source cannot be asked for a plan; the copy answers", "why", why)
-	s.notice("Answered by the copy: the source could not be asked whether this statement is cheaper there (" + why + "), so routing by its plan is off for the moment.")
+	s.unreachableNote = "Answered by the copy: the source could not be asked whether this statement is cheaper there (" + why + "), so routing by its plan is off for the moment."
 	return routeDecision{RouteCopy, ReasonSourceUnreachable}
 }
 

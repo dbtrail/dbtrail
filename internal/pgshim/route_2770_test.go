@@ -84,6 +84,13 @@ func TestCopyScreen(t *testing.T) {
 		if why := CopyScreen(q, routeTypes); why != "" {
 			t.Errorf("%s: sent to the source (%s), want the copy", q, why)
 		}
+		// What the copy answers passes the first screen too, which knows no
+		// types and comes before the source's plan.
+		if toks, lexWhy := lexSQL(RewriteForCopy(q)); lexWhy == "" {
+			if why := screenUntyped(toks); why != "" {
+				t.Errorf("%s: vetoed without its types (%s), so it never reaches the plan", q, why)
+			}
+		}
 	}
 	toSource := map[string]string{
 		// Measured by pgcompare as answered otherwise or refused.
