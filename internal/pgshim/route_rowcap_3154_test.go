@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgproto3"
 )
 
 // A statement the plan sends to the copy whose result the plan estimates
@@ -274,5 +276,110 @@ func TestRouteByCost_resultOverRowCap_leavesNoSide(t *testing.T) {
 func TestResultOverRowCap_statusWords(t *testing.T) {
 	if w := reasonMeans[ReasonResultOverRowCap]; !strings.Contains(w, "more rows than the copy returns") {
 		t.Errorf("status words for %s: %q", ReasonResultOverRowCap, w)
+	}
+}
+
+// A verdict for the source is remembered for a statement shape only when
+// its plan was cheap. One sent there for the size of its result is an
+// expensive statement: the same shape with another value is asked about
+// again, and goes to the copy when its plan says so.
+func TestRouteByCost_resultOverRowCap_notRemembered(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	// Both plans are far over the thresholds, where a verdict is kept.
+	src := startFakeSource(t, map[string]string{
+		"FROM shaped WHERE k = 5": plan(`{"Node Type": "Index Scan", "Total Cost": 900000, "Plan Rows": 2400000, "Index Cond": "(k = 5)"}`),
+		"FROM shaped WHERE k = 6": plan(`{"Node Type": "Seq Scan", "Total Cost": 900000, "Plan Rows": 12000000, "Filter": "(k = 6)"}`),
+	})
+	l := &costLogin{src: src, cost: &CostPolicy{CostThreshold: DefaultCostThreshold, ScanRows: DefaultScanRows, RowCap: 1000}}
+	c := costPortConn(t, ctx, l)
+	if got := costSimple(ctx, c, l, "SELECT n FROM shaped WHERE k = 5"); got != (costOutcome{"42", "", RouteSource, ReasonResultOverRowCap}) {
+		t.Fatalf("the first value: %+v", got)
+	}
+	if got := costSimple(ctx, c, l, "SELECT n FROM shaped WHERE k = 6"); got != (costOutcome{"7", "", RouteCopy, ReasonAnswersTheSame}) {
+		t.Errorf("the same shape with a value whose plan scans and filters: %+v, want the copy", got)
+	}
+	if asked := src.explained(); len(asked) != 2 {
+		t.Errorf("the source was asked for %d plan(s), want one for each statement: %q", len(asked), asked)
+	}
+	// A cheap plan's verdict is still kept: asked once for two values.
+	cheapSrc := startFakeSource(t, map[string]string{"FROM keyed": plan(`{"Node Type": "Index Scan", "Total Cost": 8.45, "Plan Rows": 1}`)})
+	m := &costLogin{src: cheapSrc, cost: &CostPolicy{CostThreshold: DefaultCostThreshold, ScanRows: DefaultScanRows, RowCap: 1000}}
+	d := costPortConn(t, ctx, m)
+	for _, q := range []string{"SELECT n FROM keyed WHERE id = 1", "SELECT n FROM keyed WHERE id = 2"} {
+		if got := costSimple(ctx, d, m, q); got.reason != ReasonCheapPlan {
+			t.Errorf("%s: %+v", q, got)
+		}
+	}
+	if asked := cheapSrc.explained(); len(asked) != 1 {
+		t.Errorf("a cheap shape was asked about %d time(s), want once", len(asked))
+	}
+}
+
+func TestRelayedBytes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		row  [][]byte
+		want int
+	}{
+		{"no cells", nil, 7},
+		{"one NULL", [][]byte{nil}, 11},
+		{"one empty cell", [][]byte{{}}, 11},
+		{"three NULLs", [][]byte{nil, nil, nil}, 19},
+		{"a cell of two bytes", [][]byte{[]byte("42")}, 13},
+		{"a NULL beside five bytes", [][]byte{nil, []byte("hello")}, 20},
+	} {
+		if got := relayedBytes(&pgproto3.DataRow{Values: tc.row}); got != tc.want {
+			t.Errorf("%s: %d bytes, want %d", tc.name, got, tc.want)
+		}
+		// What it counts is the message as encoded.
+		if enc, err := (&pgproto3.DataRow{Values: tc.row}).Encode(nil); err != nil || len(enc) != tc.want {
+			t.Errorf("%s: encoded in %d bytes (%v), counted as %d", tc.name, len(enc), err, tc.want)
+		}
+	}
+}
+
+// An answer of the source made of rows that hold no bytes (NULLs) reaches
+// the client as it comes: the port does not keep it whole until the source
+// is done. The source here sends its rows and ends its answer only once the
+// client has read one.
+func TestRelay_rowsOfNullsAreNotHeldWhole(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	// 120,000 rows of one NULL are 1.3 MB on the wire, past the size the
+	// port flushes at, and 0 bytes of cells.
+	const rows = 120000
+	gate := make(chan struct{})
+	src := startFakeSourceWith(t, &fakeSource{emptyRows: rows, emptyGate: gate})
+	l := &costLogin{src: src}
+	c := costPortConn(t, ctx, l)
+	mrr := c.Exec(ctx, "SELECT n FROM manyempty")
+	if !mrr.NextResult() {
+		close(gate)
+		t.Fatalf("no result: %v", mrr.Close())
+	}
+	rr := mrr.ResultReader()
+	if !rr.NextRow() {
+		close(gate)
+		_, err := rr.Close()
+		t.Fatalf("no row reached the client while the source was still answering: %v", err)
+	}
+	// A row arrived before the source ended its answer.
+	close(gate)
+	n := 1
+	for rr.NextRow() {
+		n++
+	}
+	if _, err := rr.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mrr.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if n != rows {
+		t.Errorf("%d rows reached the client, want %d", n, rows)
+	}
+	if got := l.last(); got.Side != RouteSource {
+		t.Errorf("answered by %s/%s, want the source", got.Side, got.Reason)
 	}
 }

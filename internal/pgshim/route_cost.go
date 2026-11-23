@@ -690,7 +690,11 @@ func (s *session) routeByCostRemembered(text string) (routeDecision, *pgErr) {
 	// copy would send the shape there after its table was dropped and made
 	// again on the source, its old rows still on the copy (#2985); asking
 	// costs little next to a statement expensive enough for the copy.
-	if key != "" && stop == nil && keep && pl != nil && d.side == RouteSource && pol.clear(*pl) && valuesOnlyEqualed(text) {
+	//
+	// And only a cheap plan's: a statement sent to the source for the size
+	// of its result (ReasonResultOverRowCap) is an expensive one, and the
+	// same shape with another value may be one the copy should answer.
+	if key != "" && stop == nil && keep && pl != nil && d.side == RouteSource && d.reason == ReasonCheapPlan && pol.clear(*pl) && valuesOnlyEqualed(text) {
 		if s.costVerdicts == nil || len(s.costVerdicts) >= costVerdictsMax {
 			s.costVerdicts = map[string]costVerdict{}
 		}
