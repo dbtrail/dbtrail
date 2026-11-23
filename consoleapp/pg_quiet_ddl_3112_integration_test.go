@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -61,9 +62,12 @@ func pgQdSourceRows(t *testing.T, source *pgconn.PgConn, q pgQdTable) (cols []st
 	return cols, rows
 }
 
-// pgQdCopyRows reads a table out of one snapshot: the file's columns in its
-// order and every row as text, ordered by id.
-func pgQdCopyRows(t *testing.T, snapshotDir string, q pgQdTable) (cols []string, rows [][]string) {
+// pgQdCopyRows reads a table out of one snapshot: the file's columns, and
+// every row as text ordered by id with its values in the order of want. A
+// snapshot file keeps its columns sorted by name, so cols is compared with
+// want as a set: sameCols says they are the same columns, and rows is nil
+// when they are not.
+func pgQdCopyRows(t *testing.T, snapshotDir string, q pgQdTable, want []string) (cols []string, sameCols bool, rows [][]string) {
 	t.Helper()
 	file := filepath.Join(snapshotDir, q.schema, q.table+".parquet")
 	duck, err := sql.Open("duckdb", "")
@@ -72,8 +76,6 @@ func pgQdCopyRows(t *testing.T, snapshotDir string, q pgQdTable) (cols []string,
 	}
 	defer duck.Close()
 	lit := "parquet_scan('" + strings.ReplaceAll(file, "'", "''") + "')"
-	// The file's own column order: a result set's columns, not a query over
-	// DESCRIBE, which does not keep it.
 	head, err := duck.Query("SELECT * FROM " + lit + " LIMIT 0")
 	if err != nil {
 		t.Fatalf("columns of %s: %v", file, err)
@@ -83,8 +85,14 @@ func pgQdCopyRows(t *testing.T, snapshotDir string, q pgQdTable) (cols []string,
 	if err != nil {
 		t.Fatalf("columns of %s: %v", file, err)
 	}
+	a, b := slices.Clone(cols), slices.Clone(want)
+	sort.Strings(a)
+	sort.Strings(b)
+	if !slices.Equal(a, b) {
+		return cols, false, nil
+	}
 	var sel []string
-	for _, c := range cols {
+	for _, c := range want {
 		sel = append(sel, `COALESCE(CAST("`+c+`" AS VARCHAR), 'NULL')`)
 	}
 	res, err := duck.Query("SELECT " + strings.Join(sel, ", ") + " FROM " + lit + " ORDER BY CAST(id AS BIGINT)")
@@ -93,15 +101,15 @@ func pgQdCopyRows(t *testing.T, snapshotDir string, q pgQdTable) (cols []string,
 	}
 	defer res.Close()
 	for res.Next() {
-		vals := make([]sql.NullString, len(cols))
-		ptrs := make([]any, len(cols))
+		vals := make([]sql.NullString, len(want))
+		ptrs := make([]any, len(want))
 		for i := range vals {
 			ptrs[i] = &vals[i]
 		}
 		if err := res.Scan(ptrs...); err != nil {
 			t.Fatal(err)
 		}
-		row := make([]string, len(cols))
+		row := make([]string, len(want))
 		for i, v := range vals {
 			row[i] = v.String
 		}
@@ -110,7 +118,7 @@ func pgQdCopyRows(t *testing.T, snapshotDir string, q pgQdTable) (cols []string,
 	if err := res.Err(); err != nil {
 		t.Fatal(err)
 	}
-	return cols, rows
+	return cols, true, rows
 }
 
 // pgQdRun is one run of the scenario, at rest after the schedule's slot.
@@ -196,8 +204,8 @@ func pgQdScenario(t *testing.T, tables []pgQdTable, columns map[string]string, a
 	// compares later is a difference the ALTERs made, not one it started with.
 	for _, q := range tables {
 		wantCols, wantRows := pgQdSourceRows(t, source, q)
-		gotCols, gotRows := pgQdCopyRows(t, filepath.Join(snapshots, first[0]), q)
-		if !reflect.DeepEqual(gotCols, wantCols) || !reflect.DeepEqual(gotRows, wantRows) {
+		gotCols, same, gotRows := pgQdCopyRows(t, filepath.Join(snapshots, first[0]), q, wantCols)
+		if !same || !reflect.DeepEqual(gotRows, wantRows) {
 			t.Fatalf("the full read of %s holds %v %v, the source %v %v", q.name(), gotCols, gotRows, wantCols, wantRows)
 		}
 	}
@@ -308,8 +316,8 @@ func TestIntegrationPGQuietColumnChange_3112(t *testing.T) {
 	newest := filepath.Join(run.snapshots, run.all[len(run.all)-1])
 	for _, q := range tables {
 		wantCols, wantRows := pgQdSourceRows(t, run.source, q)
-		gotCols, gotRows := pgQdCopyRows(t, newest, q)
-		if !reflect.DeepEqual(gotCols, wantCols) {
+		gotCols, same, gotRows := pgQdCopyRows(t, newest, q, wantCols)
+		if !same {
 			t.Errorf("%s: the newest copy has columns %v, the source has %v", q.name(), gotCols, wantCols)
 		} else if !reflect.DeepEqual(gotRows, wantRows) {
 			t.Errorf("%s: the newest copy holds %v, the source holds %v", q.name(), gotRows, wantRows)
@@ -366,8 +374,8 @@ func TestIntegrationPGQuietChangeNotOfColumns_3112(t *testing.T) {
 	}
 	newest := filepath.Join(run.snapshots, run.all[1])
 	wantCols, wantRows := pgQdSourceRows(t, run.source, q)
-	gotCols, gotRows := pgQdCopyRows(t, newest, q)
-	if !reflect.DeepEqual(gotCols, wantCols) || !reflect.DeepEqual(gotRows, wantRows) {
+	gotCols, same, gotRows := pgQdCopyRows(t, newest, q, wantCols)
+	if !same || !reflect.DeepEqual(gotRows, wantRows) {
 		t.Fatalf("the updated copy holds %v %v, the source %v %v", gotCols, gotRows, wantCols, wantRows)
 	}
 }
