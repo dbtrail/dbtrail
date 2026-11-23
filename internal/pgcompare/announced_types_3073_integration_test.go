@@ -89,24 +89,14 @@ func tySame() []tyList {
 			"sum(n) OVER (ORDER BY id)", "abs(i)", "abs(s)", "abs(n)",
 		}},
 		{"ORDER BY id", []string{
-			// extract is a numeric and date_part a double precision: the port
-			// said bigint for both.
-			"extract(year FROM ts)", "extract(month FROM d)", "extract(day FROM tz)", "EXTRACT(YEAR FROM d)",
-			"extract(hour FROM ts)", "extract(minute FROM ts)", "extract(quarter FROM d)", "extract(dow FROM d)",
-			"extract(doy FROM d)", "extract(week FROM d)", "extract(isodow FROM d)", "extract(isoyear FROM d)",
-			"extract(decade FROM d)", "extract(century FROM d)", "extract(millennium FROM d)",
-			"extract(year FROM d) AS y",
-			"date_part('year', ts)", "date_part('month', d)", "date_part('day', tz)", "DATE_PART('hour', ts)",
-			"date_part('minute', ts)", "date_part('quarter', d)", "date_part('dow', d)", "date_part('doy', d)",
-			"date_part('week', d)", "date_part('month', d)::text", "extract(month FROM d)::text", "lpad(date_part('month', d)::text, 2, '0')",
-			"date_trunc('month', ts)", "date_trunc('day', ts)",
-		}},
-		{"ORDER BY id", []string{
 			"id", "s", "i", "b", "n", "r", "f", "d", "ts", "tz", "t", "by",
 			"i + 1", "i - s", "s - s", "b + 1", "i + b", "-i", "n + 1", "n * 2", "f + 1", "f * r", "i + 1.5",
 			"d + 1", "d - 1", "id > 2", "t || 'x'", "coalesce(t, 'none')", "nullif(i, 10)",
 			"CASE WHEN id > 2 THEN i ELSE 0 END", "i::bigint", "s::int", "i::text", "n::int",
 			"1", "1.5", "'a'", "true", "NULL::int", "1 + 1", "3000000000", "DATE '2026-01-01'",
+			"date_trunc('month', ts)", "date_trunc('day', ts)",
+			// What the engine reads again answers as it did.
+			"date_part('month', d)::text", "extract(month FROM d)::text", "lpad(date_part('month', d)::text, 2, '0')",
 		}},
 	}
 }
@@ -120,24 +110,59 @@ func tyStatements() []string {
 		`SELECT total + 1, total FROM (SELECT sum(i) AS total FROM ` + v + `) q`,
 		`WITH c AS (SELECT id % 2 AS g, sum(s) AS small, sum(i) AS total FROM ` + v + ` GROUP BY 1) SELECT g, small, total FROM c ORDER BY g`,
 		`SELECT * FROM (SELECT id, length(t) AS l, position('a' in t) AS p, ntile(2) OVER (ORDER BY id) AS q FROM ` + v + `) x ORDER BY id`,
-		`SELECT l + 1, m FROM (SELECT id, length(t) AS l, position('a' in t) m FROM ` + v + `) x ORDER BY id`,
-		// The headings: beside a star, and of a subquery's columns read
-		// through one, an item with no name is headed by its function.
-		`SELECT *, length(t), sum(i) OVER (), extract(year FROM d), date_part('month', d), NULL FROM ` + v + ` ORDER BY id`,
-		`SELECT * FROM (SELECT id, length(t), ntile(2) OVER (ORDER BY id), sum(i) OVER (ORDER BY id), strpos(t, 'a') FROM ` + v + `) q ORDER BY id`,
-		`SELECT * FROM (SELECT length(t), count(*) AS n, sum(s) FROM ` + v + ` GROUP BY length(t)) q ORDER BY 1`,
-		// What the engine reads again stays as it was: these answered before.
-		`SELECT d - extract(dow FROM d) * interval '1 day' FROM ` + v + ` ORDER BY id`,
+		`SELECT l + 1, m FROM (SELECT id, length(t) AS l, position('a' in t) AS m FROM ` + v + `) x ORDER BY id`,
 		`SELECT max(l), min(l) + 1 FROM (SELECT length(t) AS l FROM ` + v + `) x`,
 		`SELECT id FROM ` + v + ` WHERE length(t) > 2 AND extract(year FROM d) > 2000 ORDER BY length(t), id`,
-		`SELECT length(t), count(*), sum(i) FROM ` + v + ` GROUP BY length(t) HAVING sum(i) > 0 ORDER BY 1`,
-		// A lone NULL is text.
-		`SELECT NULL`,
-		`SELECT NULL, 1, NULL AS nothing, NULL AS more`,
-		`SELECT id, NULL FROM ` + v + ` ORDER BY id`,
-		// Beside another SELECT it takes the other side's type.
+		// One expression in the list, GROUP BY, HAVING and ORDER BY.
+		`SELECT length(t), count(*), sum(i) FROM ` + v + ` GROUP BY length(t) HAVING sum(i) > 0 AND length(t) >= 0 ORDER BY length(t)`,
+		`SELECT DISTINCT id, length(t) FROM ` + v + ` ORDER BY length(t), id`,
+		// Beside a star and through one, under a name.
+		`SELECT *, length(t) AS n, sum(i) OVER () AS total FROM ` + v + ` ORDER BY id`,
+		`SELECT * FROM (SELECT length(t) AS l, count(*) AS n, sum(s) AS total FROM ` + v + ` GROUP BY length(t)) q ORDER BY 1`,
+		// A NULL beside another SELECT takes the other side's type.
 		`SELECT NULL UNION ALL SELECT 1`,
 		`SELECT 1 UNION ALL SELECT NULL`,
+		`SELECT d - extract(dow FROM d) * interval '1 day' FROM ` + v + ` ORDER BY id`,
+	}
+}
+
+// tyValues are statements the copy answered before #3073 and must still
+// answer, with PostgreSQL's values: the same expression in the select list
+// and in GROUP BY, HAVING or ORDER BY, which the engine must still take for
+// one expression. Their types are not compared here (extract and date_part
+// are tyDifferent).
+func tyValues() []string {
+	v := tyVals
+	return []string{
+		`SELECT extract(year FROM d), count(*) FROM ` + v + ` GROUP BY 1 HAVING extract(year FROM d) > 2000 ORDER BY 1`,
+		`SELECT date_part('year', d), count(*) FROM ` + v + ` GROUP BY 1 ORDER BY date_part('year', d)`,
+		`SELECT extract(year FROM d) AS y, count(*) FROM ` + v + ` GROUP BY y ORDER BY extract(year FROM d)`,
+		`SELECT extract(year FROM d), extract(year FROM d) + 1 FROM ` + v + ` GROUP BY 1 ORDER BY 1`,
+		`SELECT DISTINCT id, extract(year FROM d) FROM ` + v + ` ORDER BY extract(year FROM d), id`,
+		`SELECT extract(year FROM d), count(*) FROM ` + v + ` GROUP BY extract(year FROM d) ORDER BY 1`,
+		`SELECT extract(year FROM d), count(*) FROM ` + v + ` GROUP BY 1 ORDER BY 1`,
+		`SELECT DISTINCT date_part('year', d) FROM ` + v + ` ORDER BY date_part('year', d)`,
+		`SELECT substring(t FROM length(t) - 2) FROM ` + v + ` WHERE length(t) > 3 GROUP BY t, length(t) ORDER BY 1`,
+		`SELECT NULL, id FROM ` + v + ` ORDER BY id`,
+	}
+}
+
+// tyHeading is a column of the port's answer that must keep the heading it
+// had before #3073: the engine's text of an item with no name, where the
+// copy does not rename columns as PostgreSQL does. No cast may show in it.
+type tyHeading struct {
+	sql  string
+	col  int
+	name string
+}
+
+func tyHeadings() []tyHeading {
+	v := tyVals
+	return []tyHeading{
+		{`SELECT *, length(t) FROM ` + v + ` ORDER BY id`, 13, "length(t)"},
+		{`SELECT * FROM (SELECT length(t) FROM ` + v + `) q`, 0, "length(t)"},
+		{`SELECT * FROM (SELECT id, length(t) + 1, sum(i) OVER () FROM ` + v + `) q ORDER BY id`, 1, "(length(t) + 1)"},
+		{`SELECT * FROM (SELECT id, length(t) + 1, sum(i) OVER () FROM ` + v + `) q ORDER BY id`, 2, "sum(i) OVER ()"},
 	}
 }
 
@@ -178,16 +203,12 @@ func tyDifferent() []tyOther {
 	return []tyOther{
 		{`SELECT d - e FROM ` + v + ` ORDER BY id`, 0, 23, 20, "a date less a date is a bigint on the copy"},
 		{`SELECT s + 1 FROM ` + v + ` ORDER BY id`, 0, 23, 21, "a smallint with a literal stays a smallint on the copy"},
+		{`SELECT extract(year FROM d) FROM ` + v + ` ORDER BY id`, 0, 1700, 20, "extract is a bigint on the copy; not converted, a numeric read again by the engine could answer otherwise"},
+		{`SELECT date_part('year', d) FROM ` + v + ` ORDER BY id`, 0, 701, 20, "date_part is a bigint on the copy; not converted, for the same reason"},
+		{`SELECT NULL`, 0, 25, 23, "a lone NULL is an integer on the copy"},
 		{`SELECT sum(l) FROM (SELECT length(t) AS l FROM ` + v + `) x`, 0, 20, 1700, "the sum of a name the statement defines: its type is not read"},
 		{`SELECT sum(id) FROM (SELECT i AS id FROM ` + v + `) x`, 0, 20, 1700, "the same, under the name of a column"},
-		{`SELECT x FROM (SELECT NULL AS x) q`, 0, 25, 23, "a NULL named in a subquery"},
-		{`SELECT extract(year FROM d) + 1 FROM ` + v + ` ORDER BY id`, 0, 1700, 20, "extract inside an expression: cast, a function that takes a bigint would refuse it"},
-		{`SELECT y FROM (SELECT id, extract(year FROM d) AS y FROM ` + v + `) q ORDER BY id`, 0, 1700, 20, "extract in a subquery, for the same reason"},
 		{`SELECT a FROM (SELECT id, length(t) AS a, length(t) + 1 FROM ` + v + `) q ORDER BY id`, 0, 23, 20, "a subquery calls the function in an item with no name, whose heading must stay"},
-		{`SELECT DISTINCT date_part('year', d) FROM ` + v + ` ORDER BY date_part('year', d)`, 0, 701, 20, "date_part after DISTINCT is not a whole item to this reading; it answered before and still does"},
-		{`SELECT date_part('year', d) + 1 FROM ` + v + ` ORDER BY id`, 0, 701, 20, "date_part inside an expression: as a double precision the engine would write it 2026.0 where it is read as text"},
-		{`SELECT y FROM (SELECT id, date_part('year', d) AS y FROM ` + v + `) q ORDER BY id`, 0, 701, 20, "date_part in a subquery, for the same reason"},
-		{`SELECT NULL, NULL`, 1, 25, 23, "a second NULL with no name"},
 	}
 }
 
@@ -493,6 +514,34 @@ func TestIntegrationPGCompareAnnouncedTypes3073(t *testing.T) {
 			}
 		}
 	}
+	for _, h := range tyHeadings() {
+		n++
+		a := tyAsk(ctx, port.PgConn(), "simple", h.sql)
+		if a.err != nil || len(a.fields) <= h.col || a.fields[h.col].Name != h.name {
+			got := ""
+			if len(a.fields) > h.col {
+				got = a.fields[h.col].Name
+			}
+			t.Errorf("%s: column %d is headed %q, want %q as before (%v)", h.sql, h.col+1, got, h.name, a.err)
+		}
+	}
+	for _, sql := range tyValues() {
+		answered(sql)
+		n++
+		pg, pt := tyAsk(ctx, setup.PgConn(), "simple", sql), tyAsk(ctx, port.PgConn(), "simple", sql)
+		if pg.err != nil || pt.err != nil || len(pg.rows) != len(pt.rows) {
+			t.Errorf("%s: PostgreSQL %d rows, %v; the port %d rows, %v", sql, len(pg.rows), pg.err, len(pt.rows), pt.err)
+			continue
+		}
+		for r := range pg.rows {
+			for c := range pg.rows[r] {
+				if a, b := pg.rows[r][c], pt.rows[r][c]; !bytes.Equal(a, b) || (a == nil) != (b == nil) {
+					t.Errorf("%s, row %d, column %d: PostgreSQL writes %q and the port %q", sql, r+1, c+1, a, b)
+				}
+			}
+		}
+	}
+
 	// As a connection that can reach its source hands them to the copy.
 	types := map[string][]string{}
 	for _, c := range catalog[0].Columns {

@@ -1301,52 +1301,50 @@ listener, its own workers, its own memory.
 
   An expression's type is the one the copy computes it with. Where that is
   not PostgreSQL's, the port converts these to PostgreSQL's type before it
-  answers, so a driver reads the same type from the port as from the source,
-  in text and in binary:
+  answers, so a driver reads the same whole number type from the port as from
+  the source, in text and in binary:
   - `length`, `char_length`, `character_length`, `position`, `strpos` and
     `ntile` are an `integer`;
   - `sum` of a `smallint` or an `integer` is a `bigint` (of a `bigint` it is a
-    `numeric`, as on PostgreSQL);
-  - `extract` of a field that is a whole number (`year`, `quarter`, `month`,
-    `week`, `day`, `hour`, `minute`, `dow`, `doy`, `isodow`, `isoyear`,
-    `decade`, `century`, `millennium`) is a `numeric`, and `date_part` of one
-    a `double precision`, each when it is a whole item of the statement's
-    select list;
-  - a `NULL` alone in the select list is `text`.
+    `numeric`, as on PostgreSQL).
 
-  For `length`, `position`, `ntile` and `sum` that holds under an alias, in a
-  subquery or a `WITH`, behind `SELECT *`, as a window (`sum(x) OVER (...)`),
-  inside another expression (`length(x) + 1` is an `integer`, `sum(x) + 1` a
-  `bigint`) and in what a prepared statement announces before it runs. No
-  value changes with it, and a column keeps the heading it had, or takes
-  PostgreSQL's (`length`, `sum`). These still carry another type than on
-  PostgreSQL, with the same value:
+  That holds under an alias, in a subquery or a `WITH`, behind `SELECT *`,
+  as a window (`sum(x) OVER (...)`), inside another expression
+  (`length(x) + 1` is an `integer`, `sum(x) + 1` a `bigint`) and in what a
+  prepared statement announces before it runs. No value and no column heading
+  changes with it. A function is converted at every place a statement calls
+  it, or at none; it is at none, and keeps the copy's type, when the
+  statement:
+  - calls it in an item with no `AS` of a subquery's select list, or of a
+    select list that holds a `*` (`SELECT *, length(x) FROM t`): give the
+    item a name (`length(x) AS n`) to get PostgreSQL's type;
+  - also calls it inside a `round()`, `floor()` or `avg()` the port rewrites;
+  - uses its name where a table's may stand (`FROM (...) length(a)`,
+    `substring(x FROM length(x))`);
+  - is longer than the port takes once converted, or nests the calls more
+    than 32 deep.
+
+  `sum` also stays a `numeric` where PostgreSQL has a `bigint` when its
+  argument is a name the statement defines itself (`SELECT sum(n) FROM (SELECT
+  qty AS n ...)`), a column that is an `integer` in one table and another type
+  in another, or anything but whole-number columns, numbers, casts, `CASE` and
+  `+ - * / %` between them, and in a statement of more than a few thousand
+  words or one that names columns in a list (`AS t(a, b)`). If the port reads
+  a sum's argument as a whole number and the copy finds it is not one, the
+  statement fails with `the copy cannot tell this sum's type as PostgreSQL
+  would; cast its argument (sum(x::numeric))` rather than answer a rounded
+  sum: write the cast the message names (with a forwarding account the source
+  answers instead).
+
+  These carry another type than on PostgreSQL, with the same value:
+  - `extract` of a whole field (`year`, `month`, `day`...) and `date_part`
+    are a `bigint` (PostgreSQL: `numeric` and `double precision`);
+  - a `NULL` alone in the select list is an `integer` (PostgreSQL: `text`);
   - a `date` less a `date` is a `bigint` (PostgreSQL: `integer`);
   - a `smallint` with a number (`s + 1`) stays a `smallint` (PostgreSQL:
     `integer`), and is an error where the result passes 32767;
-  - `extract` and `date_part` of a whole field anywhere but as a whole item
-    of the statement's select list (inside another expression such as
-    `extract(year FROM d) + 1`, after `DISTINCT`, in a subquery) are a
-    `bigint` (PostgreSQL: `numeric` and `double precision`);
-  - `sum` is a `numeric` where PostgreSQL has a `bigint` when its argument
-    is a name the statement defines itself (`SELECT sum(n) FROM (SELECT qty
-    AS n ...)`), a column that is an `integer` in one table and another type
-    in another, or anything but whole-number columns, numbers, casts, `CASE`
-    and `+ - * / %` between them, and in a statement that names columns in a
-    list (`AS t(a, b)`);
-  - `length`, `position`, `ntile` and `sum` keep the copy's type in a whole
-    statement that uses the same function inside a `round()`, `floor()` or
-    `avg()` the port rewrites, or, in a subquery's select list or beside a
-    `*`, in an item with no name that is more than the call itself
-    (`length(x) + 1`) or twice in one list; give the item a name (`AS n`)
-    to get PostgreSQL's type there;
-  - a `NULL` named inside a subquery or a `WITH`, and a second `NULL` with no
-    name in one select list, are an `integer` (PostgreSQL: `text`);
   - arithmetic over a `real` column is a `real` (PostgreSQL: `double
     precision`), and `sum` of one a `double precision` (PostgreSQL: `real`).
-
-  A statement of more than a few thousand words, or one whose conversions
-  would make it longer than the port takes, is answered with the copy's types.
 
   Also not PostgreSQL's: a `round()` the copy answers is PostgreSQL's
   `numeric`, with exactly the decimals PostgreSQL writes, on every
