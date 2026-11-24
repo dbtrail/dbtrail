@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
@@ -161,6 +162,50 @@ func baselineOverrideFor(ctx context.Context, cfg FullTableConfig, schema, table
 			at.UTC().Format(time.RFC3339), cfg.At.UTC().Format(time.RFC3339))
 	}
 	return overrideBase{path: p, dir: dir, at: at}, true, nil
+}
+
+// BaselineOverridesReached asks, without folding anything, the question a run
+// to cfg.At asks of each cfg.BaselineOverride file: is it usable, and has the
+// cut reached the coordinate it was read at? It answers with the run's own
+// checks, so ErrBaselineOverrideAhead here is the refusal that run would give.
+//
+// The cut only moves forward as capture indexes more and as At moves later, so
+// a run to this At or a later one, on the same index, finds the files reached.
+func BaselineOverridesReached(ctx context.Context, cfg FullTableConfig) error {
+	cfg.OutputFormat = OutputFormatParquet
+	db, err := config.Connect(cfg.IndexDSN)
+	if err != nil {
+		return fmt.Errorf("connect to index DB: %w", err)
+	}
+	defer db.Close()
+	cut, err := ResolveSnapshotCut(ctx, db, cfg.At)
+	if err != nil {
+		return err
+	}
+	postgres := query.SourceFlavor(db) == "postgres"
+	keys := make([]string, 0, len(cfg.BaselineOverride))
+	for k := range cfg.BaselineOverride {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		schema, table, ok := splitSchemaTable(k)
+		if !ok {
+			return fmt.Errorf("%w: %q is not a table name as schema.table", ErrBaselineOverride, k)
+		}
+		override, _, err := baselineOverrideFor(ctx, cfg, schema, table)
+		if err != nil {
+			return err
+		}
+		bmeta, err := baseline.ReadParquetMetadataAny(ctx, override.path)
+		if err != nil {
+			return fmt.Errorf("read the metadata of %s: %w", override.path, err)
+		}
+		if err := checkOverrideReached(schema, table, bmeta, override.at, postgres, cut); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // resolvedPath is p made absolute with its links followed, as far as it
