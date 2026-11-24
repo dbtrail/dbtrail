@@ -362,6 +362,10 @@ func replaceParts(t BaselineTable) []retyped {
 // the invariant replaceClause states.
 func pgParts(t BaselineTable) []retyped {
 	var parts []retyped
+	var trim map[string]bool
+	if t.TrimPadded {
+		trim = baseline.PGPaddedToTrim(t.PGRelation)
+	}
 	for _, c := range t.PGCasts {
 		q := quoteIdent(c.Name)
 		refuse := func(what string) string {
@@ -369,6 +373,11 @@ func pgParts(t BaselineTable) []retyped {
 		}
 		switch c.As {
 		case "", baseline.PGAsText:
+			if trim[c.Name] {
+				// Blanks only: PostgreSQL pads with nothing else.
+				parts = append(parts, retyped{c.Name, "rtrim(" + q + ", ' ') COLLATE C"})
+				continue
+			}
 			parts = append(parts, retyped{c.Name, q + " COLLATE C"})
 		case baseline.PGAsBytes:
 			parts = append(parts, retyped{c.Name, fmt.Sprintf(
@@ -407,6 +416,18 @@ func pgParts(t BaselineTable) []retyped {
 		}
 	}
 	return parts
+}
+
+// WithPaddingTrimmed is tables with each one's char(n) columns read without
+// their padding, for the PostgreSQL port. A copy: the list it is given may be
+// shared with what other surfaces render.
+func WithPaddingTrimmed(tables []BaselineTable) []BaselineTable {
+	out := make([]BaselineTable, len(tables))
+	copy(out, tables)
+	for i := range out {
+		out[i].TrimPadded = true
+	}
+	return out
 }
 
 // pgListElements reads the text of a PostgreSQL array of one dimension,

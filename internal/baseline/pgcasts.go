@@ -3,6 +3,7 @@ package baseline
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // PGCast says how one column of a PostgreSQL-source snapshot file is read. The
@@ -175,6 +176,30 @@ func pgCastOf(c PGColumn) string {
 		return pgNumericCast(c.TypeMod)
 	}
 	return ""
+}
+
+// PGPaddedToTrim are the columns of rel the PostgreSQL port reads without the
+// blanks PostgreSQL pads them with: each char(n), by its exact name. It is the
+// one list of them: the views trim these and the port's catalog marks these,
+// so the two cannot disagree. Left out: a bpchar with no length, whose blanks
+// are the value's; an array of char(n); a domain over char(n), recorded under
+// its own type; and two columns whose names differ only in case, which the
+// copy's engine cannot tell apart.
+func PGPaddedToTrim(rel *PGRelation) map[string]bool {
+	if rel == nil {
+		return nil
+	}
+	seen := map[string]int{}
+	for _, c := range rel.Columns {
+		seen[strings.ToLower(c.Name)]++
+	}
+	out := map[string]bool{}
+	for _, c := range rel.Columns {
+		if c.TypeOID == pgOIDBpchar && c.TypeMod >= 0 && seen[strings.ToLower(c.Name)] == 1 {
+			out[c.Name] = true
+		}
+	}
+	return out
 }
 
 // pgNumericCast reads numeric's type modifier: -1 is no precision, else

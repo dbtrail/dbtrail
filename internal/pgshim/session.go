@@ -65,6 +65,9 @@ type session struct {
 	database      string
 	catalogTables []CatalogTable
 	catalogAt     time.Time
+	// catalogStamp is bound.CatalogStamp as read just before catalogTables
+	// were ("" not read).
+	catalogStamp string
 	// up is the connection to the server's source (forward.go), nil until a
 	// statement needs it; upLost says why it was lost, after which nothing
 	// more is sent there.

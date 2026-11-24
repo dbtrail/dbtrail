@@ -1567,6 +1567,9 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			// render no view.
 			markReadTableDeadRows(narrowed.Baselines, readTables)
 			dateScales = sqlDateScales(narrowed, refs, sess.StrictStar, sess.MySQLClock)
+			if sess.TrimPadded {
+				narrowed.Baselines = views.WithPaddingTrimmed(narrowed.Baselines)
+			}
 			viewsSQL = views.Generate(narrowed) + sqlUsedSchema(in, narrowed.OnlyViews, schema) + textDecline
 			return viewsSQL, nil
 		},

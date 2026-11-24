@@ -1186,7 +1186,7 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			if schema == "" {
 				schema = pgPortSchema
 			}
-			sess := sqlsandbox.Session{PostgresRules: true, PostgresNames: true, TimeZone: opts.TimeZone}
+			sess := sqlsandbox.Session{PostgresRules: true, TrimPadded: true, PostgresNames: true, TimeZone: opts.TimeZone}
 			// How far the snapshot files it reads reach (#3125), for an
 			// answer that reads a table without its recent changes.
 			snapshot := pgSnapshotAgeFor(opts)
@@ -1211,6 +1211,16 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			}
 			return copySQL.PGCopyViewNames(ctx)
 		}
+		// Which snapshot the copy reads now, with no worker of the copy:
+		// the catalog a connection keeps is read again when it changes.
+		bound.CatalogStamp = func(ctx context.Context) (string, error) {
+			if timeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, timeout)
+				defer cancel()
+			}
+			return copySQL.PGCopyStamp(ctx)
+		}
 		bound.Catalog = func(ctx context.Context) ([]pgshim.CatalogTable, error) {
 			if timeout > 0 {
 				var cancel context.CancelFunc
@@ -1221,7 +1231,7 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 				// Not held to the server's lag limit (#3125): it lists
 				// columns, and the screen cannot send a statement to the
 				// copy, or say why not, without it.
-				return copySQL.Run(console.WithPGCatalogRead(ctx), statement, pgPortSchema, sqlsandbox.Session{PostgresRules: true, PostgresNames: true})
+				return copySQL.Run(console.WithPGCatalogRead(ctx), statement, pgPortSchema, sqlsandbox.Session{PostgresRules: true, TrimPadded: true, PostgresNames: true})
 			})
 		}
 		return bound, nil
