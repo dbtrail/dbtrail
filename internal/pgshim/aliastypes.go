@@ -198,32 +198,38 @@ func aliasDefinitions(toks []rtToken) map[string][][]rtToken {
 	}
 	defs := map[string][][]rtToken{}
 	for i := range at {
-		end := i
-		if end > 0 && toks[end-1].kind == rtWord && toks[end-1].text == "as" {
-			end--
-		}
-		start, depth := end, 0
-	back:
-		for j := end - 1; j >= 0; j-- {
-			t := toks[j]
-			switch {
-			case t.kind == rtOp && (t.text == ")" || t.text == "]"):
-				depth++
-			case t.kind == rtOp && (t.text == "(" || t.text == "["):
-				if depth == 0 {
-					break back
-				}
-				depth--
-			case depth == 0 && t.kind == rtOp && t.text == ",":
-				break back
-			case depth == 0 && t.kind == rtWord && definitionStart[t.text]:
-				break back
-			}
-			start = j
-		}
-		defs[toks[i].text] = append(defs[toks[i].text], toks[start:end])
+		defs[toks[i].text] = append(defs[toks[i].text], aliasDefinitionAt(toks, i))
 	}
 	return defs
+}
+
+// aliasDefinitionAt is the expression the name given at i stands for: the
+// select item before `AS name`, or before a bare alias.
+func aliasDefinitionAt(toks []rtToken, i int) []rtToken {
+	end := i
+	if end > 0 && toks[end-1].kind == rtWord && toks[end-1].text == "as" {
+		end--
+	}
+	start, depth := end, 0
+back:
+	for j := end - 1; j >= 0; j-- {
+		t := toks[j]
+		switch {
+		case t.kind == rtOp && (t.text == ")" || t.text == "]"):
+			depth++
+		case t.kind == rtOp && (t.text == "(" || t.text == "["):
+			if depth == 0 {
+				break back
+			}
+			depth--
+		case depth == 0 && t.kind == rtOp && t.text == ",":
+			break back
+		case depth == 0 && t.kind == rtWord && definitionStart[t.text]:
+			break back
+		}
+		start = j
+	}
+	return toks[start:end]
 }
 
 // definitionStart are the words before a select item or a FROM item.

@@ -1130,7 +1130,7 @@ func screenWith(in []rtToken, types map[string][]string, untyped, sortsLikeSourc
 	if why := keywordColumnList(in); why != "" {
 		return why
 	}
-	if why := aliasUse(in); why != "" {
+	if why := aliasUse(in, types, untyped); why != "" {
 		return why
 	}
 	if why := scaleMixRisk(in); why != "" {
@@ -2007,7 +2007,7 @@ func aliases(toks []rtToken) (names map[string]bool, at map[int]bool) {
 		if !isAlias && i+1 < len(toks) {
 			next := toks[i+1]
 			ends := next.kind == rtOp && next.text == "," || next.kind == rtWord && next.text == "from"
-			value := prev.kind == rtString || prev.kind == rtNumber || prev.kind == rtParam ||
+			value := prev.kind == rtString || prev.kind == rtNumber || prev.kind == rtParam || prev.kind == rtQuoted ||
 				prev.kind == rtOp && (prev.text == ")" || prev.text == "]") || prev.kind == rtWord && !aliasStop[prev.text]
 			isAlias = ends && value
 		}
@@ -2019,11 +2019,90 @@ func aliases(toks []rtToken) (names map[string]bool, at map[int]bool) {
 	return names, at
 }
 
+// queryScopes gives each token the statement it belongs to: 0 the whole
+// one, and a new number for each parenthesis that opens with SELECT, WITH or
+// VALUES (a table in FROM, a WITH's body, a subquery). A parenthesis that
+// opens with anything else (a call, a list, a parenthesis around a
+// subquery) belongs to the statement around it. parent is each statement's
+// enclosing one, -1 for the whole.
+func queryScopes(toks []rtToken) (scope []int, parent []int) {
+	scope = make([]int, len(toks))
+	parent = []int{-1}
+	var stack []int
+	cur := 0
+	for i, t := range toks {
+		switch {
+		case t.kind == rtOp && t.text == "(":
+			scope[i] = cur
+			stack = append(stack, cur)
+			if i+1 < len(toks) && toks[i+1].kind == rtWord {
+				switch toks[i+1].text {
+				case "select", "with", "values":
+					parent = append(parent, cur)
+					cur = len(parent) - 1
+				}
+			}
+			continue
+		case t.kind == rtOp && t.text == ")":
+			if len(stack) > 0 {
+				cur = stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+			}
+		}
+		scope[i] = cur
+	}
+	return scope, parent
+}
+
+// encloses reports whether statement outer is around statement inner, at
+// any depth, and not inner itself.
+func encloses(parent []int, outer, inner int) bool {
+	for p := parent[inner]; p >= 0; p = parent[p] {
+		if p == outer {
+			return true
+		}
+	}
+	return false
+}
+
+// heldOtherwise reports whether a column named n (lowercased) is one the
+// copy does not hold as PostgreSQL does, for the screen's types: a char(n)
+// the view trims, a padded one, one the copy holds as text and the source
+// as something else, one of a type of the user's, or a table's name that
+// stands for such columns.
+func heldOtherwise(types map[string][]string, n string) bool {
+	if trimmedName(types, n) {
+		return true
+	}
+	for _, t := range types[n] {
+		if paddedType(t) {
+			return true
+		}
+	}
+	for _, k := range []string{onlyCopyTextKey + n, userTypeColKey + n, relKey + n, userTypeRelKey + n} {
+		if _, ok := types[k]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // aliasUse names an alias of the select list used in WHERE or HAVING, which
 // PostgreSQL refuses and the copy answers, or inside an expression of ORDER
 // BY (aliasInOrderKey). A name followed by a dot is a table's, and one after
 // a dot is a column of what it qualifies.
-func aliasUse(toks []rtToken) string {
+//
+// A name given inside a table in FROM or a WITH is a column of it to every
+// statement around it, whose WHERE reads it on PostgreSQL too (CH-benCHmark
+// Q2's m_i_id, Q15's supplier_no): that use is let through. Any other is
+// the source's: in the statement that gives the name, in a subquery of it,
+// or in a statement beside it. So is every use of a name given to an
+// expression that reads a column the copy does not hold as PostgreSQL does
+// (heldOtherwise): a char(n), trimmed or padded (#3219), a column the copy
+// holds as text, one of a type of the user's. The name hides the column from
+// the rules that know it, which would let a comparison through. Without the
+// columns' own types (untyped), nothing is let through.
+func aliasUse(toks []rtToken, types map[string][]string, untyped bool) string {
 	names, at := aliases(toks)
 	if why := aliasInOrderKey(toks, names); why != "" {
 		return why
@@ -2031,8 +2110,60 @@ func aliasUse(toks []rtToken) string {
 	if len(names) == 0 {
 		return ""
 	}
+	scope, parent := queryScopes(toks)
+	givenIn := map[string][]int{}
+	for i := range at {
+		givenIn[toks[i].text] = append(givenIn[toks[i].text], scope[i])
+	}
+	// A column of a statement inside: every statement that gives the name
+	// is inside the one that reads it.
+	// A name stands for a column the copy does not hold as PostgreSQL does
+	// when its expression reads one, or reads a name that does (SELECT y AS
+	// z FROM (SELECT c AS y ...)).
+	hiddenBehind := map[string]bool{}
+	for changed := true; changed; {
+		changed = false
+		for i := range at {
+			if hiddenBehind[toks[i].text] {
+				continue
+			}
+			for _, d := range aliasDefinitionAt(toks, i) {
+				n := strings.ToLower(d.text)
+				if (d.kind == rtWord || d.kind == rtQuoted) && (heldOtherwise(types, n) || hiddenBehind[n]) {
+					hiddenBehind[toks[i].text] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	columnOfInner := func(name string, readIn int) bool {
+		if untyped || hiddenBehind[name] {
+			return false
+		}
+		for _, s := range givenIn[name] {
+			if !encloses(parent, readIn, s) {
+				return false
+			}
+		}
+		return true
+	}
+	// A parenthesis keeps the clause it opens in (WHERE mod(y, 2)), and the
+	// clause comes back after it (WHERE id IN (SELECT ...) AND y = 1).
 	clause := ""
+	var clauses []string
 	for i, t := range toks {
+		if t.kind == rtOp && t.text == "(" {
+			clauses = append(clauses, clause)
+			continue
+		}
+		if t.kind == rtOp && t.text == ")" {
+			if len(clauses) > 0 {
+				clause = clauses[len(clauses)-1]
+				clauses = clauses[:len(clauses)-1]
+			}
+			continue
+		}
 		if t.kind != rtWord {
 			continue
 		}
@@ -2046,7 +2177,7 @@ func aliasUse(toks []rtToken) string {
 		}
 		// A name after a dot is a column of a table, a WITH or a subquery
 		// (r.rnk), which WHERE reads on PostgreSQL too.
-		if clause != "" && names[t.text] && !at[i] && !(i+1 < len(toks) && toks[i+1].kind == rtOp && toks[i+1].text == ".") && !isOpTok(toks, i-1, ".") {
+		if clause != "" && names[t.text] && !at[i] && !(i+1 < len(toks) && toks[i+1].kind == rtOp && toks[i+1].text == ".") && !isOpTok(toks, i-1, ".") && !columnOfInner(t.text, scope[i]) {
 			return fmt.Sprintf("the name %s, given in the select list, used in %s", t.text, strings.ToUpper(clause))
 		}
 	}

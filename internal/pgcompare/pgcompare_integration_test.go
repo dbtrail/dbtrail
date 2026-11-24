@@ -134,6 +134,7 @@ func TestIntegrationPGCompare(t *testing.T) {
 	want = append(want, screenExactness()...)
 	want = append(want, textOrderHoles()...)
 	want = append(want, reportShapes()...)
+	want = append(want, aliasScopeShapes()...)
 	stmts := make([]string, len(want))
 	for i, e := range want {
 		stmts[i] = e.stmt
