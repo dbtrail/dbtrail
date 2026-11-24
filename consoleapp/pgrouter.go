@@ -1186,7 +1186,7 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			if schema == "" {
 				schema = pgPortSchema
 			}
-			sess := sqlsandbox.Session{PostgresRules: true, PostgresNames: true, TimeZone: opts.TimeZone}
+			sess := sqlsandbox.Session{PostgresRules: true, TrimPadded: true, PostgresNames: true, TimeZone: opts.TimeZone}
 			// How far the snapshot files it reads reach (#3125), for an
 			// answer that reads a table without its recent changes.
 			snapshot := pgSnapshotAgeFor(opts)
@@ -1221,7 +1221,7 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 				// Not held to the server's lag limit (#3125): it lists
 				// columns, and the screen cannot send a statement to the
 				// copy, or say why not, without it.
-				return copySQL.Run(console.WithPGCatalogRead(ctx), statement, pgPortSchema, sqlsandbox.Session{PostgresRules: true, PostgresNames: true})
+				return copySQL.Run(console.WithPGCatalogRead(ctx), statement, pgPortSchema, sqlsandbox.Session{PostgresRules: true, TrimPadded: true, PostgresNames: true})
 			})
 		}
 		return bound, nil

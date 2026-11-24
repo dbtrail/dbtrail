@@ -228,6 +228,11 @@ type BaselineTable struct {
 	// the PostgreSQL-protocol port's catalog reads it (#2769); the views do
 	// not.
 	PGRelation *baseline.PGRelation
+	// TrimPadded reads each char(n) of the table without its padding
+	// (baseline.PGPaddedToTrim), above the join of the snapshot with its
+	// changes, so a key still matches by its stored value. Only the
+	// PostgreSQL port asks for it (WithPaddingTrimmed).
+	TrimPadded bool
 	// PGPair is what was found beside a PostgreSQL table's file when it was
 	// looked at (Input.MarkPGPairs, #2757); nil when it was not, and for
 	// any other table. Set while the path is the local file, for a views

@@ -76,6 +76,10 @@ type CatalogColumn struct {
 	// does not: a char(n) is a VARCHAR here (padded.go).
 	SourceType    uint32
 	SourceTypeMod int32
+	// TrimmedOnCopy says the copy's view reads this char(n) without its
+	// padding (baseline.PGPaddedToTrim, the list the view itself uses). The
+	// screen may treat a column as trimmed only when this says so.
+	TrimmedOnCopy bool
 }
 
 // catalogCacheFor is how long one connection reuses the catalog it read: a

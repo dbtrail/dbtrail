@@ -278,6 +278,11 @@ type Session struct {
 	// is the one written for MySQL. Division by zero is not covered: the
 	// copy answers NULL where PostgreSQL fails the statement.
 	PostgresRules bool
+	// TrimPadded reads the views' char(n) columns without their padding
+	// (views.WithPaddingTrimmed). Only the PostgreSQL port sets it: the SQL
+	// page, the dashboards and a downloaded script keep the stored value.
+	// Read where the views are built, so it does not travel to the worker.
+	TrimPadded bool
 	// PostgresNames heads a result column the statement gives no name of
 	// its own the way PostgreSQL does (#2803): `count` for count(*), the
 	// function's name for a call, the type's for a cast of an expression,

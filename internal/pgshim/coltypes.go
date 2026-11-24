@@ -238,7 +238,7 @@ func binaryScalar(oid uint32, s string) ([]byte, error) {
 		return binary.BigEndian.AppendUint64(nil, math.Float64bits(f)), nil
 	case oidNumeric:
 		return binaryNumeric(s)
-	case oidName, oidVarchar, oidJSON, oidNodeTree:
+	case oidName, oidVarchar, oidBpchar, oidJSON, oidNodeTree:
 		return []byte(s), nil
 	case oidChar:
 		// "char": one byte.
