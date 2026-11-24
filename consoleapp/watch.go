@@ -298,7 +298,8 @@ func init() {
 			"snapshot update is refused for tables changed by a statement that leaves no row changes to apply (a TRUNCATE, a table dropped and "+
 			"created again, a change of its columns), only those tables are read again from the source, and every table of the server is "+
 			"brought to one point with the others updated from the recorded changes, instead of a full read of the whole server. A table "+
-			"refused again before an update goes through, and every way that read can fail, take the full read as before, at most once a day. "+
+			"refused again before an update goes through, and a read that ends without a snapshot, take the full read as before, at most once a day; "+
+			"a read that runs out of disk in the working folder takes none, since a full read needs that space too, and the slot says so. "+
 			"Off, every such refusal takes the full read.")
 	watchCmd.Flags().StringVar(&upBaselineRefreshEvery, "baseline-refresh-interval", "", "Periodically refresh each server's newest baseline snapshot from the index (Nm/Nh/Nd; default: off). Runs with the conservative DuckDB budget, folds at most 2 tables at a time, and never publishes over a known capture gap.")
 	watchCmd.Flags().StringVar(&upConsoleBaselineRetain, snapshotRetainFlag, "", "The old way to bound local snapshots, still honored: prune those older than this (Nd/Nh) once a durable copy exists in S3 (never the only copy or the newest snapshot per table). Each server's own count, Keep by count"+console.OnPage(console.PageSnapshots)+", is the control now")

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
@@ -114,15 +115,30 @@ func (b *backupScheduler) rereadInstead(e console.ServerEntry, failed console.Ba
 	// A read of some tables reads the source: where a full read may not
 	// start, neither does it, and fallBack says why.
 	if err := console.FullBackupPossible(e, b.gates()); err != nil {
+		slog.Info("snapshot schedule: the refused tables are not read again alone, since no read of the source can start here",
+			"server", e.Name, "id", e.ID, "reason", err)
+		return false
+	}
+	// The lock modes a read of some tables can use (stageReread), asked
+	// before a job is started for nothing.
+	source := console.BaselineRequestFor(e)
+	if mode, _, err := b.sup.lockModeFor(source); err != nil || (mode != baseline.LockModeFTWRL && mode != baseline.LockModeLockAll) {
+		why := fmt.Sprintf("this server is read with lock mode %s, and a read of some tables records the instant of its rows only under ftwrl or lock-all", mode)
+		if err != nil {
+			why = "the lock mode could not be read: " + err.Error()
+		}
+		slog.Info("snapshot schedule: the refused tables are not read again alone; the full read is taken in place of the update, as before",
+			"server", e.Name, "id", e.ID, "reason", why)
 		return false
 	}
 	p, err := e.BackupSchedule.Parse()
 	if err != nil {
+		slog.Warn("snapshot schedule: the refused tables are not read again alone, since the schedule could not be read", "server", e.Name, "id", e.ID, "error", err)
 		return false
 	}
 	stamp := now.Format(time.RFC3339)
 	req := b.rebuildRequest(e, p)
-	req.Reread = &rereadOrder{Tables: tables, Source: console.BaselineRequestFor(e)}
+	req.Reread = &rereadOrder{Tables: tables, Source: source}
 	req.UpdateWhy = rereadUpdateWhy(len(tables))
 	since, err := b.sup.TriggerRefresh(req, p.Every)
 	if err != nil {
@@ -161,7 +177,19 @@ func (b *backupScheduler) afterReread(e console.ServerEntry, own scheduledStart,
 		b.includeNewTables(e, last)
 		return
 	}
+	if last.DiskRefused {
+		// The full read stages a dump of every table in the same working
+		// folder, so it would run out of room the same way: as for any update
+		// the disk refused, none is taken. Said, with the update's refusal.
+		b.skip(e, time.Now().UTC(), "the update from the recorded changes was refused ("+own.rereadFor.LastError+
+			"), and reading the refused tables again ran out of disk space, so no full read is taken in its place, which needs that space too: "+last.LastError)
+		return
+	}
 	if !fullReadStandsIn(last) {
+		// Published, and only its upload failed: the snapshot exists, as for
+		// any update whose upload failed.
+		slog.Warn("snapshot schedule: the refused tables were read again alone and the update published, but its upload failed",
+			"server", e.Name, "id", e.ID, "tables", own.rereadTables, "reason", last.LastError)
 		return
 	}
 	slog.Warn("snapshot schedule: reading the refused tables again did not publish a snapshot; the full read is taken in place of the refused update, as before",

@@ -274,7 +274,7 @@ var docs = map[string]Doc{
 	},
 	"BINTRAIL_BASELINE_REREAD_REFUSED_TABLES": {
 		Group:   "archives",
-		Text:    "When a scheduled snapshot update is refused for tables changed by a statement that leaves no row changes to apply (a TRUNCATE, a table dropped and created again, a change of its columns), watch reads only those tables again from the source and brings every table to one point, instead of reading the whole server. A table refused again before an update goes through, and every way that read can fail, take the full read as before, at most once a day. Set false to always take the full read.",
+		Text:    "When a scheduled snapshot update is refused for tables changed by a statement that leaves no row changes to apply (a TRUNCATE, a table dropped and created again, a change of its columns), watch reads only those tables again from the source and brings every table to one point, instead of reading the whole server. A table refused again before an update goes through, and a read that ends without a snapshot, take the full read as before, at most once a day, except a read that ran out of disk space, since a full read needs that space too. Set false to always take the full read.",
 		Default: "on",
 		Example: "false",
 		ReadBy:  "watch",

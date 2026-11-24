@@ -562,3 +562,39 @@ func TestNewBaselineSupervisorFromConfig_carriesTheRereadChoice_2640(t *testing.
 		}
 	}
 }
+
+// A read that ran out of disk in the working folder takes no full read, which
+// would stage a dump of every table there; the slot says so with both reasons.
+func TestScheduleReread_aReadOutOfDiskIsSaidNotSilent_2640(t *testing.T) {
+	r := newRereadSched(t, true)
+	r.setRefuse(func(cfg reconstruct.FullTableConfig) []reconstruct.TableFailure {
+		if len(cfg.BaselineOverride) == 0 {
+			return []reconstruct.TableFailure{truncated("orders")}
+		}
+		return []reconstruct.TableFailure{{Schema: "demo", Table: "plain", Err: fmt.Errorf("demo.plain: %w", errFoldDiskFull)}}
+	})
+	state := r.slot(t, 9)
+	if len(*r.dumps) != 1 || r.reads.count() != 0 {
+		t.Fatalf("dumps %d, full reads %d; want the read and no full read", len(*r.dumps), r.reads.count())
+	}
+	if !strings.Contains(state.LastSkipReason, "ran out of disk space") || !strings.Contains(state.LastSkipReason, "TRUNCATE TABLE in the window") {
+		t.Fatalf("the slot does not say why nothing stands in: %q", state.LastSkipReason)
+	}
+	r.wantNoReadLeft(t)
+}
+
+// A lock mode a read of some tables cannot use starts no read: the full read,
+// as before, and the log says why.
+func TestScheduleReread_aLockModeItCannotUseTakesTheFullRead_2640(t *testing.T) {
+	log := captureSlogFor(t)
+	r := newRereadSched(t, true)
+	r.sup.lockMode, r.sup.lockModeChosen = baseline.LockModeNoLock, true
+	r.setRefuse(curedByRead(truncated("orders")))
+	state := r.slot(t, 9)
+	if len(*r.dumps) != 0 || r.reads.count() != 1 || state.LastFallbackAt == "" {
+		t.Fatalf("dumps %d, full reads %d, state %+v; want today's full read and no read of some tables", len(*r.dumps), r.reads.count(), state)
+	}
+	if !strings.Contains(log.String(), "lock mode no-lock") {
+		t.Fatalf("the log does not say why the tables were not read alone:\n%s", log.String())
+	}
+}
