@@ -248,7 +248,7 @@ func TestIntegrationRereadFold_truncatedAgainAfterTheRead_2640(t *testing.T) {
 	realReached := rereadCaptureReached
 	t.Cleanup(func() { rereadCaptureReached = realReached })
 	var once sync.Once
-	rereadCaptureReached = func(ctx context.Context, cfg reconstruct.FullTableConfig) error {
+	rereadCaptureReached = func(ctx context.Context, cfg reconstruct.OverrideProbe) error {
 		once.Do(func() {
 			testutil.MustExec(t, r.src, "TRUNCATE TABLE orders")
 			testutil.MustExec(t, r.src, "INSERT INTO orders VALUES (5000, 'second-truncate', 3)")

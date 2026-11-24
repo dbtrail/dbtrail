@@ -25,8 +25,8 @@ func TestBaselineOverridesReached_answersWhatTheFoldAnswers(t *testing.T) {
 	staged := stageTable(t, t.TempDir(), "orders", base.Add(15*time.Second), 5000)
 	override := map[string]string{"shop.orders": staged}
 	ask := func(at time.Time) error {
-		return reconstruct.BaselineOverridesReached(context.Background(), reconstruct.FullTableConfig{
-			IndexDSN: dsn, BaselineSrc: root, OutputDir: root, At: at, BaselineOverride: override,
+		return reconstruct.BaselineOverridesReached(context.Background(), reconstruct.OverrideProbe{
+			IndexDSN: dsn, BaselineSrc: root, OutputDir: root, At: at, Override: override,
 		})
 	}
 
@@ -54,9 +54,9 @@ func TestBaselineOverridesReached_answersWhatTheFoldAnswers(t *testing.T) {
 func TestBaselineOverridesReached_aFileThatCannotBeUsedIsNotAWait(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	_, dsn, root, base := lateDDLIndex(t)
-	err := reconstruct.BaselineOverridesReached(context.Background(), reconstruct.FullTableConfig{
+	err := reconstruct.BaselineOverridesReached(context.Background(), reconstruct.OverrideProbe{
 		IndexDSN: dsn, BaselineSrc: root, OutputDir: root, At: base.Add(time.Minute),
-		BaselineOverride: map[string]string{"shop.orders": filepath.Join(t.TempDir(), "x", "shop", "orders.parquet")},
+		Override: map[string]string{"shop.orders": filepath.Join(t.TempDir(), "x", "shop", "orders.parquet")},
 	})
 	if !errors.Is(err, reconstruct.ErrBaselineOverride) || errors.Is(err, reconstruct.ErrBaselineOverrideAhead) {
 		t.Fatalf("err = %v, want ErrBaselineOverride", err)
@@ -99,8 +99,8 @@ func TestBaselineOverride_aRenumberedLogStillRefuses(t *testing.T) {
 
 	at := base.Add(30 * time.Second)
 	override := map[string]string{"shop.items": staged}
-	if err := reconstruct.BaselineOverridesReached(context.Background(), reconstruct.FullTableConfig{
-		IndexDSN: dsn, BaselineSrc: root, OutputDir: root, At: at, BaselineOverride: override,
+	if err := reconstruct.BaselineOverridesReached(context.Background(), reconstruct.OverrideProbe{
+		IndexDSN: dsn, BaselineSrc: root, OutputDir: root, At: at, Override: override,
 	}); err != nil {
 		t.Fatalf("the read's own numbering has reached it: %v", err)
 	}

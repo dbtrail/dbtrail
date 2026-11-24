@@ -96,7 +96,7 @@ func (s *baselineSupervisor) prepareReread(req refreshRequest, job *jobRun) (map
 	}
 	discard := func() {
 		if err := read.discard(); err != nil {
-			slog.Error("baseline refresh: could not remove the read of some tables; it still takes room in the working folder",
+			slog.Error("snapshot refresh: could not remove the read of some tables; it still takes room in the working folder",
 				"server", req.ServerName, "path", read.root, "error", err)
 		}
 	}
@@ -165,9 +165,9 @@ func pathInside(p, root string) bool {
 func (s *baselineSupervisor) waitForRereadCapture(req refreshRequest, read stagedReread) error {
 	deadline := time.Now().Add(rereadCaptureWait)
 	for {
-		err := rereadCaptureReached(s.ctx, reconstruct.FullTableConfig{
+		err := rereadCaptureReached(s.ctx, reconstruct.OverrideProbe{
 			IndexDSN: req.IndexDSN, BaselineSrc: baselineFoldSource(req), OutputDir: req.BaselineDir,
-			At: time.Now().UTC(), BaselineOverride: read.files,
+			At: time.Now().UTC(), Override: read.files,
 		})
 		if err == nil {
 			return nil

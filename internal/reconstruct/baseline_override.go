@@ -164,15 +164,28 @@ func baselineOverrideFor(ctx context.Context, cfg FullTableConfig, schema, table
 	return overrideBase{path: p, dir: dir, at: at}, true, nil
 }
 
+// OverrideProbe is what BaselineOverridesReached asks about: the files a run
+// would take as BaselineOverride, and the index, roots and target of that run.
+type OverrideProbe struct {
+	IndexDSN    string
+	BaselineSrc string
+	OutputDir   string
+	At          time.Time
+	Override    map[string]string
+}
+
 // BaselineOverridesReached asks, without folding anything, the question a run
-// to cfg.At asks of each cfg.BaselineOverride file: is it usable, and has the
-// cut reached the coordinate it was read at? It answers with the run's own
-// checks, so ErrBaselineOverrideAhead here is the refusal that run would give.
+// to p.At asks of each override file: is it usable, and has the cut reached
+// the coordinate it was read at? It answers with the run's own checks, so
+// ErrBaselineOverrideAhead here is the refusal that run would give.
 //
 // The cut only moves forward as capture indexes more and as At moves later, so
 // a run to this At or a later one, on the same index, finds the files reached.
-func BaselineOverridesReached(ctx context.Context, cfg FullTableConfig) error {
-	cfg.OutputFormat = OutputFormatParquet
+func BaselineOverridesReached(ctx context.Context, p OverrideProbe) error {
+	cfg := FullTableConfig{
+		IndexDSN: p.IndexDSN, BaselineSrc: p.BaselineSrc, OutputDir: p.OutputDir, At: p.At,
+		OutputFormat: OutputFormatParquet, BaselineOverride: p.Override,
+	}
 	db, err := config.Connect(cfg.IndexDSN)
 	if err != nil {
 		return fmt.Errorf("connect to index DB: %w", err)

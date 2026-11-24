@@ -50,7 +50,7 @@ func newRereadFixture(t *testing.T, fold func(reconstruct.FullTableConfig) ([]*r
 	readIndexMark = func(context.Context, string) (indexMark, error) {
 		return indexMark{}, errors.New("no index in this test")
 	}
-	rereadCaptureReached = func(context.Context, reconstruct.FullTableConfig) error { return nil }
+	rereadCaptureReached = func(context.Context, reconstruct.OverrideProbe) error { return nil }
 	rereadCapturePoll = time.Millisecond
 
 	folds := &[]reconstruct.FullTableConfig{}
@@ -179,7 +179,7 @@ func TestRunRefresh_rereadWaitsForCaptureThenFolds_2640(t *testing.T) {
 	f := newRereadFixture(t, foldOK)
 	rereadCaptureWait = time.Minute
 	var asked []time.Time
-	rereadCaptureReached = func(_ context.Context, cfg reconstruct.FullTableConfig) error {
+	rereadCaptureReached = func(_ context.Context, cfg reconstruct.OverrideProbe) error {
 		asked = append(asked, cfg.At)
 		if len(asked) < 3 {
 			return fmt.Errorf("%w: not yet", reconstruct.ErrBaselineOverrideAhead)
@@ -207,7 +207,7 @@ func TestRunRefresh_rereadWaitsForCaptureThenFolds_2640(t *testing.T) {
 func TestRunRefresh_captureNeverArrives_2640(t *testing.T) {
 	f := newRereadFixture(t, foldOK)
 	rereadCaptureWait = 20 * time.Millisecond
-	rereadCaptureReached = func(context.Context, reconstruct.FullTableConfig) error {
+	rereadCaptureReached = func(context.Context, reconstruct.OverrideProbe) error {
 		return fmt.Errorf("%w: behind", reconstruct.ErrBaselineOverrideAhead)
 	}
 	st := f.run()
@@ -227,7 +227,7 @@ func TestRunRefresh_cancelledWhileWaitingForCapture_2640(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	f.sup.ctx = ctx
-	rereadCaptureReached = func(context.Context, reconstruct.FullTableConfig) error {
+	rereadCaptureReached = func(context.Context, reconstruct.OverrideProbe) error {
 		cancel()
 		return fmt.Errorf("%w: behind", reconstruct.ErrBaselineOverrideAhead)
 	}
@@ -252,7 +252,7 @@ func TestRunRefresh_aFailedCaptureCheckIsNotRetried_2640(t *testing.T) {
 	f := newRereadFixture(t, foldOK)
 	rereadCaptureWait = time.Hour
 	n := 0
-	rereadCaptureReached = func(context.Context, reconstruct.FullTableConfig) error {
+	rereadCaptureReached = func(context.Context, reconstruct.OverrideProbe) error {
 		n++
 		return errors.New("index unreachable")
 	}
@@ -303,7 +303,7 @@ func TestRunRefresh_aPanicInTheFoldStillRemovesTheRead_2640(t *testing.T) {
 // all the same, since the job's release drops it from the journal.
 func TestRunRefresh_aPanicWhileWaitingRemovesTheRead_2640(t *testing.T) {
 	f := newRereadFixture(t, foldOK)
-	rereadCaptureReached = func(context.Context, reconstruct.FullTableConfig) error { panic("boom") }
+	rereadCaptureReached = func(context.Context, reconstruct.OverrideProbe) error { panic("boom") }
 	st := f.run()
 	f.wantNothingPublished(t, st)
 	if len(*f.folds) != 0 {
@@ -352,7 +352,7 @@ func TestRunRefresh_theRecordStartsAtTheReadAndMeasuresTheFold_2640(t *testing.T
 	real := jf.supervisor(t)
 	f.sup.history, f.sup.jobsDir = real.history, real.jobsDir
 	var foldAt time.Time
-	rereadCaptureReached = func(context.Context, reconstruct.FullTableConfig) error {
+	rereadCaptureReached = func(context.Context, reconstruct.OverrideProbe) error {
 		time.Sleep(1200 * time.Millisecond)
 		foldAt = time.Now().UTC()
 		return nil
