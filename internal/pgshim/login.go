@@ -197,11 +197,16 @@ type RunOptions struct {
 	// and the source answers it (#3086). Without it a snapshot alone
 	// answers, as on a connection with nowhere else to send the statement.
 	NeedTails bool
+	// FastLane says the source's plan of the statement reads one table and
+	// joins nothing (fastlane.go): the host may run it on a worker it keeps
+	// for such statements, so it does not wait behind a report. False when
+	// there was no plan, and for a probe.
+	FastLane bool
 }
 
 // runOptions are the options the connection's next statement runs in.
 func (s *session) runOptions() RunOptions {
-	return RunOptions{Schema: s.schema(), TimeZone: s.set.zone.duck}
+	return RunOptions{Schema: s.schema(), TimeZone: s.set.zone.duck, FastLane: s.fastLane}
 }
 
 // handleLoginConn runs one connection of a port with a login of its own.

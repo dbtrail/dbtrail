@@ -1228,6 +1228,18 @@ listener, its own workers, its own memory.
     out of the box, with 256 clients connected at most
     (`--max-connections`); in the compose `.env`, `PG_ROUTER_WORKERS` and
     `PG_ROUTER_MAX_CONNECTIONS`. The measurement above ran 8 at once.
+  - **One of the workers is kept for short statements.** A statement whose
+    plan on your PostgreSQL reads one table and joins nothing (a sum of one
+    warehouse, a count with a filter) runs on any free worker, and one is
+    always left free for such statements: it does not wait behind a report.
+    Everything else for the copy, a report whose plan joins tables, and any
+    statement the port has no plan for (routing by plan off, no forwarding
+    user), runs on the other workers, at most `--workers` minus 1 at once.
+    When in doubt, a statement counts as long. The cost: reports run one
+    fewer at a time. With `--workers 1` none is kept, and every statement
+    takes its turn as before. A short statement that runs long is not
+    stopped for it; it runs to its end like any other. See
+    [The copy's worker for short statements](#the-copys-worker-for-short-statements).
   - **Switching a server from fresh to fast** makes the connections already
     open read the snapshot from their next statement on: an answer older
     than the one before it on the same connection, which is told once by a
@@ -1517,7 +1529,7 @@ starts it.
 | `--listen` | `BINTRAIL_PG_ROUTER_LISTEN` | `127.0.0.1:5433` | Where the port listens |
 | `--tls-cert` | `BINTRAIL_PG_ROUTER_TLS_CERT` | none: a certificate made up at start | The certificate (PEM, its chain after it) a client that asks for TLS gets. Requires `--tls-key` |
 | `--tls-key` | `BINTRAIL_PG_ROUTER_TLS_KEY` | none | Its private key (PEM, not encrypted with a passphrase) |
-| `--workers` | `BINTRAIL_PG_ROUTER_WORKERS` | 4 | How many statements run on the copy at once (1 to 16). The rest wait their turn |
+| `--workers` | `BINTRAIL_PG_ROUTER_WORKERS` | 4 | How many statements run on the copy at once (1 to 16). The rest wait their turn. With 2 or more, one is kept for statements that read one table and join nothing, and the rest run at most this minus 1 at once ([why](#the-copys-worker-for-short-statements)) |
 | `--threads` | `BINTRAIL_PG_ROUTER_THREADS` | 2 | Threads each statement may use (1 to 16) |
 | `--sql-memory` | `BINTRAIL_CONSOLE_SQL_MEMORY` | 2GB, or the value saved in the web interface | Memory each statement may use |
 | `--max-connections` | `BINTRAIL_PG_ROUTER_MAX_CONNECTIONS` | 256 | Clients connected at once (1 to 1024). One more is refused with an error |
@@ -2169,7 +2181,10 @@ The source answers a cheap statement for:
   default) a statement waits for its turn as long as its client stays
   connected, and the line holds 4096, more than `--max-connections` lets
   connect: so the refusal is in practice what `--max-wait` sets. The MySQL
-  router does the same with error 1040.
+  router does the same with error 1040. A long statement waits for its turn
+  among the long ones first, then for a worker, which it waits for only
+  behind short statements; each of the two waits is bounded by
+  `--max-wait`.
 - **What is not a query**: `EXPLAIN`, cursors and savepoints outside a block,
   `VALUES`, `TABLE`. A statement that writes is refused (`25006`). `SHOW
   TABLES` and `DESCRIBE`, the copy's own, stay on the copy.
@@ -2466,6 +2481,60 @@ What to know about it:
   this port it is SHOW dbtrail.router_status`.
 - The time-travel port of `bintrail-pg flashback` routes nothing and does not
   answer it.
+
+#### The copy's worker for short statements
+
+The copy runs `--workers` statements at once. Without more, a short statement
+waits in the same line as the reports, and with reports of many seconds holding
+every worker, a sum that takes a second alone took 13 to 31 seconds under 30
+connections. So one worker is kept for short statements:
+
+- **Short** is told before the statement runs, from the plan your PostgreSQL
+  already gave the port to route it: the plan reads **one table** and **joins
+  nothing**. It is not told by the plan's cost: on the copy a report is long
+  for its joins, and a sum over a table of 30 million rows costs about as much
+  on PostgreSQL as the cheapest reports.
+- **One table** is counted on the safe side, on the plan PostgreSQL gives,
+  not on how the statement is written. Short is a plan with exactly one scan
+  of a table (`Seq Scan`, `Index Scan`, `Index Only Scan`, `Bitmap Heap
+  Scan`) and only `Aggregate`, `Limit`, `Sort`, `Incremental Sort`, `Gather`,
+  `Gather Merge`, `Unique`, `Group` or `WindowAgg` above it. A plan with a
+  join (a self-join too), a `SubPlan` or an `InitPlan` (a subquery PostgreSQL
+  kept apart), a `CTE Scan`, an `Append` or a `Merge Append` (a partitioned
+  table read in more than one partition, a `UNION`), a `Subquery Scan`, a
+  function, or any other node is not short. PostgreSQL folds some of those
+  shapes into the query before it plans it: a `WITH` used once, a subquery in
+  `FROM`, a partitioned table pruned to one partition. When its plan then
+  reads one table alone, the statement is short, and on the copy it is one
+  pass over one table.
+- **Short means one table, not fast.** A grouping of a large table into many
+  groups, a `count(DISTINCT ...)` or a window over it reads one table and
+  counts as short. Several of those at once can take every worker, the one
+  kept included; they still take their turn in order with the reports, so a
+  report is never kept waiting for good. What a short statement is kept from
+  is waiting behind reports that join tables.
+- **Long** is every other statement for the copy, and one the port has no plan
+  for: routing by plan turned off, a server with no forwarding user, a plan
+  the source refused. At most `--workers` minus 1 of them run at once; a short
+  statement takes any free worker, so one is always left for it.
+- **Nothing is stopped for it.** A short statement that turns out long runs to
+  its end, on a worker no report would have had.
+- **With `--workers 1`** there is no worker to keep: every statement takes its
+  turn, as before, and the router says so where it starts.
+- The port's own checks (a `SET` checked on the copy) and its reads of the
+  copy's columns do not wait among the long statements.
+
+`/status` says how it stands now, in `copy_lanes`: `kept_for_short` (1, or 0
+with one worker), `long_limit` (how many long statements run at once),
+`long_admitted` (the long statements that have their turn: running, or about
+to, waiting for a worker behind short statements only), `long_waiting` (those
+that wait for their turn among the long ones), and `refused_wait_timeout` and
+`refused_queue_full` (the long statements refused for want of a turn since the
+router started, also counted as `copy_wait_timeout` and `copy_queue_full` in
+the reasons). A statement the copy refuses at once as unavailable (a copy
+that lives only on S3, among others) is answered by the source; after the
+first such refusal, the next statements of that connection do not wait their
+turn among the long ones to be refused, until the copy answers one.
 
 #### The port's status
 

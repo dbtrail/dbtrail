@@ -55,6 +55,10 @@ type pgRouterStatusDoc struct {
 	SQLModeForcedFrom string `json:"sql_mode_forced_from,omitempty"`
 	FreshByDefault    bool   `json:"fresh_by_default,omitempty"`
 	PerServerMode     bool   `json:"per_server_mode,omitempty"`
+	// CopyLanes is the copy's lane for short statements now
+	// (pgrouter_fastlane.go): how many workers are kept for them, and the
+	// long statements that run and wait. Absent when the router keeps none.
+	CopyLanes *pgCopyLanesDoc `json:"copy_lanes,omitempty"`
 }
 
 // pgRouterServerNumbers is one server's decisions.
@@ -132,7 +136,10 @@ type pgForwardAccounts interface {
 // pgRouteStats is the tally.
 type pgRouteStats struct {
 	// modes, when set, gives the document each server's mode.
-	modes      pgModes
+	modes pgModes
+	// lanes, when set, gives the document the copy's lane for short
+	// statements (pgrouter_fastlane.go).
+	lanes      *pgCopyLanes
 	mu         sync.Mutex
 	since      time.Time
 	statements bool
@@ -381,6 +388,10 @@ func (c *pgConnAges) routed() func(pgshim.RouteNote) {
 // asked of the console outside the tally's lock, which every statement takes.
 func (r *pgRouteStats) doc(listen string) pgRouterStatusDoc {
 	d := r.counts(listen)
+	if r.lanes != nil {
+		n := r.lanes.numbers()
+		d.CopyLanes = &n
+	}
 	if r.modes != nil {
 		forced, _ := console.SQLModeSetting()
 		fresh := forced == console.SQLModeForcedFresh

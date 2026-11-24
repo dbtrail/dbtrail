@@ -124,6 +124,9 @@ type pgPortFixture struct {
 	// router's --max-wait; negative refuses at once, as a full line).
 	workers int
 	maxWait time.Duration
+	// noFastLane keeps none of the copy's workers for short statements;
+	// otherwise one is kept, as the pg-router does (pgrouter_fastlane.go).
+	noFastLane bool
 }
 
 func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx pgPortFixture) pgExtEnv {
@@ -217,6 +220,10 @@ func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx
 	srv.RefreshFollowedFiles()
 	routes := newPGRouteStats(time.Now(), true)
 	router := &pgRouterPort{srv: srv, addr: freeAddr(t), maxConns: 32, poll: 20 * time.Millisecond, out: io.Discard, tls: tlsConfig, routes: routes}
+	if !fx.noFastLane {
+		router.lanes = newPGCopyLanes(runner)
+		routes.lanes = router.lanes
+	}
 	if fx.sources > 0 {
 		router.sources = newPGSourceSlots(fx.sources)
 		if fx.sourceWait > 0 {

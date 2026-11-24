@@ -79,6 +79,15 @@ type preparedStatement struct {
 	// byCost is the side the source's plan gave the statement
 	// (route_cost.go), kept once decided; zero while it was not.
 	byCost routeDecision
+	// byCostOneTable: the plan byCost was decided by reads one table and
+	// joins nothing (fastlane.go).
+	byCostOneTable bool
+}
+
+// fastLaneFor says whether st, answered by the copy under d, runs in the
+// copy's lane for short statements: its plan read one table alone.
+func fastLaneFor(st *preparedStatement, d routeDecision) bool {
+	return d.side == RouteCopy && st.byCost.side == RouteCopy && st.byCostOneTable
 }
 
 // portal is a statement with its arguments, ready to run.
@@ -370,8 +379,11 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 		}
 		s.busyRefused = ""
 		var perr *pgErr
+		lane := false
 		if s.abortedRefusal(st.query) == nil {
-			switch d := s.stmtRoute(st); {
+			d := s.stmtRoute(st)
+			lane = fastLaneFor(st, d)
+			switch {
 			case d.side == RouteSource || d.side == RouteRefused:
 				s.describeOnSource(st)
 				s.noteIfFailed(st)
@@ -387,7 +399,10 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 		var types []colType
 		held := false
 		if perr == nil {
+			// Its describe runs on the copy: in the lane its executions take.
+			s.fastLane = lane
 			cols, types, held, perr = s.describeStatement(st)
+			s.fastLane = false
 		}
 		if perr == nil && st.fallback != "" && s.canFallBack() {
 			// The copy could not describe it (route.go): the source does.
@@ -752,9 +767,11 @@ func (s *session) runPortal(p *portal) *pgErr {
 	s.screened = p.stmt.query
 	s.argsBound = len(p.stmt.paramOIDs) > 0
 	s.argsPadded = paddedArgument(p.stmt.paramOIDs)
+	s.fastLane = fastLaneFor(p.stmt, p.route)
 	cols, types, rows, tag, perr := s.run(p.text)
 	s.screened = ""
 	s.argsBound, s.argsPadded = false, false
+	s.fastLane = false
 	if why := s.takeBusyRefused(); why != "" && perr != nil && p.route.side == RouteCopy {
 		// The copy was busy (#3109, route.go): refused, and counted so.
 		p.route = routeDecision{RouteRefused, why}

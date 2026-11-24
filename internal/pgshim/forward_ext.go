@@ -44,13 +44,15 @@ func (s *session) stmtRoute(st *preparedStatement) routeDecision {
 	} else {
 		var keep bool
 		var stop *pgErr
-		d, keep, stop = s.routeByCost(st.query, len(st.paramOIDs) > 0)
+		var pl *pgPlan
+		d, keep, stop, pl = s.routeByCostPlan(st.query, len(st.paramOIDs) > 0)
 		if keep || stop != nil && stop.code != "57014" {
 			// A source that could not be reached is kept too: this is asked
 			// again by every message of the statement (its Bind, its note),
 			// and each would wait for the source to answer once more. It goes
 			// there, whose error the client gets.
 			st.byCost = d
+			st.byCostOneTable = pl != nil && pl.oneTable
 		}
 	}
 	// Headed for the copy: only now its list of columns is read, which can
