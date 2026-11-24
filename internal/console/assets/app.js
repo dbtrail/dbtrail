@@ -2118,6 +2118,13 @@ function ovFlowModel(inp) {
       actions: [{ label: "Details", run: "status" }] });
   }
 
+  // A PostgreSQL server the PostgreSQL port does not serve (0.140.0): its
+  // clients get this at login, and capture goes on.
+  if (srv && srv.pg_port_refused) {
+    cards.push({ kind: "pg-port-not-served", key: sid + "|pg-port|" + srv.pg_port_refused, tone: "warn",
+      title: "The PostgreSQL port does not serve this server", lines: [srv.pg_port_refused], actions: [] });
+  }
+
   // The Source type saved with a server is a hint: capture follows what the
   // server reports, and says so when the two disagree. Never a failure.
   if (srv && srv.monitor_warning) {
@@ -16383,14 +16390,14 @@ function pgPortLine(host, name) {
 // none is picked. Pure, so every state is rendered with node.
 function pgForwardSaid(cur) {
   const how = " To change it, edit the server (Servers, Edit).";
-  if (!cur || cur.flavor !== "postgres" || !cur.has_source) return "What it does not answer goes to your PostgreSQL, read-only, only for a server whose form lets the port forward; for any other, the copy answers alone.";
+  if (!cur || cur.flavor !== "postgres" || !cur.has_source) return "What it does not answer goes to your PostgreSQL, read-only. A server the port cannot forward for is not served: a client that connects gets an error that says why.";
   const name = cur.name || "this server";
   if (cur.hidden) return "For " + name + ", nothing is sent to your PostgreSQL: this server hides tables or columns, which your PostgreSQL would not hide, so the copy answers alone.";
   if (cur.has_route) return "For " + name + ", every other statement, and a transaction block (BEGIN to COMMIT or ROLLBACK), runs on your PostgreSQL as its forwarding user, " + cur.route_user + ", read-only." + how;
-  if (cur.route_is_capture || cur.route_unreadable) return "For " + name + ", nothing is sent to your PostgreSQL: its saved forwarding user is one the port refuses, so the copy answers alone. Edit the server (Servers, Edit) and remove that user.";
-  if (cur.forward_with_capture_account && cur.capture_account_refused) return "For " + name + ", nothing is sent to your PostgreSQL: " + String(cur.capture_account_refused).replace(/\.+$/, "") + ".";
+  if (cur.route_unreadable || (cur.route_is_capture && !cur.forward_with_capture_account)) return "The PostgreSQL port does not serve " + name + ": its saved forwarding user is one the port refuses. Edit the server (Servers, Edit) and tick the box about the source user, or remove that user and set another.";
+  if (cur.forward_with_capture_account && cur.capture_account_refused) return "The PostgreSQL port does not serve " + name + ": " + String(cur.capture_account_refused).replace(/\.+$/, "") + ".";
   if (cur.forward_with_capture_account) return "For " + name + ", a SELECT the copy does not answer runs on your PostgreSQL, read-only and as the source user (" + cur.source_user + "), when every table it reads is a table of the copy; anything else is refused and not sent." + how;
-  return "For " + name + ", nothing is sent to your PostgreSQL: the copy answers alone, and a statement it cannot answer gets an error." + how;
+  return "The PostgreSQL port does not serve " + name + ": a client that connects gets an error that says why. Tick the box about the source user, or set a separate forwarding user." + how;
 }
 
 // sqlClientPanel renders the MySQL port: could not check, not here (a
@@ -18217,9 +18224,11 @@ const FORWARDING_HINT_PG = "For a port that should send this PostgreSQL more tha
 // The capture account (#3054): a PostgreSQL server needs no second user for
 // its port to forward. The box is the yes or no the terminal asks at
 // `server add`, saved the same way (PUT /api/servers/{id}/route with
-// capture_account alone), off until somebody ticks it.
+// capture_account alone). Ticked on a new server (0.140.0): the PostgreSQL
+// port serves a server only when it can forward. A separate forwarding user
+// typed on a new server goes in its place, unless the box was ticked by hand.
 const PG_FORWARD_ASK = "Let the PostgreSQL port send to this PostgreSQL, read-only and as the source user above, a SELECT the copy does not answer";
-const PG_FORWARD_HINT = "Unticked: the copy answers alone, and a statement it cannot answer gets an error. Ticked: the port sends that SELECT to this PostgreSQL as the source user, read-only, and only when every table it reads is in the copy. No second user to create.";
+const PG_FORWARD_HINT = "Ticked: the port sends that SELECT to this PostgreSQL as the source user, read-only, and only when every table it reads is in the copy. No second user to create. Unticked, with no separate forwarding user, the PostgreSQL port does not serve this server.";
 // For a server that hides tables or columns: its port sends nothing to the
 // source, whatever the box holds, so the hint does not say it sends.
 const PG_FORWARD_HINT_HIDES = "This server hides tables or columns, so the port sends nothing to this PostgreSQL, ticked or not: the copy answers alone.";
@@ -18236,6 +18245,10 @@ const captureWas = new WeakMap();
 function captureChoice(form) {
   const f = form.elements;
   if (!f.forward_capture || f.flavor.value !== "postgres") return undefined;
+  // The box ticked by default on a new server, and a separate forwarding
+  // user typed: that user is who the port forwards as, and nothing is said
+  // about the source user.
+  if (captureDefault(form) && f.route_user && f.route_user.value.trim() !== "") return undefined;
   // Removing the forwarding account says the port stops forwarding for the
   // server. With a yes saved the source user would take the account's place,
   // so a removal always takes the yes back too; ticking the box afterwards
@@ -18249,12 +18262,20 @@ function captureChoice(form) {
 // forwards as: the box newly ticked, and a forwarding user typed beside it.
 function captureFormProblem(form) {
   const f = form.elements, was = routePrefill.get(form) || { user: "" };
+  if (captureDefault(form)) return "";
   if (f.forward_capture && f.flavor.value === "postgres" && f.route_remove && f.route_remove.checked && f.forward_capture.checked && !captureWas.get(form)) {
     return "Remove the forwarding account is ticked, which stops the port forwarding for this server, and the box that lets it forward as the source user was ticked too. Untick one: to forward as the source user, save the removal first, then tick the box.";
   }
   if (captureChoice(form) !== true) return "";
   if (!f.route_user || (f.route_user.value.trim() === was.user && f.route_password.value === "")) return "";
   return "The box that lets the port forward as the source user is ticked, and a separate forwarding user was typed too. Both say who the port forwards as: untick the box, or clear the forwarding user and its password.";
+}
+
+// captureDefault says the box of form is ticked because the server is new,
+// not because somebody ticked it.
+const captureDefaulted = new WeakSet();
+function captureDefault(form) {
+  return captureDefaulted.has(form) && !!form.elements.forward_capture && form.elements.forward_capture.checked;
 }
 
 // captureSaid is the line shown once the answer is saved: what the server's
@@ -18266,11 +18287,11 @@ function captureSaid(s) {
   if (!s.forward_with_capture_account) {
     return { tone: "ok", text: s.has_route
       ? name + ": the PostgreSQL port does not forward as the source user. Its forwarding user, " + s.route_user + ", stays as it was."
-      : name + ": the PostgreSQL port sends nothing to this PostgreSQL now. The copy answers alone." };
+      : name + ": the PostgreSQL port does not serve this server now: a client that connects gets an error that says why. Tick the box again, or set a separate forwarding user, to serve it." };
   }
   if (s.hidden) return { tone: "err", text: name + ": saved, and not used. This server hides tables or columns, so the port sends nothing to this PostgreSQL." };
   if (s.has_route) return { tone: "ok", text: name + ": saved. The PostgreSQL port keeps forwarding as its forwarding user, " + s.route_user + ", while that one is set. Once it is removed, the source user takes its place." };
-  if (s.route_is_capture || s.route_unreadable) return { tone: "err", text: name + ": saved, and not used yet. The server has a saved forwarding user that the port refuses, and while it is saved nothing is forwarded. Edit the server and remove it." };
+  if (s.route_unreadable) return { tone: "err", text: name + ": saved, and not used yet. The server has a saved forwarding user that the port refuses, and while it is saved nothing is forwarded. Edit the server and remove it." };
   if (s.capture_account_refused) return { tone: "err", text: name + ": saved, and not used: " + String(s.capture_account_refused).replace(/\.+$/, "") + "." };
   return { tone: "ok", text: name + ": the PostgreSQL port now sends to this PostgreSQL, read-only and as " + (s.source_user || "the source user") + ", a SELECT the copy does not answer, when every table it reads is a table of the copy." };
 }
@@ -18324,6 +18345,9 @@ function tagFlavor(node, families) { node.setAttribute("data-flavor", families);
 // documented display-bug class this codebase already hit).
 function applyFlavor(form) {
   const e = form.elements, f = (e.flavor && e.flavor.value) || "mysql";
+  // The box ticked by default on a new server is ticked for a PostgreSQL
+  // only: no other type has it.
+  if (captureDefaulted.has(form) && e.forward_capture) e.forward_capture.checked = f === "postgres";
   // A PostgreSQL's separate forwarding user is folded (#3054): its nodes
   // carry "postgres-own" and show once the fold is opened, or while they
   // hold something (a saved account, or a value typed before the type was
@@ -18808,6 +18832,12 @@ function showServerForm(prefill, opts) {
     form.elements.source_password.placeholder = prefill.has_source_password ? "(unchanged; leave blank to keep)" : "";
     if (prefill.has_source_password) savedSourcePasswords.set(form, true);
     form.elements.s3_secret_access_key.placeholder = prefill.has_s3_secret_access_key ? "(unchanged; leave blank to keep)" : "";
+  }
+  // A new server: the box is ticked (0.140.0), and remembered as ticked by
+  // default until somebody changes it.
+  if (!(prefill && prefill.id) && form.elements.forward_capture) {
+    captureDefaulted.add(form);
+    form.elements.forward_capture.addEventListener("change", () => captureDefaulted.delete(form));
   }
   // Flavor init runs for both add and edit; it's immutable after create (the
   // backend rejects a change on PUT), so disable the selector when editing.

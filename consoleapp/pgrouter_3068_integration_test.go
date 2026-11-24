@@ -166,43 +166,7 @@ func TestIntegrationPGRouterCharPadding_3068(t *testing.T) {
 		}
 	})
 
-	t.Run("without one the statement is refused, not answered with other rows", func(t *testing.T) {
-		const table = "pgchr_alone"
-		env := startPGPortFor(t, ctx, nil, pgPortFixture{table: table, slot: "pgchr_alone_slot", pub: "pgchr_alone_pub", setup: pgCharSetup(table)})
-		c := pgClient(t, ctx, env.portDSN(), nil)
-		for _, tc := range []struct{ stmt, want string }{
-			{"SELECT count(*) FROM " + table, "4"},
-			{"SELECT code FROM " + table + " WHERE id = 1", "ab   "},
-			{"SELECT * FROM " + table + " WHERE id = 3", "3|abcde|abcde|2"},
-			{"SELECT count(*) FROM " + table + " WHERE label = 'ab'", "2"},
-			// A star over the char(5) column that nothing goes on to read.
-			{"SELECT count(*) FROM (SELECT * FROM " + table + ") s", "4"},
-			{"WITH x AS (SELECT * FROM " + table + ") SELECT id FROM x WHERE id = 3", "3"},
-		} {
-			if got := pgRows(t, c, tc.stmt); got != tc.want {
-				t.Errorf("%s: %q, want %q", tc.stmt, got, tc.want)
-			}
-		}
-		for _, stmt := range []string{
-			"SELECT count(*) FROM " + table + " WHERE code = 'ab'",
-			"SELECT id, length(code) FROM " + table,
-			"SELECT id, code || 'x' FROM " + table,
-			"SELECT count(*) FROM (SELECT * FROM " + table + ") s WHERE s.code = 'ab'",
-		} {
-			got := pgRows(t, c, stmt)
-			if !strings.HasPrefix(got, "error 0A000") || !strings.Contains(got, "char(n)") || !strings.Contains(got, "refused rather than answered with other rows") {
-				t.Errorf("%s: %q, want it refused (0A000) for the char(n) column", stmt, got)
-			}
-		}
-		conn := pgxConn(t, ctx, env.portDSN(), pgx.QueryExecModeCacheStatement)
-		if got := pgxAnswer(ctx, conn, "SELECT count(*) AS n FROM "+table+" WHERE code = $1", "ab"); !strings.HasPrefix(got, "error 0A000") {
-			t.Errorf("a prepared count by the char(5) column: %s, want it refused (0A000)", got)
-		}
-		if got := pgxAnswer(ctx, conn, "SELECT count(*) AS n FROM "+table+" WHERE label = $1", "ab"); got != `[n] ["2"]` {
-			t.Errorf("a prepared count by the text column: %s, want the copy's 2", got)
-		}
-		if c.TxStatus() != 'I' {
-			t.Errorf("the connection is left in status %c", c.TxStatus())
-		}
-	})
+	// Without a way to forward the server is not served (0.140.0): the
+	// refusals a connection to the copy alone gave are gone with it. A server
+	// that hides tables or columns sends nothing to its source and keeps them.
 }

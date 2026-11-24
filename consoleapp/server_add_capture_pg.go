@@ -34,7 +34,9 @@ const (
 	captureYes
 	// captureNo: --no-capture-account or capture-account=no.
 	captureNo
-	// captureNotAsked: nobody to ask and nothing said: no, and said so.
+	// captureNotAsked: nobody to ask and nothing said: yes, as by default
+	// (0.140.0: the PostgreSQL port serves a server only when it forwards),
+	// and said so with how to take it back.
 	captureNotAsked
 )
 
@@ -122,11 +124,13 @@ func addCaptureAnswerPG(ctx context.Context, c *ctlClient, in addInput, res ctlC
 	case captureNone:
 		return nil
 	case captureNo:
-		fmt.Fprintf(out, "The port does not forward for %q (%s): the copy answers alone, and a statement it cannot answer gets an error. Turn it on later:  %s\n\n", res.Name, in.captureWhy, turnOn)
+		fmt.Fprintf(out, "The port does not forward for %q (%s), so the PostgreSQL port does not serve it: a client that connects gets an error that says why and how to serve it. Turn it on later:  %s\n(or set a forwarding user of its own:  bintrail-console server forward-user %s -u <user> -p)\n\n", res.Name, in.captureWhy, turnOn, later)
 		return nil
 	case captureNotAsked:
-		fmt.Fprintf(out, "Not asked whether the port may forward with %s: %s, and nothing said yes, so the port does not forward for %q and the copy answers alone. Turn it on:  %s\n(or, when adding, --capture-account, or capture-account=yes under [dbtrail-forward] in the option file)\n\n", in.User, in.captureWhy, res.Name, turnOn)
-		return nil
+		// Yes, as by default: without a way to forward the PostgreSQL port
+		// does not serve the server at all.
+		fmt.Fprintf(out, "Not asked whether the port may forward with %s (%s), so it does, as it does by default: without it the PostgreSQL port would not serve %q. Take it back:  bintrail-console server forward-user %s --no-capture-account\n(or, when adding, --no-capture-account, or capture-account=no under [dbtrail-forward] in the option file)\n", in.User, in.captureWhy, res.Name, later)
+		on = true
 	case captureYes:
 		on = true
 	case captureAsk:
@@ -155,7 +159,7 @@ func addCaptureAnswerPG(ctx context.Context, c *ctlClient, in addInput, res ctlC
 			say("Answer yes or no (Enter is yes).\n")
 		}
 		if !on {
-			fmt.Fprintf(out, "No: the copy answers alone, and a statement it cannot answer gets an error. Turn it on later:  %s\n\n", turnOn)
+			fmt.Fprintf(out, "No: the port does not forward for %q, so the PostgreSQL port does not serve it: a client that connects gets an error that says why and how to serve it. Turn it on later:  %s\n(or set a forwarding user of its own:  bintrail-console server forward-user %s -u <user> -p)\n\n", res.Name, turnOn, later)
 			return nil
 		}
 	}

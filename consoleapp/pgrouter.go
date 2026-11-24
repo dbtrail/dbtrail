@@ -982,6 +982,9 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 	// The side each statement shape of a server was last sent to by its
 	// plan, for all the port's connections to it (#3045).
 	sides := &pgCostSides{}
+	// The refusal last logged per server, so a client that retries is not a
+	// line per attempt.
+	notServedSaid := &sync.Map{}
 	return func(ctx context.Context, user, database string, password *pgshim.Password, drop func()) (*pgshim.Binding, *pgshim.Error) {
 		// Before the passwords are read: a connection opened with an
 		// application login is served only if no login changed since
@@ -1060,6 +1063,25 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			return nil, &pgshim.Error{Code: "0A000", Message: fmt.Sprintf(
 				"server %q is not a PostgreSQL server, and this port serves PostgreSQL servers only; the copy of a MySQL or MariaDB server is read with a MySQL client on the MySQL port", tgt.ID)}
 		}
+		// The port serves a PostgreSQL server only when it can forward
+		// (0.140.0): a connection that reaches the copy alone could get rows
+		// PostgreSQL would not return, with no error. Refused here, before
+		// anything is opened, with the cause and both ways to serve it.
+		// Capture and everything else of the server go on.
+		fwd := srv.PostgresForwardTarget(tgt.ID)
+		if fwd.DSN == "" {
+			why := srv.PGPortRefusal(tgt.ID)
+			if why == "" {
+				// Saved between the two reads: what was read first decides,
+				// and the client reconnects.
+				return nil, &pgshim.Error{Code: "57P03", Message: "the server's forwarding account changed while connecting; reconnect"}
+			}
+			if prev, _ := notServedSaid.Swap(tgt.ID, why); prev != why {
+				logger.Warn("PostgreSQL router: refused a connection to a server the port does not serve", "server", tgt.ID, "reason", why)
+			}
+			return nil, &pgshim.Error{Code: "08004", Message: why}
+		}
+		notServedSaid.Delete(tgt.ID)
 		ages := routes.agesFor(tgt.ID)
 		bound := &pgshim.Binding{Actor: "server:" + tgt.ID, Schema: pgPortSchema, Routed: ages.routed()}
 		// SHOW dbtrail.router_status on this connection (#3021); it reads
@@ -1103,8 +1125,7 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		// Or as the capture account itself, when the server said yes to that
 		// and has no account of its own (#3054): then every statement passes
 		// the capture gate first (pgshim, capture_gate.go).
-		switch fwd := srv.PostgresForwardTarget(tgt.ID); {
-		case fwd.DSN != "":
+		{
 			untrack, ok := srv.TrackRoutedConn(tgt.ID, fwd.Gen, drop, nil)
 			if !ok {
 				bound.Close()
@@ -1113,8 +1134,6 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			closers = append(closers, untrack)
 			bound.Forward = &pgshim.Forward{DSN: fwd.DSN, CaptureAccount: fwd.CaptureAccount, Acquire: sources.acquire, Park: sources.park, Limit: sources.limit(), Timeout: timeout,
 				Barred: pgForwardBarred(tgt.ID, tgt.TimeTravelRefusal, routes, logger), Cost: cost, Sides: sides.of(tgt.ID)}
-		case fwd.Refused != "":
-			bound.Forward = &pgshim.Forward{Refused: fwd.Refused}
 		}
 		if tgt.SQL == nil {
 			// The connection is made and every statement says why it cannot

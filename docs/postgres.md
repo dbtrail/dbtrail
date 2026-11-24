@@ -106,18 +106,19 @@ the copy does not answer it
 ([forwarding with the capture account](#forwarding-with-the-capture-account))?
 Enter is yes. Without a terminal (a script, or the Docker `dbtrail` command,
 which sends the option file on standard input) nothing is asked and the answer
-is no, and the command says so, unless `--capture-account` or this line in the
-option file says yes:
+is yes, as it is by default, and the command says so and how to take it back.
+`--no-capture-account`, or this line in the option file, says no:
 
 ```ini
 [dbtrail-forward]
-capture-account = yes
+capture-account = no
 ```
 
-`--no-capture-account` (or `capture-account = no`) says no. `capture-account`
+`--capture-account` (or `capture-account = yes`) says yes. `capture-account`
 alone on its line is yes, as an option alone is in MySQL, even with a comment
-after it; `capture-account =` with nothing after it says nothing. With no the copy
-answers alone, and a statement it cannot answer gets an error;
+after it; `capture-account =` with nothing after it says nothing. With no, and
+no forwarding user of its own, the
+[PostgreSQL port does not serve the server](#the-port-serves-a-server-only-when-it-can-forward);
 `bintrail-console server forward-user <server> --capture-account` turns it on
 later.
 
@@ -1185,12 +1186,10 @@ listener, its own workers, its own memory.
   answer as PostgreSQL does, and a client's transaction block, run on your
   PostgreSQL as that user, read-only
   ([the forwarding user](#transactions-on-the-source-the-forwarding-user)).
-  With neither (the answer no, `--no-forward`, or a script that said nothing)
-  the copy answers every statement, nothing is sent to your PostgreSQL, and a
-  statement the copy cannot answer gets an error, as does one it would answer
-  with other rows than PostgreSQL (a `char(n)` column
-  [compared, measured or concatenated](#which-side-answers-a-statement-on-the-postgresql-port),
-  refused with `0A000`), until one is set
+  With neither (the box unticked, the answer no, or `--no-forward`) the
+  [PostgreSQL port does not serve the server](#the-port-serves-a-server-only-when-it-can-forward):
+  a client that connects gets an error at login that says why and how to
+  serve it, until one is set
   (`bintrail-console server forward-user <server> --capture-account`, or
   `-u <user> -p` for a user of its own, or the box and the Forwarding user on
   the server's form in the web interface).
@@ -1324,8 +1323,8 @@ listener, its own workers, its own memory.
   A transaction block the client opens, and a catalog statement the copy does
   not answer, go to the source too (see
   [Transactions on the source](#transactions-on-the-source-the-forwarding-user)).
-  A server without a forwarding user is answered from the copy alone, and a
-  statement the copy cannot answer gets its error. `round()` and `avg()` are
+  A server the port cannot forward for is not served at all
+  ([below](#the-port-serves-a-server-only-when-it-can-forward)). `round()` and `avg()` are
   written PostgreSQL's way on every connection (see
   [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port)):
   `round(avg(amount), 2)` of a `numeric` is `500.00`, as on the source, not
@@ -1335,7 +1334,8 @@ listener, its own workers, its own memory.
   PostgreSQL writes 12 for a quotient of 10000 and more and 20 for one
   below 1 (see
   [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port)).
-  Without a forwarding user, a `round()` or an `avg()` the copy would
+  On a server that hides tables or columns, which sends nothing to its
+  source, a `round()` or an `avg()` the copy would
   write otherwise (`avg()` of a `numeric`, `round()` of a `double precision`,
   a `round()` beside a `UNION`) is refused with error `0A000`, never answered
   with other digits. A statement that is not a
@@ -1377,8 +1377,8 @@ listener, its own workers, its own memory.
   `numeric`, with exactly the decimals PostgreSQL writes, on every
   connection (`avg()` of a `numeric` or of whole numbers and a division of a
   `numeric`, which PostgreSQL writes with 12 to 20 decimals, are a `numeric`
-  of 16 decimals on the copy; without a forwarding user such an `avg()` is
-  refused), and an aggregate or a literal of a `numeric` keeps its
+  of 16 decimals on the copy; on a server that hides tables or columns such an
+  `avg()` is refused), and an aggregate or a literal of a `numeric` keeps its
   precision and scale here (`numeric(10,2)`) where PostgreSQL reports none. A
   `numeric` declared without precision is a `numeric(38,18)` here and is
   written with its 18 decimals (`12345.678000000000000000` where the source
@@ -1599,8 +1599,8 @@ laid over the source's own address, database and parameters (`sslmode`
 included), and must be another user than the one DBTrail captures with: the
 port never runs anything as that one, which holds `REPLICATION` and reads every
 published table, unless the server says yes to that
-([below](#forwarding-with-the-capture-account)). Without a forwarding user, every statement, a transaction
-block's too, is answered by the copy alone, as before. Changing the forwarding user, or removing the
+([below](#forwarding-with-the-capture-account)). A server with neither is
+[not served](#the-port-serves-a-server-only-when-it-can-forward). Changing the forwarding user, or removing the
 server, closes the connections that use it; clients reconnect.
 
 - **Read-only, three ways.** A statement that is not a read is refused before
@@ -1700,6 +1700,50 @@ server, closes the connections that use it; clients reconnect.
   inside a block the port still answers some statements itself (`SHOW`,
   the catalog statements it recognizes, time travel).
 
+
+### The port serves a server only when it can forward
+
+Since 0.140.0 the PostgreSQL port serves a server only when it can send what
+the copy does not answer to the server's PostgreSQL: as a forwarding user of
+the server's own ([above](#transactions-on-the-source-the-forwarding-user)), or
+as the user DBTrail connects with
+([below](#forwarding-with-the-capture-account)), which is the default for a
+server added from then on. A connection that could reach only the copy got,
+for some statements, rows PostgreSQL would not return, with no error, so such
+a connection is no longer made.
+
+A client of a server the port cannot forward for is refused at login, before
+any statement, with `FATAL` error `08004` that names the server, says why,
+and gives both ways to serve it:
+
+```text
+FATAL:  the PostgreSQL port does not serve server "shop": it has no forwarding user, and forwarding as the account DBTrail captures with is turned off for it. ...
+```
+
+The reasons: no forwarding user and the answer about the capture account is
+no; a saved forwarding user that is the user DBTrail connects with while that
+answer is no (with the answer yes the port forwards as that account, behind
+its gate); a saved forwarding user that cannot be read; a source URL the
+capture account cannot forward over (a socket, a `replication` parameter, a
+user named in a parameter); a server with no source.
+
+Everything else of the server goes on: capture records its changes,
+snapshots are taken, and the web interface and the MySQL port read it as
+before. The daemon says once at boot, per server, that the port does not
+serve it; the server's Overview has a card with the same words; and
+`GET /api/servers` carries them in `pg_port_refused`. Once the server can
+forward, the next connection is served, without a restart.
+
+When the user DBTrail connects with is a superuser, or can bypass row-level
+security (`BYPASSRLS`), the checks of `server add` and of the web form warn
+(**Power of the user DBTrail connects with**): the port reads, as that user,
+every row it can read, those a row-level security policy hides included. The
+warning gives the statements for a role that can only read, to set as the
+server's forwarding user instead.
+
+A server that hides tables or columns is still served: it sends nothing to
+its source, and a statement the copy cannot answer as PostgreSQL does is
+refused there.
 
 ### Forwarding with the capture account
 
@@ -2248,7 +2292,7 @@ statement the copy refuses, not a transaction block, not a catalog statement:
 the rules are applied by the copy's views, and a statement run on the source
 reads past them, whatever the forwarding user's grants (a view there runs with
 its owner's rights, as a `SECURITY DEFINER` function does). Such a server is
-answered by the copy alone, as without a forwarding user; a rule saved while a
+answered by the copy alone; a rule saved while a
 block is open on the source fails that block. A statement that uses a
 `char(n)` column where its trailing blanks count has no source to go to
 there, on either kind of server, and is refused (`0A000`, with the column's
@@ -2296,8 +2340,8 @@ STATUS`, with the same row names where they mean the same. The rows:
 
 - `server`: the id of the server this connection reads.
 - `forwarding`: `on` when statements of this connection may go to the source,
-  `off` when the copy answers alone; `forwarding_off_reason` then says why (no
-  forwarding user, or a server that hides tables or columns).
+  `off` when the copy answers alone, which on a server the port serves happens
+  only when it hides tables or columns; `forwarding_off_reason` then says why.
 - `forwarding_account`: the account statements are sent with, `forwarding
   user <name>` or `capture account, read-only, tables of the copy only`
   ([above](#forwarding-with-the-capture-account)); `none` when there is none.
@@ -2395,7 +2439,6 @@ The reasons, with the MySQL port's names where they mean the same:
 |---|---|---|
 | copy | `answers_the_same` | everything in it answers on the copy as on PostgreSQL |
 | copy | `copy_command` | a command of the copy's own (`SHOW TABLES`, `DESCRIBE`) |
-| copy | `no_forward_account` | the server has no forwarding user: the copy answers alone |
 | copy | `hidden_rules` | the server hides tables or columns: nothing is sent to its source |
 | copy | `capture_gate` | the server forwards with the capture account, and the statement did not pass that account's check, so the copy answered it without asking the source for its plan |
 | source | `cheap_plan` | its plan on the source is under both thresholds: the source answers it, by its indexes |

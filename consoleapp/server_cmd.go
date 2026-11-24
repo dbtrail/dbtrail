@@ -128,10 +128,10 @@ DBTrail creates the replication slot (--slot, bintrail_<database> unless
 named). Once a PostgreSQL is added, one question is asked on a terminal:
 may the PostgreSQL port send to your PostgreSQL, read-only, a SELECT whose
 every table is a table of the copy, as the user DBTrail connects with, when
-the copy does not answer it? Enter is yes. Without a terminal it is no unless
---capture-account, or capture-account=yes under [dbtrail-forward], says yes;
---no-capture-account says no. Without it the copy answers alone, and a
-statement it cannot answer gets an error. To let the port read more, name a
+the copy does not answer it? Enter is yes. Without a terminal it is yes
+unless --no-capture-account, or capture-account=no under [dbtrail-forward],
+says no. Without it the PostgreSQL port does not serve the server: a client
+that connects gets an error that says why. To let the port read more, name a
 forwarding user of its own instead, a role that can log in with SELECT on
 what the port should read: --forward-user or [dbtrail-forward] user= (the
 question is then not asked). Later:
@@ -402,7 +402,7 @@ func runServerForwardUser(ctx context.Context, c *ctlClient, name string, f fwdF
 			return nil
 		}
 		if s.Flavor == console.FlavorPostgres {
-			fmt.Fprintf(out, "%q has no forwarding user now: the PostgreSQL port answers its clients from the copy alone. A statement the copy cannot answer gets an error, and nothing is sent to your PostgreSQL.\n", s.Name)
+			fmt.Fprintf(out, "%q has no forwarding user now, so the PostgreSQL port does not serve it: a client that connects gets an error that says why and how to serve it. Serve it again:  bintrail-console server forward-user %s --capture-account\n", s.Name, mysqlLineUser(s.Name))
 			return nil
 		}
 		fmt.Fprintf(out, "%q has no forwarding user now: with Engine Routing on, a statement the copy cannot answer is refused.\n", s.Name)
@@ -1257,7 +1257,7 @@ func runServerList(ctx context.Context, c *ctlClient, format string, out io.Writ
 		}
 		fwd := s.RouteUser
 		switch {
-		case (!s.HasRoute || fwd == "") && s.ForwardWithCaptureAccount && s.Flavor == console.FlavorPostgres && !s.RouteIsCapture && !s.RouteUnreadable && s.CaptureAccountRefused == "":
+		case (!s.HasRoute || fwd == "") && s.ForwardWithCaptureAccount && s.Flavor == console.FlavorPostgres && !s.RouteUnreadable && s.CaptureAccountRefused == "":
 			fwd = "the user above (copy tables only)"
 		case !s.HasRoute || fwd == "":
 			fwd = "-"

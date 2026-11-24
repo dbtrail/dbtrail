@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/pgshim"
 )
 
@@ -288,39 +289,23 @@ func TestIntegrationPGRouterStatusStatement(t *testing.T) {
 	})
 }
 
-// A server with no forwarding account, and one with no copy to read: the
-// port answers the statement all the same.
+// A server with no source: refused at login, with the cause.
 func TestIntegrationPGRouterStatusStatementWithoutASource(t *testing.T) {
+	// Since 0.140.0 a server the port cannot forward for is not served at
+	// all: there is no connection to ask the status on, and the login says
+	// why instead.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	env := startPGExtPort(t, ctx)
-	c := pgClient(t, ctx, env.portDSN(), nil)
-	st, order := pgStatus(t, ctx, c)
-	t.Logf("no forwarding account, before any statement:\n%s", strings.Join(order, "\n"))
-	if st["forwarding"] != "off" || st["forwarding_off_reason"] == "" || st["last_answer"] != "none" {
-		t.Errorf("before any statement: %v", order)
+	env := startPGPortFor(t, ctx, nil, pgPortFixture{table: pgExtTable, slot: pgExtSlot, pub: pgExtPub, noForward: true, setup: []string{
+		"CREATE TABLE " + pgExtTable + " (id int PRIMARY KEY)", "INSERT INTO " + pgExtTable + " VALUES (1)"}})
+	c, err := pgconn.Connect(ctx, env.portDSN())
+	if err == nil {
+		c.Close(ctx)
+		t.Fatal("a server with no source was served")
 	}
-	if got := one(ctx, c, "SELECT count(*) FROM "+pgExtTable); got != "5" {
-		t.Fatalf("the copy's answer: %q", got)
-	}
-	st, order = pgStatus(t, ctx, c)
-	t.Logf("no forwarding account, after the copy answered:\n%s", strings.Join(order, "\n"))
-	if st["last_answer"] != "copy" || st["last_answer_reason"] != pgshim.ReasonNoForwardAccount || st["last_answer_error"] != "no" {
-		t.Errorf("after the copy answered: %v", order)
-	}
-	if got := one(ctx, c, "SELECT * FROM no_such_table_3021"); !strings.HasPrefix(got, "error ") {
-		t.Fatalf("a table the copy does not hold: %q", got)
-	}
-	st, order = pgStatus(t, ctx, c)
-	if st["last_answer"] != "copy" || st["last_answer_error"] != "yes" {
-		t.Errorf("after the copy refused: %v", order)
-	}
-	if _, ok := st["last_answer_age_seconds"]; ok {
-		t.Errorf("an age for a statement the copy refused: %v", order)
-	}
-	// The MySQL port's spelling is not handed to the copy either.
-	if got := one(ctx, c, "SHOW ROUTER STATUS"); !strings.HasPrefix(got, "error 42601") {
-		t.Errorf("SHOW ROUTER STATUS: %q", got)
+	var pe *pgconn.PgError
+	if !errors.As(err, &pe) || pe.Code != "08004" || pe.Message != console.PGPortNotServed("pgsrv", console.PGRouteRefusedNoSource) {
+		t.Fatalf("the login: %v", err)
 	}
 }
 

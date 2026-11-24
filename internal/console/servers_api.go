@@ -89,6 +89,11 @@ type serverDTO struct {
 	// of its own, and its source URL cannot be forwarded with as the
 	// capture account (pgCaptureURLRefusal): why.
 	CaptureAccountRefused string `json:"capture_account_refused,omitempty"`
+	// PGPortRefused: the PostgreSQL port does not serve this server, and
+	// this is the error its clients get at login, with both ways to serve
+	// it (pg_port_forward_required.go). Empty for a server it serves, and
+	// for any other source type.
+	PGPortRefused string `json:"pg_port_refused,omitempty"`
 
 	// Hidden are the tables and columns the analytical surfaces leave out
 	// for this server (#2529). Edited through /api/servers/{id}/hidden only.
@@ -1953,9 +1958,10 @@ func (s *Server) entryDTO(e ServerEntry) serverDTO {
 		SourcePublication:    e.SourcePublication,
 	}
 	dto.ForwardWithCaptureAccount = captureAnswerHolds(e)
-	if dto.ForwardWithCaptureAccount && e.IsPostgres() && e.RouteDSN == "" {
+	if dto.ForwardWithCaptureAccount && e.IsPostgres() && !ownForwardAccount(e) {
 		dto.CaptureAccountRefused = pgCaptureURLRefusal(e.SourceDSN)
 	}
+	dto.PGPortRefused = pgPortRefusalOf(e)
 	fillDSNParts(&dto, e.DSN)
 	fillSourceDSNParts(&dto, e.SourceDSN, e.SourceFlavor())
 	if e.IsPostgres() {

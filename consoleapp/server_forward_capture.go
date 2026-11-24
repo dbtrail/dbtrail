@@ -37,7 +37,7 @@ func captureAnswerLine(s ctlServer) string {
 	case !s.ForwardWithCaptureAccount && s.HasRoute:
 		return fmt.Sprintf("%q does not forward with the user DBTrail captures with. It forwards as its forwarding user, %s, as before.", s.Name, s.RouteUser)
 	case !s.ForwardWithCaptureAccount && pg:
-		return fmt.Sprintf("%q does not forward with the user DBTrail captures with. It has no forwarding user, so the PostgreSQL port answers its clients from the copy alone.", s.Name)
+		return fmt.Sprintf("%q does not forward with the user DBTrail captures with. It has no forwarding user of its own, so the PostgreSQL port does not serve it: a client that connects gets an error that says why and how to serve it.", s.Name)
 	case !s.ForwardWithCaptureAccount:
 		return fmt.Sprintf("%q does not forward with the user DBTrail captures with. It has no forwarding user, so a statement the copy cannot answer is refused.", s.Name)
 	case !pg && s.HasRoute:
@@ -46,8 +46,8 @@ func captureAnswerLine(s ctlServer) string {
 		return fmt.Sprintf("Saved, and not used yet: the MySQL port does not forward with the user DBTrail captures with. Until %q has a forwarding user, a statement the copy cannot answer is refused:\n  bintrail-console server forward-user %s -u <user> -p", s.Name, mysqlLineUser(s.Name))
 	case s.HasRoute:
 		return fmt.Sprintf("Saved. %q keeps forwarding as its forwarding user, %s, while that one is set. Removed (--remove), the user DBTrail captures with takes its place.", s.Name, s.RouteUser)
-	case s.RouteIsCapture || s.RouteUnreadable:
-		return fmt.Sprintf("Saved, and not used yet: %q has a saved forwarding user that the port refuses (it is the user DBTrail captures with, or it cannot be read), and while it is saved nothing is forwarded. Remove it:  bintrail-console server forward-user %s --remove", s.Name, mysqlLineUser(s.Name))
+	case s.RouteUnreadable:
+		return fmt.Sprintf("Saved, and not used yet: %q has a saved forwarding user that cannot be read, and while it is saved nothing is forwarded. Remove it:  bintrail-console server forward-user %s --remove", s.Name, mysqlLineUser(s.Name))
 	case s.CaptureAccountRefused != "":
 		return fmt.Sprintf("Saved, and not used: %s.", s.CaptureAccountRefused)
 	}
