@@ -90,6 +90,15 @@ type session struct {
 	// screenBusy is why the statement route just decided was not screened
 	// (routeFree): the copy was too busy to list its columns.
 	screenBusy string
+	// untypedVeto is what of the statement route just decided the screen
+	// vetoed with no column's type (routeFree), "" when nothing: on the
+	// simple protocol a statement the source's plan finds expensive goes to
+	// the copy anyway (heavy.go).
+	untypedVeto string
+	// heavy says the statement being answered goes to the copy because the
+	// source's plan found it expensive, whatever the screen says of how the
+	// copy answers it (heavy.go).
+	heavy bool
 	// catalogBusy is the busy reason the copy's list of columns could not
 	// be read for at its last read (catalog), "" when it was read or failed
 	// otherwise.
@@ -216,10 +225,17 @@ func (s *session) handleSimpleQuery(qstr string) error {
 	started := time.Now()
 	var d routeDecision
 	screenBusy := ""
+	s.heavy = false
+	defer func() { s.heavy = false }()
 	if s.abortedRefusal(qstr) == nil {
 		d = s.route(s.classify(qstr), qstr)
 	}
-	if byCostApplies(d) {
+	// A statement the screen sent to the source for how the copy would
+	// answer it, not for what the copy cannot run: the source's plan is
+	// asked too, and if it is expensive the copy answers it (heavy.go).
+	vetoed := d
+	relaxable := d.side == RouteSource && d.reason == ReasonVeto && s.untypedVeto != ""
+	if byCostApplies(d) || relaxable {
 		// The screen lets the copy answer it: the source's plan says
 		// whether the copy is worth it (route_cost.go).
 		var stop *pgErr
@@ -228,10 +244,23 @@ func (s *session) handleSimpleQuery(qstr string) error {
 			s.routeNote(qstr, d, time.Since(started), true)
 			return s.readyFlush()
 		}
-		// Headed for the copy: only now its list of columns is read, which
-		// can wait for one of its workers.
-		d = s.screenTyped(qstr, d)
-		screenBusy = s.takeScreenBusy()
+		s.heavy = s.expensive(d)
+		if relaxable && !s.heavy {
+			// Not expensive, or not told: the screen's veto stands.
+			d = vetoed
+		} else {
+			if relaxable {
+				s.logger.Debug("pgshim: sent to the copy, expensive on the source, though the copy may answer otherwise", "reason", ReasonHeavyOnCopy, "construct", s.untypedVeto)
+				d = routeDecision{RouteCopy, ReasonHeavyOnCopy}
+			}
+			// Headed for the copy: only now its list of columns is read, which
+			// can wait for one of its workers.
+			d = s.screenTyped(qstr, d)
+			if relaxable && d.side == RouteCopy {
+				d = routeDecision{RouteCopy, ReasonHeavyOnCopy}
+			}
+			screenBusy = s.takeScreenBusy()
+		}
 	}
 	if busyOnCopy(withScreenBusy(d, screenBusy)) {
 		// For the copy, which was too busy to list its columns (#3109,
