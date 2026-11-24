@@ -72,11 +72,11 @@ func TestIntegrationPGServerAddCaptureAccountFromStdin(t *testing.T) {
 	// for the comparison.
 	got := out.String()
 	if i := strings.Index(got, "\nWarning: "); i >= 0 {
-		j := strings.Index(got[i+1:], "\n\n")
-		if j < 0 || !strings.Contains(got[i:i+1+j], "is a superuser") && !strings.Contains(got[i:i+1+j], "BYPASSRLS") {
+		j := strings.Index(got[i:], "\nNext, ")
+		if j < 0 || !strings.Contains(got[i:i+j], "is a superuser") && !strings.Contains(got[i:i+j], "BYPASSRLS") {
 			t.Fatalf("a warning that is not about the role's power:\n%s", got)
 		}
-		got = got[:i+1] + got[i+1+j+2:]
+		got = got[:i+1] + got[i+j+1:]
 	}
 	if !strings.HasSuffix(got, want) {
 		t.Fatalf("output:\n%s\nwant it to end with:\n%s", out.String(), want)

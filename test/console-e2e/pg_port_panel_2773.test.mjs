@@ -120,7 +120,7 @@ test("drawn for a PostgreSQL server: on", () => {
 test("drawn for a PostgreSQL server: the page with two sections", () => {
   const text = draw({ servers: [pg("shop")], fb: { enabled: true, can_manage: true }, split: true });
   for (const want of ["PostgreSQL client", "Read your copy from a PostgreSQL client", "port=5433 dbname=shop",
-    "On the PostgreSQL port, the copy answers what it is known to answer", "For shop, nothing is sent to your PostgreSQL: the copy answers alone"]) {
+    "On the PostgreSQL port, the copy answers what it is known to answer", "The PostgreSQL port does not serve shop"]) {
     assert.ok(text.includes(want), "lacks " + JSON.stringify(want) + ":\n" + text);
   }
   for (const not of ["mysql -h", "3309", "Run MySQL and DuckDB", "Put ProxySQL in front", "Read your copy from a MySQL client"]) {

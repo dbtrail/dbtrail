@@ -16435,7 +16435,7 @@ function sqlClientPanel(servers, fb, reveal, live, rt, split) {
     if (!split) return panel;
     if (pg) {
       wrap.append(cnSection("PostgreSQL client", "Read your copy from a PostgreSQL client",
-        "Your tables as DBTrail keeps them, answered by DBTrail's copy where it gives the answer PostgreSQL gives. What else goes to your database, read-only, is each server's own choice: nothing, until its form says so.", "pink"), panel);
+        "Your tables as DBTrail keeps them, answered by DBTrail's copy where it gives the answer PostgreSQL gives. What else goes to your database, read-only, is each server's own choice, and a server that can send nothing there is not served.", "pink"), panel);
       wrap.append(el("section", { class: "ov-panel cn-routep sqlc is-idle" },
         el("p", { class: "cn-sql-row", text: "Engine Routing and the proxy logins are the MySQL port's. On the PostgreSQL port, the copy answers what it is known to answer as PostgreSQL does. " + pgForwardSaid((servers || []).find((x) => x && x.id === (currentServer || defaultServerId))) })));
       return wrap;
