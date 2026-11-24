@@ -46,6 +46,7 @@ func TestReadsOneTable(t *testing.T) {
 		{"a node this does not know", `{"Node Type": "Custom Scan", "Plans": [{"Node Type": "Seq Scan", "Parent Relationship": "Outer", "Relation Name": "t"}]}`, false},
 		{"a materialized scan", `{"Node Type": "Materialize", "Plans": [{"Node Type": "Seq Scan", "Parent Relationship": "Outer", "Relation Name": "t"}]}`, false},
 		{"an aggregate over two children", `{"Node Type": "Aggregate", "Plans": [{"Node Type": "Seq Scan", "Parent Relationship": "Outer", "Relation Name": "a"}, {"Node Type": "Seq Scan", "Parent Relationship": "Outer", "Relation Name": "b"}]}`, false},
+		{"an aggregate with a second child that reads no table", `{"Node Type": "Aggregate", "Plans": [{"Node Type": "Seq Scan", "Parent Relationship": "Outer", "Relation Name": "a"}, {"Node Type": "Limit", "Parent Relationship": "Outer"}]}`, false},
 		{"a scan with a child that is not a subplan", `{"Node Type": "Seq Scan", "Relation Name": "a", "Plans": [{"Node Type": "Seq Scan", "Parent Relationship": "Outer", "Relation Name": "b"}]}`, false},
 		{"a bitmap index scan outside a bitmap heap scan", `{"Node Type": "Bitmap Index Scan", "Index Name": "a"}`, false},
 		{"a bitmap heap scan over a scan of a table", `{"Node Type": "Bitmap Heap Scan", "Relation Name": "t", "Plans": [{"Node Type": "Seq Scan", "Parent Relationship": "Outer", "Relation Name": "b"}]}`, false},
