@@ -25,7 +25,13 @@ const substringVeto = "substring() with a start or a length other than a positiv
 // positiveWhole reports whether arg is one whole number above zero, written
 // as digits.
 func positiveWhole(arg []rtToken) bool {
-	return len(arg) == 1 && arg[0].kind == rtNumber && !strings.Contains(arg[0].text, ".") && strings.Trim(arg[0].text, "0") != ""
+	if len(arg) != 1 || arg[0].kind != rtNumber {
+		return false
+	}
+	// PostgreSQL's start and length are an integer: a larger one has no such
+	// function there.
+	n, err := strconv.ParseInt(arg[0].text, 10, 32)
+	return err == nil && n > 0
 }
 
 // substringOK reports whether a substring call, its arguments split at their

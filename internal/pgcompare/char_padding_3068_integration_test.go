@@ -123,8 +123,63 @@ func charCases() []charCase {
 		sent(`SELECT id, concat(c, '|') FROM ` + x + ` ORDER BY id`),
 		sent(`SELECT id FROM ` + x + ` WHERE c LIKE 'ab%' ORDER BY id`),
 		sent(`SELECT id FROM ` + x + ` WHERE c IS NULL ORDER BY id`),
-		sent(`SELECT c, count(*) FROM ` + x + ` GROUP BY c`),
+		// Sorted, a char(n) is text: the source sorts it by its collation.
+		differs(`SELECT c, count(*) FROM ` + x + ` GROUP BY c ORDER BY c`),
+		// A whole key of GROUP BY (#3219): every value of a char(n) has the
+		// same length, so both sides make the same groups.
+		stays(`SELECT c, count(*) FROM ` + x + ` GROUP BY c`),
+		stays(`SELECT count(*), sum(k) FROM ` + x + ` GROUP BY c`),
+		stays(`SELECT a.c, count(*) AS n, sum(b.k) FROM ` + x + ` a JOIN ` + p + ` b ON b.id = a.id GROUP BY a.c`),
+		stays(`SELECT c, k, count(*) FROM ` + x + ` WHERE k < 6 GROUP BY c, k HAVING count(*) >= 1`),
+		// A bpchar without a length keeps each value's own blanks: two
+		// groups on the copy where PostgreSQL makes one.
+		differs(`SELECT u, count(*) FROM ` + x + ` GROUP BY u`),
+		differs(`SELECT count(*) FROM ` + x + ` GROUP BY u`),
+		// The key used again, or inside an expression: the source's.
+		sent(`SELECT c, count(*) FROM ` + x + ` GROUP BY c HAVING c IS NOT NULL`),
 		sent(`SELECT count(DISTINCT c), count(c) FROM ` + x),
+		// A table with a char(n) as a later item of a FROM list written with
+		// commas (#3219): the join compares what its WHERE compares.
+		stays(`SELECT b.id, b.k, a.k FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id AND a.k > 1 ORDER BY b.id`),
+		stays(`SELECT a.id, a.c FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id ORDER BY a.id`),
+		stays(`SELECT b.k, count(*), sum(a.k) FROM ` + p + ` b, ` + x + ` a, ` + p + ` d WHERE a.id = b.id AND d.id = a.id GROUP BY b.k ORDER BY b.k`),
+		differs(`SELECT a.id, b.id FROM ` + p + ` b, ` + x + ` a WHERE a.c = b.c ORDER BY a.id, b.id`),
+		differs(`SELECT a.id FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id AND a.c = 'ab' ORDER BY a.id`),
+		// EXISTS and NOT EXISTS with a star (#3219): the list is not read.
+		stays(`SELECT b.id FROM ` + p + ` b WHERE EXISTS (SELECT * FROM ` + x + ` a WHERE a.id = b.id AND a.k > 2) ORDER BY b.id`),
+		stays(`SELECT b.id FROM ` + p + ` b WHERE NOT EXISTS (SELECT * FROM ` + x + ` a WHERE a.id = b.id AND a.k > 2) ORDER BY b.id`),
+		stays(`SELECT b.k, count(*) FROM ` + p + ` b WHERE EXISTS (SELECT * FROM ` + x + ` a, ` + p + ` d WHERE a.id = b.id AND d.k = a.k) GROUP BY b.k ORDER BY b.k`),
+		stays(`SELECT id FROM ` + p + ` WHERE EXISTS (SELECT * FROM ` + x + `) ORDER BY id`),
+		differs(`SELECT b.id FROM ` + p + ` b WHERE EXISTS (SELECT * FROM ` + x + ` a WHERE a.c = b.c) ORDER BY b.id`),
+		// With a GROUP BY the rows' values are put together, and a bpchar
+		// without a length (u) is grouped otherwise on the copy: the
+		// source's, though these rows (each with its own id) agree.
+		sent(`SELECT b.id FROM ` + p + ` b WHERE EXISTS (SELECT * FROM ` + x + ` GROUP BY 1, 2, 3, 4, 5, 6 HAVING count(*) > 1) ORDER BY b.id`),
+		// A table alias spelled like a keyword, with a list that renames the
+		// columns: the renamed char(n) column is compared.
+		differs(`SELECT count(*) FROM ` + x + ` AS materialized(p, q) WHERE q = 'ab'`),
+		// A char(n) as a key of GROUP BY (#3219) beside a list with commas
+		// and an EXISTS (#3219): neither lets the other through.
+		stays(`SELECT a.c, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY a.c`),
+		stays(`SELECT a.c, d.c, count(*) FROM ` + x + ` a, ` + x + ` d WHERE a.id = d.id GROUP BY a.c, d.c`),
+		stays(`SELECT a.c, b.c, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY a.c, b.c`),
+		differs(`SELECT a.c, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.c = b.c GROUP BY a.c`),
+		differs(`SELECT a.c, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id AND a.c = 'ab' GROUP BY a.c`),
+		sent(`SELECT a.c, d.c, count(*) FROM ` + x + ` a, ` + x + ` d WHERE a.c = d.c GROUP BY a.c, d.c`),
+		differs(`SELECT a.u, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY a.u`),
+		differs(`SELECT a.c, a.u, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY a.c, a.u`),
+		differs(`SELECT a.c, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY a.c ORDER BY a.c`),
+		sent(`SELECT a.c AS z, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY z`),
+		{`SELECT b.t AS c, count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY c`, sqlcompare.SourceError, false},
+		sent(`SELECT count(*) FROM ` + p + ` b, ` + x + ` a WHERE a.id = b.id GROUP BY a.arr`),
+		sent(`SELECT a.c, count(*) FROM ` + x + ` a WHERE EXISTS (SELECT * FROM ` + p + ` b WHERE b.id = a.id) GROUP BY a.c`),
+		sent(`SELECT a.c, count(*) FROM ` + x + ` a WHERE EXISTS (SELECT * FROM ` + x + ` d WHERE d.c = a.c) GROUP BY a.c`),
+		differs(`SELECT b.k, count(*) FROM ` + p + ` b WHERE EXISTS (SELECT * FROM ` + x + ` a WHERE a.c = b.c) GROUP BY b.k`),
+		// WITH ... AS [NOT] MATERIALIZED.
+		stays(`WITH y AS MATERIALIZED (SELECT id, k FROM ` + p + `) SELECT id, k FROM y ORDER BY id`),
+		stays(`WITH y AS NOT MATERIALIZED (SELECT id, k FROM ` + p + `) SELECT id FROM y WHERE k > 2 ORDER BY id`),
+		// Any other subquery reads the star's values: the source's.
+		differs(`SELECT b.id FROM ` + p + ` b WHERE (b.id, b.c, b.t, b.k) IN (SELECT id, c, t, k FROM ` + x + `) ORDER BY b.id`),
 		// A plain select list: both sides write the padded value.
 		stays(`SELECT id, c FROM ` + x + ` ORDER BY id`),
 		stays(`SELECT a.id, a.c AS code FROM ` + x + ` a WHERE a.k > 2 ORDER BY a.id`),
@@ -134,6 +189,21 @@ func charCases() []charCase {
 		stays(`SELECT id, u FROM ` + x + ` ORDER BY id`),
 		stays(`SELECT id, arr FROM ` + x + ` ORDER BY id`),
 		stays(`SELECT a.id, a.c, b.c FROM ` + x + ` a JOIN ` + p + ` b ON a.id = b.id ORDER BY a.id`),
+		// A star over the padded columns that nothing goes on to read.
+		stays(`SELECT count(*) FROM (SELECT * FROM ` + x + `) s`),
+		stays(`SELECT s.id, s.k FROM (SELECT * FROM ` + x + `) s ORDER BY s.id`),
+		stays(`WITH y AS (SELECT * FROM ` + x + `) SELECT id, t FROM y ORDER BY id`),
+		stays(`WITH y AS (SELECT * FROM ` + x + `), z AS (SELECT * FROM y) SELECT id FROM z WHERE k > 2 ORDER BY id`),
+		stays(`WITH y AS (SELECT a.* FROM ` + x + ` a WHERE a.k > 1) SELECT y.id, length(y.t) FROM y ORDER BY y.id`),
+		stays(`WITH y AS (SELECT id, k FROM ` + x + `) SELECT * FROM y ORDER BY id`),
+		// Returned whole by a WITH: the same bytes, announced as another type.
+		sent(`WITH y AS (SELECT id, sum(k) AS n FROM ` + p + ` GROUP BY id), r AS (SELECT y.*, rank() OVER (ORDER BY y.n DESC, y.id) AS rn FROM y) SELECT r.id, a.c, r.n FROM r JOIN ` + x + ` a ON a.id = r.id ORDER BY r.id`),
+		sent(`WITH y AS (SELECT * FROM ` + x + `) SELECT y.id, y.c, y.u FROM y ORDER BY y.id`),
+		// The same shapes, once the padded value is read.
+		differs(`WITH y AS (SELECT * FROM ` + x + `) SELECT id FROM y WHERE c = 'ab' ORDER BY id`),
+		differs(`WITH y AS (SELECT * FROM ` + x + `) SELECT id, length(c) FROM y ORDER BY id`),
+		differs(`WITH y AS (SELECT * FROM ` + x + `) SELECT id, c || 'x' FROM y ORDER BY id`),
+		differs(`SELECT s.id FROM (SELECT * FROM ` + x + `) s JOIN ` + p + ` b ON s.c = b.t ORDER BY s.id, b.id`),
 		// Nothing of the padded columns.
 		stays(`SELECT count(*) FROM ` + x),
 		stays(`SELECT id FROM ` + x + ` WHERE t = 'ab' ORDER BY id`),

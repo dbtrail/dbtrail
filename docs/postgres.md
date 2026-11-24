@@ -1251,6 +1251,19 @@ listener, its own workers, its own memory.
   - **Waiting for the source** (`BINTRAIL_SQL_FRESH_WAIT`) does not apply to
     PostgreSQL yet: a statement does not wait for the newest changes to
     arrive before it reads.
+- **During an update of the recent changes, a statement does not wait, and
+  may answer from the version before that update, with no notice.** That is
+  usually seconds behind, and a minute or more in a long update. On
+  PostgreSQL there is no switch to make it wait. What does protect is partial:
+  a connection the source already answered about a table waits for the copy
+  to reach that answer, or goes to the source, so it does not read back in
+  time; that does not cover an application that writes on one connection and
+  reads on another. A table with no version yet (the first statement on it,
+  the first after a new snapshot) does wait for the running update, for at
+  most half of the statement's time limit (30 of 60 seconds by default); past
+  that it goes on as described above. While the index holds no captured
+  change at all, the first change can be missing from statements that run
+  during the update that brings it.
 - **If capture falls behind, the copy falls behind with it, as a replica
   does.** The port keeps answering from the copy and does not tell the
   client. A server's lag limit, `max_behind_source_seconds`, is off by
@@ -1273,7 +1286,13 @@ listener, its own workers, its own memory.
   written PostgreSQL's way on every connection (see
   [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port)):
   `round(avg(amount), 2)` of a `numeric` is `500.00`, as on the source, not
-  `500`. Without a forwarding user, a `round()` or an `avg()` the copy would
+  `500`. A division or an `avg()` of a `numeric` written without a `round()`
+  is the one place where the copy's text is not always the source's: the
+  copy answers the same quotient, a `numeric`, with 16 decimals, where
+  PostgreSQL writes 12 for a quotient of 10000 and more and 20 for one
+  below 1 (see
+  [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port)).
+  Without a forwarding user, a `round()` or an `avg()` the copy would
   write otherwise (`avg()` of a `numeric`, `round()` of a `double precision`,
   a `round()` beside a `UNION`) is refused with error `0A000`, never answered
   with other digits. A statement that is not a
@@ -1313,8 +1332,10 @@ listener, its own workers, its own memory.
   An expression's type is the one the copy computes it with, which is not
   always PostgreSQL's: a `round()` the copy answers is PostgreSQL's
   `numeric`, with exactly the decimals PostgreSQL writes, on every
-  connection (`avg()` of a `numeric` or of whole numbers, which PostgreSQL
-  writes with 16 to 20 decimals, is refused on the copy), and an aggregate or a literal of a `numeric` keeps its
+  connection (`avg()` of a `numeric` or of whole numbers and a division of a
+  `numeric`, which PostgreSQL writes with 12 to 20 decimals, are a `numeric`
+  of 16 decimals on the copy; without a forwarding user such an `avg()` is
+  refused), and an aggregate or a literal of a `numeric` keeps its
   precision and scale here (`numeric(10,2)`) where PostgreSQL reports none. A
   `numeric` declared without precision is a `numeric(38,18)` here and is
   written with its 18 decimals (`12345.678000000000000000` where the source
@@ -1735,9 +1756,17 @@ The source answers:
   not at all.** The copy takes `count`, `sum`, `min`, `max`, `coalesce`,
   `nullif`, `greatest`, `least`, `length`, `substring` (with its start, and
   its length when given, written as whole numbers above zero:
-  `substring(name, 1, 3)`, `substring(name FROM 2 FOR 3)`), `trim`, `position`,
+  `substring(name, 1, 3)`, `substring(name FROM 2 FOR 3)`) and `substr` under
+  the same rule (`substr(name, 1, 3)`), also of a `char(n)` column, whose
+  padding the copy keeps: where the cut reaches it the copy answers `b  ` and
+  PostgreSQL `b`, and a comparison of that cut (`substr(code, 1, 3) = 'b'`)
+  can miss the row on the copy; a cut inside the part with data is the same
+  on both. `trim`, `position`,
   `concat`, `abs`, `bool_and`, `string_agg`, `row_number`, `rank`, `lag`, and
-  `extract`, `date_part` and `date_trunc` of a year, month or day;
+  `extract`, `date_part` and `date_trunc` of a year, month or day
+  (`date_trunc` of a `timestamp` or a `timestamp with time zone` column,
+  written with or without its table: a series by day over a `timestamptz`
+  stays on the copy, in a session in UTC, the only one the copy answers in);
   `round(a / b, k)` and `round(avg(x), k)` (also `round(100 * avg(x), k)`, or
   any other power of ten) where `k` is written as a whole number from 0 to 15 (counting the
   power of ten of `avg`)
@@ -1750,6 +1779,31 @@ The source answers:
   value (PostgreSQL writes `CASE WHEN c THEN round(x, 2) ELSE 0 END` as `0`
   where the copy would write `0.00`, so a row that takes the `0` sends the
   statement to the source);
+  a division `a / b` and `avg(x)` written without a `round()`, of numerics
+  and whole numbers: the exact quotient rounded to 16 decimals, a `numeric`
+  as PostgreSQL's is. PostgreSQL writes its own with 16 significant digits or
+  more, so the two are the same number with other decimals. The copy always
+  writes 16; PostgreSQL's count depends on the value and on both sides: often
+  16 for a quotient from 1 to 9999 (`7.5000000000000000`, the same text), 12
+  for a larger one, 20 for a smaller one (`0.3333333333333333` for
+  `0.33333333333333333333`), and 20 for `2.00 / 2`. A quotient that ends
+  within 16 decimals is exact (`0.3 / 3` is `0.1000000000000000`). A quotient
+  under 0.000001 that is not zero is answered by the source, because 16
+  decimals would keep too few of its digits. A quotient that does not end is
+  cut at the sixteenth decimal here and later on PostgreSQL, and what is
+  worked out from it carries that: a comparison, a sort, a `sum` or a
+  `GROUP BY` that turns on a digit past the sixteenth can come out otherwise
+  on the copy. `amount / 3 = 33333.333333333333` can match a row on one side
+  and not on the other, `a / b * b = a` can be true on one and false on the
+  other, and a `GROUP BY a / b` of two quotients that differ only past the
+  sixteenth decimal can be one group on one side and two on the other. Write `round(a / b, k)` or
+  `round(avg(x), k)` for PostgreSQL's text exactly. The copy answers when
+  the statement shows each side to be a `numeric` or a whole number:
+  numbers, columns of whole numbers or of a `numeric` of at most 20 digits
+  and 8 decimals, `+`, `-`, `*`, parentheses, `count`,
+  `sum`, `min`, `max`, `abs`, `coalesce`, `nullif`, `greatest`, `least` and
+  `length` over them. A divisor of zero is PostgreSQL's error, from the
+  source;
   `floor(a / b)` of numerics, as PostgreSQL takes it (`95`, not `95.0`);
   `ntile(n)`; `extract(epoch from x)` of a timestamp (a `numeric` with six
   decimals, as on PostgreSQL 14 and later) and `to_timestamp(n)` of a whole
@@ -1769,8 +1823,17 @@ The source answers:
   this rule; joins, `GROUP BY`, `HAVING`, `DISTINCT [ON]`, `UNION`,
   `INTERSECT`, `EXCEPT`, `WITH`, window functions, `FILTER`, `LIMIT` and
   `OFFSET`. Anything else goes to the source. Some of what the harness found
-  answering otherwise, and why each one goes there: `avg()` and division of a
-  `numeric` outside that `round` (PostgreSQL keeps more decimals), a `round`
+  answering otherwise, and why each one goes there: a division of two whole
+  numbers other than a column over a number (`sum(qty) / count(*)`:
+  PostgreSQL divides them as whole numbers, and the copy's division answers
+  a `numeric`), a division or an `avg()` with a side the statement does not
+  show to be a `numeric` or a whole number (a `double precision` or a
+  `real`, a `numeric` without precision or past 20 digits or 8 decimals, a name from a subquery or a `WITH`, `sum()` of a `bigint`, which
+  PostgreSQL sums to a `numeric`, a function not in the list above, a
+  `CASE`, a cast, a parameter), a division more than two deep in others
+  (`a / b / c / d`), a division in `LIMIT` or `OFFSET` or inside `ceil` or
+  `trunc` (the quotient could fall on the other side of the cut),
+  `avg(DISTINCT x)` and an `avg` with `FILTER` or `OVER`, a `round`
   of a division of two whole numbers (PostgreSQL divides them as whole
   numbers), a `round` whose quotient lands so close to a half that
   PostgreSQL's own rounding of the division could reach it (the copy refuses
@@ -1778,15 +1841,15 @@ The source answers:
   `double precision` (it rounds a half to even) and of a whole number (a
   `double precision` on PostgreSQL), a `round` beside other values in one
   column (`UNION`, `VALUES`, `ARRAY`, `greatest`, `least`, `nullif`: PostgreSQL keeps each
-  value's own decimals), a division by a column or by
-  zero (the copy answers NULL where PostgreSQL fails), `~` and `SIMILAR TO`
+  value's own decimals), a division by a zero written in the statement
+  (PostgreSQL fails it), `~` and `SIMILAR TO`
   (the copy matched no row), `->` and `->>` (PostgreSQL answers `json`, and
   writes a nested value with spaces), a number with an exponent (a `numeric`
   on PostgreSQL), `::text` of a
   float, `substring` with a start of zero or below, or one that is not a
   number written in the statement (`substring('apple', -1, 3)` is `a` on
   PostgreSQL; the copy counts a negative start from the end and answers `e`;
-  `substr`, `left`, `right` and `overlay` always go to the source), a date or
+  `left`, `right` and `overlay` always go to the source), a date or
   time literal in any other form (`'26-01-05'::date` is 2026-01-05 on
   PostgreSQL and the year 26 on the copy, a seventh decimal of a second is
   rounded there and cut here, `TIME '24:00:00'` is a time there and midnight
@@ -1808,7 +1871,10 @@ The source answers:
 - **Text sorted or compared by order** (`ORDER BY` a text column, `min()` of
   one, `name > 'B'`): PostgreSQL orders text by the database's collation, the
   copy by bytes. Text compared for equality, grouped or matched with `LIKE`
-  stays on the copy. The port finds the text by what the statement names,
+  stays on the copy. A sort key that is one call of `count`, `sum`, `rank`
+  and the like is a number whatever text the statement reads elsewhere
+  (`ORDER BY sum(amount) DESC` beside a selected name stays on the copy), and
+  the field of a `date_trunc` or a `date_part` (`'day'`) is not text. The port finds the text by what the statement names,
   and reads three ways of sorting text that name none. A position behind a
   `*`: in `SELECT * FROM t ORDER BY 2`, one table and nothing else, the
   port looks the position up in the table's columns, so it goes to the
@@ -1839,17 +1905,43 @@ The source answers:
   select list of a statement that is one `SELECT` and nothing else, no
   subquery, `WITH`, `UNION`, `INTERSECT` or `EXCEPT` (`SELECT id, code FROM t
   WHERE id = 7`, with or without the table's name before it and an alias
-  after it). There both sides write the same padded value, and nothing reads
-  it again under another name: the alias written a second time, a `NATURAL
+  after it), and as a whole key of that statement's `GROUP BY` (`SELECT
+  status, count(*) FROM t GROUP BY status`, the key selected or not): every
+  value of a `char(n)` has the same length, so both sides make the same
+  groups. A `bpchar` declared without a length keeps each value's own blanks
+  and is not grouped by the copy. There both sides write the same padded
+  value, and nothing reads it again under another name: the alias written a second time, a `NATURAL
   JOIN`, the table's name used as a value (`count(DISTINCT t)`), `TABLE t`
   inside a larger statement and a list that renames the columns (`t AS
   a(i, x)`) go to the source as well. So a comparison (`=`, `<>`, `<`, `BETWEEN`,
   `IN`, `LIKE`, `IS DISTINCT FROM`, `IS NULL`), a join's condition or
-  `USING`, `GROUP BY`, `ORDER BY`, a function, `||`, a cast, a `CASE` or an
-  aggregate of such a column goes to the source, and so does a `*` that
-  stands for it anywhere but as a whole item of that one select list
-  (`SELECT * FROM t WHERE id = 7` stays on the copy; `SELECT count(*) FROM
-  (SELECT * FROM t) s` does not). The rule is by where the column stands,
+  `USING`, a `GROUP BY` of an expression over it or of an array of `char(n)`, `ORDER BY` (a `char(n)` is
+  text, sorted by the source's collation), a function, `||`, a cast, a `CASE` or an
+  aggregate of such a column goes to the source. A `*` stays on the copy as
+  a whole item of that one select list (`SELECT * FROM t WHERE id = 7`), and
+  inside a `WITH` or a subquery in `FROM` when nothing goes on to read the
+  `char(n)` column (`SELECT count(*) FROM (SELECT * FROM t) s`, `WITH x AS
+  (SELECT * FROM t) SELECT id FROM x`). It goes to the source when the column
+  is then named, when another `*` hands it to the client, when the row is
+  used whole, when the block with the `*` has `DISTINCT`, `GROUP BY`, `ORDER
+  BY` or a window, in a set operation, in a subquery used as a value, and in
+  any shape the port does not follow. It also goes there when the statement
+  casts to `char(n)`, takes arguments, or reads a table with a column of a
+  domain, an enum or another type that is not built in. A `char(n)` column named in the last
+  `SELECT` of a `WITH` goes to the source even when returned as it is: the
+  bytes match, but the port would announce it as `text`, not `bpchar(n)`.
+  Two more places where a table with a `char(n)` column stands without its
+  padding counting, and the statement stays on the copy: as a later table of
+  a `FROM` list written with commas (`FROM orders, order_line WHERE
+  ol_o_id = o_id`), which joins by what its `WHERE` compares, as `JOIN ...
+  ON` does; and under the `*` of `EXISTS (SELECT * FROM t WHERE ...)` or
+  `NOT EXISTS`, whose select list PostgreSQL never reads. In both, the
+  `char(n)` column itself named in the `WHERE` still sends the statement to
+  the source. A list that mixes `JOIN ... ON` with commas is not followed
+  and goes to the source, and so does a `*` in any other subquery (`IN`,
+  `= ANY`, a subquery used as a value or compared as a row) and an `EXISTS`
+  whose subquery has a `UNION`, `INTERSECT` or `EXCEPT`.
+  The rule is by where the column stands,
   not by what it would give: `WHERE code IS NULL` answers the same on both
   sides and goes to the source all the same. Only the tables the statement
   reads count, so a table without a `char(n)` column is answered as before,

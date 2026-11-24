@@ -107,7 +107,7 @@ func CopyScreen(stmt string, types map[string][]string) string {
 	if w := ownName(stmt); w != "" {
 		return w
 	}
-	toks, why := lexSQL(RewriteForCopy(stmt))
+	toks, why := lexSQL(RewriteForCopyTyped(stmt, types))
 	if why != "" {
 		return why
 	}
@@ -202,12 +202,25 @@ func (s *session) screenTyped(qstr string, d routeDecision) routeDecision {
 		return d
 	}
 	text := RewriteForCopy(qstr)
-	toks, _ := lexSQL(text)
 	types, unread := s.columnTypes(text)
 	if unread && s.catalogBusy != "" {
+		if holdsDivisionOrAvg(text) {
+			// Whether the copy may answer the macro's division or an avg is
+			// told by the columns' types: without them it is the source's,
+			// as it was before the copy answered any. A column over a number
+			// written in the text (qty / 2) is not one of them: it is refused
+			// as busy, as it was.
+			s.logger.Debug("pgshim: sent to the source", "reason", ReasonVeto, "construct", "a division or an avg(), with the copy too busy to list its columns")
+			return routeDecision{RouteSource, ReasonVeto}
+		}
 		s.screenBusy = s.catalogBusy
 		return d
 	}
+	if !unread {
+		// What the columns' types decide, as copyText writes it for the copy.
+		text = retypeForCopy(text, types)
+	}
+	toks, _ := lexSQL(text)
 	veto := ""
 	if unread {
 		if veto = catalogUnread(toks); veto != "" {
@@ -246,7 +259,11 @@ func (s *session) columnTypes(stmt string) (types map[string][]string, unread bo
 	if perr != nil {
 		return nil, true
 	}
-	return withColumnOrder(screenTypes(v.tables, tablesRead(stmt, v.tables)), v.tables), false
+	types = withColumnOrder(screenTypes(v.tables, tablesRead(stmt, v.tables)), v.tables)
+	if s.argsBound {
+		types[starUnprovenKey] = []string{relType}
+	}
+	return types, false
 }
 
 // untypedAsInteger is a column type for every name in toks: INTEGER, the type
@@ -938,7 +955,7 @@ func firstWord(toks []rtToken) string {
 var copyFuncs = map[string]bool{
 	"count": true, "sum": true, "min": true, "max": true,
 	"coalesce": true, "nullif": true, "greatest": true, "least": true,
-	"length": true, "substring": true, "trim": true, "position": true, "concat": true,
+	"length": true, "substring": true, "substr": true, "trim": true, "position": true, "concat": true,
 	"abs": true, "bool_and": true, "string_agg": true,
 	// round(a / b, k), round(avg(x), k), round(x, k), round(x, -k) and
 	// round(x), as RewriteForCopy writes them: rounded as PostgreSQL rounds a
@@ -946,6 +963,11 @@ var copyFuncs = map[string]bool{
 	// around one, checked value by value (packMixedScale).
 	pgRoundDiv: true, pgRoundAvg: true, pgRoundK: true, pgRoundNeg: true, pgRoundWhole: true,
 	pgPack: true, pgPackN: true, pgUnpack: true,
+	// avg(x) of numerics or whole numbers and a division on their own, as
+	// RewriteForCopyTyped writes them: PostgreSQL's quotient rounded to 16
+	// decimals (#3219), where every side is shown to be a numeric or a whole
+	// number (divisionVeto, avgVeto).
+	pgAvgN: true, pgDiv: true,
 	// floor(a / b), as RewriteForCopy writes it, and ntile(n), whose
 	// buckets pgcompare measured the same.
 	pgFloorDiv: true, "ntile": true,
@@ -976,6 +998,8 @@ var parenWords = map[string]bool{
 	"by": true, "with": true, "union": true, "intersect": true, "except": true,
 	"distinct": true, "between": true, "is": true, "having": true, "limit": true, "offset": true,
 	"case": true, "like": true, "partition": true,
+	// WITH x AS [NOT] MATERIALIZED (...).
+	"materialized": true,
 }
 
 // literalWords are the keywords that may stand before a string without
@@ -1081,6 +1105,9 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 	if why := paddedUse(in, types); why != "" {
 		return why
 	}
+	if why := keywordColumnList(in); why != "" {
+		return why
+	}
 	if why := aliasUse(in); why != "" {
 		return why
 	}
@@ -1164,8 +1191,9 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 	// literal, a parameter, or an expression that makes text of anything.
 	anyText := false
 	for j, t := range toks {
-		if orderModifier(toks, j) {
-			// NULLS LAST is no column, whatever a table names its columns.
+		if fieldName(toks, j) || orderModifier(toks, j) {
+			// The field of a date_trunc is no text, and NULLS LAST is no
+			// column, whatever a table names its columns.
 			continue
 		}
 		if textish(t) || t.kind == rtParam || t.kind == rtOp && t.text == "||" || t.kind == rtWord && textMakers[t.text] {
@@ -1269,6 +1297,9 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 			if t.kind == rtWord && isOpTok(key, j+1, ".") || isOpTok(key, j, ".") && j > 0 && key[j-1].kind == rtWord {
 				continue
 			}
+			if fieldName(key, j) {
+				continue
+			}
 			core = append(core, t)
 		}
 		if len(core) == 0 {
@@ -1281,6 +1312,12 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 			if textish(t) || t.kind == rtParam || t.kind == rtOp && t.text == "||" || t.kind == rtWord && textMakers[t.text] {
 				return true
 			}
+		}
+		// One call of a function whose answer is never text, whatever stands
+		// elsewhere in the statement: ORDER BY sum(amount) DESC, count(*)
+		// (#3219).
+		if len(core) >= 3 && core[0].kind == rtWord && neverText[core[0].text] && isOpTok(core, 1, "(") && closingParen(core, 1) == len(core)-1 {
+			return false
 		}
 		// A position, written with parentheses or without (PostgreSQL reads
 		// ORDER BY (2) as ORDER BY 2): it may be any column of the answer,
@@ -1503,14 +1540,17 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 					return "a cast with :: to a type other than date"
 				}
 			case "/":
-				// A division by a whole number other than zero, of a column of
-				// whole numbers or of floats: what pgcompare measured. Any
+				// A division by a whole number other than zero, of a product of
+				// columns of whole numbers or of floats and whole numbers
+				// (rawDivisionLeftOK): what pgcompare measured. Any
 				// other can divide by zero (NULL on the copy, an error on
 				// PostgreSQL) or divide a numeric to another scale.
 				n := next
 				ok := n.kind == rtNumber && !strings.ContainsAny(n.text, ".eE") && strings.Trim(n.text, "0") != "" &&
 					!(at(i+2).kind == rtOp && (at(i+2).text == "." || at(i+2).text == "::" || at(i+2).text == "[")) &&
-					prev.kind == rtWord && all(prev.text, func(ty string) bool { return typeIsInteger(ty) || typeIsFloat(ty) })
+					rawDivisionLeftOK(toks, i, func(name string) bool {
+						return all(name, func(ty string) bool { return typeIsInteger(ty) || typeIsFloat(ty) })
+					})
 				if !ok {
 					return "a division"
 				}
@@ -1626,11 +1666,21 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 					}
 					break
 				}
-				if !copyFuncs[t.text] {
+				// Without the columns' types an avg is not yet told a numeric's
+				// from a float's (retypeForCopy): the typed screen decides it.
+				if !copyFuncs[t.text] && !(untyped && t.text == pgAvg) {
 					return fmt.Sprintf("the function %s()", t.text)
 				}
 				a := args(i + 1)
 				switch t.text {
+				case pgDiv:
+					if why := divisionVeto(a, func(name string) []string { return types[name] }, untyped); why != "" {
+						return why
+					}
+				case pgAvgN:
+					if why := avgVeto(a, func(name string) []string { return types[name] }); why != "" && !untyped {
+						return why
+					}
 				case pgRoundK, pgRoundNeg, pgRoundWhole:
 					// The macro refuses a float; a column known to be one goes
 					// to the source without asking the copy first.
@@ -1647,13 +1697,34 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 					}
 				case "date_trunc":
 					// On a date PostgreSQL answers a timestamp with time zone,
-					// the copy a timestamp: only a timestamp column is measured.
-					if len(a) != 2 || len(a[0]) != 1 || a[0][0].kind != rtString || !dateFields[strings.ToLower(a[0][0].text)] ||
-						len(a[1]) != 1 || a[1][0].kind != rtWord || !untyped && !all(a[1][0].text, func(ty string) bool { return ty == "TIMESTAMP" }) {
+					// the copy a timestamp: only a timestamp column is measured,
+					// with or without a time zone (#3219). With one, where a day
+					// starts is the session's time zone: the copy answers in UTC
+					// alone (routeFree sends a session in any other zone to the
+					// source), and so does this. The column may be written with
+					// its table (o.placed_at).
+					ok := len(a) == 2 && len(a[0]) == 1 && a[0][0].kind == rtString && dateFields[strings.ToLower(a[0][0].text)] && len(a[1])%2 == 1
+					for j := 0; ok && j < len(a[1]); j++ {
+						if j%2 == 1 {
+							ok = isOpTok(a[1], j, ".")
+						} else {
+							ok = a[1][j].kind == rtWord
+						}
+					}
+					if ok && !untyped {
+						ok = all(a[1][len(a[1])-1].text, func(ty string) bool { return ty == "TIMESTAMP" || ty == "TIMESTAMP WITH TIME ZONE" })
+					}
+					if !ok {
 						return "date_trunc() other than of year, month or day of a timestamp column"
 					}
 				case "substring":
 					if !substringOK(a) {
+						return substringVeto
+					}
+				case "substr":
+					// The same function, with commas only: PostgreSQL has no
+					// substr(x FROM n).
+					if len(a) < 2 || !substringOK(a) {
 						return substringVeto
 					}
 				case "concat":
@@ -1707,6 +1778,14 @@ func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, fa
 	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed})
 }
 
+// fieldName reports whether the token at j is the field a date_trunc or a
+// date_part is taken with ('day' in date_trunc('day', x)): a word of the
+// call, not a text value of the statement (#3219).
+func fieldName(toks []rtToken, j int) bool {
+	return toks[j].kind == rtString && isOpTok(toks, j-1, "(") && j >= 2 && toks[j-2].kind == rtWord &&
+		(toks[j-2].text == "date_trunc" || toks[j-2].text == "date_part") && !isOpTok(toks, j-3, ".")
+}
+
 // orderModifier reports whether the token at j is a word that says how a
 // key is sorted, not a name: ASC, DESC, NULLS before FIRST or LAST, and
 // FIRST or LAST after NULLS. A copy with a text column named last would
@@ -1734,12 +1813,95 @@ func orderModifier(toks []rtToken, j int) bool {
 	return false
 }
 
+// aliasInOrderKey names an alias of the select list written inside an
+// expression of ORDER BY. PostgreSQL reads a name there as an alias only when
+// it is the whole key: inside an expression it is a column of the tables, so
+// ORDER BY abs(q) is an error when q is only an alias, and the copy answers
+// it. With a column of that name too, both sort by the column (measured,
+// internal/pgcompare); this does not look at the columns, so that statement
+// goes to the source as well. A name before a parenthesis is a function
+// (count(*) AS count ... ORDER BY count(*)).
+func aliasInOrderKey(toks []rtToken, names map[string]bool) string {
+	word := func(i int, w string) bool {
+		return i >= 0 && i < len(toks) && toks[i].kind == rtWord && toks[i].text == w
+	}
+	// A name after AS is an alias even when it is spelled like a word the
+	// screen stops at (qty AS last), which aliases leaves out. Not the type
+	// of a CAST, which a closing or an opening parenthesis follows.
+	all := make(map[string]bool, len(names))
+	for n := range names {
+		all[n] = true
+	}
+	for i := 1; i < len(toks); i++ {
+		if word(i-1, "as") && (toks[i].kind == rtWord || toks[i].kind == rtQuoted) && !isOpTok(toks, i+1, ")") && !isOpTok(toks, i+1, "(") {
+			all[toks[i].text] = true
+		}
+	}
+	names = all
+	key := func(lo, hi int) string {
+		if hi-lo >= 3 && word(hi-2, "nulls") && (word(hi-1, "first") || word(hi-1, "last")) {
+			hi -= 2
+		}
+		if hi-lo >= 2 && (word(hi-1, "asc") || word(hi-1, "desc")) {
+			hi--
+		}
+		if hi-lo <= 1 {
+			return ""
+		}
+		for k := lo; k < hi; k++ {
+			if t := toks[k]; (t.kind == rtWord || t.kind == rtQuoted) && names[t.text] &&
+				!isOpTok(toks, k+1, "(") && !isOpTok(toks, k+1, ".") && !isOpTok(toks, k-1, ".") {
+				return fmt.Sprintf("the name %s, given in the select list, used inside an expression of ORDER BY", t.text)
+			}
+		}
+		return ""
+	}
+	// What the keys of all the ORDER BYs may cost in all is bounded: a
+	// statement of them nested by the thousand is not followed.
+	budget := 4*len(toks) + 1<<16
+	for i := range toks {
+		if !word(i, "order") || !word(i+1, "by") {
+			continue
+		}
+		start, depth := i+2, 0
+		for j := i + 2; ; j++ {
+			if budget--; budget < 0 {
+				return "an ORDER BY the port does not read whole, in a statement with aliases"
+			}
+			end := j >= len(toks) || depth == 0 && (isOpTok(toks, j, ")") || isOpTok(toks, j, "]") || isOpTok(toks, j, ";") ||
+				toks[j].kind == rtWord && orderKeysEnd[toks[j].text])
+			if end || depth == 0 && isOpTok(toks, j, ",") {
+				if why := key(start, j); why != "" {
+					return why
+				}
+				start = j + 1
+				if end {
+					break
+				}
+				continue
+			}
+			if isOpTok(toks, j, "(") || isOpTok(toks, j, "[") {
+				depth++
+			} else if isOpTok(toks, j, ")") || isOpTok(toks, j, "]") {
+				depth--
+			}
+		}
+	}
+	return ""
+}
+
+// orderKeysEnd are the words that end a list of ORDER BY keys.
+var orderKeysEnd = map[string]bool{
+	"limit": true, "offset": true, "fetch": true, "for": true,
+	"union": true, "intersect": true, "except": true,
+}
+
 // compareOps compare two values.
 var compareOps = map[string]bool{"=": true, "<>": true, "!=": true, "<": true, ">": true, "<=": true, ">=": true}
 
 // textMakers are the functions that make text of their arguments, whatever
 // those are.
-var textMakers = map[string]bool{"concat": true, "string_agg": true, "substring": true, "trim": true}
+var textMakers = map[string]bool{"concat": true, "string_agg": true, "substring": true, "substr": true, "trim": true}
 
 // zonedLiteral is a date and time written with a time zone: an offset, Z,
 // or a zone's name after the time (Europe/Paris, PST8PDT, Etc/GMT+5).
@@ -1812,10 +1974,14 @@ func aliases(toks []rtToken) (names map[string]bool, at map[int]bool) {
 }
 
 // aliasUse names an alias of the select list used in WHERE or HAVING, which
-// PostgreSQL refuses and the copy answers. A name followed by a dot is a
-// table's, and one after a dot is a column of what it qualifies.
+// PostgreSQL refuses and the copy answers, or inside an expression of ORDER
+// BY (aliasInOrderKey). A name followed by a dot is a table's, and one after
+// a dot is a column of what it qualifies.
 func aliasUse(toks []rtToken) string {
 	names, at := aliases(toks)
+	if why := aliasInOrderKey(toks, names); why != "" {
+		return why
+	}
 	if len(names) == 0 {
 		return ""
 	}

@@ -20,11 +20,22 @@ func screenExactness() []expectation {
 		return expectation{stmt: stmt, verdict: sqlcompare.Different, kind: kind, why: why}
 	}
 	const (
-		sub    = "#3071: the copy counts a start of zero or below otherwise"
-		lit    = "#3072: the copy reads this date or time literal otherwise"
-		asReal = "#3069: PostgreSQL computes a real as a double precision, and sums it as a real"
+		sub      = "#3071: the copy counts a start of zero or below otherwise"
+		lit      = "#3072: the copy reads this date or time literal otherwise"
+		leftSide = "the left side of a division is the whole product, and PostgreSQL divides it as what it is"
+		asReal   = "#3069: PostgreSQL computes a real as a double precision, and sums it as a real"
 	)
 	return []expectation{
+		// --- a division whose left side is a product ------------------------
+		// PostgreSQL divides the whole product: sum of a bigint is a numeric
+		// there (13.5) and a whole number on the copy (13).
+		differs("rows", leftSide, `SELECT qty, sum(id) * qty / 2 FROM pgcmp_orders WHERE qty = 3 GROUP BY qty`),
+		// A numeric on the left is the macro's quotient since #3238: for
+		// these PostgreSQL's own text.
+		stay(`SELECT qty, amount * qty / 2 FROM pgcmp_orders WHERE id = 1`),
+		stay(`SELECT (amount + 1) * qty / 2 FROM pgcmp_orders WHERE id = 1`),
+		differs("precision", leftSide, `WITH c(qty) AS (SELECT amount FROM pgcmp_orders WHERE id = 1) SELECT qty / 2 FROM c`),
+		stay(`SELECT id, qty / 2, -qty / 2, 2 * qty / 3, qty * qty / 2, qty * id / 7, o.qty / 2, ratio * qty / 4 FROM pgcmp_orders o ORDER BY id`),
 		// --- #3071: substring ---------------------------------------------
 		differs("rows", sub, `SELECT substring('apple', -1, 3)`),
 		differs("text", sub, `SELECT id, substring(word, -1, 3) FROM `+x+` ORDER BY id`),
@@ -41,10 +52,13 @@ func screenExactness() []expectation {
 		stay(`SELECT id, substring(word, 1, 3), substring(word, 2), substring(word, 4, 100) FROM ` + x + ` ORDER BY id`),
 		stay(`SELECT id, substring(word FROM 2 FOR 3), substring(word FROM 3) FROM ` + x + ` ORDER BY id`),
 		stay(`SELECT substring('apple', 2, 3), substring('apple' FROM 5)`),
-		// substr, left, right and overlay were never the copy's: the screen
-		// sends each to the source, whatever it is given.
+		// substr is substring with commas (#3219): the copy's under the same
+		// rule, a start and a length that are positive whole numbers.
 		differs("text", sub, `SELECT id, substr(word, -1, 3) FROM `+x+` ORDER BY id`),
-		eq(`SELECT id, substr(word, 2, 3) FROM ` + x + ` ORDER BY id`),
+		stay(`SELECT id, substr(word, 2, 3), substr(word, 1, 1), substr(word, 2), substr(word, 4, 100) FROM ` + x + ` ORDER BY id`),
+		stay(`SELECT substr('apple', 2, 3), substr('apple', 5), substr('año', 2, 1)`),
+		// left, right and overlay were never the copy's: the screen sends
+		// each to the source, whatever it is given.
 		eq(`SELECT id, left(word, 2), right(word, 2) FROM ` + x + ` ORDER BY id`),
 		eq(`SELECT id, left(word, -2), right(word, -2) FROM ` + x + ` ORDER BY id`),
 		{stmt: `SELECT id, overlay(word placing 'XX' from 2 for 1) FROM ` + x + ` ORDER BY id`, verdict: sqlcompare.NotOnCopy, says: "overlay", why: "the copy has no overlay()"},

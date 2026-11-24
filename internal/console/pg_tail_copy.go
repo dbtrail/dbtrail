@@ -114,6 +114,10 @@ var (
 // first time, and then once every this many updates in a row.
 const pgCopyDeferredSaid = 300
 
+// pgCopyBeforeRead, when set, runs just before each read takes its clock: a
+// test's way to put a delay exactly there. Nil outside tests.
+var pgCopyBeforeRead func()
+
 // pgCopyReadSlow is how long a read may take before it is said at Info.
 const pgCopyReadSlow = 5 * time.Second
 
@@ -121,6 +125,10 @@ const pgCopyReadSlow = 5 * time.Second
 // everything the read needs, noted under the lock, so the tail itself is not
 // touched while the lock is let go.
 type pgCopyRead struct {
+	// hadWhole: this read's deadline was all of pgCopyReadMax from its start.
+	// Decided from the deadline and not from how long the read took, which
+	// depends on when the process woke up after it.
+	hadWhole   bool
 	key        string
 	entry      *tailEntry
 	tail       tailTable
@@ -186,13 +194,22 @@ func (k *tailKeeper) pgFillFromCopy(ctx context.Context, src pgCopySource) {
 	k.mu.Unlock()
 	func() {
 		defer k.mu.Lock()
-		now := time.Now()
-		until := now.Add(pgCopyReadMax)
-		if end, ok := ctx.Deadline(); ok && end.Add(-pgCopyReadMargin).Before(until) {
-			until = end.Add(-pgCopyReadMargin)
-		}
+		// The time starts with the first read that runs, on that read's own
+		// clock: a delay before it is not time the read had.
+		var until time.Time
+		started := false
 		for _, r := range reads {
+			if pgCopyBeforeRead != nil {
+				pgCopyBeforeRead()
+			}
 			began := time.Now()
+			whole := began.Add(pgCopyReadMax)
+			if !started {
+				until = whole
+				if end, ok := ctx.Deadline(); ok && end.Add(-pgCopyReadMargin).Before(until) {
+					until = end.Add(-pgCopyReadMargin)
+				}
+			}
 			switch {
 			case ctx.Err() != nil:
 				r.err = ctx.Err()
@@ -205,7 +222,9 @@ func (k *tailKeeper) pgFillFromCopy(ctx context.Context, src pgCopySource) {
 				// found too small.
 				r.err = errPGCopyNoRoom
 			default:
+				started = true
 				r.room = left
+				r.hadWhole = until.Equal(whole)
 				rctx, cancel := context.WithDeadline(ctx, until)
 				r.rows, r.err = pgCopyValues(rctx, src, r.table, r.pk, r.keys, r.cols, left)
 				r.late = r.err != nil && rctx.Err() != nil && ctx.Err() == nil
@@ -286,7 +305,7 @@ func (k *tailKeeper) pgCopyReadRefusal(ctx context.Context, r *pgCopyRead) strin
 		}
 		return fmt.Sprintf("the large values to read from its copy for %d key(s) do not fit the tails' memory budget, with no other table's changes held (%d MiB, BINTRAIL_SQL_TAIL_MAX_BYTES)",
 			len(r.keys), k.budget.Bytes>>20)
-	case r.late && r.took >= pgCopyReadMax:
+	case r.late && r.hadWhole:
 		return fmt.Sprintf("reading the large values of %d key(s) from its copy did not end in the %s an update of the recent changes gives such reads",
 			len(r.keys), pgCopyReadMax)
 	case r.late:
