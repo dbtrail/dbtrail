@@ -61,8 +61,6 @@ func TestTrimmedUse_allowed(t *testing.T) {
 		"SELECT id FROM a WHERE c LIKE 'a%b%'",
 		"SELECT id FROM a WHERE c NOT LIKE 'ab%'",
 		// Cut.
-		"SELECT id, substring(c from 'a.') FROM a ORDER BY id",
-		"SELECT id FROM a WHERE substring(c from 'a.') = 'ab'",
 		"SELECT id, substr(c, 1, 2) FROM a ORDER BY id",
 		"SELECT ascii(substring(c from 1 for 1)) FROM a",
 		// Grouped by a window's partition, which does not depend on the order.
@@ -133,6 +131,9 @@ func TestTrimmedUse_source(t *testing.T) {
 		"SELECT id, character_length(c) FROM a ORDER BY id",
 		"SELECT id, position('a' in c) FROM a ORDER BY id",
 		"SELECT id FROM a WHERE position('a' in c) = 1",
+		// A cut by a regular expression: the copy's are not PostgreSQL's.
+		"SELECT id, substring(c from 'a.') FROM a ORDER BY id",
+		"SELECT id FROM a WHERE substring(c from 'a.') = 'ab'",
 		// Sorted where the order of bytes changes values or rows, not only
 		// the order of the result.
 		"SELECT id, row_number() OVER (ORDER BY c) FROM a",
@@ -193,13 +194,18 @@ func TestTrimmedUse_notReadWhole(t *testing.T) {
 
 // With no source, the copy's order of text would be the only answer.
 func TestTrimmedUse_noSourceOrder(t *testing.T) {
-	types := screenTypes(trimmedCatalog(), nil)
-	toks, _ := lexSQL("SELECT id FROM a ORDER BY c")
-	if why := paddedForNoSource(toks, types); why == "" {
+	cat := trimmedCatalog()
+	noSource := func(q string) string {
+		toks, _ := lexSQL(q)
+		return paddedForNoSource(toks, screenTypes(cat, tablesRead(q, cat)))
+	}
+	if why := noSource("SELECT id FROM a ORDER BY c"); why == "" {
 		t.Error("ORDER BY a trimmed char(n) left to the copy with no source")
 	}
-	toks, _ = lexSQL("SELECT id FROM a WHERE c = 'ab'")
-	if why := paddedForNoSource(toks, types); why != "" {
+	if why := noSource("SELECT id FROM a WHERE c = 'ab'"); why != "" {
 		t.Errorf("c = 'ab' with no source: %s", why)
+	}
+	if why := noSource("SELECT id FROM a WHERE c = 'ab  '"); why == "" {
+		t.Error("c = 'ab  ' left to the copy with no source")
 	}
 }
