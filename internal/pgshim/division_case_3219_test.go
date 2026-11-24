@@ -130,21 +130,21 @@ func TestCopyScreen_caseInDivision(t *testing.T) {
 	const unknown, whole = "cannot show to be a numeric or a whole number", "two whole numbers"
 	for q, want := range map[string]string{
 		// PostgreSQL: bigint / bigint, a whole number (3 for 7 / 2).
-		`SELECT sum(CASE WHEN qty > 1 THEN qty ELSE 0 END) / count(*) FROM t`:                  whole,
-		`SELECT sum(CASE WHEN qty > 1 THEN 1 ELSE 0 END) / count(*) FROM t`:                    whole,
+		`SELECT sum(CASE WHEN qty > 1 THEN qty ELSE 0 END) / count(*) FROM t`:                        whole,
+		`SELECT sum(CASE WHEN qty > 1 THEN 1 ELSE 0 END) / count(*) FROM t`:                          whole,
 		`SELECT sum(CASE WHEN qty > 1 THEN 1 ELSE 0 END) / sum(CASE WHEN qty > 0 THEN 1 END) FROM t`: whole,
-		`SELECT qty / (CASE WHEN qty > 1 THEN qty ELSE 1 END) FROM t`:                          whole,
-		`SELECT CASE WHEN qty > 1 THEN qty ELSE 1 END / 2 FROM t`:                               "",
-		`SELECT amount / CASE WHEN qty > 1 THEN qty ELSE 1 END FROM t`:                          "",
+		`SELECT qty / (CASE WHEN qty > 1 THEN qty ELSE 1 END) FROM t`:                                whole,
+		`SELECT CASE WHEN qty > 1 THEN qty ELSE 1 END / 2 FROM t`:                                    "",
+		`SELECT amount / CASE WHEN qty > 1 THEN qty ELSE 1 END FROM t`:                               "",
 		// A sum of a bigint is a numeric on PostgreSQL and a whole number on
 		// the copy.
-		`SELECT sum(CASE WHEN qty > 1 THEN big ELSE 0 END) / sum(amount) FROM t`: unknown,
-		`SELECT sum(CASE WHEN qty > 1 THEN ratio ELSE 0 END) / sum(amount) FROM t`: unknown,
+		`SELECT sum(CASE WHEN qty > 1 THEN big ELSE 0 END) / sum(amount) FROM t`:        unknown,
+		`SELECT sum(CASE WHEN qty > 1 THEN ratio ELSE 0 END) / sum(amount) FROM t`:      unknown,
 		`SELECT sum(CASE WHEN qty > 1 THEN amount ELSE ratio END) / sum(amount) FROM t`: unknown,
-		`SELECT sum(CASE WHEN qty > 1 THEN free ELSE 0 END) / sum(amount) FROM t`: unknown,
-		`SELECT sum(CASE WHEN qty > 1 THEN NULL END) / sum(amount) FROM t`:       unknown,
-		`SELECT sum(CASE WHEN qty > 1 THEN amount END) / 0 FROM t`:               "a division by zero",
-		`SELECT avg(CASE WHEN qty > 1 THEN ratio ELSE 0 END) FROM t`:             "avg()",
+		`SELECT sum(CASE WHEN qty > 1 THEN free ELSE 0 END) / sum(amount) FROM t`:       unknown,
+		`SELECT sum(CASE WHEN qty > 1 THEN NULL END) / sum(amount) FROM t`:              unknown,
+		`SELECT sum(CASE WHEN qty > 1 THEN amount END) / 0 FROM t`:                      "a division by zero",
+		`SELECT avg(CASE WHEN qty > 1 THEN ratio ELSE 0 END) FROM t`:                    "avg()",
 	} {
 		veto := CopyScreen(q, caseTypes)
 		if want == "" {
@@ -171,7 +171,9 @@ func chTables(plainNames bool) []CatalogTable {
 	const (
 		int2, int4, numeric, varchar, timestamptz = 21, 23, 1700, 1043, 1184
 	)
-	in := func(n string) CatalogColumn { return CatalogColumn{Name: n, Type: "INTEGER", SourceType: int4, SourceTypeMod: -1} }
+	in := func(n string) CatalogColumn {
+		return CatalogColumn{Name: n, Type: "INTEGER", SourceType: int4, SourceTypeMod: -1}
+	}
 	small := func(n string) CatalogColumn {
 		return CatalogColumn{Name: n, Type: "SMALLINT", SourceType: int2, SourceTypeMod: -1}
 	}
@@ -206,7 +208,7 @@ func chTables(plainNames bool) []CatalogTable {
 // CH-benCHmark's Q8 and Q14, as BenchBase publishes them (the rig's
 // queries.json).
 const (
-	chQ8 = `SELECT extract(YEAR FROM o_entry_d) AS l_year, sum(CASE WHEN n2.n_name = 'Germany' THEN ol_amount ELSE 0 END) / sum(ol_amount) AS mkt_share FROM item, supplier, stock, order_line, orders, customer, nation n1, nation n2, region WHERE i_id = s_i_id AND ol_i_id = s_i_id AND ol_supply_w_id = s_w_id AND MOD ((s_w_id * s_i_id), 10000) = su_suppkey AND ol_w_id = o_w_id AND ol_d_id = o_d_id AND ol_o_id = o_id AND c_id = o_c_id AND c_w_id = o_w_id AND c_d_id = o_d_id AND n1.n_nationkey = ascii(substring(c_state from 1 for 1)) AND n1.n_regionkey = r_regionkey AND ol_i_id < 1000 AND r_name = 'Europe' AND su_nationkey = n2.n_nationkey AND i_data LIKE '%b' AND i_id = ol_i_id GROUP BY l_year ORDER BY l_year`
+	chQ8  = `SELECT extract(YEAR FROM o_entry_d) AS l_year, sum(CASE WHEN n2.n_name = 'Germany' THEN ol_amount ELSE 0 END) / sum(ol_amount) AS mkt_share FROM item, supplier, stock, order_line, orders, customer, nation n1, nation n2, region WHERE i_id = s_i_id AND ol_i_id = s_i_id AND ol_supply_w_id = s_w_id AND MOD ((s_w_id * s_i_id), 10000) = su_suppkey AND ol_w_id = o_w_id AND ol_d_id = o_d_id AND ol_o_id = o_id AND c_id = o_c_id AND c_w_id = o_w_id AND c_d_id = o_d_id AND n1.n_nationkey = ascii(substring(c_state from 1 for 1)) AND n1.n_regionkey = r_regionkey AND ol_i_id < 1000 AND r_name = 'Europe' AND su_nationkey = n2.n_nationkey AND i_data LIKE '%b' AND i_id = ol_i_id GROUP BY l_year ORDER BY l_year`
 	chQ14 = `SELECT (100.00 * sum(CASE WHEN i_data LIKE 'PR%' THEN ol_amount ELSE 0 END) / (1 + sum(ol_amount))) AS promo_revenue FROM order_line, item WHERE ol_i_id = i_id AND ol_delivery_d >= '2007-01-02 00:00:00.000000' AND ol_delivery_d < '2032-01-02 00:00:00.000000'`
 )
 
