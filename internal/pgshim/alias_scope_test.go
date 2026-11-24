@@ -146,3 +146,127 @@ func TestAliasScope_CHNames(t *testing.T) {
 		}
 	}
 }
+
+// WITH name (a, b) AS (...) names the WITH's columns: the copy reads them
+// as PostgreSQL does (CH-benCHmark Q15).
+func TestCTEColumnList(t *testing.T) {
+	for _, q := range []string{
+		"WITH w (y) AS (SELECT k FROM a) SELECT y FROM w WHERE y = 1",
+		"WITH w (y, n) AS (SELECT k, count(*) FROM a GROUP BY k) SELECT y, n FROM w WHERE n > 1 ORDER BY y",
+		"WITH v AS (SELECT id FROM a), w (y) AS (SELECT k FROM a) SELECT y FROM w, v WHERE y = v.id",
+		"WITH w (y) AS MATERIALIZED (SELECT k FROM a) SELECT y FROM w WHERE y = 1",
+		"WITH w (y) AS NOT MATERIALIZED (SELECT k FROM a) SELECT y FROM w WHERE y = 1",
+	} {
+		if why := CopyScreenFor(q, trimmedCatalog()); why != "" {
+			t.Errorf("%s\n    sent to the source: %s", q, why)
+		}
+	}
+	for _, q := range []string{
+		// A list over a trimmed char(n): its names hide the column.
+		"WITH w (y) AS (SELECT c FROM a) SELECT y FROM w WHERE y = 'ab'",
+		"WITH w (y) AS (SELECT c FROM a) SELECT y = 'ab  ' FROM w",
+		"WITH w (i, y) AS (SELECT id, trim(c) FROM a) SELECT i FROM w",
+		"WITH w (y) AS (SELECT a.c FROM a) SELECT 1 FROM w",
+		// A * in the body: the list's names would land on other columns.
+		"WITH w (a1, b1) AS (SELECT *, 1 FROM a) SELECT max(b1) FROM w",
+		"WITH w (a1, b1) AS (SELECT *, 1 FROM a) SELECT a1 FROM w WHERE b1 > 'M'",
+		"WITH w (a1, b1, c1) AS (SELECT b.id, a.*, 0 FROM a, b) SELECT max(c1) FROM w",
+		"WITH w (a1) AS (SELECT DISTINCT * FROM b) SELECT a1 FROM w",
+		// A name twice.
+		"WITH w (y, y) AS (SELECT 1, 2) SELECT * FROM w",
+		// A function of FROM with a list of its columns is no WITH.
+		"SELECT * FROM a, foo(zz) AS (p int, q text)",
+		"WITH v AS (SELECT 1) SELECT * FROM v, foo(zz) AS (p int, q text)",
+		// A function is still a function.
+		"SELECT foo(k) FROM a",
+		"WITH w AS (SELECT foo(k) AS y FROM a) SELECT y FROM w",
+		// A name of the list read inside the body is no column of it.
+		"WITH w (y) AS (SELECT k FROM a WHERE y = 1) SELECT y FROM w",
+	} {
+		if why := CopyScreenFor(q, trimmedCatalog()); why == "" {
+			t.Errorf("%s\n    left to the copy", q)
+		}
+	}
+	// Without the columns' own types a column list stays the source's.
+	toks := lexOrFail(t, "WITH w (y) AS (SELECT k FROM a) SELECT y FROM w WHERE y = 1")
+	if why := screenWith(toks, untypedAsInteger(toks), true, false); why == "" {
+		t.Error("a WITH column list left to the copy without types")
+	}
+}
+
+func TestCTEColumnListAt(t *testing.T) {
+	for _, c := range []struct {
+		q    string
+		want bool
+	}{
+		{"WITH w (y) AS (SELECT 1)", true},
+		{"WITH RECURSIVE w (y) AS (SELECT 1)", true},
+		{"WITH v AS (SELECT 1), w (y, z) AS (SELECT 1, 2)", true},
+		{"WITH v AS MATERIALIZED (SELECT 1), w (y) AS (SELECT 1)", true},
+		{"SELECT * FROM a, f(x) AS (SELECT 1)", false},
+		{"SELECT * FROM (SELECT 1) s, f(x) AS (SELECT 1)", false},
+		{"WITH w () AS (SELECT 1)", false},
+		{"WITH w (y z) AS (SELECT 1)", false},
+		{"WITH w (y) (SELECT 1)", false},
+		{"SELECT count(y) AS n FROM a", false},
+		{"SELECT a, f(y) AS z FROM a", false},
+	} {
+		q, want := c.q, c.want
+		toks := lexOrFail(t, q)
+		got := false
+		for i := range toks {
+			if cteColumnList(toks, i) >= 0 {
+				got = true
+			}
+		}
+		if got != want {
+			t.Errorf("%s: a WITH column list = %v, want %v", q, got, want)
+		}
+	}
+}
+
+// CH-benCHmark's Q15 reads its WITH's columns by the names of the list.
+func TestCTEColumnList_CH(t *testing.T) {
+	if why := CopyScreenFor(chQ15, chCatalog()); why != "" {
+		t.Errorf("Q15 sent to the source: %s", why)
+	}
+}
+
+// mod() of a name of a WITH's column list, whose type the screen does not
+// know, stays the source's; mod() of the table's own columns does not.
+func TestCTEColumnList_mod(t *testing.T) {
+	cat := chCatalog()
+	if why := CopyScreenFor("WITH w (x) AS (SELECT s_w_id FROM stock) SELECT mod(x, 3) FROM w", cat); why == "" {
+		t.Error("mod() of a name of the list left to the copy")
+	}
+	if why := CopyScreenFor("WITH w (x) AS (SELECT mod(s_w_id, 3) FROM stock) SELECT x FROM w", cat); why != "" {
+		t.Errorf("mod() of the table's column sent to the source: %s", why)
+	}
+	if why := CopyScreenFor("SELECT mod(s_w_id, 3) FROM (SELECT s_w_id FROM stock) m (s_w_id)", cat); why == "" {
+		t.Error("a column list of a table in FROM left to the copy")
+	}
+}
+
+func TestSelectItems(t *testing.T) {
+	for _, c := range []struct {
+		q    string
+		want int
+	}{
+		{"SELECT a, b FROM t", 2},
+		{"SELECT mod((x*y),10) AS n, sum(z) total FROM t", 2},
+		{"SELECT DISTINCT a, f(b, c) FROM t", 2},
+		{"SELECT DISTINCT ON (a) a FROM t", 0},
+		{"SELECT CASE WHEN a THEN 1 END, b.c FROM t", 2},
+		{"SELECT 1", 1},
+	} {
+		q, want := c.q, c.want
+		toks := lexOrFail(t, q)
+		if got := len(selectItems(toks, 0)); got != want {
+			t.Errorf("%s: %d items, want %d", q, got, want)
+		}
+	}
+	items := selectItems(lexOrFail(t, "SELECT mod(x, 10) AS n, sum(z) total, c FROM t"), 0)
+	if len(items) != 3 || len(items[0]) != 6 || len(items[1]) != 4 || len(items[2]) != 1 {
+		t.Errorf("items without their names: %v", items)
+	}
+}

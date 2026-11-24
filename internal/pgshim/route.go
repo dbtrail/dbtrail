@@ -1679,6 +1679,12 @@ func screenWith(in []rtToken, types map[string][]string, untyped, sortsLikeSourc
 				if prev.kind == rtOp && prev.text == "." {
 					return fmt.Sprintf("the function %s.%s", at(i-2).text, t.text)
 				}
+				// WITH name (a, b) AS (...): the names of the WITH's columns,
+				// which PostgreSQL and the copy both read (CH-benCHmark Q15).
+				// Without the columns' own types it stays the source's.
+				if !untyped && cteColumnList(toks, i) >= 0 {
+					break
+				}
 				if t.text == "cast" {
 					a := args(i + 1)
 					if len(a) != 1 || len(a[0]) < 3 {
@@ -1705,7 +1711,7 @@ func screenWith(in []rtToken, types map[string][]string, untyped, sortsLikeSourc
 				a := args(i + 1)
 				switch t.text {
 				case "mod":
-					if why := modVeto(a, func(name string) []string { return types[name] }, untyped, columnList(toks)); why != "" {
+					if why := modVeto(a, func(name string) []string { return types[name] }, untyped, readsListedName(toks, a)); why != "" {
 						return why
 					}
 				case pgAscii:
@@ -2087,6 +2093,117 @@ func heldOtherwise(types map[string][]string, n string) bool {
 	return false
 }
 
+// cteColumnList is, when the word at i names a WITH and a list of its
+// columns follows (WITH name (a, b) AS (...), or after a comma of the same
+// WITH), the index of the "(" that opens the WITH's body; -1 otherwise.
+func cteColumnList(toks []rtToken, i int) int {
+	word := func(j int, w string) bool {
+		return j >= 0 && j < len(toks) && toks[j].kind == rtWord && toks[j].text == w
+	}
+	if i < 1 || toks[i].kind != rtWord && toks[i].kind != rtQuoted || !isOpTok(toks, i+1, "(") {
+		return -1
+	}
+	if !word(i-1, "with") && !word(i-1, "recursive") && !(isOpTok(toks, i-1, ",") && afterWithBody(toks, i-2)) {
+		return -1
+	}
+	end := closingParen(toks, i+1)
+	if end < 0 || end == i+2 {
+		return -1
+	}
+	for j := i + 2; j < end; j++ {
+		if (j-i)%2 == 0 {
+			if toks[j].kind != rtWord && toks[j].kind != rtQuoted {
+				return -1
+			}
+		} else if !isOpTok(toks, j, ",") {
+			return -1
+		}
+	}
+	if !word(end+1, "as") {
+		return -1
+	}
+	open := end + 2
+	if word(open, "not") && word(open+1, "materialized") {
+		open += 2
+	} else if word(open, "materialized") {
+		open++
+	}
+	if !isOpTok(toks, open, "(") {
+		return -1
+	}
+	return open
+}
+
+// readsListedName reports whether the arguments a read a name whose type
+// this screen cannot know: one of a WITH's column list, or any name once the
+// statement holds a list that is not a WITH's (FROM (...) m (a, b)).
+func readsListedName(toks []rtToken, a [][]rtToken) bool {
+	if !columnList(toks) {
+		return false
+	}
+	others := columnListBesidesWith(toks)
+	listed := cteListDefinitions(toks)
+	for _, arg := range a {
+		for _, t := range arg {
+			if t.kind != rtWord && t.kind != rtQuoted {
+				continue
+			}
+			if _, ok := listed[strings.ToLower(t.text)]; ok || others {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// afterWithBody reports whether the ")" at close ends a WITH's body (AS (...),
+// AS MATERIALIZED (...)), so that a comma after it starts the next WITH and
+// not a FROM item (FROM t, f(x) AS (a int)).
+func afterWithBody(toks []rtToken, close int) bool {
+	if !isOpTok(toks, close, ")") {
+		return false
+	}
+	depth := 0
+	for j := close; j >= 0; j-- {
+		switch {
+		case isOpTok(toks, j, ")"):
+			depth++
+		case isOpTok(toks, j, "("):
+			depth--
+			if depth == 0 {
+				p := toks[max(j-1, 0)]
+				return j > 0 && p.kind == rtWord && (p.text == "as" || p.text == "materialized")
+			}
+		}
+	}
+	return false
+}
+
+// selectListReads reports whether the select list of the statement whose
+// SELECT is at sel names a column for which is reports true.
+func selectListReads(toks []rtToken, sel int, is func(string) bool) bool {
+	depth := 0
+	for j := sel + 1; j < len(toks); j++ {
+		t := toks[j]
+		switch {
+		case t.kind == rtOp && t.text == "(":
+			depth++
+		case t.kind == rtOp && t.text == ")":
+			if depth == 0 {
+				return false
+			}
+			depth--
+		case depth == 0 && t.kind == rtWord && (t.text == "from" || t.text == "union" || t.text == "intersect" || t.text == "except"):
+			return false
+		case t.kind == rtWord || t.kind == rtQuoted || depth == 0 && t.kind == rtOp && t.text == "*" && (isOpTok(toks, j-1, ",") || isOpTok(toks, j-1, ".") || j == sel+1 || toks[j-1].kind == rtWord && (toks[j-1].text == "distinct" || toks[j-1].text == "all")):
+			if is(strings.ToLower(t.text)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // aliasUse names an alias of the select list used in WHERE or HAVING, which
 // PostgreSQL refuses and the copy answers, or inside an expression of ORDER
 // BY (aliasInOrderKey). A name followed by a dot is a table's, and one after
@@ -2107,13 +2224,49 @@ func aliasUse(toks []rtToken, types map[string][]string, untyped bool) string {
 	if why := aliasInOrderKey(toks, names); why != "" {
 		return why
 	}
-	if len(names) == 0 {
-		return ""
-	}
 	scope, parent := queryScopes(toks)
 	givenIn := map[string][]int{}
 	for i := range at {
 		givenIn[toks[i].text] = append(givenIn[toks[i].text], scope[i])
+	}
+	// The names of a WITH's column list are given by its body. One whose body
+	// selects a column the copy does not hold as PostgreSQL does is the
+	// source's, wherever its names are read: they hide the column.
+	for i, t := range toks {
+		body := cteColumnList(toks, i)
+		if body < 0 || t.kind != rtWord && t.kind != rtQuoted {
+			continue
+		}
+		// A * in the body stands for columns the list names by position, which
+		// this screen does not count; a name given twice is read otherwise.
+		if selectListReads(toks, body+1, func(n string) bool { return n == "*" }) {
+			return "the column list of the WITH " + t.text + ", over a select list with a *"
+		}
+		seen := map[string]bool{}
+		for j := i + 2; isOpTok(toks, j-1, "(") || isOpTok(toks, j-1, ","); j += 2 {
+			n := strings.ToLower(toks[j].text)
+			if seen[n] {
+				return "the column list of the WITH " + t.text + ", which names " + n + " twice"
+			}
+			seen[n] = true
+		}
+		if !untyped && selectListReads(toks, body+1, func(n string) bool { return heldOtherwise(types, n) }) {
+			return "the column list of the WITH " + t.text + ", over a column the copy does not hold as PostgreSQL does"
+		}
+		for j := i + 2; isOpTok(toks, j-1, "(") || isOpTok(toks, j-1, ","); j += 2 {
+			n := toks[j].text
+			if toks[j].kind == rtQuoted {
+				n = strings.ToLower(n)
+			}
+			// A name that is also a column's: every rule of a type would read
+			// the column's (WITH c(qty) AS (SELECT amount ...) SELECT qty / 2).
+			if _, column := types[n]; column || untyped {
+				return "the column list of the WITH " + t.text + " names " + n + ", a column of a table too"
+			}
+			names[n] = true
+			at[j] = true
+			givenIn[n] = append(givenIn[n], scope[body+1])
+		}
 	}
 	// A column of a statement inside: every statement that gives the name
 	// is inside the one that reads it.
