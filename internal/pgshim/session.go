@@ -95,6 +95,8 @@ type session struct {
 	// into its text, whose declared types the text no longer shows, so no
 	// star of it is exempted (paddedExempt).
 	argsBound bool
+	// argsPadded: one of those arguments is declared bpchar (paddedArgument).
+	argsPadded bool
 	// costVerdicts are the source's plans' verdicts this connection
 	// remembers, by statement shape (route_cost.go).
 	costVerdicts map[string]costVerdict

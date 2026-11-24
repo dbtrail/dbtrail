@@ -29,8 +29,8 @@ import (
 // marked too.
 //
 // Not told apart: a domain over char(n). The snapshot records the domain's
-// own type, not what it is made of, so such a column is read as any other
-// type of the user's (an enum, say) and is not marked.
+// own type, not what it is made of, so such a column is not marked; a
+// statement that reads it goes by the rule of user_types.go instead.
 
 // The marks, in place of the copy's type. Each holds CHAR, so typeIsText
 // takes a marked column for text, as the copy holds it.
@@ -112,6 +112,9 @@ func screenTypes(tables []CatalogTable, read func(*CatalogTable) bool) map[strin
 			}
 			if !provenNotPadded(c) && (read == nil || read(t)) {
 				out[starUnprovenKey] = []string{relType}
+			}
+			if userTypeColumn(c) && (read == nil || read(t)) {
+				markUserType(out, t.Name, n)
 			}
 			if paddedType(typ) {
 				// The table itself: its name, or its alias, written as a
@@ -245,6 +248,9 @@ func paddedWhat(name string, sized bool) string {
 // equal are two on the copy: beside one of those, DISTINCT and GROUP BY are
 // the source's as well.
 func paddedUse(toks []rtToken, types map[string][]string) string {
+	if why := userTypeUse(toks, types); why != "" {
+		return why
+	}
 	return paddedRead(toks, types, true)
 }
 
@@ -620,6 +626,9 @@ func (s *session) warnCatalogUnread() {
 // of a padded column, no star and no name written with Unicode escapes.
 // types are every table's (the statement's tables are not read either).
 func paddedInText(text string, types map[string][]string) string {
+	if why := userTypeInText(text, types); why != "" {
+		return why
+	}
 	if padded, _ := paddedAmong(types); !padded {
 		return ""
 	}
@@ -652,6 +661,9 @@ func paddedInText(text string, types map[string][]string) string {
 // (paddedRefusal, describeWith).
 func (s *session) paddedVeto(text string) string {
 	s.catalogBusy = ""
+	if s.argsPadded {
+		return "an argument of a declared type the copy would read as plain text (a bpchar, a domain, inet...)"
+	}
 	if s.bound == nil || s.bound.Catalog == nil {
 		return ""
 	}

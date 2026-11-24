@@ -58,6 +58,9 @@ func (s *session) stmtRoute(st *preparedStatement) routeDecision {
 	// route.go): what the plan sends there is refused where it would run, and
 	// nothing of it is kept with the statement (st.byCost holds the plan's
 	// verdict only).
+	if d.side == RouteCopy && paddedArgument(st.paramOIDs) {
+		return routeDecision{RouteSource, ReasonVeto}
+	}
 	d = s.screenTyped(st.query, d)
 	return withScreenBusy(d, s.takeScreenBusy())
 }
