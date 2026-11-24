@@ -12,6 +12,7 @@ import (
 	"hash/fnv"
 	"io"
 	"io/fs"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -19,6 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -681,13 +683,20 @@ func cnClip(s string, n int) string {
 }
 
 // cnSide is the side the port says answered the connection's last statement.
-func cnSide(ctx context.Context, c *pgconn.PgConn) string {
+func cnSide(ctx context.Context, c *pgconn.PgConn) string { return cnStatus(ctx, c, "last_answer") }
+
+// cnReason is why the port's last answer on c was given where it was.
+func cnReason(ctx context.Context, c *pgconn.PgConn) string {
+	return cnStatus(ctx, c, "last_answer_reason")
+}
+
+func cnStatus(ctx context.Context, c *pgconn.PgConn, row string) string {
 	res, err := c.Exec(ctx, "SHOW dbtrail.router_status").ReadAll()
 	if err != nil || len(res) == 0 {
 		return "unknown"
 	}
 	for _, r := range res[0].Rows {
-		if len(r) == 2 && string(r[0]) == "last_answer" {
+		if len(r) == 2 && string(r[0]) == row {
 			return string(r[1])
 		}
 	}
@@ -1007,6 +1016,10 @@ type cnTally struct {
 	total, copy, source, refused int
 	wanted, wantedOn             int
 	byGroup                      map[string]*[3]int // statements, on the copy, wrong
+	// heavyOnCopy counts, by group, the answers the copy gave because the
+	// statement was expensive on the source (heavy_on_copy) and that differ
+	// from PostgreSQL's: accepted by the product, said, not failed.
+	heavyOnCopy map[string]int
 }
 
 type cnFailure struct {
@@ -1022,7 +1035,7 @@ func cnRun(t *testing.T, ctx context.Context, s *cnStack, phase string, cases []
 	if extended {
 		proto = "extended"
 	}
-	tl := cnTally{byGroup: map[string]*[3]int{}}
+	tl := cnTally{byGroup: map[string]*[3]int{}, heavyOnCopy: map[string]int{}}
 	var notices []string
 	connect := func() (*pgconn.PgConn, error) {
 		cfg, err := pgconn.ParseConfig(s.portDSN)
@@ -1083,6 +1096,12 @@ func cnRun(t *testing.T, ctx context.Context, s *cnStack, phase string, cases []
 			}
 			if why == "" && cs.noCopy {
 				why, class = "a domain over char(n) was answered by the copy, with the right rows; it must go to the source", "B"
+			}
+			if why != "" && cnReason(ctx, port) == "heavy_on_copy" {
+				// Expensive on the source, so the copy answered it though it
+				// may answer otherwise: counted, not failed.
+				tl.heavyOnCopy[cs.group]++
+				break
 			}
 			if why != "" {
 				g[2]++
@@ -1350,6 +1369,14 @@ func TestIntegrationPGCharNTrimBattery(t *testing.T) {
 			}
 			tl := cnRun(t, ctx, s, phase, cases, extended, &fails)
 			t.Logf("%s, %s: %d statements: %d answered by the copy, %d by the source, %d refused; of the %d that should reach the copy, %d did", phase, proto, tl.total, tl.copy, tl.source, tl.refused, tl.wanted, tl.wantedOn)
+			heavy := 0
+			for _, n := range tl.heavyOnCopy {
+				heavy += n
+			}
+			t.Logf("%s, %s: %d answers of the copy differ from PostgreSQL's because the statement was expensive on the source (heavy_on_copy, accepted)", phase, proto, heavy)
+			for _, g := range slices.Sorted(maps.Keys(tl.heavyOnCopy)) {
+				t.Logf("    %-24s %5d differ, heavy_on_copy", g, tl.heavyOnCopy[g])
+			}
 			names := make([]string, 0, len(tl.byGroup))
 			for g := range tl.byGroup {
 				names = append(names, g)
@@ -1375,10 +1402,16 @@ func TestIntegrationPGCharNTrimBattery(t *testing.T) {
 			return false, err.Error()
 		}
 		defer c.Close(ctx)
-		if _, err := c.Exec(ctx, "SELECT now() FROM cn_mark").ReadAll(); err != nil {
+		// Inside a block: the source's, cheap or expensive, once the port
+		// can forward.
+		if _, err := c.Exec(ctx, "BEGIN").ReadAll(); err != nil {
+			return false, err.Error()
+		}
+		if _, err := c.Exec(ctx, "SELECT 1 FROM cn_mark").ReadAll(); err != nil {
 			return false, err.Error()
 		}
 		side := cnSide(ctx, c)
+		_, _ = c.Exec(ctx, "ROLLBACK").ReadAll()
 		return side == "source", side
 	})
 	report("forwarding user")

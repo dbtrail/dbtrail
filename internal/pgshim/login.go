@@ -371,8 +371,10 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	if err == nil {
 		// A char(n) column used where the copy counts its padding (#3068):
 		// the source's, or refused where nothing is sent there.
-		if refusal := s.paddedRefusal(text); refusal != nil {
-			return nil, nil, nil, "", refusal
+		if !s.heavy {
+			if refusal := s.paddedRefusal(text); refusal != nil {
+				return nil, nil, nil, "", refusal
+			}
 		}
 		// A table whose capture dropped its changes (not_captured.go): the
 		// copy holds old rows of it, and the source answers, before the copy

@@ -1845,10 +1845,27 @@ the copy only when everything in it is something the copy is known to answer
 the way PostgreSQL does. What "known" means is measured, not assumed: the
 comparison harness (`internal/pgcompare`) runs the same statements on a real
 PostgreSQL and on its copy, and only what it found answering the same is let
-through. When in doubt, the source answers: the cost is a slower answer, never
-a different one.
+through. When in doubt, a cheap statement goes to the source: the cost is a
+slower answer, never a different one.
 
-The source answers:
+**An expensive statement goes to the copy even where it may answer
+otherwise.** Since 0.140.0, a statement sent without preparing it (the simple
+protocol: `psql`, and drivers that put the values in the text themselves)
+whose plan on the source is over the port's cost thresholds (`--cost-threshold`,
+`--scan-rows`) is answered by the copy, even when the list below would send it
+to the source. Such an answer can differ from PostgreSQL's: text sorted by
+bytes instead of by the database's collation (and, under `LIMIT`, other rows),
+the last decimals of a division or an average, a `char(n)` compared with a
+string that ends in blanks, a `now()` read on the copy, a name given in the
+select list and used in `WHERE`. The port counts these under
+`heavy_on_copy` on `/status`. A statement the copy cannot run at all still
+goes to the source, and the client does not see the copy's error. A cheap
+statement, one inside a transaction block, one under a session time zone, and
+a prepared statement (the extended protocol) are decided as before. For the
+answer PostgreSQL gives, send the statement inside a transaction block
+(`BEGIN; ...; COMMIT;`): every statement of a block is the source's.
+
+The source answers a cheap statement for:
 
 - **A function, operator, cast or construct the copy answers differently or
   not at all.** The copy takes `count`, `sum`, `min`, `max`, `coalesce`,
@@ -2477,6 +2494,7 @@ The reasons, with the MySQL port's names where they mean the same:
 | copy | `answers_the_same` | everything in it answers on the copy as on PostgreSQL |
 | copy | `copy_command` | a command of the copy's own (`SHOW TABLES`, `DESCRIBE`) |
 | copy | `hidden_rules` | the server hides tables or columns: nothing is sent to its source |
+| copy | `heavy_on_copy` | its plan on the source is expensive, so the copy answers it even though the port would otherwise send it to the source for how the copy answers it: the answer may differ from PostgreSQL's (simple protocol only, since 0.140.0) |
 | copy | `capture_gate` | the server forwards with the capture account, and the statement did not pass that account's check, so the copy answered it without asking the source for its plan |
 | source | `cheap_plan` | its plan on the source is under both thresholds: the source answers it, by its indexes |
 | source | `result_over_row_cap` | its plan on the source is expensive and says it returns more rows than the copy returns for one statement (`--sql-port-max-rows`): the copy would refuse the result, so it is not tried there |
