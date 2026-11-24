@@ -1919,7 +1919,11 @@ The source answers a cheap statement for:
   numbers, columns of whole numbers or of a `numeric` of at most 20 digits
   and 8 decimals, `+`, `-`, `*`, parentheses, `count`,
   `sum`, `min`, `max`, `abs`, `coalesce`, `nullif`, `greatest`, `least` and
-  `length` over them. A divisor of zero is PostgreSQL's error, from the
+  `length` over them, and a `CASE` whose values are such
+  (`sum(CASE WHEN c THEN amount ELSE 0 END) / sum(amount)`, a share of a
+  total): its conditions do not count, a `NULL` among its values takes the
+  others' type, and a value of another type sends the statement to the
+  source. A divisor of zero is PostgreSQL's error, from the
   source;
   `floor(a / b)` of numerics, as PostgreSQL takes it (`95`, not `95.0`);
   `ntile(n)`; `extract(epoch from x)` of a timestamp (a `numeric` with six
@@ -1947,7 +1951,9 @@ The source answers a cheap statement for:
   show to be a `numeric` or a whole number (a `double precision` or a
   `real`, a `numeric` without precision or past 20 digits or 8 decimals, a name from a subquery or a `WITH`, `sum()` of a `bigint`, which
   PostgreSQL sums to a `numeric`, a function not in the list above, a
-  `CASE`, a cast, a parameter), a division more than two deep in others
+  `CASE` with such a value or with only `NULL`, a cast, a parameter), a
+  division with a `CASE` just before or after its slash (`CASE ... END / 2`;
+  in parentheses it is read), a division more than two deep in others
   (`a / b / c / d`), a division in `LIMIT` or `OFFSET` or inside `ceil` or
   `trunc` (the quotient could fall on the other side of the cut),
   `avg(DISTINCT x)` and an `avg` with `FILTER` or `OVER`, a `round`
