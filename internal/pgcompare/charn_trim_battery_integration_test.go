@@ -441,6 +441,9 @@ func cnCases() []cnCase {
 	for _, c := range cnStoredCases() {
 		add(c)
 	}
+	for _, c := range cnASCIICases() {
+		add(c)
+	}
 	for i := range out {
 		if out[i].group == "domain" {
 			out[i].noCopy = true
@@ -885,7 +888,7 @@ func cnStart(t *testing.T, ctx context.Context) *cnStack {
 		return err == nil, out + s.logTail("watch")
 	})
 	if out, err := s.cli(ctx, s.pass+"\n", "server", "add", "--name", cnServer, "--flavor", "postgres", "-h", s.host, "-P", s.port, "-u", s.user,
-		"--password-stdin", "-d", s.db, "--publication", cnPub, "--slot", cnSlot, "--schemas", "public", "--no-forward"); err != nil {
+		"--password-stdin", "-d", s.db, "--publication", cnPub, "--slot", cnSlot + "_" + id, "--schemas", "public", "--no-forward"); err != nil {
 		t.Fatalf("server add: %v\n%s\n%s", err, out, s.logTail("watch"))
 	}
 	if out, err := s.cli(ctx, "", "snapshot", "run", cnServer); err != nil {
@@ -1189,6 +1192,8 @@ func cnKnown(f cnFailure) string {
 		return ""
 	}
 	switch f.group {
+	case "ascii":
+		return "ascii() of a char(n) or of a cut of it"
 	case "output expression":
 		return "a cut of a char(n) (substr, substring) keeps its padding"
 	case "domain":
@@ -1672,6 +1677,47 @@ func cnStoredCases() []cnCase {
 		} {
 			add(strings.NewReplacer("%A", a, "%B", b).Replace(s))
 		}
+	}
+	return out
+}
+
+// cnASCIICases is ascii(c) and ascii(substr(c, i, 1)) on char(n), the shape
+// the CH-benCHmark reports join and group by: in the select list, in WHERE,
+// in a join and in GROUP BY, with cuts past the stored value and inside the
+// padding (substr(c, 4, 1) of 'ab' in a char(5)).
+func cnASCIICases() []cnCase {
+	exprs := []string{"ascii(%C)"}
+	for i := 1; i <= 7; i++ {
+		exprs = append(exprs, fmt.Sprintf("ascii(substr(%%C, %d, 1))", i))
+	}
+	exprs = append(exprs, "ascii(substr(%C, 1, 2))", "ascii(substr(%C, 4))", "ascii(substring(%C from 4 for 1))", "ascii(left(%C, 1))", "ascii(right(%C, 1))")
+	froms := []struct{ with, from, c string }{
+		{"", "cn_a s", "c"}, {"", "cn_a s", "s.m"}, {"", "(SELECT * FROM cn_a) s", "c"}, {"", "(SELECT id, c AS r, k FROM cn_a) s", "r"}, {"WITH w AS (SELECT * FROM cn_a) ", "w s", "c"},
+	}
+	var out []cnCase
+	add := func(s string) { out = append(out, cnCase{group: "ascii", sql: s}) }
+	for _, f := range froms {
+		for _, e := range exprs {
+			x := strings.ReplaceAll(e, "%C", f.c)
+			add(f.with + "SELECT id, " + x + " FROM " + f.from + " ORDER BY id")
+			for _, w := range []string{"= 97", "= 32", "= 0", "<> 32", "> 90", "BETWEEN 65 AND 122", "IN (32, 97, 195)", "IS NULL"} {
+				add(f.with + "SELECT id FROM " + f.from + " WHERE " + x + " " + w + " ORDER BY id")
+			}
+			add(f.with + "SELECT " + x + ", count(*) FROM " + f.from + " GROUP BY 1 ORDER BY 1 NULLS FIRST")
+			add(f.with + "SELECT k, sum(" + x + ") FROM " + f.from + " GROUP BY k ORDER BY k")
+			add(f.with + "SELECT s.id, b.id FROM " + f.from + " JOIN cn_b b ON " + x + " = ascii(substr(b.c, 1, 1)) ORDER BY 1, 2")
+			add(f.with + "SELECT s.id, b.id FROM " + f.from + " JOIN cn_b b ON b.id = " + x + " - 90 ORDER BY 1, 2")
+		}
+	}
+	for _, i := range []string{"1", "2", "3"} {
+		sub := "ascii(substr(%s, " + i + ", 1))"
+		a, b := fmt.Sprintf(sub, "c.c_state"), fmt.Sprintf(sub, "w.w_state")
+		add("SELECT c.c_w_id, c.c_d_id, c.c_id, " + a + " FROM customer c ORDER BY 1, 2, 3")
+		add("SELECT " + a + ", count(*) FROM customer c GROUP BY 1 ORDER BY 1 NULLS FIRST")
+		add("SELECT count(*) FROM customer c JOIN warehouse w ON " + a + " = " + b)
+		add("SELECT c.c_id, d.d_id FROM customer c JOIN district d ON d.d_w_id = c.c_w_id AND d.d_id = " + a + " % 2 + 1 WHERE c.c_w_id = 1 AND c.c_d_id = 1 ORDER BY 1, 2")
+		add("SELECT count(*) FROM customer c JOIN item i ON i.i_id = " + a + " - 60")
+		add("SELECT count(*) FROM customer c WHERE " + a + " BETWEEN 65 AND 90")
 	}
 	return out
 }
