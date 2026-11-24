@@ -1708,7 +1708,7 @@ the copy does not answer to the server's PostgreSQL: as a forwarding user of
 the server's own ([above](#transactions-on-the-source-the-forwarding-user)), or
 as the user DBTrail connects with
 ([below](#forwarding-with-the-capture-account)). Either one serves the
-server; a server with neither is refused. Where a person is asked, the
+server; a server with neither is refused. Statements the port forwards to the source do not leave an audit record yet: with this release every PostgreSQL server the port serves forwards part of its statements, so fewer of the port's reads are recorded, and those reads run on the source as the forwarding account. This is fixed later (#3256). Where a person is asked, the
 capture account is what is offered first: Enter is yes at `server add` on a
 terminal, and the box is ticked on the web form of a new server. A script
 that says nothing gets no. A forwarding user of its own that can only read
