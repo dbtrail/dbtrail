@@ -5,12 +5,15 @@ package pgshim
 // and length are positive whole numbers written in the text
 // (substr(c_phone, 1, 2), substring(o.code FROM 2 FOR 1)).
 //
-// Such a cut stays on the copy, a decision of the product (#3219): the copy
-// keeps a char(n) value with its padding, so a cut that reaches the padding
-// answers 'b ' where PostgreSQL answers 'b', and a comparison of that cut can
-// then miss. A cut inside the part that holds data is the same on both.
-// Nothing else about the column is relaxed: compared, joined, sorted or
-// grouped on its own it goes to the source, because that gives other rows.
+// Such a cut stays on the copy, a decision of the product (#3219). On the
+// port the copy reads a char(n) without its padding (TrimmedOnCopy), so a
+// cut gives what PostgreSQL gives. A char(n) the view does not trim (one of
+// two columns whose names differ only in case, baseline.PGPaddedToTrim)
+// keeps its padding there, and a cut that reaches it answers 'b ' where
+// PostgreSQL answers 'b'; the product accepted that difference. Nothing
+// else about the column is let through yet: compared, joined, sorted or
+// grouped on its own it goes to the source, until the screen lets through
+// the uses that give the same rows on a trimmed column.
 func paddedCut(toks []rtToken, i int) bool {
 	start := i
 	for start >= 2 && isOpTok(toks, start-1, ".") && (toks[start-2].kind == rtWord || toks[start-2].kind == rtQuoted) {

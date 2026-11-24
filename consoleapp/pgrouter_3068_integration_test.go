@@ -113,13 +113,14 @@ func TestIntegrationPGRouterCharPadding_3068(t *testing.T) {
 
 		// What the copy answers, first: once the source answered a
 		// connection, the copy's older answers are not given to it (#2985).
-		// The copy holds four rows; the padded value is what PostgreSQL
-		// writes too.
+		// The copy holds four rows, and the port reads a char(n) without its
+		// padding (#3219, a decision of the product): 'ab' where PostgreSQL
+		// writes 'ab   '.
 		c := pgClient(t, ctx, env.portDSN(), nil)
 		for _, tc := range []struct{ stmt, want string }{
 			{"SELECT count(*) FROM " + table, "4"},
-			{"SELECT code FROM " + table + " WHERE id = 1", "ab   "},
-			{"SELECT id, code FROM " + table + " WHERE k = 1 ORDER BY id", "1|ab   \n2|ab   "},
+			{"SELECT code FROM " + table + " WHERE id = 1", "ab"},
+			{"SELECT id, code FROM " + table + " WHERE k = 1 ORDER BY id", "1|ab\n2|ab"},
 			{"SELECT * FROM " + table + " WHERE id = 3", "3|abcde|abcde|2"},
 			{"SELECT count(*) FROM " + table + " WHERE label = 'ab'", "2"},
 		} {
@@ -175,7 +176,7 @@ func TestIntegrationPGRouterCharPadding_3068(t *testing.T) {
 		c := pgClient(t, ctx, env.portDSN(), nil)
 		for _, tc := range []struct{ stmt, want string }{
 			{"SELECT count(*) FROM " + table, "4"},
-			{"SELECT code FROM " + table + " WHERE id = 1", "ab   "},
+			{"SELECT code FROM " + table + " WHERE id = 1", "ab"},
 			{"SELECT * FROM " + table + " WHERE id = 3", "3|abcde|abcde|2"},
 			{"SELECT count(*) FROM " + table + " WHERE label = 'ab'", "2"},
 			// A star over the char(5) column that nothing goes on to read.

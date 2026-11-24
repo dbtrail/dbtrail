@@ -98,8 +98,10 @@ func modVeto(a [][]rtToken, typesOf func(string) []string, untyped, listed bool)
 // asciiVeto is why ascii(x) goes to the source, "" when the copy answers it:
 // x is a string written in the statement, a column that is text on the source
 // too, or a substr or substring of one. plain says that of a column's name
-// (plainTextNames, and not a char(n): a cut of its padding is a blank here and
-// nothing on PostgreSQL, 32 for 0). untyped as in modVeto.
+// (plainTextNames, and not a char(n): one the view does not trim keeps its
+// padding, so a cut of it is a blank here and nothing on PostgreSQL, 32 for
+// 0; a trimmed one waits for the screen's list of allowed uses). untyped as
+// in modVeto.
 func asciiVeto(a [][]rtToken, plain func(string) bool, untyped bool) string {
 	const veto = "ascii() of a value the port cannot show to be text"
 	if len(a) != 1 || len(a[0]) == 0 {

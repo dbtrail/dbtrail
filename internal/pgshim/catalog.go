@@ -76,6 +76,10 @@ type CatalogColumn struct {
 	// does not: a char(n) is a VARCHAR here (padded.go).
 	SourceType    uint32
 	SourceTypeMod int32
+	// TrimmedOnCopy says the copy's view reads this char(n) without its
+	// padding (baseline.PGPaddedToTrim, the list the view itself uses). The
+	// screen may treat a column as trimmed only when this says so.
+	TrimmedOnCopy bool
 }
 
 // catalogCacheFor is how long one connection reuses the catalog it read: a
@@ -100,10 +104,26 @@ type catalogView struct {
 	database string
 }
 
-// catalog reads (or reuses) the copy's catalog for this connection.
+// catalog reads (or reuses) the copy's catalog for this connection. One it
+// keeps is read again once it is catalogCacheFor old, and before that as
+// soon as the copy's snapshot changes (bound.CatalogStamp): the screen
+// reads its types (a char(n) the view trims, TrimmedOnCopy), and the
+// snapshot's must be the ones it reads. The stamp is read before the
+// catalog: should a new snapshot come between them, the next statement
+// sees another stamp and reads it again, which is the safe side. The
+// statement itself reads the snapshot of its own moment, which may still be
+// newer than this one; a type changed with it is #3251.
 func (s *session) catalog() (*catalogView, *pgErr) {
-	if s.catalogAt.IsZero() || time.Since(s.catalogAt) > catalogCacheFor {
+	if s.catalogStale() {
 		ctx, done := s.statementContext()
+		stamp := ""
+		if s.bound.CatalogStamp != nil {
+			// An error leaves no stamp, so the next statement reads the
+			// catalog again; Catalog says why, if it fails too.
+			if st, err := s.bound.CatalogStamp(ctx); err == nil {
+				stamp = st
+			}
+		}
 		tables, err := s.bound.Catalog(ctx)
 		stopped := ctx.Err() != nil
 		done()
@@ -115,7 +135,7 @@ func (s *session) catalog() (*catalogView, *pgErr) {
 			}
 			return nil, s.statementError(ctx, err)
 		}
-		s.catalogTables, s.catalogAt = tables, time.Now()
+		s.catalogTables, s.catalogAt, s.catalogStamp = tables, time.Now(), stamp
 	}
 	v := &catalogView{s: s, tables: s.catalogTables, database: s.database}
 	seen := map[string]bool{}
@@ -138,6 +158,22 @@ func (s *session) catalog() (*catalogView, *pgErr) {
 		return v.rels[i].name < v.rels[j].name
 	})
 	return v, nil
+}
+
+// catalogStale says the catalog this connection keeps must be read again:
+// none yet, catalogCacheFor old, or the copy's snapshot is not the one it
+// was read from (an unread stamp, or one that cannot be read now, is not).
+func (s *session) catalogStale() bool {
+	if s.catalogAt.IsZero() || time.Since(s.catalogAt) > catalogCacheFor {
+		return true
+	}
+	if s.bound.CatalogStamp == nil {
+		return false
+	}
+	ctx, done := s.statementContext()
+	stamp, err := s.bound.CatalogStamp(ctx)
+	done()
+	return err != nil || stamp == "" || stamp != s.catalogStamp
 }
 
 // tableOID is the table's OID on the source, or one made from its name.

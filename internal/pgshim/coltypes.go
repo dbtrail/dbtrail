@@ -77,12 +77,16 @@ var arrayOIDs = map[uint32]uint32{
 	oidUUID:        2951,
 }
 
-// arrayElement is the element type of each array type in arrayOIDs.
+// arrayElement is the element type of each array type in arrayOIDs, and of
+// two the copy never announces but the source can describe a statement
+// with (a char(n)[] and a varchar[], whose cells are text): a statement
+// described there and answered here is sent as described (conformToDescribed).
 var arrayElement = func() map[uint32]uint32 {
-	m := make(map[uint32]uint32, len(arrayOIDs))
+	m := make(map[uint32]uint32, len(arrayOIDs)+2)
 	for elem, arr := range arrayOIDs {
 		m[arr] = elem
 	}
+	m[1014], m[1015] = oidBpchar, oidVarchar
 	return m
 }()
 
@@ -238,7 +242,7 @@ func binaryScalar(oid uint32, s string) ([]byte, error) {
 		return binary.BigEndian.AppendUint64(nil, math.Float64bits(f)), nil
 	case oidNumeric:
 		return binaryNumeric(s)
-	case oidName, oidVarchar, oidJSON, oidNodeTree:
+	case oidName, oidVarchar, oidBpchar, oidJSON, oidNodeTree:
 		return []byte(s), nil
 	case oidChar:
 		// "char": one byte.
