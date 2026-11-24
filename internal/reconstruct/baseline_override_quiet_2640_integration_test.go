@@ -93,6 +93,9 @@ func TestBaselineOverride_captureThatDoesNotShowTheReadStaysAhead_2640(t *testin
 		// transaction, so they do not say what was indexed.
 		{"GTID mode", func(t *testing.T, db *sql.DB) { captured(t, db, "gtid", "binlog.000003", 900) }},
 		{"a position in an earlier file", func(t *testing.T, db *sql.DB) { captured(t, db, "position", "binlog.000002", 9000) }},
+		// Another numbering of the binary log: a longer name orders after
+		// any shorter one, which says nothing about where it is.
+		{"a position in another numbering", func(t *testing.T, db *sql.DB) { captured(t, db, "position", "mysql-bin.000001", 4) }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			testutil.SkipIfNoMySQL(t)

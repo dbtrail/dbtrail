@@ -473,16 +473,24 @@ func resolveSnapshotCutDetail(ctx context.Context, db *sql.DB, at time.Time, flo
 //     read one.
 //
 // A GTID-mode checkpoint's file and position can sit inside a transaction, so
-// they are not used. A checkpoint in another numbering of the binary log than
-// the cut cannot be ordered; the renumbering checks of the fold refuse that
-// run as they would any other.
+// they are not used, and neither is a checkpoint in another numbering of the
+// binary log than the cut, which cannot be ordered against it.
+//
+// What this rests on is capture's: that a change it saved a position past is
+// in the index. Changes capture skips or filters out (statement-format DML, a
+// column-count mismatch, tables outside its scope) and a schema_changes insert
+// whose failure the parser hook only logs are not, on this path as on every
+// fold whose cut a later change moved past them.
 func resolveCutPastCapture(ctx context.Context, db *sql.DB, at time.Time, floored bool) (*query.BinlogPos, error) {
 	saved := captureCheckpoint(ctx, db)
 	cut, all, err := resolveSnapshotCutDetail(ctx, db, at, floored)
 	if err != nil || cut == nil || !all || saved == nil || cut.IsLSN() {
 		return cut, err
 	}
-	if cut.AtOrBefore(*saved) && !saved.AtOrBefore(*cut) {
+	// Only within one numbering of the binary log: AtOrBefore orders names
+	// of two numberings by length, and on a quiet source no event after the
+	// cut would show the renumbering to the fold's own checks.
+	if sameBinlogSequence(cut.File, saved.File) && cut.AtOrBefore(*saved) && !saved.AtOrBefore(*cut) {
 		return saved, nil
 	}
 	return cut, nil
@@ -497,6 +505,8 @@ func captureCheckpoint(ctx context.Context, db *sql.DB) *query.BinlogPos {
 	err := db.QueryRowContext(ctx, `SELECT mode, binlog_file, binlog_position FROM stream_state WHERE id = 1`).Scan(&mode, &file, &pos)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil && ctx.Err() != nil:
 		return nil
 	case err != nil:
 		slog.Warn("snapshot cut: could not read capture's saved position, so a read of some tables waits for a change after it as before", "error", err)
