@@ -368,10 +368,12 @@ func (f *fakeSource) serve(c net.Conn) {
 				f.explains = append(f.explains, q)
 				f.mu.Unlock()
 				answer := `[{"Plan": {"Node Type": "Result", "Total Cost": 0.01, "Plan Rows": 1}}]`
+				// The longest key the statement holds: the most specific, the
+				// same one every time.
+				best := ""
 				for k, v := range f.plans {
-					if strings.Contains(q, k) {
-						answer = v
-						break
+					if strings.Contains(q, k) && len(k) > len(best) {
+						best, answer = k, v
 					}
 				}
 				if code, ok := strings.CutPrefix(answer, "error "); ok {
