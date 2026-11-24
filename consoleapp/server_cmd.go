@@ -128,10 +128,12 @@ DBTrail creates the replication slot (--slot, bintrail_<database> unless
 named). Once a PostgreSQL is added, one question is asked on a terminal:
 may the PostgreSQL port send to your PostgreSQL, read-only, a SELECT whose
 every table is a table of the copy, as the user DBTrail connects with, when
-the copy does not answer it? Enter is yes. Without a terminal it is yes
-unless --no-capture-account, or capture-account=no under [dbtrail-forward],
-says no. Without it the PostgreSQL port does not serve the server: a client
-that connects gets an error that says why. To let the port read more, name a
+the copy does not answer it? Enter is yes. Without a terminal it is no
+unless --capture-account, or capture-account=yes under [dbtrail-forward],
+says yes; --no-capture-account says no. With neither that yes nor a
+forwarding user of its own, the PostgreSQL port does not serve the server: a
+client that connects gets an error that says why and how to turn it on. To
+let the port read more, name a
 forwarding user of its own instead, a role that can log in with SELECT on
 what the port should read: --forward-user or [dbtrail-forward] user= (the
 question is then not asked). Later:
@@ -893,6 +895,9 @@ type ctlServer struct {
 	// with although the answer is yes.
 	RouteUnreadable       bool   `json:"route_unreadable,omitempty"`
 	CaptureAccountRefused string `json:"capture_account_refused,omitempty"`
+	// CaptureAccountWarning: in the answer to saving the yes, what the
+	// checks say of the capture account's power, "" for none.
+	CaptureAccountWarning string `json:"capture_account_warning,omitempty"`
 	// SQLFresh is the mode this server's entry asks for on the MySQL port
 	// (fresh, or fast); SQLFreshSaved says it was chosen, as opposed to the
 	// default. What the router applies is `port mode`'s to say.

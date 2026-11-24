@@ -32,7 +32,10 @@ func TestCaptureRoleResult(t *testing.T) {
 				}
 				return
 			}
-			for _, w := range []string{"CREATE ROLE dbtrail_ro LOGIN", "GRANT SELECT ON ALL TABLES IN SCHEMA", "server forward-user <server> -u dbtrail_ro -p", "does not stop the server from being added"} {
+			for _, w := range []string{"CREATE ROLE dbtrail_repl LOGIN REPLICATION", "a table under row-level security is never sent", "reads whatever its own grants allow", "does not stop the server from being added"} {
+				if strings.Contains(got.Remediation, "GRANT SELECT ON ALL TABLES") {
+					t.Errorf("the remediation grants every table: %s", got.Remediation)
+				}
 				if !strings.Contains(got.Remediation, w) {
 					t.Errorf("remediation lacks %q:\n%s", w, got.Remediation)
 				}

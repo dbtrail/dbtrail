@@ -1,8 +1,10 @@
 package consoleapp
 
 import (
+	"bytes"
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -82,3 +84,20 @@ const (
 	pgFixtureRole = "bintrail_fixture_ro"
 	pgFixturePass = "fixture-ro-pw"
 )
+
+// `server forward-user <server> --capture-account`, the command the
+// changelog tells upgraders to run, says what the daemon's checks say of the
+// capture account's power when it saves the yes.
+func TestServerForwardUserCaptureAccountWarnsOfAPowerfulRole(t *testing.T) {
+	d, c := newFakeDaemon(t)
+	d.on("GET /api/servers", 200, map[string]any{"servers": []map[string]any{{"id": "id1", "name": "shop", "kind": "registry", "flavor": "postgres", "has_source": true, "source_user": "repl"}}})
+	d.on("PUT /api/servers/id1/route", 200, map[string]any{"id": "id1", "name": "shop", "flavor": "postgres", "has_source": true, "source_user": "repl",
+		"forward_with_capture_account": true, "capture_account_warning": `The role "repl" is a superuser. Give DBTrail a role that can only replicate and read.`})
+	var out bytes.Buffer
+	if err := runForwardCaptureAnswer(context.Background(), c, "shop", true, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "\nWarning: The role \"repl\" is a superuser. Give DBTrail a role that can only replicate and read.\n") {
+		t.Errorf("output:\n%s", out.String())
+	}
+}

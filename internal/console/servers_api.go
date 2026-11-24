@@ -94,6 +94,10 @@ type serverDTO struct {
 	// it (pg_port_forward_required.go). Empty for a server it serves, and
 	// for any other source type.
 	PGPortRefused string `json:"pg_port_refused,omitempty"`
+	// CaptureAccountWarning: in the answer to saving the yes about the
+	// capture account only, what the checks say of that account's power
+	// (a superuser, or one that bypasses row-level security), "" for none.
+	CaptureAccountWarning string `json:"capture_account_warning,omitempty"`
 
 	// Hidden are the tables and columns the analytical surfaces leave out
 	// for this server (#2529). Edited through /api/servers/{id}/hidden only.

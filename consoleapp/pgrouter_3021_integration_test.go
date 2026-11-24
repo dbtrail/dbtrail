@@ -289,6 +289,43 @@ func TestIntegrationPGRouterStatusStatement(t *testing.T) {
 	})
 }
 
+// A server that hides tables or columns is served with its forwarding off:
+// the copy answers it alone, and the status says so and why (0.140.0: the
+// one way a served server has forwarding off).
+func TestIntegrationPGRouterStatusWithForwardingOff(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	env := startPGExtPortWith(t, ctx, nil, true)
+	c := pgClient(t, ctx, env.portDSN(), nil)
+	st, order := pgStatus(t, ctx, c)
+	t.Logf("forwarding off, before any statement:\n%s", strings.Join(order, "\n"))
+	if st["forwarding"] != "off" || st["forwarding_off_reason"] == "" || st["last_answer"] != "none" {
+		t.Errorf("before any statement: %v", order)
+	}
+	if got := one(ctx, c, "SELECT count(*) FROM "+pgExtTable); got != "5" {
+		t.Fatalf("the copy's answer: %q", got)
+	}
+	st, order = pgStatus(t, ctx, c)
+	t.Logf("forwarding off, after the copy answered:\n%s", strings.Join(order, "\n"))
+	if st["last_answer"] != "copy" || st["last_answer_reason"] != pgshim.ReasonHiddenRules || st["last_answer_error"] != "no" {
+		t.Errorf("after the copy answered: %v", order)
+	}
+	if got := one(ctx, c, "SELECT * FROM no_such_table_3021"); !strings.HasPrefix(got, "error ") {
+		t.Fatalf("a table the copy does not hold: %q", got)
+	}
+	st, order = pgStatus(t, ctx, c)
+	if st["last_answer"] != "copy" || st["last_answer_error"] != "yes" {
+		t.Errorf("after the copy refused: %v", order)
+	}
+	if _, ok := st["last_answer_age_seconds"]; ok {
+		t.Errorf("an age for a statement the copy refused: %v", order)
+	}
+	// The MySQL port's spelling is not handed to the copy either.
+	if got := one(ctx, c, "SHOW ROUTER STATUS"); !strings.HasPrefix(got, "error 42601") {
+		t.Errorf("SHOW ROUTER STATUS: %q", got)
+	}
+}
+
 // A server with no source: refused at login, with the cause.
 func TestIntegrationPGRouterStatusStatementWithoutASource(t *testing.T) {
 	// Since 0.140.0 a server the port cannot forward for is not served at

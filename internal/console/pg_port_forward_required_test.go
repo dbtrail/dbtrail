@@ -1,6 +1,8 @@
 package console
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -25,7 +27,10 @@ func TestPGPortNotServed(t *testing.T) {
 			`server "my shop's db": its saved forwarding user cannot be read.`,
 			`dbtrail server forward-user 'my shop'\''s db' --capture-account`,
 		}},
-		{name: "no cause: the server has no source", server: "shop", cause: "", has: []string{`"shop": ` + PGRouteRefusedNoSource + "."}},
+		{name: "no cause: the server has no source", server: "shop", cause: "", has: []string{`"shop": ` + PGRouteRefusedNoSource + ". Set up its source first"},
+			hasNot: []string{"--capture-account", "-u <user>"}},
+		{name: "no source, said", server: "shop", cause: PGRouteRefusedNoSource, has: []string{"Set up its source first"},
+			hasNot: []string{"--capture-account", "-u <user>"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			got := PGPortNotServed(c.server, c.cause)
@@ -99,5 +104,50 @@ func TestPGServersNotServed(t *testing.T) {
 	}
 	if got[0].Reason != PGPortNotServed(other.Name, PGRouteRefusedUnreadable) || got[1].Reason != PGPortNotServed(none.Name, PGRouteRefusedNoAccount) {
 		t.Errorf("reasons %q / %q", got[0].Reason, got[1].Reason)
+	}
+}
+
+// warnerCtrl is a MonitorController that says a capture role is powerful.
+type warnerCtrl struct {
+	*stubMonitorCtrl
+	asked int
+}
+
+func (w *warnerCtrl) CaptureRoleWarning(_ context.Context, e ServerEntry) string {
+	w.asked++
+	return "The role \"repl\" is a superuser"
+}
+
+// Saving the yes about the capture account answers with what the checks say
+// of that account's power, so `server forward-user --capture-account`, the
+// command upgraders are told to run, says it too.
+func TestRouteCaptureAccountAPIWarnsOfAPowerfulRole(t *testing.T) {
+	reg, err := LoadRegistry(t.TempDir() + "/console-servers.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctrl := &warnerCtrl{stubMonitorCtrl: &stubMonitorCtrl{}}
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg, MonitorCtrl: ctrl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pg := addPG(t, reg, "", ServerEntry{SourceDSN: capPGSource})
+	own := addPG(t, reg, "", ServerEntry{SourceDSN: capPGSource, RouteDSN: "postgres://app_ro:pw@db/shop"})
+	for _, c := range []struct {
+		name, id, body, want string
+		asked                int
+	}{
+		{"yes, as the capture account", pg.ID, `{"capture_account":true}`, `The role "repl" is a superuser`, 1},
+		{"no", pg.ID, `{"capture_account":false}`, "", 1},
+		{"yes beside an account of its own, which is used instead", own.ID, `{"capture_account":true}`, "", 1},
+	} {
+		rec, b := doServersReq(t, srv, "PUT", "/api/servers/"+c.id+"/route", c.body)
+		var dto serverDTO
+		if rec.Code != 200 || json.Unmarshal(b, &dto) != nil {
+			t.Fatalf("%s: %d %s", c.name, rec.Code, b)
+		}
+		if dto.CaptureAccountWarning != c.want || ctrl.asked != c.asked {
+			t.Errorf("%s: warning %q (asked %d times), want %q (%d)", c.name, dto.CaptureAccountWarning, ctrl.asked, c.want, c.asked)
+		}
 	}
 }

@@ -67,7 +67,18 @@ func TestIntegrationPGServerAddCaptureAccountFromStdin(t *testing.T) {
 		t.Fatalf("err = %v\n%s", err, out.String())
 	}
 	want := `"add3054" forwards with the user DBTrail captures with (` + capture.User.Username() + `): the PostgreSQL port sends to your PostgreSQL, read-only, a SELECT the copy does not answer, and only when every table it reads is a table of the copy. Anything else is refused and not sent. A server that hides tables or columns sends nothing.` + "\n\nNext, the first copy of its tables:  bintrail-console snapshot run add3054\n"
-	if !strings.HasSuffix(out.String(), want) {
+	// The test's role is the source's superuser, so saving the yes warns of
+	// its power (0.140.0): a paragraph of its own, said and then set aside
+	// for the comparison.
+	got := out.String()
+	if i := strings.Index(got, "\nWarning: "); i >= 0 {
+		j := strings.Index(got[i+1:], "\n\n")
+		if j < 0 || !strings.Contains(got[i:i+1+j], "is a superuser") && !strings.Contains(got[i:i+1+j], "BYPASSRLS") {
+			t.Fatalf("a warning that is not about the role's power:\n%s", got)
+		}
+		got = got[:i+1] + got[i+1+j+2:]
+	}
+	if !strings.HasSuffix(got, want) {
 		t.Fatalf("output:\n%s\nwant it to end with:\n%s", out.String(), want)
 	}
 	if capturePW != "" && strings.Contains(out.String(), capturePW) {

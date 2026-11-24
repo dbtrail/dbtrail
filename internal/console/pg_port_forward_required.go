@@ -22,8 +22,11 @@ import (
 // PGRouteRefused* causes, or a refusal of the source URL), "" for a server
 // with no source.
 func PGPortNotServed(name, cause string) string {
-	if cause == "" {
-		cause = PGRouteRefusedNoSource
+	if cause == "" || cause == PGRouteRefusedNoSource {
+		// Neither way out works without a source: that comes first.
+		return fmt.Sprintf("the PostgreSQL port does not serve server %q: %s. Set up its source first "+
+			"(in the web interface, Servers, Edit, or `dbtrail server add` for a new one); the port serves it once it can forward there. Then reconnect.",
+			name, PGRouteRefusedNoSource)
 	}
 	cmd := shellWord(name)
 	return fmt.Sprintf("the PostgreSQL port does not serve server %q: %s. It serves a server only when it can send what the copy does not answer to the server's PostgreSQL. "+

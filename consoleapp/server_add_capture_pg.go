@@ -34,9 +34,9 @@ const (
 	captureYes
 	// captureNo: --no-capture-account or capture-account=no.
 	captureNo
-	// captureNotAsked: nobody to ask and nothing said: yes, as by default
-	// (0.140.0: the PostgreSQL port serves a server only when it forwards),
-	// and said so with how to take it back.
+	// captureNotAsked: nobody to ask and nothing said: no, and said so,
+	// with how to turn it on; until then the PostgreSQL port does not serve
+	// the server (0.140.0).
 	captureNotAsked
 )
 
@@ -127,10 +127,10 @@ func addCaptureAnswerPG(ctx context.Context, c *ctlClient, in addInput, res ctlC
 		fmt.Fprintf(out, "The port does not forward for %q (%s), so the PostgreSQL port does not serve it: a client that connects gets an error that says why and how to serve it. Turn it on later:  %s\n(or set a forwarding user of its own:  bintrail-console server forward-user %s -u <user> -p)\n\n", res.Name, in.captureWhy, turnOn, later)
 		return nil
 	case captureNotAsked:
-		// Yes, as by default: without a way to forward the PostgreSQL port
-		// does not serve the server at all.
-		fmt.Fprintf(out, "Not asked whether the port may forward with %s (%s), so it does, as it does by default: without it the PostgreSQL port would not serve %q. Take it back:  bintrail-console server forward-user %s --no-capture-account\n(or, when adding, --no-capture-account, or capture-account=no under [dbtrail-forward] in the option file)\n", in.User, in.captureWhy, res.Name, later)
-		on = true
+		// A script said nothing: no. A yes is given by a person, asked on a
+		// terminal or in the web form.
+		fmt.Fprintf(out, "Not asked whether the port may forward with %s (%s), and nothing said yes, so the port does not forward for %q and the PostgreSQL port does not serve it: a client that connects gets an error that says why and how to serve it. Turn it on:  %s\n(or, when adding, --capture-account, or capture-account=yes under [dbtrail-forward] in the option file; or set a forwarding user of its own:  bintrail-console server forward-user %s -u <user> -p)\n\n", in.User, in.captureWhy, res.Name, turnOn, later)
+		return nil
 	case captureYes:
 		on = true
 	case captureAsk:
@@ -177,5 +177,8 @@ func addCaptureAnswerPG(ctx context.Context, c *ctlClient, in addInput, res ctlC
 		saved.Name = res.Name
 	}
 	fmt.Fprintf(out, "%s\n\n", captureAnswerLine(saved))
+	if saved.CaptureAccountWarning != "" {
+		fmt.Fprintf(out, "Warning: %s\n\n", saved.CaptureAccountWarning)
+	}
 	return nil
 }

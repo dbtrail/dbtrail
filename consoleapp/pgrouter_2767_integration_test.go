@@ -69,7 +69,14 @@ func startPGExtPort(t *testing.T, ctx context.Context) pgExtEnv {
 // nil answers a request for TLS 'N'.
 func startPGExtPortTLS(t *testing.T, ctx context.Context, tlsConfig *tls.Config) pgExtEnv {
 	t.Helper()
-	return startPGPortFor(t, ctx, tlsConfig, pgPortFixture{table: pgExtTable, slot: pgExtSlot, pub: pgExtPub, setup: []string{
+	return startPGExtPortWith(t, ctx, tlsConfig, false)
+}
+
+// startPGExtPortWith is startPGExtPortTLS, on a server whose forwarding is
+// off when copyOnly (pgPortFixture.copyOnly).
+func startPGExtPortWith(t *testing.T, ctx context.Context, tlsConfig *tls.Config, copyOnly bool) pgExtEnv {
+	t.Helper()
+	return startPGPortFor(t, ctx, tlsConfig, pgPortFixture{table: pgExtTable, slot: pgExtSlot, pub: pgExtPub, copyOnly: copyOnly, setup: []string{
 		"CREATE TABLE " + pgExtTable + ` (
 		id int PRIMARY KEY, status text, amount numeric(10,2), placed timestamptz,
 		day date, ok boolean, weight double precision, note text, data bytea, uid uuid, big bigint)`,

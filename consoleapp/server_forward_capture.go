@@ -26,6 +26,9 @@ func runForwardCaptureAnswer(ctx context.Context, c *ctlClient, name string, on 
 		return fmt.Errorf("DBTrail took the request and did not save the answer for %q. See `bintrail-console server list`", s.Name)
 	}
 	fmt.Fprintln(out, captureAnswerLine(saved))
+	if saved.CaptureAccountWarning != "" {
+		fmt.Fprintf(out, "Warning: %s\n", saved.CaptureAccountWarning)
+	}
 	return nil
 }
 

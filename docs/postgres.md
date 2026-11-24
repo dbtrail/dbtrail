@@ -106,15 +106,15 @@ the copy does not answer it
 ([forwarding with the capture account](#forwarding-with-the-capture-account))?
 Enter is yes. Without a terminal (a script, or the Docker `dbtrail` command,
 which sends the option file on standard input) nothing is asked and the answer
-is yes, as it is by default, and the command says so and how to take it back.
-`--no-capture-account`, or this line in the option file, says no:
+is no, and the command says so and how to turn it on, unless
+`--capture-account` or this line in the option file says yes:
 
 ```ini
 [dbtrail-forward]
-capture-account = no
+capture-account = yes
 ```
 
-`--capture-account` (or `capture-account = yes`) says yes. `capture-account`
+`--no-capture-account` (or `capture-account = no`) says no. `capture-account`
 alone on its line is yes, as an option alone is in MySQL, even with a comment
 after it; `capture-account =` with nothing after it says nothing. With no, and
 no forwarding user of its own, the
@@ -1707,8 +1707,13 @@ Since 0.140.0 the PostgreSQL port serves a server only when it can send what
 the copy does not answer to the server's PostgreSQL: as a forwarding user of
 the server's own ([above](#transactions-on-the-source-the-forwarding-user)), or
 as the user DBTrail connects with
-([below](#forwarding-with-the-capture-account)), which is the default for a
-server added from then on. A connection that could reach only the copy got,
+([below](#forwarding-with-the-capture-account)). Either one serves the
+server; a server with neither is refused. Where a person is asked, the
+capture account is what is offered first: Enter is yes at `server add` on a
+terminal, and the box is ticked on the web form of a new server. A script
+that says nothing gets no. A forwarding user of its own that can only read
+is still what this guide recommends, and nothing requires it; a server that
+already forwards as the capture account needs nothing at the upgrade. A connection that could reach only the copy got,
 for some statements, rows PostgreSQL would not return, with no error, so such
 a connection is no longer made.
 
@@ -1736,14 +1741,20 @@ forward, the next connection is served, without a restart.
 
 When the user DBTrail connects with is a superuser, or can bypass row-level
 security (`BYPASSRLS`), the checks of `server add` and of the web form warn
-(**Power of the user DBTrail connects with**): the port reads, as that user,
-every row it can read, those a row-level security policy hides included. The
-warning gives the statements for a role that can only read, to set as the
-server's forwarding user instead.
+(**Power of the user DBTrail connects with**), and so does saving the yes
+(`server forward-user <server> --capture-account`). What the port sends as
+that user is still a read-only `SELECT` whose every table is a plain table of
+the copy, and a table under row-level security is never sent; the warning
+says that less power leaves less behind that check, and gives the statements
+for a role that can only replicate and read the published tables, to point
+the server's source at. A forwarding user of its own is not held to that
+check: it reads whatever its own grants allow, so grant it only what the
+port should read.
 
-A server that hides tables or columns is still served: it sends nothing to
-its source, and a statement the copy cannot answer as PostgreSQL does is
-refused there.
+A server that hides tables or columns is refused at login the same way when
+it cannot forward. When it can, it sends nothing to its source, as before:
+the copy answers it alone. What such a server refuses changes in a later
+release.
 
 ### Forwarding with the capture account
 
