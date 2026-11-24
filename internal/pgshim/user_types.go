@@ -28,6 +28,9 @@ const (
 // holds in another form that compares otherwise. A padded column has rules of
 // its own, and so does one whose type the snapshot does not record.
 func userTypeColumn(c CatalogColumn) bool {
+	if collatedOtherwise(c) {
+		return true
+	}
 	if sourceMark(c) != "" {
 		return false
 	}

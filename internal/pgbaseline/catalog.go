@@ -161,9 +161,11 @@ func loadColumns(ctx context.Context, conn *pgx.Conn, oid uint32, schema, table 
 		       COALESCE(pg_get_expr(d.adbin, d.adrelid), ''), a.attidentity::text,
 		       COALESCE(seq.name, ''), a.attnum,
 		       COALESCE(format_type(s.seqtypid, NULL), ''), COALESCE(s.seqstart, 0), COALESCE(s.seqincrement, 0),
-		       COALESCE(s.seqmin, 0), COALESCE(s.seqmax, 0), COALESCE(s.seqcache, 0), COALESCE(s.seqcycle, false)
+		       COALESCE(s.seqmin, 0), COALESCE(s.seqmax, 0), COALESCE(s.seqcache, 0), COALESCE(s.seqcycle, false),
+		       COALESCE(NOT co.collisdeterministic, false)
 		FROM pg_attribute a
 		LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+		LEFT JOIN pg_collation co ON co.oid = a.attcollation
 		CROSS JOIN LATERAL (SELECT pg_get_serial_sequence(a.attrelid::regclass::text, a.attname) AS name) seq
 		LEFT JOIN pg_sequence s ON s.seqrelid = seq.name::regclass
 		WHERE a.attrelid = $1
@@ -181,7 +183,7 @@ func loadColumns(ctx context.Context, conn *pgx.Conn, oid uint32, schema, table 
 		var c baseline.PGColumn
 		var isGenerated, virtual bool
 		if err := rows.Scan(&c.Name, &isGenerated, &virtual, &c.TypeOID, &c.TypeMod, &c.Type, &c.NotNull, &c.Default, &c.Identity, &c.Sequence, &c.Ordinal,
-			&c.Seq.Type, &c.Seq.Start, &c.Seq.Increment, &c.Seq.Min, &c.Seq.Max, &c.Seq.Cache, &c.Seq.Cycle); err != nil {
+			&c.Seq.Type, &c.Seq.Start, &c.Seq.Increment, &c.Seq.Min, &c.Seq.Max, &c.Seq.Cache, &c.Seq.Cycle, &c.Nondeterministic); err != nil {
 			return nil, nil, fmt.Errorf("pgbaseline: scanning columns of %s.%s: %w", schema, table, err)
 		}
 		if isGenerated {

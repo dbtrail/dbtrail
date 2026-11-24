@@ -66,7 +66,7 @@ func TestIntegrationPGRouterCharWithoutPadding(t *testing.T) {
 	}
 	tables, err := pgCopyCatalog(ctx, tgt.SQL, func(ctx context.Context, statement string) (sqlsandbox.Result, error) {
 		return tgt.SQL.Run(console.WithPGCatalogRead(ctx), statement, pgPortSchema, sqlsandbox.Session{PostgresRules: true, TrimPadded: true, PostgresNames: true})
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("catalog: %v", err)
 	}

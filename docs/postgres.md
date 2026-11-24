@@ -2036,6 +2036,26 @@ The source answers:
   count(*) FROM t`, a `*` inside a `WITH` whose outer query names other
   columns). An argument declared `bpchar` is the source's too: it compares
   without its trailing blanks.
+- **A text column under a nondeterministic collation** (an ICU collation
+  created with `deterministic = false`, one that ignores case or accents)
+  follows the same rule: PostgreSQL finds `'ab'` and `'AB'` equal, groups
+  them as one and sorts them by the collation, the copy compares bytes. A
+  statement that compares, groups, joins, sorts, aggregates, applies
+  `DISTINCT` to or passes to a function such a column goes to the source, or
+  is refused without a forwarding user; showing it stays on the copy. The
+  snapshot records each column's collation. **A snapshot taken before this
+  version does not**: with a forwarding user the port reads the collations
+  from the source's catalog (`pg_attribute` and `pg_collation`, never a row
+  of a table), once a minute; without one, every text column of such a
+  snapshot is taken for nondeterministic, so a statement that compares,
+  groups or sorts text of it is refused until the table's next snapshot,
+  which records the collation (a full read: an update of the snapshot from
+  captured changes keeps what the last full read recorded). With a forwarding
+  user the source's answer is also what counts for a newer snapshot, since a
+  column changed with `ALTER ... COLLATE` keeps its type and nothing else
+  notices; without one, such a change counts from the next full read. A
+  `COLLATE` written in the statement goes to the source. A database's default collation is always deterministic in
+  PostgreSQL, so it needs nothing of this.
   For a `char(n)` column, the type is
   the one the last snapshot recorded: a column changed from `text` to
   `char(n)` on the source is treated as `char(n)` from the next snapshot on.

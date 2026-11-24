@@ -25,7 +25,14 @@ const pgCatalogColumnsSQL = "SELECT table_schema, table_name, column_name, data_
 // column the snapshot does not describe is reported with nothing of the
 // source's; a primary key one of whose columns the server hides is not
 // reported at all.
-func pgCopyCatalog(ctx context.Context, copySQL pgCatalogSource, run func(context.Context, string) (sqlsandbox.Result, error)) ([]pgshim.CatalogTable, error) {
+//
+// sourceCollations, when not nil, asks the source which columns of the
+// copy's tables have a nondeterministic collation (#3111). Its answer wins
+// over the snapshot's, which a later ALTER ... COLLATE does not change; a
+// snapshot taken before collations were recorded says nothing at all.
+// Without it, or when it fails, the snapshot's answer stands, and a column it
+// says nothing of stays unknown.
+func pgCopyCatalog(ctx context.Context, copySQL pgCatalogSource, run func(context.Context, string) (sqlsandbox.Result, error), sourceCollations pgCollationAsker) ([]pgshim.CatalogTable, error) {
 	res, copyTables, err := pgCatalogOneSnapshot(ctx, copySQL, run)
 	if err != nil {
 		return nil, err
@@ -44,7 +51,7 @@ func pgCopyCatalog(ctx context.Context, copySQL pgCatalogSource, run func(contex
 			out = append(out, pgshim.CatalogTable{Schema: schema, Name: table})
 		}
 		t := &out[len(out)-1]
-		c := pgshim.CatalogColumn{Name: col, Type: typ}
+		c := pgshim.CatalogColumn{Name: col, Type: typ, Collation: pgshim.CollationUnknown}
 		if rec, ok := lookupRecorded(recorded, schema, table); ok && rec.Relation != nil {
 			for _, rc := range rec.Relation.Columns {
 				// The copy's engine matches names without regard to case.
@@ -58,10 +65,14 @@ func pgCopyCatalog(ctx context.Context, copySQL pgCatalogSource, run func(contex
 						c.SourceType, c.SourceTypeMod = rc.TypeOID, rc.TypeMod
 					}
 					c.TrimmedOnCopy = c.TrimmedOnCopy || rec.Trimmed[rc.Name]
+					c.Collation = pgColumnCollation(rec.Relation, rc, c.Collation)
 				}
 			}
 		}
 		t.Columns = append(t.Columns, c)
+	}
+	if sourceCollations != nil {
+		pgFillCollations(ctx, out, sourceCollations)
 	}
 	for i := range out {
 		t := &out[i]

@@ -590,7 +590,7 @@ func tableFooter(t tableInfo, tsStr string, deltaStartLSN, anchorLSN uint64) (ma
 	// The table's OID and typed column list (#1596 slice 1). Written only if
 	// it reads back: a shape the readers would reject is a bug here, and a
 	// baseline without its shape must not be published as if it had one.
-	shape, err := baseline.PGRelation{OID: t.OID, Columns: t.Shape, Generated: t.Generated, PrimaryKey: t.PrimaryKey}.Encode()
+	shape, err := baseline.PGRelation{OID: t.OID, Columns: t.Shape, Generated: t.Generated, PrimaryKey: t.PrimaryKey, Collations: true}.Encode()
 	if err != nil {
 		return nil, err
 	}
