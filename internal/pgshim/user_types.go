@@ -127,10 +127,9 @@ func userTypeUse(toks []rtToken, types map[string][]string) string {
 	return ""
 }
 
-// The array types of text, varchar and name (pg_type).
+// The array types of varchar and name (pg_type).
 const (
 	oidNameArray    = 1003
-	oidTextArray    = 1009
 	oidVarcharArray = 1015
 )
 
