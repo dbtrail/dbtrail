@@ -120,7 +120,7 @@ test("drawn for a PostgreSQL server: on", () => {
 test("drawn for a PostgreSQL server: the page with two sections", () => {
   const text = draw({ servers: [pg("shop")], fb: { enabled: true, can_manage: true }, split: true });
   for (const want of ["PostgreSQL client", "Read your copy from a PostgreSQL client", "port=5433 dbname=shop",
-    "On the PostgreSQL port, the copy answers what it is known to answer", "For shop, nothing is sent to your PostgreSQL: the copy answers alone"]) {
+    "On the PostgreSQL port, the copy answers what it is known to answer", "The PostgreSQL port does not serve shop"]) {
     assert.ok(text.includes(want), "lacks " + JSON.stringify(want) + ":\n" + text);
   }
   for (const not of ["mysql -h", "3309", "Run MySQL and DuckDB", "Put ProxySQL in front", "Read your copy from a MySQL client"]) {
@@ -155,22 +155,24 @@ test("drawn for a PostgreSQL server: what the port forwards as", () => {
   const shop = { ...pg("shop"), source_user: "dbtrail" };
   const cases = [
     ["nobody said yes", shop,
-      "For shop, nothing is sent to your PostgreSQL: the copy answers alone, and a statement it cannot answer gets an error. To change it, edit the server (Servers, Edit)."],
+      "The PostgreSQL port does not serve shop: a client that connects gets an error that says why. Tick the box about the source user, or set a separate forwarding user. To change it, edit the server (Servers, Edit)."],
     ["the box is ticked", { ...shop, forward_with_capture_account: true },
       "For shop, a SELECT the copy does not answer runs on your PostgreSQL, read-only and as the source user (dbtrail), when every table it reads is a table of the copy; anything else is refused and not sent. To change it, edit the server (Servers, Edit)."],
     ["a forwarding user of its own", { ...shop, has_route: true, route_user: "app_ro", forward_with_capture_account: true },
       "For shop, every other statement, and a transaction block (BEGIN to COMMIT or ROLLBACK), runs on your PostgreSQL as its forwarding user, app_ro, read-only. To change it, edit the server (Servers, Edit)."],
-    ["a saved forwarding user the port refuses", { ...shop, route_is_capture: true, forward_with_capture_account: true },
-      "For shop, nothing is sent to your PostgreSQL: its saved forwarding user is one the port refuses, so the copy answers alone. Edit the server (Servers, Edit) and remove that user."],
+    ["a saved forwarding user that is the source user, and the box ticked", { ...shop, route_is_capture: true, forward_with_capture_account: true },
+      "For shop, a SELECT the copy does not answer runs on your PostgreSQL, read-only and as the source user (dbtrail), when every table it reads is a table of the copy; anything else is refused and not sent. To change it, edit the server (Servers, Edit)."],
+    ["a saved forwarding user that is the source user, the box unticked", { ...shop, route_is_capture: true },
+      "The PostgreSQL port does not serve shop: its saved forwarding user is one the port refuses. Edit the server (Servers, Edit) and tick the box about the source user, or remove that user and set another."],
     ["ticked, on a server that hides a table", { ...shop, forward_with_capture_account: true, hidden: { tables: ["shop.audit"], columns: [] } },
       "For shop, nothing is sent to your PostgreSQL: this server hides tables or columns, which your PostgreSQL would not hide, so the copy answers alone."],
     ["a forwarding user of its own, on a server that hides a column", { ...shop, has_route: true, route_user: "app_ro", hidden: { tables: [], columns: ["shop.users.email"] } },
       "For shop, nothing is sent to your PostgreSQL: this server hides tables or columns, which your PostgreSQL would not hide, so the copy answers alone."],
     ["ticked, and the source URL cannot be forwarded with", { ...shop, forward_with_capture_account: true, capture_account_refused: "the server's source URL asks for replication: set a separate forwarding user instead, or correct the source" },
-      "For shop, nothing is sent to your PostgreSQL: the server's source URL asks for replication: set a separate forwarding user instead, or correct the source."],
+      "The PostgreSQL port does not serve shop: the server's source URL asks for replication: set a separate forwarding user instead, or correct the source."],
   ];
   for (const [name, server, want] of cases) assert.equal(line(server), want, name);
-  assert.equal(line(shop, ""), "What it does not answer goes to your PostgreSQL, read-only, only for a server whose form lets the port forward; for any other, the copy answers alone.", "no server picked");
+  assert.equal(line(shop, ""), "What it does not answer goes to your PostgreSQL, read-only. A server the port cannot forward for is not served: a client that connects gets an error that says why.", "no server picked");
   for (const [name, server] of cases) {
     const said = line(server);
     assert.ok(!/undefined|null|MySQL|\u2014/.test(said), name + ": " + said);

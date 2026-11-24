@@ -44,7 +44,7 @@ func startPGSettingsPort(t *testing.T, ctx context.Context) (pgExtEnv, testutil.
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := startPGPortFor(t, ctx, pt.Config, pgPortFixture{table: pgSetTable, slot: "bintrail_pg2769_slot", pub: "bintrail_pg2769_pub", setup: []string{
+	env := startPGPortFor(t, ctx, pt.Config, pgPortFixture{table: pgSetTable, slot: "bintrail_pg2769_slot", pub: "bintrail_pg2769_pub", copyOnly: true, setup: []string{
 		"CREATE SCHEMA IF NOT EXISTS " + pgSetSchema,
 		"CREATE TABLE " + pgSetTable + " (id int PRIMARY KEY, tstz timestamptz, ts timestamp, day date, da date[])",
 		"INSERT INTO " + pgSetTable + ` VALUES
