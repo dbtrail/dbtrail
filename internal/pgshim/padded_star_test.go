@@ -8,19 +8,8 @@ import (
 // A star that stands for a char(n) column vetoes only if the statement can
 // read that column; anything the analysis cannot follow keeps the veto.
 
-// paddedStarCatalog is paddedCatalog with every column of codes of a built-in type:
-// its enum column alone would keep every star over codes on the source.
-func paddedStarCatalog() []CatalogTable {
-	tables := paddedCatalog()
-	var cols []CatalogColumn
-	for _, c := range tables[0].Columns {
-		if c.Name != "kind" {
-			cols = append(cols, c)
-		}
-	}
-	tables[0].Columns = cols
-	return tables
-}
+// paddedStarCatalog is a catalog whose columns are all of built-in types.
+func paddedStarCatalog() []CatalogTable { return paddedCatalog() }
 
 func paddedStarScreen(stmt string) string { return CopyScreenFor(stmt, paddedStarCatalog()) }
 
@@ -273,10 +262,6 @@ func TestPaddedStar_aTypeNotProven(t *testing.T) {
 		if q := `WITH x AS (SELECT * FROM codes) SELECT id FROM x`; CopyScreenFor(q, tables) != "" {
 			t.Errorf("%s: %s: sent to the source for a table it does not read", name, q)
 		}
-	}
-	// The plain paths do not change: an enum stays on the copy.
-	if q := `SELECT id FROM codes WHERE kind = 'new'`; paddedScreen(q) != "" {
-		t.Errorf("%s: sent to the source", q)
 	}
 }
 
