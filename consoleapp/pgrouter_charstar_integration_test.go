@@ -113,7 +113,7 @@ func TestIntegrationPGRouterCharStar(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	cu, or, li := pgStarCustomer, pgStarOrders, pgStarLines
-	env := startPGPortFor(t, ctx, nil, pgPortFixture{table: cu + ", " + or + ", " + li + ", " + pgStarFlags + ", " + pgStarDomain + ", " + pgStarU + ", " + pgStarV + ", " + pgStarBare, slot: "pgstar_slot", pub: "pgstar_pub", setup: pgStarSetup()})
+	env := startPGPortFor(t, ctx, nil, pgPortFixture{table: cu + ", " + or + ", " + li + ", " + pgStarFlags + ", " + pgStarDomain + ", " + pgStarU + ", " + pgStarV + ", " + pgStarBare, copyOnly: true, slot: "pgstar_slot", pub: "pgstar_pub", setup: pgStarSetup()})
 	source, err := pgconn.Connect(ctx, env.sourceDSN)
 	if err != nil {
 		t.Fatal(err)

@@ -312,7 +312,7 @@ Password (shown only now, keep it): bfp_portpw
 Statements for "shop" are answered once its first copy is ready.
 `
 
-const pgNoForwardYet = `Until "shop" forwards, the copy answers its statements alone, and a statement it cannot answer gets an error. Let the port forward with the user DBTrail connects with:
+const pgNoForwardYet = `Until "shop" forwards, the PostgreSQL port does not serve it: a client that connects gets an error that says why and how to serve it. Let the port forward with the user DBTrail connects with:
   bintrail-console server forward-user shop --capture-account
 or set a forwarding user of its own:
   bintrail-console server forward-user shop -u <user> -p
@@ -472,7 +472,7 @@ func TestServerForwardUserStillWorksAfterAPostgresAdd(t *testing.T) {
 	if err := runServerForwardUser(context.Background(), c, "shop", fwdFlags{Remove: true}, &seqAsker{t: t}, strings.NewReader(""), &out); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := out.String(), `"shop" has no forwarding user now: the PostgreSQL port answers its clients from the copy alone. A statement the copy cannot answer gets an error, and nothing is sent to your PostgreSQL.`+"\n"; got != want {
+	if got, want := out.String(), `"shop" has no forwarding user now, so the PostgreSQL port does not serve it: a client that connects gets an error that says why and how to serve it. Serve it again:  bintrail-console server forward-user shop --capture-account`+"\n"; got != want {
 		t.Fatalf("output:\n%s\nwant:\n%s", got, want)
 	}
 	if d.forwardURL() != "" {

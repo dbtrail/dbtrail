@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/hiderules"
 	"github.com/dbtrail/dbtrail/internal/pgbaseline"
+	"github.com/dbtrail/dbtrail/internal/pgshim"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
@@ -141,7 +143,12 @@ func TestIntegrationPGRouter(t *testing.T) {
 	testutil.InsertSnapshot(t, idx, 2, snapTS, "public", "users", "name", 2, "", "varchar", "YES")
 	testutil.InsertEvent(t, idx, "mysql-bin.000001", 300, 400, eventAt.Format("2006-01-02 15:04:05"), nil,
 		"public", "users", 1, "1", nil, nil, []byte(`{"id":1,"name":"alice"}`))
-	ent, err := f.owner.Add(console.ServerEntry{Name: "pgsrv", DSN: dsn, Flavor: console.FlavorPostgres, BaselineDir: outDir})
+	// Served (0.140.0: a source and a forwarding user of its own that only
+	// reads), with routing by plan off below, so the copy answers what it
+	// answers as PostgreSQL does.
+	ensureFixtureRole(t, ctx)
+	ent, err := f.owner.Add(console.ServerEntry{Name: "pgsrv", DSN: dsn, Flavor: console.FlavorPostgres, BaselineDir: outDir,
+		SourceDSN: pgFwdSourceDSN(t), RouteDSN: withAccount(t, pgFwdSourceDSN(t), pgFixtureRole, pgFixturePass)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +159,8 @@ func TestIntegrationPGRouter(t *testing.T) {
 	}
 	t.Cleanup(runner.Close)
 	srv.RefreshFollowedFiles()
-	router := &pgRouterPort{srv: srv, addr: freeAddr(t), maxConns: 8, poll: 20 * time.Millisecond, out: io.Discard}
+	router := &pgRouterPort{srv: srv, addr: freeAddr(t), maxConns: 8, poll: 20 * time.Millisecond, out: io.Discard, cost: &pgshim.CostPolicy{},
+		routes: newPGRouteStats(time.Now(), true)}
 	portCtx, stopPort := context.WithCancel(context.Background())
 	served := make(chan struct{})
 	go func() { _ = router.serve(portCtx); close(served) }()
@@ -240,15 +248,17 @@ func TestIntegrationPGRouter(t *testing.T) {
 	}
 
 	// Nothing that writes runs, and the client is told why in a PostgreSQL
-	// error it can read; the connection goes on.
+	// error it can read; the connection goes on. A server that forwards
+	// refuses what is not a read before it is sent, as read-only (25006),
+	// text it cannot read as one included.
 	for _, tc := range []struct{ stmt, code string }{
-		{"DELETE FROM " + tbl, "0A000"},
-		{"UPDATE " + tbl + " SET status = 'x'", "0A000"},
-		{"INSERT INTO " + tbl + " (id) VALUES (99)", "0A000"},
-		{"DROP TABLE " + tbl, "0A000"},
-		{"SELECT 1; DELETE FROM " + tbl, "0A000"},
+		{"DELETE FROM " + tbl, "25006"},
+		{"UPDATE " + tbl + " SET status = 'x'", "25006"},
+		{"INSERT INTO " + tbl + " (id) VALUES (99)", "25006"},
+		{"DROP TABLE " + tbl, "25006"},
+		{"SELECT 1; DELETE FROM " + tbl, "25006"},
 		{"SELECT * FROM no_such_table", "42P01"},
-		{"SELEC 1", "42601"},
+		{"SELEC 1", "25006"},
 	} {
 		_, _, err := pgText(t, port, tc.stmt)
 		var pe *pgconn.PgError
@@ -303,7 +313,15 @@ func TestIntegrationPGRouter(t *testing.T) {
 		t.Errorf("%d time-travel audit records, want 2: the row found and the row not there yet", timeTravels)
 	}
 
-	// Every answered statement left its audit record, under the server.
+	// Every statement the copy answered left its audit record, under the
+	// server. The server forwards (0.140.0), so what the copy does not
+	// answer as PostgreSQL does went to the source, which keeps no record
+	// here: the count is the port's own count of the copy's answers.
+	st, _ := pgStatus(t, ctx, port)
+	copyAnswers, err := strconv.Atoi(st["statements_copy"])
+	if err != nil || copyAnswers < 10 {
+		t.Fatalf("the copy answered %q statements, want a number of at least 10: %v", st["statements_copy"], err)
+	}
 	var sqlRuns int
 	for _, ev := range rec.Events() {
 		if ev.Surface == "shim" && ev.Action == "sql.run" {
@@ -316,8 +334,8 @@ func TestIntegrationPGRouter(t *testing.T) {
 			}
 		}
 	}
-	if sqlRuns != 36 {
-		t.Errorf("%d sql.run audit records, want 36: the 35 compared statements and the last count", sqlRuns)
+	if sqlRuns != copyAnswers {
+		t.Errorf("%d sql.run audit records, want %d: one per statement the copy answered", sqlRuns, copyAnswers)
 	}
 
 	// The client the port is for. Not every machine that runs this has it;

@@ -167,9 +167,12 @@ func TestIntegrationPGRouterCharPadding_3068(t *testing.T) {
 		}
 	})
 
-	t.Run("without one the statement is refused, not answered with other rows", func(t *testing.T) {
+	// A server that hides tables or columns sends nothing to its source, so
+	// the copy answers alone and must refuse (0.140.0: the one way a served
+	// server still has no source to go to).
+	t.Run("a server that sends nothing to its source refuses the statement rather than answer other rows", func(t *testing.T) {
 		const table = "pgchr_alone"
-		env := startPGPortFor(t, ctx, nil, pgPortFixture{table: table, slot: "pgchr_alone_slot", pub: "pgchr_alone_pub", setup: pgCharSetup(table)})
+		env := startPGPortFor(t, ctx, nil, pgPortFixture{table: table, slot: "pgchr_alone_slot", pub: "pgchr_alone_pub", copyOnly: true, setup: pgCharSetup(table)})
 		c := pgClient(t, ctx, env.portDSN(), nil)
 		for _, tc := range []struct{ stmt, want string }{
 			{"SELECT count(*) FROM " + table, "4"},

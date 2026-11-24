@@ -641,6 +641,7 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	// baseline features off, no supervisor would ever remove a previous
 	// process's staged dump.
 	sweepWorkingFoldersAtBoot(registry, time.Now())
+	warnPGPortNotServedAtBoot(registry, nil)
 	go runUnusedDefaultSweep(ctx, registry, 0)
 	var baselineSup *baselineSupervisor
 	if upConsoleBaselineTrigger || upBaselineRefreshEvery != "" {
@@ -988,6 +989,7 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	// baseline features off, no supervisor would ever remove a previous
 	// process's staged dump.
 	sweepWorkingFoldersAtBoot(registry, time.Now())
+	warnPGPortNotServedAtBoot(registry, nil)
 	go runUnusedDefaultSweep(ctx, registry, 0)
 	var baselineSup *baselineSupervisor
 	if upConsoleBaselineTrigger || upBaselineRefreshEvery != "" {
