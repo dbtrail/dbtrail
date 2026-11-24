@@ -299,6 +299,83 @@ func TestRunRefresh_aPanicInTheFoldStillRemovesTheRead_2640(t *testing.T) {
 	f.wantNothingPublished(t, st)
 }
 
+// A panic during the wait, before the run holds the discard: the folder goes
+// all the same, since the job's release drops it from the journal.
+func TestRunRefresh_aPanicWhileWaitingRemovesTheRead_2640(t *testing.T) {
+	f := newRereadFixture(t, foldOK)
+	rereadCaptureReached = func(context.Context, reconstruct.FullTableConfig) error { panic("boom") }
+	st := f.run()
+	f.wantNothingPublished(t, st)
+	if len(*f.folds) != 0 {
+		t.Fatal("it folded after the panic")
+	}
+}
+
+// The list is checked against the snapshot the fold reads: here the local
+// copy, newer than the bucket's and without one of its tables.
+func TestRunRefresh_theReadIsCheckedAgainstTheSnapshotTheFoldReads_2640(t *testing.T) {
+	f := newRereadFixture(t, foldOK)
+	f.req.BaselineS3 = "s3://bucket/copy"
+	prevList, prevUnreadable, prevUpload := listBaselines, listLocalUnreadable, uploadSnapshot
+	t.Cleanup(func() { listBaselines, listLocalUnreadable, uploadSnapshot = prevList, prevUnreadable, prevUpload })
+	now := time.Now().UTC().Truncate(time.Second)
+	listBaselines = func(_ context.Context, src string) ([]reconstruct.BaselineFile, error) {
+		if src == f.req.BaselineS3 {
+			return []reconstruct.BaselineFile{{Schema: "shop", Table: "orders", SnapshotTime: now.Add(-2 * time.Hour)}}, nil
+		}
+		return []reconstruct.BaselineFile{{Schema: "shop", Table: "orders", SnapshotTime: now.Add(-time.Hour)}}, nil
+	}
+	listLocalUnreadable = func(context.Context, string) ([]reconstruct.UnreadableSnapshot, error) { return nil, nil }
+	uploadSnapshot = func(context.Context, string, string, string, bool) (int, error) { return 1, nil }
+	var listed []string
+	newestSnapshotTables = func(_ context.Context, src string) (time.Time, []string, error) {
+		listed = append(listed, src)
+		if src == f.req.BaselineDir {
+			return now.Add(-time.Hour), []string{"shop.orders", "shop.items"}, nil
+		}
+		return now.Add(-2 * time.Hour), slices.Clone(rereadSnapshot), nil
+	}
+	st := f.run()
+	if len(listed) == 0 || listed[0] != f.req.BaselineDir {
+		t.Fatalf("the read was checked against %v, want the local copy %s", listed, f.req.BaselineDir)
+	}
+	// Both tables of the local copy are on the list: that is a full read.
+	if st.State != "failed" || len(*f.dumps) != 0 || len(*f.folds) != 0 {
+		t.Fatalf("status %q, %d dumps, %d folds; want it refused before reading", st.State, len(*f.dumps), len(*f.folds))
+	}
+}
+
+// The record starts at the read; the measured update does not include it.
+func TestRunRefresh_theRecordStartsAtTheReadAndMeasuresTheFold_2640(t *testing.T) {
+	f := newRereadFixture(t, foldOK)
+	jf := newJobsFixture(t)
+	real := jf.supervisor(t)
+	f.sup.history, f.sup.jobsDir = real.history, real.jobsDir
+	var foldAt time.Time
+	rereadCaptureReached = func(context.Context, reconstruct.FullTableConfig) error {
+		time.Sleep(1200 * time.Millisecond)
+		foldAt = time.Now().UTC()
+		return nil
+	}
+	if st := f.run(); st.State != "succeeded" {
+		t.Fatalf("status = %q (%s)", st.State, st.LastError)
+	}
+	runs := f.sup.history.List(rereadServer)
+	if len(runs) != 1 {
+		t.Fatalf("%d records, want one", len(runs))
+	}
+	started, err := time.Parse(time.RFC3339, runs[0].StartedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !started.Before(foldAt.Truncate(time.Second)) {
+		t.Fatalf("the record starts at %s, after the read and the wait ended at %s", started, foldAt)
+	}
+	if runs[0].UpdateSeconds >= 1 {
+		t.Fatalf("UpdateSeconds = %v includes the wait", runs[0].UpdateSeconds)
+	}
+}
+
 // What cannot work is refused before production is read.
 func TestRunRefresh_refusalsReadNothing_2640(t *testing.T) {
 	for name, change := range map[string]func(*refreshRequest, *baselineSupervisor){
@@ -310,6 +387,12 @@ func TestRunRefresh_refusalsReadNothing_2640(t *testing.T) {
 		"another server":      func(r *refreshRequest, _ *baselineSupervisor) { r.Reread.Source.ServerID = "s2" },
 		"working folder inside the snapshots": func(r *refreshRequest, s *baselineSupervisor) {
 			s.stagingDir = filepath.Join(r.BaselineDir, "work")
+		},
+		"no local folder": func(r *refreshRequest, _ *baselineSupervisor) { r.BaselineDir = "" },
+		"a snapshot whose writer cannot be read": func(*refreshRequest, *baselineSupervisor) {
+			snapshotSignersFunc = func(string, time.Time) ([]string, bool, error) {
+				return nil, false, errors.New("permission denied")
+			}
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -332,8 +415,17 @@ func TestRunRefresh_theGateDoesNotSkipARead_2640(t *testing.T) {
 	f := newRereadFixture(t, foldOK)
 	mark := indexMark{events: 7}
 	readIndexMark = func(context.Context, string) (indexMark, error) { return mark, nil }
-	f.sup.foldedMarks[rereadServer] = foldMemo{mark: mark, publishedAt: time.Now().UTC(),
-		destination: refreshDestination(f.req), indexDSN: f.req.IndexDSN}
+	stubCoverage(t, true, true)
+	prevCreated, prevLoss := tablesCreatedSince, lossOnRecordSince
+	t.Cleanup(func() { tablesCreatedSince, lossOnRecordSince = prevCreated, prevLoss })
+	tablesCreatedSince = func(context.Context, string, time.Time) (bool, error) { return false, nil }
+	lossOnRecordSince = func(context.Context, string, time.Time) (bool, error) { return false, nil }
+	now := time.Now().UTC()
+	f.sup.foldedMarks[rereadServer] = foldMemo{mark: mark, publishedAt: now,
+		destination: refreshDestination(f.req), indexDSN: f.req.IndexDSN, readsFrom: now, readsFromKnown: true}
+	if !f.sup.refreshCanSkip(context.Background(), f.req, mark, now, time.Hour) {
+		t.Fatal("the gate would not skip this cycle, so this case proves nothing")
+	}
 	if st := f.run(); st.State != "succeeded" || len(*f.folds) != 1 {
 		t.Fatalf("status %q, %d folds: the cycle was skipped with a read in hand", st.State, len(*f.folds))
 	}

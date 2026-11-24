@@ -64,13 +64,21 @@ func (s *baselineSupervisor) prepareReread(req refreshRequest, job *jobRun) (map
 	if err != nil {
 		return nil, none, err
 	}
-	// Everything that can refuse without reading production comes first.
+	// Everything that can refuse without reading production comes first,
+	// against the snapshot the fold will read (the caller resolved
+	// req.FoldSource).
+	if strings.TrimSpace(req.BaselineDir) == "" {
+		return nil, none, console.NoLocalFolderError()
+	}
 	foldSource := baselineFoldSource(req)
-	_, inSnapshot, err := newestSnapshotTables(s.ctx, foldSource)
+	prev, inSnapshot, err := newestSnapshotTables(s.ctx, foldSource)
 	if err != nil {
 		return nil, none, fmt.Errorf("list the snapshot to refresh: %w", err)
 	}
 	if err := rereadFitsSnapshot(want, inSnapshot); err != nil {
+		return nil, none, err
+	}
+	if err := foldSourceRefusal(req.IndexDSN, foldSource, prev); err != nil {
 		return nil, none, err
 	}
 	for _, root := range []string{foldSource, req.BaselineDir} {
@@ -92,9 +100,19 @@ func (s *baselineSupervisor) prepareReread(req refreshRequest, job *jobRun) (map
 				"server", req.ServerName, "path", read.root, "error", err)
 		}
 	}
+	// Until the caller holds discard, it is this function's to run, on an
+	// error and on a panic: the job's release would drop the folder from the
+	// journal, and nothing else ever removes it.
+	handedOver := false
+	defer func() {
+		if !handedOver {
+			discard()
+		}
+	}()
 	if err := s.waitForRereadCapture(req, read); err != nil {
-		return nil, discard, err
+		return nil, none, err
 	}
+	handedOver = true
 	return read.files, discard, nil
 }
 

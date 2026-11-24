@@ -287,10 +287,15 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	var job *jobRun
 	jobBegun := false
 	var rereadErr error
+	var rereadStarted time.Time
 	if req.Reread != nil {
-		job = s.beginJob(console.BaselineRunRefresh, req.ServerID, req.ServerName, req.Trigger, "", time.Now().UTC())
+		rereadStarted = time.Now().UTC()
+		job = s.beginJob(console.BaselineRunRefresh, req.ServerID, req.ServerName, req.Trigger, "", rereadStarted)
 		jobBegun = true
 		defer job.release()
+		// Resolved first: the read is checked against the snapshot the fold
+		// will read, which may be the local copy and not the bucket's.
+		req.FoldSource = resolveFoldSource(s.ctx, req)
 		var discard func()
 		req.baselineOverride, discard, rereadErr = s.prepareReread(req, job)
 		defer discard()
@@ -387,6 +392,13 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// branch. See recoverBaselineJob's own note on how far a recover reaches.
 	prevPace := s.takeRefreshPace(req.ServerID)
 	started := time.Now().UTC()
+	// A run with a read of some tables started at the read. Its measured time
+	// below does not: UpdateSeconds is what the #1721 model compares with a
+	// full read, and a read and a wait for capture are not what the events
+	// of this update cost to apply.
+	if !rereadStarted.IsZero() {
+		started = rereadStarted
+	}
 	// Separate capture for the ELAPSED time, and the duplication is not
 	// redundant: t.UTC() strips the monotonic reading, so time.Since(started)
 	// would subtract wall clocks. A daemon whose folds run for minutes to
