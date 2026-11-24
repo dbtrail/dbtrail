@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
@@ -156,7 +157,9 @@ func (q *SQLOnCopy) CopyTablesStamped(ctx context.Context) ([]CopyTable, string,
 	for _, t := range in.Baselines {
 		out = append(out, CopyTable{Schema: t.Schema, Table: t.Table, Hidden: t.HiddenColumns, Relation: t.PGRelation, Trimmed: baseline.PGPaddedToTrim(t.PGRelation)})
 	}
-	return out, pgCopyStamp(in), nil
+	stamp := pgCopyStamp(in)
+	q.b.pgStamp.put(time.Now(), stamp)
+	return out, stamp, nil
 }
 
 // PGCopyStamp names the snapshot files a statement on the copy reads now,
@@ -165,13 +168,57 @@ func (q *SQLOnCopy) CopyTablesStamped(ctx context.Context) ([]CopyTable, string,
 // It reads no table and needs none of the copy's workers. The PostgreSQL
 // port reads it before reusing the catalog it keeps, so that a new snapshot
 // (a column's type changed with it, #3251) is not answered with the old
-// one's list of columns.
+// one's list of columns. It is read before nearly every statement, and with
+// the snapshots in S3 and no local mirror yet each read lists S3, so one is
+// shared by the server's connections for pgStampFor: a new snapshot is seen
+// that much later at most.
 func (q *SQLOnCopy) PGCopyStamp(ctx context.Context) (string, error) {
+	return q.b.pgStamp.get(time.Now(), func() (string, error) { return q.PGCopyStampFresh(ctx) })
+}
+
+// PGCopyStampFresh is PGCopyStamp read now: what reading the catalog
+// compares with the stamp of its tables (CopyTablesStamped), which is never
+// an older one.
+func (q *SQLOnCopy) PGCopyStampFresh(ctx context.Context) (string, error) {
 	in, err := q.s.buildViewsInput(ctx, q.b, pgCopyRequest)
 	if err != nil {
 		return "", err
 	}
-	return pgCopyStamp(in), nil
+	stamp := pgCopyStamp(in)
+	q.b.pgStamp.put(time.Now(), stamp)
+	return stamp, nil
+}
+
+// pgStampFor is how long a stamp is shared (PGCopyStamp).
+const pgStampFor = 250 * time.Millisecond
+
+// pgStampMemo is one server's last stamp and when it was read.
+type pgStampMemo struct {
+	mu  sync.Mutex
+	at  time.Time
+	val string
+}
+
+// get is the stamp read at most pgStampFor before now, or read reads it.
+// An error is not kept.
+func (m *pgStampMemo) get(now time.Time, read func() (string, error)) (string, error) {
+	m.mu.Lock()
+	if !m.at.IsZero() && now.Sub(m.at) >= 0 && now.Sub(m.at) < pgStampFor {
+		v := m.val
+		m.mu.Unlock()
+		return v, nil
+	}
+	m.mu.Unlock()
+	return read()
+}
+
+// put keeps a stamp just read, unless a later one is kept already.
+func (m *pgStampMemo) put(at time.Time, val string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if at.After(m.at) {
+		m.at, m.val = at, val
+	}
 }
 
 // pgCopyRequest is the views input the port's catalog is read from.

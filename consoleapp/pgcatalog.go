@@ -92,7 +92,7 @@ func pgCopyCatalog(ctx context.Context, copySQL pgCatalogSource, run func(contex
 // pgCatalogSource is what pgCopyCatalog reads of the copy besides its
 // columns (console.SQLOnCopy).
 type pgCatalogSource interface {
-	PGCopyStamp(ctx context.Context) (string, error)
+	PGCopyStampFresh(ctx context.Context) (string, error)
 	CopyTablesStamped(ctx context.Context) ([]console.CopyTable, string, error)
 }
 
@@ -106,7 +106,7 @@ type pgCatalogSource interface {
 // can try again (40001), never a mix of the two.
 func pgCatalogOneSnapshot(ctx context.Context, copySQL pgCatalogSource, run func(context.Context, string) (sqlsandbox.Result, error)) (sqlsandbox.Result, []console.CopyTable, error) {
 	for try := 0; ; try++ {
-		before, err := copySQL.PGCopyStamp(ctx)
+		before, err := copySQL.PGCopyStampFresh(ctx)
 		if err != nil {
 			return sqlsandbox.Result{}, nil, err
 		}

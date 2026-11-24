@@ -24,7 +24,7 @@ func (s *snapshotSource) next() string {
 	return v
 }
 
-func (s *snapshotSource) PGCopyStamp(context.Context) (string, error) { return s.next(), nil }
+func (s *snapshotSource) PGCopyStampFresh(context.Context) (string, error) { return s.next(), nil }
 
 func (s *snapshotSource) CopyTablesStamped(context.Context) ([]console.CopyTable, string, error) {
 	if s.err != nil {
