@@ -119,5 +119,7 @@ func scheduleSlot(t *testing.T, b *backupScheduler, id string, slot time.Time) c
 		}
 	}
 	b.watchers.Wait()
+	// A run reports its end before its deferred removal of the read runs.
+	b.sup.postRefresh.Wait()
 	return b.ScheduleState(id)
 }
