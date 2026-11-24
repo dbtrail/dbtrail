@@ -156,7 +156,9 @@ func TestIntegrationPGRouterCollation_3111(t *testing.T) {
 
 	t.Run("without one a statement that uses the column is refused", func(t *testing.T) {
 		const table = "pgcoll_alone"
-		env := startPGPortFor(t, ctx, nil, pgPortFixture{table: table, slot: "pgcoll_alone_slot", pub: "pgcoll_alone_pub", setup: pgCollSetup(table)})
+		// A server that hides tables sends nothing to its source: the copy
+		// answers alone.
+		env := startPGPortFor(t, ctx, nil, pgPortFixture{table: table, slot: "pgcoll_alone_slot", pub: "pgcoll_alone_pub", copyOnly: true, setup: pgCollSetup(table)})
 		t.Cleanup(func() { dropColl(env.sourceDSN) })
 		source, err := pgconn.Connect(ctx, env.sourceDSN)
 		if err != nil {

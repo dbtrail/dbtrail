@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/pgshim"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
@@ -64,6 +65,10 @@ func TestIntegrationPGRouterFreshMode_2756(t *testing.T) {
 	if err := f.owner.Update(e); err != nil {
 		t.Fatal(err)
 	}
+	// The port serves a PostgreSQL server only when it can forward (0.140.0).
+	if e, err = f.owner.SetForwardWithCaptureAccount(e.ID, true); err != nil {
+		t.Fatal(err)
+	}
 	pgTestStart(t, ctx, mon, bootDSN, source, e)
 
 	if err := sup.Trigger(console.BaselineRequestFor(e)); err != nil {
@@ -106,7 +111,9 @@ func TestIntegrationPGRouterFreshMode_2756(t *testing.T) {
 	t.Cleanup(runner.Close)
 	srv.RefreshFollowedFiles()
 	ages := newPGRouteStats(time.Now(), false)
-	router := &pgRouterPort{srv: srv, addr: freeAddr(t), maxConns: 8, poll: 20 * time.Millisecond, out: io.Discard, routes: ages}
+	// Routing by plan off: what is tested is the copy's answer, and a
+	// cheap plan would send it to the source now that it forwards.
+	router := &pgRouterPort{srv: srv, addr: freeAddr(t), maxConns: 8, poll: 20 * time.Millisecond, out: io.Discard, routes: ages, cost: &pgshim.CostPolicy{}}
 	portCtx, stopPort := context.WithCancel(context.Background())
 	served := make(chan struct{})
 	go func() { _ = router.serve(portCtx); close(served) }()

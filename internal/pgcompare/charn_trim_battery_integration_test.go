@@ -6,11 +6,14 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"io/fs"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -27,6 +30,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
@@ -709,6 +713,56 @@ type cnStack struct {
 	procs   []*exec.Cmd
 }
 
+// cnNeverHidden is the table the server hides in the phases with no
+// forwarding user: no database has it.
+const cnNeverHidden = "public.cn_never_there"
+
+// setHidden saves the tables the server hides (and no column), through the
+// daemon's own API, as the web interface saves them.
+func (s *cnStack) setHidden(t *testing.T, ctx context.Context, tables []string) {
+	t.Helper()
+	acc, err := console.ReadLocalAccess(console.LocalAccessPath(filepath.Join(s.dir, "console-auth.yaml")))
+	if err != nil {
+		t.Fatalf("the daemon's local access file: %v", err)
+	}
+	call := func(method, path string, body []byte) []byte {
+		t.Helper()
+		req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(acc.URL, "/")+path, bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+acc.Token)
+		req.Header.Set("Content-Type", "application/json")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		defer res.Body.Close()
+		out, _ := io.ReadAll(res.Body)
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("%s %s: %d %s", method, path, res.StatusCode, out)
+		}
+		return out
+	}
+	var list struct {
+		Servers []struct{ ID, Name string } `json:"servers"`
+	}
+	if err := json.Unmarshal(call(http.MethodGet, "/api/servers", nil), &list); err != nil {
+		t.Fatal(err)
+	}
+	id := ""
+	for _, sv := range list.Servers {
+		if sv.Name == cnServer {
+			id = sv.ID
+		}
+	}
+	if id == "" {
+		t.Fatalf("server %q is not listed", cnServer)
+	}
+	body, _ := json.Marshal(map[string][]string{"tables": tables, "columns": {}})
+	call(http.MethodPut, "/api/servers/"+id+"/hidden", body)
+}
+
 func cnFreeAddr(t *testing.T) string {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -891,6 +945,17 @@ func cnStart(t *testing.T, ctx context.Context) *cnStack {
 		"--password-stdin", "-d", s.db, "--publication", cnPub, "--slot", cnSlot+"_"+id, "--schemas", "public", "--no-forward"); err != nil {
 		t.Fatalf("server add: %v\n%s\n%s", err, out, s.logTail("watch"))
 	}
+	// The phases with no forwarding user: since 0.140.0 the port serves a
+	// PostgreSQL server only when it can forward, and the one served server
+	// that still sends nothing to its source is one that hides tables or
+	// columns. So the server forwards as the capture account and hides a
+	// table nobody has: the copy answers every statement alone, as a server
+	// with no forwarding user did. Both are taken back before the phase with
+	// a forwarding user.
+	if out, err := s.cli(ctx, "", "server", "forward-user", cnServer, "--capture-account"); err != nil {
+		t.Fatalf("forward-user --capture-account: %v\n%s", err, out)
+	}
+	s.setHidden(t, ctx, []string{cnNeverHidden})
 	if out, err := s.cli(ctx, "", "snapshot", "run", cnServer); err != nil {
 		t.Fatalf("snapshot run: %v\n%s\n%s", err, out, s.logTail("watch"))
 	}
@@ -1297,6 +1362,10 @@ func TestIntegrationPGCharNTrimBattery(t *testing.T) {
 		}
 	}
 	report("no forwarding user")
+	s.setHidden(t, ctx, []string{})
+	if out, err := s.cli(ctx, "", "server", "forward-user", cnServer, "--no-capture-account"); err != nil {
+		t.Fatalf("forward-user --no-capture-account: %v\n%s", err, out)
+	}
 	if out, err := s.cli(ctx, cnFwdPass+"\n", "server", "forward-user", cnServer, "-u", s.fwd, "--password-stdin"); err != nil {
 		t.Fatalf("forward-user: %v\n%s", err, out)
 	}

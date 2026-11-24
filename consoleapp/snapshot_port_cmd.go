@@ -505,7 +505,7 @@ func printPortPG(out io.Writer, p ctlPort, db string) {
 		host = "127.0.0.1"
 	}
 	fmt.Fprintf(out, "The port for SQL clients is on. PostgreSQL clients connect to the PostgreSQL port (5433, unless the PostgreSQL router was given another). %s, and the user can be anything:\n\n  psql \"host=%s port=5433 dbname=%s user=app sslmode=require\"\n\n", who, host, db)
-	fmt.Fprintln(out, "The copy answers what it is known to answer as PostgreSQL does. Every other statement, and a transaction block a client opens, goes to your PostgreSQL as the server's forwarding user, read-only, when one is set (bintrail-console server forward-user); without one, the copy answers alone.")
+	fmt.Fprintln(out, "The copy answers what it is known to answer as PostgreSQL does. Every other statement, and a transaction block a client opens, goes to your PostgreSQL as the server's forwarding user, read-only, or as the user DBTrail connects with when the server allows it (bintrail-console server forward-user); a server with neither is not served, and a client that connects to it gets an error that says why.")
 	fmt.Fprintln(out, "The copy's answers are fresh unless fast is chosen for the server: fresh lays the changes captured since the last snapshot over it, fast reads the last snapshot alone (bintrail-console port mode <server> [fresh|fast]).")
 	if p.Notice != "" {
 		fmt.Fprintf(out, "\n%s\n", p.Notice)
