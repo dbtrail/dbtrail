@@ -125,6 +125,11 @@ type backupScheduler struct {
 	// newTablesPending: per server, the full read PlanNewTables promised and
 	// the watcher has not started yet.
 	newTablesPending map[string]newTablesTry
+	// rereadTried: per server, the refused tables (rereadKey) read again
+	// alone since the last ordinary update that went through (#2640). The
+	// read's own bound: a table refused again after its read takes the full
+	// read. Memory only: a restart allows one more read of each.
+	rereadTried map[string]map[string]bool
 	// warned holds the servers whose unreadable schedule was already reported,
 	// so the log says it once rather than every minute.
 	warned map[string]bool
@@ -175,6 +180,12 @@ type scheduledStart struct {
 	// about a path this schedule no longer takes, and a full backup that
 	// went through does end it; otherwise nothing ever would.
 	noUpdates bool
+	// rereadFor: this is the update that reads some tables again (#2640),
+	// started for the update whose failed status it holds. When it fails,
+	// that update's full read is taken, with that update's refusal.
+	rereadFor *console.BaselineStatus
+	// rereadTables are the tables it reads again, for the log.
+	rereadTables []string
 }
 
 type scheduledSkip struct {
@@ -215,6 +226,7 @@ func newBackupScheduler(sup *baselineSupervisor, reg *console.Registry, fullBack
 		newTablesStarts:  make(map[string][]time.Time),
 		newTablesTried:   make(map[string]newTablesTry),
 		newTablesPending: make(map[string]newTablesTry),
+		rereadTried:      make(map[string]map[string]bool),
 		warned:           make(map[string]bool),
 	}
 	b.window = b.measureWindow
@@ -872,7 +884,8 @@ func startBackupScheduleLoop(ctx context.Context, sched *backupScheduler) {
 	// says, so a bare reuse_unchanged=false would read as "every table is
 	// rewritten" on a daemon that rewrites nothing.
 	slog.Info("snapshot schedule loop enabled", "tick", backupScheduleTick, "full_backups", sched.fullBackups,
-		"reuse_unchanged_path", sched.carryDefault, "table_deltas", sched.sup.tableDeltas)
+		"reuse_unchanged_path", sched.carryDefault, "table_deltas", sched.sup.tableDeltas,
+		"reread_refused_tables", sched.sup.rereadRefused)
 	go func() {
 		t := time.NewTicker(backupScheduleTick)
 		defer t.Stop()
@@ -981,6 +994,11 @@ func (b *backupScheduler) tick(ctx context.Context, now time.Time) {
 	for id := range b.fallback {
 		if !live[id] {
 			delete(b.fallback, id)
+		}
+	}
+	for id := range b.rereadTried {
+		if !live[id] {
+			delete(b.rereadTried, id)
 		}
 	}
 	b.mu.Unlock()
@@ -1471,9 +1489,14 @@ func (b *backupScheduler) watchScheduled(e console.ServerEntry, stamp, method st
 			b.standInNewTables(e, *st.Last)
 			return
 		}
+		if method == console.BackupMethodRefresh && own.rereadFor != nil {
+			// The read of some tables (#2640): its own end, whatever it did.
+			b.afterReread(e, own, *st.Last)
+			return
+		}
 		if method == console.BackupMethodRefresh && fullReadStandsIn(*st.Last) {
 			if !b.fullReadCannotCure(e, *st.Last) {
-				b.fallBack(e, *st.Last)
+				b.fallBack(e, *st.Last, false)
 			}
 		}
 		if method == console.BackupMethodFull && updateStandsIn(own, *st.Last) {
@@ -1483,6 +1506,7 @@ func (b *backupScheduler) watchScheduled(e console.ServerEntry, stamp, method st
 			b.noteFallbackReadOK(e.ID, stamp)
 		}
 		if method == console.BackupMethodRefresh && st.Last.State == "succeeded" {
+			b.forgetRereads(e.ID)
 			b.includeNewTables(e, *st.Last)
 		}
 		return
@@ -1599,7 +1623,12 @@ func (b *backupScheduler) standInNewTables(e console.ServerEntry, done console.B
 // update ran for minutes, and an operator who removed or changed the
 // schedule meanwhile, perhaps because backups were misbehaving, must not
 // get a full read of production from a schedule that no longer exists.
-func (b *backupScheduler) fallBack(e console.ServerEntry, failed console.BaselineStatus) {
+//
+// When the update was refused for tables a read of their own fixes, that read
+// is taken instead (#2640, rereadInstead), unless afterReread is the one
+// calling: the read of some tables already failed, and failed is the update
+// it stood in for.
+func (b *backupScheduler) fallBack(e console.ServerEntry, failed console.BaselineStatus, afterReread bool) {
 	reason := failed.LastError
 	cur, ok := b.reg.Get(e.ID)
 	if !ok || cur.BackupSchedule == nil || cur.BackupSchedule.Identity() != e.BackupSchedule.Identity() {
@@ -1614,6 +1643,11 @@ func (b *backupScheduler) fallBack(e console.ServerEntry, failed console.Baselin
 	}
 	because := how + " (" + reason + ")"
 	now := time.Now().UTC()
+	// Before the daily cap: the read of some tables is not a read of the
+	// server, so the cap neither holds it back nor counts it.
+	if !afterReread && b.rereadInstead(e, failed, now) {
+		return
+	}
 	if next, held := b.emergencyHeld(e.ID, now); held {
 		// Said on the card (the skipped line) and in the log, not in the
 		// history: the update's own failure is recorded at every slot, and a
@@ -1667,6 +1701,7 @@ func (b *backupScheduler) Forget(serverID string) {
 	delete(b.fullMissed, serverID)
 	delete(b.fullOwed, serverID)
 	delete(b.fallback, serverID)
+	delete(b.rereadTried, serverID)
 	delete(b.windows, serverID)
 	b.mu.Unlock()
 	// A schedule set again starts silent: its first skipped slot is said.
