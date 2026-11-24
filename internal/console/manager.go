@@ -26,9 +26,6 @@ var errNoServers = errors.New("no servers configured: pass --index-dsn or add a 
 // Server when the console spoke to exactly one index. One bundle per selected
 // server, built lazily and cached by connManager.
 type bundle struct {
-	// pgStamp is the PostgreSQL port's last stamp of this server's copy,
-	// shared by its connections (PGCopyStamp).
-	pgStamp pgStampMemo
 	// serverID is the registry id this bundle serves, so a reader that must
 	// see the entry's CURRENT settings (the hidden rules, #2529) reads them
 	// fresh instead of trusting a bundle a long-lived connection holds.

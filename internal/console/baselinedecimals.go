@@ -158,7 +158,7 @@ func (q *SQLOnCopy) CopyTablesStamped(ctx context.Context) ([]CopyTable, string,
 		out = append(out, CopyTable{Schema: t.Schema, Table: t.Table, Hidden: t.HiddenColumns, Relation: t.PGRelation, Trimmed: baseline.PGPaddedToTrim(t.PGRelation)})
 	}
 	stamp := pgCopyStamp(in)
-	q.b.pgStamp.put(time.Now(), stamp)
+	q.s.pgStampOf(q.id).put(time.Now(), stamp)
 	return out, stamp, nil
 }
 
@@ -173,7 +173,7 @@ func (q *SQLOnCopy) CopyTablesStamped(ctx context.Context) ([]CopyTable, string,
 // shared by the server's connections for pgStampFor: a new snapshot is seen
 // that much later at most.
 func (q *SQLOnCopy) PGCopyStamp(ctx context.Context) (string, error) {
-	return q.b.pgStamp.get(time.Now(), func() (string, error) { return q.PGCopyStampFresh(ctx) })
+	return q.s.pgStampOf(q.id).get(time.Now(), func() (string, error) { return q.PGCopyStampFresh(ctx) })
 }
 
 // PGCopyStampFresh is PGCopyStamp read now: what reading the catalog
@@ -185,8 +185,14 @@ func (q *SQLOnCopy) PGCopyStampFresh(ctx context.Context) (string, error) {
 		return "", err
 	}
 	stamp := pgCopyStamp(in)
-	q.b.pgStamp.put(time.Now(), stamp)
+	q.s.pgStampOf(q.id).put(time.Now(), stamp)
 	return stamp, nil
+}
+
+// pgStampOf is server id's stamp memo, made on first use.
+func (s *Server) pgStampOf(id string) *pgStampMemo {
+	m, _ := s.pgStamps.LoadOrStore(id, &pgStampMemo{})
+	return m.(*pgStampMemo)
 }
 
 // pgStampFor is how long a stamp is shared (PGCopyStamp).
