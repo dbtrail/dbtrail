@@ -97,7 +97,7 @@ var fastLanePlans = map[string]string{
 	"WHERE id = ": plan(`{"Node Type": "Index Scan", "Relation Name": "t", "Total Cost": 8.45, "Plan Rows": 1}`),
 	"FROM lone":   plan(`{"Node Type": "Aggregate", "Total Cost": 506064, "Plan Rows": 1, "Plans": [{"Node Type": "Seq Scan", "Parent Relationship": "Outer", "Relation Name": "lone", "Total Cost": 400000, "Plan Rows": 30000000}]}`),
 	"FROM joined": plan(`{"Node Type": "Aggregate", "Total Cost": 1046199, "Plan Rows": 1, "Plans": [{"Node Type": "Hash Join", "Parent Relationship": "Outer", "Total Cost": 900000, "Plans": [{"Node Type": "Seq Scan", "Parent Relationship": "Outer", "Relation Name": "joined", "Total Cost": 400000, "Plan Rows": 30000000}, {"Node Type": "Hash", "Parent Relationship": "Inner", "Plans": [{"Node Type": "Seq Scan", "Parent Relationship": "Outer", "Relation Name": "other", "Plan Rows": 3000000}]}]}]}`),
-	"FROM sub":    plan(`{"Node Type": "Aggregate", "Total Cost": 506064, "Plan Rows": 1, "Plans": [{"Node Type": "Seq Scan", "Parent Relationship": "Outer", "Relation Name": "sub", "Plan Rows": 30000000, "Plans": [{"Node Type": "Seq Scan", "Parent Relationship": "SubPlan", "Subplan Name": "SubPlan 1", "Relation Name": "other"}]}]}`),
+	"FROM sub":    plan(`{"Node Type": "Aggregate", "Total Cost": 506064, "Plan Rows": 1, "Plans": [{"Node Type": "Seq Scan", "Parent Relationship": "Outer", "Relation Name": "sub", "Plan Rows": 30000000, "Plans": [{"Node Type": "Seq Scan", "Parent Relationship": "SubPlan", "Subplan Name": "SubPlan 1", "Relation Name": "other", "Plan Rows": 10}]}]}`),
 }
 
 // lanes is what the copy was told of each statement it ran, in order.
@@ -180,7 +180,8 @@ func TestFastLane_noPlanNoLane(t *testing.T) {
 func TestFastLane_extended(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	l := &costLogin{src: startFakeSource(t, fastLanePlans)}
+	// The copy's columns, so the screen can read $1 against n.
+	l := &costLogin{src: startFakeSource(t, fastLanePlans), catalog: func() []CatalogTable { return catalogOf("lone", "joined", "other") }}
 	c := costPortConn(t, ctx, l)
 	run := func(name, stmt string, args [][]byte) []bool {
 		t.Helper()
