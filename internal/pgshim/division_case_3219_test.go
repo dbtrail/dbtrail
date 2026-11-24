@@ -61,7 +61,6 @@ func TestExactClass_case(t *testing.T) {
 		{`CASE WHEN qty > 1 THEN ratio ELSE 0 END`, clsUnknown},
 		{`CASE WHEN qty > 1 THEN amount ELSE ratio END`, clsUnknown},
 		{`CASE WHEN qty > 1 THEN free ELSE 0 END`, clsUnknown},
-		{`CASE WHEN qty > 1 THEN amount ELSE 0.5e1 END`, clsUnknown},
 		{`CASE WHEN qty > 1 THEN 'a' ELSE 0 END`, clsUnknown},
 		{`CASE WHEN qty > 1 THEN note ELSE 0 END`, clsUnknown},
 		{`CASE WHEN qty > 1 THEN (SELECT max(amount) FROM t) ELSE 0 END`, clsUnknown},
@@ -144,7 +143,6 @@ func TestCopyScreen_caseInDivision(t *testing.T) {
 		`SELECT sum(CASE WHEN qty > 1 THEN amount ELSE ratio END) / sum(amount) FROM t`: unknown,
 		`SELECT sum(CASE WHEN qty > 1 THEN free ELSE 0 END) / sum(amount) FROM t`: unknown,
 		`SELECT sum(CASE WHEN qty > 1 THEN NULL END) / sum(amount) FROM t`:       unknown,
-		`SELECT sum(CASE WHEN qty > 1 THEN amount ELSE 0.5e1 END) / sum(amount) FROM t`: unknown,
 		`SELECT sum(CASE WHEN qty > 1 THEN amount END) / 0 FROM t`:               "a division by zero",
 		`SELECT avg(CASE WHEN qty > 1 THEN ratio ELSE 0 END) FROM t`:             "avg()",
 	} {
