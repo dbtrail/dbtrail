@@ -204,8 +204,10 @@ func TestCopyScreen(t *testing.T) {
 		`TABLE pgcmp_orders`:         "SELECT",
 		`EXPLAIN SELECT 1`:           "SELECT",
 	}
+	// With the main ORDER BY's text kept from the copy: that one is the copy's
+	// since #3219 (TestCopyScreen_mainOrderOfText).
 	for q, why := range toSource {
-		got := CopyScreen(q, routeTypes)
+		got := CopyScreenSortingLikeSource(q, routeTypes)
 		if got == "" {
 			t.Errorf("%s: left to the copy, want the source (%s)", q, why)
 		}

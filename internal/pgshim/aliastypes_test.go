@@ -129,7 +129,9 @@ func TestCopyScreen_namesTheStatementDefines(t *testing.T) {
 		`SELECT customer_id FROM pgcmp_orders GROUP BY customer_id HAVING max(note) >= 'a'`: "text",
 		`SELECT id FROM pgcmp_orders WHERE upper(note) > 'A'`:                               "upper",
 	} {
-		if veto := CopyScreen(q, routeTypes); !strings.Contains(veto, says) {
+		// With the main ORDER BY's text kept from the copy: that one is the
+		// copy's since #3219, and these still say what reads as text.
+		if veto := CopyScreenSortingLikeSource(q, routeTypes); !strings.Contains(veto, says) {
 			t.Errorf("veto %q, want one that says %q:\n%s", veto, says, q)
 		}
 	}

@@ -4,6 +4,7 @@ package pgcompare
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -25,7 +26,7 @@ import (
 //     fails too (never a copy that answers where PostgreSQL errors);
 //   - and many EQUAL lines stay on the copy: a screen that sent everything to
 //     the source would pass the first two and serve no purpose.
-func checkRouting(t *testing.T, ctx context.Context, cp *SnapshotCopy, rep *Report, want []expectation) {
+func checkRouting(t *testing.T, ctx context.Context, src *Source, cp *SnapshotCopy, rep *Report, want []expectation) {
 	t.Helper()
 	cols, _, err := cp.Query(ctx, "SELECT lower(column_name), data_type, lower(table_name) FROM information_schema.columns WHERE table_schema = 'public' ORDER BY table_name, ordinal_position", 10000)
 	if err != nil {
@@ -76,7 +77,7 @@ func checkRouting(t *testing.T, ctx context.Context, cp *SnapshotCopy, rep *Repo
 				onCopy++
 			}
 		case sqlcompare.Different:
-			if veto == "" && !unsized(r.Statement) {
+			if veto == "" && !unsized(r.Statement) && !mainTextOrder(t, ctx, src, cp, r, types) {
 				t.Errorf("answered differently on the copy (%s), and the port lets the copy answer it: %s", r.Kind, r.Statement)
 			}
 		case sqlcompare.SourceError:
@@ -97,4 +98,66 @@ func checkRouting(t *testing.T, ctx context.Context, cp *SnapshotCopy, rep *Repo
 		t.Errorf("%d EQUAL statements are left to the copy, fewer than 66", onCopy)
 	}
 	t.Logf("%d EQUAL statements are left to the copy", onCopy)
+}
+
+// mainTextOrder reports whether r differs from PostgreSQL only by what #3219
+// accepted on the main statement's ORDER BY of text: the copy sorts by bytes.
+// It holds the claim itself: the same statement on the source, with every
+// text column of the fixture sorting by bytes (COLLATE "C", in a transaction
+// that is rolled back), must answer exactly what the copy answered, in the
+// same order, a LIMIT's rows included. Any other difference fails.
+func mainTextOrder(t *testing.T, ctx context.Context, src *Source, cp *SnapshotCopy, r Result, types map[string][]string) bool {
+	t.Helper()
+	if !strings.Contains(pgshim.CopyScreenSortingLikeSource(r.Statement, types), "text sorted by ORDER BY") {
+		return false
+	}
+	byBytes, err := src.underByteOrder(ctx, r.Statement)
+	if err != nil {
+		t.Errorf("%s on the source sorting by bytes: %v", r.Statement, err)
+		return true
+	}
+	onCopy, _, err := cp.Query(ctx, r.Statement, 5000)
+	if err != nil {
+		t.Errorf("%s on the copy: %v", r.Statement, err)
+		return true
+	}
+	verdict, kind, detail := sqlcompare.Compare(byBytes, onCopy, true)
+	if verdict != sqlcompare.Equal {
+		t.Logf("%s: against PostgreSQL sorting by bytes: %s %s", r.Statement, kind, detail)
+		return false
+	}
+	return true
+}
+
+// underByteOrder runs stmt with every text column of the fixture's tables
+// collated "C", and takes it all back.
+func (s *Source) underByteOrder(ctx context.Context, stmt string) (sqlcompare.Rows, error) {
+	if _, err := s.conn.Exec(ctx, "BEGIN"); err != nil {
+		return sqlcompare.Rows{}, err
+	}
+	defer s.conn.Exec(ctx, "ROLLBACK")
+	rows, err := s.conn.Query(ctx, `SELECT format('ALTER TABLE %I ALTER COLUMN %I TYPE %s COLLATE "C"', c.relname, a.attname, format_type(a.atttypid, a.atttypmod))
+		FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+		WHERE c.relkind = 'r' AND c.relname LIKE 'pgcmp%' AND c.relnamespace = 'public'::regnamespace
+		  AND a.attnum > 0 AND NOT a.attisdropped AND a.atttypid IN ('text'::regtype, 'varchar'::regtype)`)
+	if err != nil {
+		return sqlcompare.Rows{}, err
+	}
+	var alters []string
+	for rows.Next() {
+		var q string
+		if err := rows.Scan(&q); err != nil {
+			rows.Close()
+			return sqlcompare.Rows{}, err
+		}
+		alters = append(alters, q)
+	}
+	rows.Close()
+	for _, q := range alters {
+		if _, err := s.conn.Exec(ctx, q); err != nil {
+			return sqlcompare.Rows{}, fmt.Errorf("%s: %w", q, err)
+		}
+	}
+	out, _, err := s.read(ctx, stmt, 5000)
+	return out, err
 }

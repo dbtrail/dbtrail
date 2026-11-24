@@ -163,7 +163,7 @@ func TestIntegrationPGCompare(t *testing.T) {
 		t.Errorf("%d statements were EQUAL, fewer than 50", n)
 	}
 
-	checkRouting(t, ctx, cp, rep, want)
+	checkRouting(t, ctx, src, cp, rep, want)
 
 	// The numeric statements again, as a connection with no forwarding
 	// account runs them: answered as PostgreSQL answers them, or refused.

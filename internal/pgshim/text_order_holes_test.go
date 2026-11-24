@@ -14,7 +14,9 @@ import (
 // order, as a connection has them (columnTypes).
 func orderedScreen(stmt string) string {
 	tables := starCatalog()
-	return CopyScreen(stmt, withColumnOrder(screenTypes(tables, tablesRead(RewriteForCopy(stmt), tables)), tables))
+	// With the main ORDER BY's text kept from the copy (#3219): these say what
+	// reads as text.
+	return CopyScreenSortingLikeSource(stmt, withColumnOrder(screenTypes(tables, tablesRead(RewriteForCopy(stmt), tables)), tables))
 }
 
 // starCatalog is a copy of two tables with no char(n) column (a star over
@@ -73,8 +75,10 @@ func TestCopyScreen_aliasNamedLikeItsColumn(t *testing.T) {
 		`SELECT name AS name, count(*) FROM people GROUP BY name ORDER BY 1`:                          "ORDER BY",
 		`SELECT last AS first, first AS last FROM people ORDER BY first`:                              "ORDER BY",
 	}
+	// With the main ORDER BY's text kept from the copy: that one is the copy's
+	// since #3219, and these still say what reads as text.
 	for q, want := range toSource {
-		if why := CopyScreen(q, peopleTypes); !strings.Contains(why, want) {
+		if why := CopyScreenSortingLikeSource(q, peopleTypes); !strings.Contains(why, want) {
 			t.Errorf("%s:\n  got %q, want it sent to the source for %q", q, why, want)
 		}
 	}
@@ -132,7 +136,9 @@ func TestCopyScreen_columnNamedLikeAnOrderWord(t *testing.T) {
 		`SELECT id FROM people WHERE first BETWEEN 'a' AND 'c'`,
 		`SELECT greatest(first, last) FROM people`,
 	} {
-		if why := CopyScreen(q, peopleTypes); why == "" {
+		// With the main ORDER BY's text kept from the copy: that one is the
+		// copy's since #3219, and these still say what reads as text.
+		if why := CopyScreenSortingLikeSource(q, peopleTypes); why == "" {
 			t.Errorf("%s: left to the copy, want the source (text by order)", q)
 		}
 	}
@@ -263,7 +269,7 @@ func TestStarByPosition(t *testing.T) {
 		t.Errorf("one table: %q", why)
 	}
 	SetColumnOrder(types, "t", []string{"VARCHAR"})
-	if why := CopyScreen(`SELECT * FROM t ORDER BY 1`, types); why == "" {
+	if why := CopyScreenSortingLikeSource(`SELECT * FROM t ORDER BY 1`, types); why == "" {
 		t.Error("a name two schemas share: a position behind a star left to the copy")
 	}
 	// Without the copy's types nothing is listed: any column may be text.
@@ -283,7 +289,7 @@ func TestCopyScreen_quotedAlias(t *testing.T) {
 		`SELECT min(name) AS "age" FROM people`,
 		`SELECT name AS "age" FROM people WHERE id > 0 ORDER BY age DESC`,
 	} {
-		if why := CopyScreen(q, peopleTypes); why == "" {
+		if why := CopyScreenSortingLikeSource(q, peopleTypes); why == "" {
 			t.Errorf("%s: left to the copy, want the source (text by order under a quoted name)", q)
 		}
 	}

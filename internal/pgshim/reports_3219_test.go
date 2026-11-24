@@ -122,7 +122,9 @@ func TestCopyScreen_reportShapes3219(t *testing.T) {
 		"a call with something after it":                           {`SELECT i_name, i_id FROM item GROUP BY i_name, i_id ORDER BY sum(i_id) + (i_id)`, "ORDER BY"},
 	}
 	for what, c := range toSource {
-		if why := CopyScreen(c[0], types); !strings.Contains(why, c[1]) {
+		// With the main ORDER BY's text kept from the copy: that one is the
+		// copy's since #3219 (TestCopyScreen_mainOrderOfText).
+		if why := CopyScreenSortingLikeSource(c[0], types); !strings.Contains(why, c[1]) {
 			t.Errorf("%s: %q, want it sent to the source for %q", what, why, c[1])
 		}
 	}
