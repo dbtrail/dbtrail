@@ -888,7 +888,7 @@ func cnStart(t *testing.T, ctx context.Context) *cnStack {
 		return err == nil, out + s.logTail("watch")
 	})
 	if out, err := s.cli(ctx, s.pass+"\n", "server", "add", "--name", cnServer, "--flavor", "postgres", "-h", s.host, "-P", s.port, "-u", s.user,
-		"--password-stdin", "-d", s.db, "--publication", cnPub, "--slot", cnSlot + "_" + id, "--schemas", "public", "--no-forward"); err != nil {
+		"--password-stdin", "-d", s.db, "--publication", cnPub, "--slot", cnSlot+"_"+id, "--schemas", "public", "--no-forward"); err != nil {
 		t.Fatalf("server add: %v\n%s\n%s", err, out, s.logTail("watch"))
 	}
 	if out, err := s.cli(ctx, "", "snapshot", "run", cnServer); err != nil {
@@ -1487,7 +1487,10 @@ func cnPreparedInTx(t *testing.T, ctx context.Context, s *cnStack, fails *[]cnFa
 
 // cnStored is a type PostgreSQL compares by value and the copy may hold as
 // text: vals are stored, lits are other spellings of some of those values.
-type cnStored struct{ name, decl string; vals, lits []string }
+type cnStored struct {
+	name, decl string
+	vals, lits []string
+}
 
 func cnStoredTypes() []cnStored {
 	return []cnStored{

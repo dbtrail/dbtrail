@@ -28,8 +28,8 @@ func TestIntegrationPGRouterCharWithoutPadding(t *testing.T) {
 	defer cancel()
 	env := startPGPortFor(t, ctx, nil, pgPortFixture{table: pgTrimTable, slot: "pgtrim_slot", pub: "pgtrim_pub",
 		setup: []string{
-			"CREATE TABLE " + pgTrimTable + " (id int PRIMARY KEY, code char(5), word text)",
-			"INSERT INTO " + pgTrimTable + " VALUES (1, 'ab', 'ab  '), (2, 'abcde', 'x'), (3, '', ''), (4, NULL, NULL)",
+			"CREATE TABLE " + pgTrimTable + " (id int PRIMARY KEY, code char(5), word text, arr char(3)[])",
+			"INSERT INTO " + pgTrimTable + " VALUES (1, 'ab', 'ab  ', '{ab,a}'), (2, 'abcde', 'x', '{abc}'), (3, '', '', '{}'), (4, NULL, NULL, NULL)",
 		},
 		entry: func(e *console.ServerEntry) {
 			e.SourceDSN, e.SourceSlot, e.SourcePublication = pgFwdSourceDSN(t), "pgtrim_slot", "pgtrim_pub"
@@ -126,6 +126,37 @@ func TestIntegrationPGRouterCharWithoutPadding(t *testing.T) {
 		}
 		if len(r.Rows) != 3 || string(r.Rows[0][0]) != "abcde" {
 			t.Errorf("format %d: %q", format, r.Rows)
+		}
+	}
+
+	// The same for an array of char(n), which the source describes as 1014
+	// and the copy never announces: answered by the copy as described.
+	for _, format := range []int16{pgproto3.TextFormat, pgproto3.BinaryFormat} {
+		p := pgClient(t, ctx, env.portDSN(), nil)
+		if _, err := p.Exec(ctx, "BEGIN").ReadAll(); err != nil {
+			t.Fatal(err)
+		}
+		d, err := p.Prepare(ctx, "arr_in_tx", "SELECT arr FROM "+pgTrimTable+" WHERE id > $1 ORDER BY id", []uint32{23})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Fields[0].DataTypeOID != 1014 {
+			t.Fatalf("described as %d, want char(n)[]", d.Fields[0].DataTypeOID)
+		}
+		if _, err := p.Exec(ctx, "COMMIT").ReadAll(); err != nil {
+			t.Fatal(err)
+		}
+		before := onCopy()
+		r := p.ExecPrepared(ctx, "arr_in_tx", [][]byte{[]byte("0")}, []int16{pgproto3.TextFormat}, []int16{format}).Read()
+		if r.Err != nil {
+			t.Errorf("array, format %d: %v", format, r.Err)
+			continue
+		}
+		if onCopy() <= before {
+			t.Errorf("array, format %d: the copy did not answer it", format)
+		}
+		if len(r.Rows) != 4 || r.Rows[3][0] != nil {
+			t.Errorf("array, format %d: %q", format, r.Rows)
 		}
 	}
 }
