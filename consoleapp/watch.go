@@ -294,7 +294,7 @@ func init() {
 			"day old, or the chain's start comes close to the oldest events the index keeps. The generated DuckDB views read the chain; every other reader uses the table file and the index, as before. A snapshot written this way "+
 			"must not be read by a bintrail older than this one. Turning it off needs nothing else: the next refresh writes every table in full. A DuckDB view that follows the newest snapshot keeps working when a pair appears or goes away, except over a table whose schema it could not read, or when another table in the same schema is named after it plus a dot (orders and orders.old): the generated file names those, and they refuse once a pair appears, until the views are generated again.")
 	watchCmd.Flags().BoolVar(&upBaselineRereadRefused, "baseline-reread-refused-tables", true,
-		"On by default (--baseline-reread-refused-tables=false or BINTRAIL_BASELINE_REREAD_REFUSED_TABLES=false turns it off). When a scheduled "+
+		"On by default (=false, or the environment variable set to false, turns it off). When a scheduled "+
 			"snapshot update is refused for tables changed by a statement that leaves no row changes to apply (a TRUNCATE, a table dropped and "+
 			"created again, a change of its columns), only those tables are read again from the source, and every table of the server is "+
 			"brought to one point with the others updated from the recorded changes, instead of a full read of the whole server. A table "+
