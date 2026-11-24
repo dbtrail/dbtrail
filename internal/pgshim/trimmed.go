@@ -184,7 +184,9 @@ func trimmedUse(toks []rtToken, types map[string][]string, mainOrder bool) strin
 		before, after := at(start-1), at(i+1)
 
 		// The first argument of a call.
-		if isOpTok(toks, start-1, "(") && at(start-2).kind == rtWord && !isOpTok(toks, start-3, ".") {
+		// A ( after AND, OR, NOT, WHERE and the like groups; it does not call.
+		if isOpTok(toks, start-1, "(") && at(start-2).kind == rtWord && !isOpTok(toks, start-3, ".") &&
+			!trimmedBefore[at(start-2).text] && !trimmedClauses[at(start-2).text] && !trimmedTerminators[at(start-2).text] {
 			switch at(start - 2).text {
 			case "substr", "substring":
 				if isOpTok(toks, i+1, ",") || word(i+1, "from") || word(i+1, "for") {

@@ -58,6 +58,9 @@ func TestTrimmedUse_allowed(t *testing.T) {
 		"SELECT id FROM a WHERE c = 'ab' AND k = 1",
 		"SELECT id FROM a WHERE k = 1 OR c = 'ab'",
 		"SELECT CASE WHEN c = 'ab' THEN 1 ELSE 0 END FROM a",
+		"SELECT id FROM a WHERE (c = 'ab' AND k = 1) OR (c = 'x' AND k = 2)",
+		"SELECT id FROM a WHERE ((a.c = 'ab' AND k = 1) OR (a.c = 'x'))",
+		"SELECT id FROM a WHERE NOT (c = 'ab')",
 		// IN of plain strings.
 		"SELECT id FROM a WHERE c IN ('ab', 'x')",
 		"SELECT id FROM a WHERE c NOT IN ('ab')",
@@ -162,6 +165,8 @@ func TestTrimmedUse_source(t *testing.T) {
 		"SELECT c::text FROM a",
 		"SELECT CAST(c AS text) FROM a",
 		"SELECT id FROM a WHERE (c, 1) = ('ab', 1)",
+		"SELECT id FROM a WHERE (c) = 'ab  '",
+		"SELECT id FROM a WHERE (c || 'x') = 'abx'",
 		"SELECT ascii(c) FROM a",
 		"SELECT min(c) FROM a",
 		"SELECT id FROM a WHERE c < 'b'",
