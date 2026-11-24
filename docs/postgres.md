@@ -1279,7 +1279,8 @@ listener, its own workers, its own memory.
   changes are not ready) is measured by what the snapshot's files record:
   each file holds every change committed before an instant written in it,
   and the statement is as far behind as the oldest such instant of the
-  tables it reads, by the router's clock. That number only errs old:
+  tables it reads, by the router's clock. That number errs old, with the
+  limits named at the end of this list:
   - It sits a minute before the moment the file was written at, so a
     snapshot just taken reads about a minute behind. A limit under that
     sends every such statement to the source.
@@ -1292,18 +1293,29 @@ listener, its own workers, its own memory.
     is not asked for this number.
   - A full read's instant is the source's clock; an update's is the older of
     the commit time of the newest captured change and the clock of the
-    machine that ran the update. The lag is the router's clock minus that,
-    so a source clock ahead of the router's reads as less lag.
+    machine that ran the update. So that a source clock ahead of the
+    router's does not make a file look new, the instant is never later than
+    when the file was last written, by the router's machine.
+  - Three cases can still read younger than the data is. With a source clock
+    ahead of the router's, a file that took minutes to write can read
+    younger by up to the lesser of the clock's lead and the time the write
+    took. A schema removed from a server and added back later leaves the
+    changes made in between uncaptured, and nothing records that gap (fresh
+    mode has the same limit). A publication that does not publish `TRUNCATE`
+    keeps the rows a `TRUNCATE` removed, under a recent age.
 
   A file that does not record the instant has no age and its statements go
   to the source under any limit (`copy_age_unknown`): a full read taken by
   a version before 0.137.0 that no snapshot update has written again since,
+  a copy that is not in a local folder. The next snapshot update or full
+  read of the table records it. The same goes, for as long as it lasts, for
   a table capture lost or dropped changes of since its rows were read, a
-  copy that is not in a local folder, an index that cannot be asked what
-  capture lost. The next snapshot update or full read of the table
-  records it. In fast mode, pick a limit above the time between
-  snapshot updates plus a minute, or the copy answers only right after each
-  update.
+  table outside the schemas the server captures now, a capture that has
+  saved no state for more than a minute after the file was read or written,
+  a server whose captured schemas are not known to the console, and an index
+  that cannot be asked what capture lost. In fast mode, pick a limit above
+  the time between snapshot updates plus a minute, or the copy answers only
+  right after each update.
 - **The copy answers what it answers as PostgreSQL does.** With the server's
   forwarding user, each statement is decided on its own: the copy answers it
   when everything in it is known to give PostgreSQL's answer there and its

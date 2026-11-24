@@ -399,7 +399,7 @@ func TestPGReadThroughDoesNotReadYoung(t *testing.T) {
 			t.Errorf("%v %q, want the file's write time %v", got, why, wrote)
 		}
 	})
-	t.Run("a file written before its bound on a slower source clock keeps the bound", func(t *testing.T) {
+	t.Run("a file written after its bound keeps the bound", func(t *testing.T) {
 		root := t.TempDir()
 		tbl := pgAgeTable(t, root, dirAt, "orders", 250, rfc(-30*time.Minute))
 		s := &Server{tailCapturesHook: pgAgeCapturesAll}
