@@ -263,7 +263,7 @@ func trimmedUse(toks []rtToken, types map[string][]string, mainOrder bool) strin
 		// The item ends after the column, or after an alias written with no
 		// AS (with AS, AS itself ends it).
 		if ends(i+1) || isName(after) && ends(i+2) {
-			alias := !ends(i+1)
+			alias := !ends(i + 1)
 			if k := trimmedClause(toks, depth, start); k >= 0 {
 				switch {
 				case toks[k].text == "select":
@@ -353,4 +353,23 @@ func trimmedSelectList(toks []rtToken, depth []int, opens func(int) int, sel int
 		}
 	}
 	return false
+}
+
+// trimmedFor is what a statement for the copy, text as the copy is handed
+// it, relies on the view to trim (RunOptions.Trimmed). Read again from the
+// catalog the screen read it with; when that cannot be read now (the copy
+// is too busy, right after a new snapshot), TrimmedUnknown. It leaves what
+// the screen said of the catalog as it was.
+func (s *session) trimmedFor(text string) []string {
+	if s.bound == nil || s.bound.Catalog == nil {
+		return nil
+	}
+	busy := s.catalogBusy
+	defer func() { s.catalogBusy = busy }()
+	types, unread := s.columnTypes(text)
+	if unread {
+		return []string{TrimmedUnknown}
+	}
+	toks, _ := lexSQL(text)
+	return trimmedNames(toks, types)
 }

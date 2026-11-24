@@ -1,6 +1,11 @@
 package pgshim
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+)
 
 // trimmedCatalog: a has a char(n) the view trims (c), a varchar (v), a text
 // (t); b another trimmed char(n) (c2) and a text (x); d a char(n) named c
@@ -207,5 +212,35 @@ func TestTrimmedUse_noSourceOrder(t *testing.T) {
 	}
 	if why := noSource("SELECT id FROM a WHERE c = 'ab  '"); why == "" {
 		t.Error("c = 'ab  ' left to the copy with no source")
+	}
+}
+
+// A statement the copy answers carries the names it relies on the view to
+// trim; one that names none carries nothing; and with the catalog unread at
+// the moment it runs, TrimmedUnknown.
+func TestTrimmedFor(t *testing.T) {
+	cat := trimmedCatalog()
+	s := &session{user: "app"}
+	s.initSettings("public", "app")
+	s.reported = map[string]string{}
+	var fail error
+	s.bound = &Binding{Catalog: func(context.Context) ([]CatalogTable, error) { return cat, fail }}
+	if got := s.trimmedFor("SELECT id FROM a WHERE c = 'ab'"); len(got) != 1 || got[0] != "c" {
+		t.Errorf("names %q", got)
+	}
+	if got := s.trimmedFor("SELECT id FROM a WHERE k = 1"); got != nil {
+		t.Errorf("a statement that names no trimmed column: %q", got)
+	}
+	if got := s.trimmedFor("SELECT id FROM e WHERE c = 'ab'"); got != nil {
+		t.Errorf("a name of a table it does not read: %q", got)
+	}
+	s.catalogAt = time.Time{}
+	fail = errors.New("busy")
+	s.catalogBusy = "kept"
+	if got := s.trimmedFor("SELECT id FROM a WHERE c = 'ab'"); len(got) != 1 || got[0] != TrimmedUnknown {
+		t.Errorf("unread: %q", got)
+	}
+	if s.catalogBusy != "kept" {
+		t.Errorf("what the screen said of the catalog changed: %q", s.catalogBusy)
 	}
 }
