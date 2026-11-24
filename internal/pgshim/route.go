@@ -974,7 +974,7 @@ var copyFuncs = map[string]bool{
 	"count": true, "sum": true, "min": true, "max": true,
 	"coalesce": true, "nullif": true, "greatest": true, "least": true,
 	"length": true, "substring": true, "substr": true, "trim": true, "position": true, "concat": true,
-	"abs": true, "bool_and": true, "string_agg": true,
+	"mod": true, pgAscii: true, "abs": true, "bool_and": true, "string_agg": true,
 	// round(a / b, k), round(avg(x), k), round(x, k), round(x, -k) and
 	// round(x), as RewriteForCopy writes them: rounded as PostgreSQL rounds a
 	// numeric (sqlsandbox pgRoundMacros), or refused. A CASE or a COALESCE
@@ -1147,6 +1147,7 @@ func screenWith(in []rtToken, types map[string][]string, untyped, sortsLikeSourc
 	starText := !untyped && starMayBeText(in, types)
 	catalogTypes := types
 	var textOrder *mainTextOrder
+	var plainText func(string) bool
 	types = withAliasTypes(in, types, untyped)
 	// A typed literal (DATE '...', '...'::date) is one value, never text:
 	// its string is folded into one token.
@@ -1703,6 +1704,21 @@ func screenWith(in []rtToken, types map[string][]string, untyped, sortsLikeSourc
 				}
 				a := args(i + 1)
 				switch t.text {
+				case "mod":
+					if why := modVeto(a, func(name string) []string { return types[name] }, untyped, columnList(toks)); why != "" {
+						return why
+					}
+				case pgAscii:
+					if plainText == nil && !untyped {
+						names := plainTextNames(toks, catalogTypes)
+						plainText = func(name string) bool {
+							padded, _ := paddedKind(catalogTypes, name)
+							return !padded && names(name)
+						}
+					}
+					if why := asciiVeto(a, plainText, untyped); why != "" {
+						return why
+					}
 				case pgDiv:
 					if why := divisionVeto(a, func(name string) []string { return types[name] }, untyped); why != "" {
 						return why
