@@ -454,6 +454,12 @@ type baselineHistoryFile struct {
 	// behind the daemon's per-day bound on them, written as each starts for
 	// the same reason as EmergencyStarted. Older binaries ignore the key.
 	NewTablesStarted map[string][]string `json:"new_tables_started,omitempty"`
+	// RereadsTried is, per server, the refused tables the schedule read again
+	// alone since the last ordinary update that went through (#2640), each as
+	// the scheduler's key. Written BEFORE the read starts, so a read the
+	// daemon died in still bounds the next one after the restart. Older
+	// binaries ignore the key.
+	RereadsTried map[string][]string `json:"rereads_tried,omitempty"`
 	// Jobs is the journal of the snapshot jobs running now, keyed by run id
 	// (#2180): what each one is and every directory it created. A job that
 	// ends removes its entry; one whose process was killed leaves it, and
@@ -476,6 +482,7 @@ type BaselineRunHistory struct {
 	servers   map[string][]BaselineRunRecord
 	emergency map[string]string
 	newTables map[string][]string
+	rereads   map[string][]string
 	jobs      map[string]BaselineJob
 }
 
@@ -489,7 +496,7 @@ func DefaultBaselineHistoryPath(serversPath string) string {
 // history; a corrupt or newer-versioned file is an error for the caller to
 // decide on, never silently truncated.
 func OpenBaselineHistory(path string) (*BaselineRunHistory, error) {
-	h := &BaselineRunHistory{path: path, servers: make(map[string][]BaselineRunRecord), emergency: make(map[string]string), newTables: make(map[string][]string), jobs: make(map[string]BaselineJob)}
+	h := &BaselineRunHistory{path: path, servers: make(map[string][]BaselineRunRecord), emergency: make(map[string]string), newTables: make(map[string][]string), rereads: make(map[string][]string), jobs: make(map[string]BaselineJob)}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return h, nil
@@ -515,6 +522,9 @@ func OpenBaselineHistory(path string) (*BaselineRunHistory, error) {
 	}
 	if f.NewTablesStarted != nil {
 		h.newTables = f.NewTablesStarted
+	}
+	if f.RereadsTried != nil {
+		h.rereads = f.RereadsTried
 	}
 	if f.Jobs != nil {
 		h.jobs = f.Jobs
@@ -571,6 +581,30 @@ func (h *BaselineRunHistory) NewTablesStarts(serverID string) []string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return slices.Clone(h.newTables[serverID])
+}
+
+// SetRereadsTried records, durably, the keys of the server's refused tables
+// read again alone since its last ordinary update that went through (#2640);
+// none removes the server's entry.
+func (h *BaselineRunHistory) SetRereadsTried(serverID string, keys []string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(keys) == 0 {
+		if _, ok := h.rereads[serverID]; !ok {
+			return nil
+		}
+		delete(h.rereads, serverID)
+	} else {
+		h.rereads[serverID] = slices.Sorted(slices.Values(keys))
+	}
+	return h.save()
+}
+
+// RereadsTried is what SetRereadsTried last recorded for the server.
+func (h *BaselineRunHistory) RereadsTried(serverID string) []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.rereads[serverID])
 }
 
 func (h *BaselineRunHistory) Append(rec BaselineRunRecord) error {
@@ -836,7 +870,7 @@ func (h *BaselineRunHistory) List(serverID string) []BaselineRunRecord {
 }
 
 func (h *BaselineRunHistory) save() error {
-	b, err := json.Marshal(baselineHistoryFile{Version: baselineHistoryVersion, Servers: h.servers, EmergencyStarted: h.emergency, NewTablesStarted: h.newTables, Jobs: h.jobs})
+	b, err := json.Marshal(baselineHistoryFile{Version: baselineHistoryVersion, Servers: h.servers, EmergencyStarted: h.emergency, NewTablesStarted: h.newTables, RereadsTried: h.rereads, Jobs: h.jobs})
 	if err != nil {
 		// The only step here whose failure names nothing on its own: every
 		// other one returns an *os.PathError/*os.LinkError already carrying

@@ -90,9 +90,13 @@ func slotAt(t *testing.T, b *backupScheduler, id string, h int) console.BackupSc
 	b.watchers.Wait()
 	// A fallback full read started by the watcher: wait for it too.
 	st = b.ScheduleState(id)
-	for deadline := time.Now().Add(10 * time.Second); st.Running && time.Now().Before(deadline); {
+	for deadline := time.Now().Add(30 * time.Second); st.Running; st = b.ScheduleState(id) {
+		if time.Now().After(deadline) {
+			// Never a state taken halfway: every assertion after it would
+			// describe a job still running.
+			t.Fatalf("the slot's jobs were still running after 30 s: %+v", st)
+		}
 		time.Sleep(10 * time.Millisecond)
-		st = b.ScheduleState(id)
 	}
 	b.watchers.Wait()
 	return b.ScheduleState(id)
