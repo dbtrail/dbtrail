@@ -179,17 +179,21 @@ func TestUserType_builtInTypes(t *testing.T) {
 		col("id", "INTEGER", oidInt4), col("cost", "VARCHAR", oidMoney), col("addr", "VARCHAR", oidInet),
 		col("doc", "VARCHAR", oidJSONB), col("raw", "BLOB", oidBytea), col("num", "UINTEGER", oidOID),
 		col("one", "VARCHAR", oidChar), col("n", "BIGINT", oidInt8), col("title", "VARCHAR", oidText),
+		col("tags", "VARCHAR[]", oidTextArray), col("vtags", "VARCHAR[]", oidVarcharArray), col("ntags", "VARCHAR[]", oidNameArray),
+		col("ips", "VARCHAR[]", 1041), // inet[]
 	}}}
 	for _, q := range []string{
 		`SELECT id FROM b WHERE addr = '10.0.0.1'`, `SELECT id FROM b WHERE doc = '{}'`, `SELECT min(cost) FROM b`,
 		`SELECT id FROM b WHERE raw = 'ab'`, `SELECT id FROM b WHERE num = '0010'`, `SELECT count(DISTINCT addr) FROM b`,
 		`SELECT id FROM b WHERE one = 'a'`,
+		`SELECT id FROM b WHERE '10.0.0.1' = ANY(ips)`,
 	} {
 		if veto := CopyScreenFor(q, tables); veto == "" {
 			t.Errorf("%s: left to the copy", q)
 		}
 	}
-	for _, q := range []string{`SELECT cost, addr, doc FROM b`, `SELECT * FROM b`, `SELECT raw, num FROM b`, `SELECT id FROM b WHERE n > 1 AND title = 'x'`} {
+	for _, q := range []string{`SELECT cost, addr, doc FROM b`, `SELECT * FROM b`, `SELECT raw, num FROM b`, `SELECT id FROM b WHERE n > 1 AND title = 'x'`,
+		`SELECT id FROM b WHERE 'z' = ANY(tags)`, `SELECT id FROM b WHERE 'z' = ANY(vtags)`, `SELECT id FROM b WHERE 'z' = ANY(ntags)`} {
 		if veto := CopyScreenFor(q, tables); veto != "" {
 			t.Errorf("%s: sent to the source (%s)", q, veto)
 		}

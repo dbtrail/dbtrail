@@ -31,6 +31,12 @@ func userTypeColumn(c CatalogColumn) bool {
 	if sourceMark(c) != "" {
 		return false
 	}
+	switch c.SourceType {
+	case oidTextArray, oidVarcharArray, oidNameArray:
+		// Arrays of text: the copy holds and compares their elements as
+		// PostgreSQL's text.
+		return false
+	}
 	return c.SourceType >= firstUserOID || onlyTextOnCopy(c) || c.SourceType == oidBytea || c.SourceType == oidOID
 }
 
@@ -120,6 +126,13 @@ func userTypeUse(toks []rtToken, types map[string][]string) string {
 	}
 	return ""
 }
+
+// The array types of text, varchar and name (pg_type).
+const (
+	oidNameArray    = 1003
+	oidTextArray    = 1009
+	oidVarcharArray = 1015
+)
 
 // userTypeStarsRead is how many stars of a statement have their FROM read.
 const userTypeStarsRead = 64
