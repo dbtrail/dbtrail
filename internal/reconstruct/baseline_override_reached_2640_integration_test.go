@@ -4,6 +4,7 @@ package reconstruct_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -68,25 +69,36 @@ func TestBaselineOverridesReached_aFileThatCannotBeUsedIsNotAWait(t *testing.T) 
 // numbering refuses, and nothing is published.
 func TestBaselineOverride_aRenumberedLogStillRefuses(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
-	db, dsn, root, base := lateDDLIndex(t)
+	// orders is the table NOT read again: its footer carries the event mark
+	// a stream-written snapshot has, which is what shows the renumbering.
+	db, dsn, root, base := lateDDLIndexWith(t, "binlog.000003", "500", func(db *sql.DB, base time.Time) map[string]string {
+		markStreamCaptured(t, db)
+		testutil.InsertEvent(t, db, "binlog.000003", 400, 450, base.Add(-time.Second).Format("2006-01-02 15:04:05"), nil,
+			"shop", "orders", 2, "1", nil, nil, []byte(`{"id":1,"status":"new"}`))
+		var id uint64
+		if err := db.QueryRow("SELECT MAX(event_id) FROM binlog_events").Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return map[string]string{baseline.MetaKeyEventMark: reconstruct.EventMark{ID: id, File: "binlog.000003", End: 450}.Encode()}
+	})
 	addItems(t, db, root, base)
 	insert := func(start uint64, at time.Time, table, pk, after string) {
 		testutil.InsertEvent(t, db, "binlog.000001", start, start+50, at.Format("2006-01-02 15:04:05"), nil,
 			"shop", table, 2, pk, nil, nil, []byte(after))
 	}
-	insert(100, base.Add(10*time.Second), "orders", "9", `{"id":9,"status":"new"}`)
+	insert(100, base.Add(10*time.Second), "items", "9", `{"id":9,"status":"new"}`)
 
 	readAt := base.Add(15 * time.Second)
 	dir := filepath.Join(t.TempDir(), reconstruct.SnapshotDirName(readAt))
-	staged := filepath.Join(dir, "shop", "orders.parquet")
+	staged := filepath.Join(dir, "shop", "items.parquet")
 	writeOrdersShapedIn(t, staged, readAt, "binlog.000001", 150, [][]string{{"9", "new"}})
 	if err := baseline.WriteSuccessMarker(dir); err != nil {
 		t.Fatal(err)
 	}
-	insert(200, base.Add(20*time.Second), "items", "2", `{"id":2,"status":"X"}`)
+	insert(200, base.Add(20*time.Second), "orders", "2", `{"id":2,"status":"X"}`)
 
 	at := base.Add(30 * time.Second)
-	override := map[string]string{"shop.orders": staged}
+	override := map[string]string{"shop.items": staged}
 	if err := reconstruct.BaselineOverridesReached(context.Background(), reconstruct.FullTableConfig{
 		IndexDSN: dsn, BaselineSrc: root, OutputDir: root, At: at, BaselineOverride: override,
 	}); err != nil {
@@ -97,7 +109,7 @@ func TestBaselineOverride_aRenumberedLogStillRefuses(t *testing.T) {
 	if !errors.Is(err, reconstruct.ErrBinlogRenumbered) {
 		t.Fatalf("err = %v (failures %+v), want ErrBinlogRenumbered", err, failures)
 	}
-	if _, ts := published(t, root, "items", at.Add(time.Second)); !ts.Equal(base) {
+	if _, ts := published(t, root, "orders", at.Add(time.Second)); !ts.Equal(base) {
 		t.Fatalf("a snapshot was published at %s across a renumbered log", ts)
 	}
 }
