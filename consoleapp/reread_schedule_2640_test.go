@@ -171,6 +171,9 @@ func (r *rereadSched) dumpRecords() []console.BaselineRunRecord {
 // wantNoReadLeft: no staged read is left in the working folder.
 func (r *rereadSched) wantNoReadLeft(t *testing.T) {
 	t.Helper()
+	// The run says it ended before its deferred removal of the read runs:
+	// wait for the whole run, not only its status.
+	r.sup.postRefresh.Wait()
 	for _, name := range rereadLeft(t, r.sup.stagingDir) {
 		if strings.HasPrefix(name, rereadDirPrefix) {
 			t.Fatalf("a staged read is left in the working folder: %s", name)
