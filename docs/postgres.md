@@ -1273,6 +1273,49 @@ listener, its own workers, its own memory.
   (`copy_behind_source`, or `copy_age_unknown` when the lag cannot be told).
   Capture's state is read at most every 30 seconds, so a limit is not kept
   to the second.
+
+  A statement that reads a table from its snapshot alone (every table read
+  in fast mode; in fresh mode a table with no recent changes, or one whose
+  changes are not ready) is measured by what the snapshot's files record:
+  each file holds every change committed before an instant written in it,
+  and the statement is as far behind as the oldest such instant of the
+  tables it reads, by the router's clock. That number errs old, with the
+  limits named at the end of this list:
+  - It sits a minute before the moment the file was written at, so a
+    snapshot just taken reads about a minute behind. A limit under that
+    sends every such statement to the source.
+  - A table with no change is published in the next snapshot as the file it
+    was, with the instant of the update that last wrote it. A statement
+    that reads it is as old as that update, however new the snapshot is,
+    until the table is written again.
+  - A source with no write since the snapshot makes the lag grow though
+    nothing is missing, and so does a capture that stopped: capture's state
+    is not asked for this number.
+  - A full read's instant is the source's clock; an update's is the older of
+    the commit time of the newest captured change and the clock of the
+    machine that ran the update. So that a source clock ahead of the
+    router's does not make a file look new, the instant is never later than
+    when the file was last written, by the router's machine.
+  - Three cases can still read younger than the data is. With a source clock
+    ahead of the router's, a file that took minutes to write can read
+    younger by up to the lesser of the clock's lead and the time the write
+    took. A schema removed from a server and added back later leaves the
+    changes made in between uncaptured, and nothing records that gap (fresh
+    mode has the same limit). A publication that does not publish `TRUNCATE`
+    keeps the rows a `TRUNCATE` removed, under a recent age.
+
+  A file that does not record the instant has no age and its statements go
+  to the source under any limit (`copy_age_unknown`): a full read taken by
+  a version before 0.137.0 that no snapshot update has written again since,
+  a copy that is not in a local folder. The next snapshot update or full
+  read of the table records it. The same goes, for as long as it lasts, for
+  a table capture lost or dropped changes of since its rows were read, a
+  table outside the schemas the server captures now, a capture that has
+  saved no state for more than a minute after the file was read or written,
+  a server whose captured schemas are not known to the console, and an index
+  that cannot be asked what capture lost. In fast mode, pick a limit above
+  the time between snapshot updates plus a minute, or the copy answers only
+  right after each update.
 - **The copy answers what it answers as PostgreSQL does.** With the server's
   forwarding user, each statement is decided on its own: the copy answers it
   when everything in it is known to give PostgreSQL's answer there and its
@@ -2272,9 +2315,11 @@ STATUS`, with the same row names where they mean the same. The rows:
 - When the copy answered: `last_answer_indexed_through` (every change capture
   had recorded up to this instant was in what the statement read) and
   `last_answer_age_seconds` (how long before the answer that was, rounded up).
+  For an answer that read a table without its newest changes (fast mode,
+  among others) they are what its snapshot files record, as in `/status`.
   Both read `unknown`, and `last_answer_age_unknown_reason` says why, for an
-  answer that read a table without its newest changes (fast mode, among
-  others: it is as old as the snapshot it read) or that read no table.
+  answer whose snapshot files do not record how far they reach or that read
+  no table.
 - `counting_since`, `statements_copy`, `statements_source`,
   `statements_refused` and one `reason_<name>` per reason: the server's counts
   since the router started, the same numbers `/status` serves.
@@ -2324,7 +2369,11 @@ this instant, a commit time on the source, was in what it read) and
 clock), with `data_age_max_seconds` the worst since the process started. Only
 an answer the client got counts, never a statement the source answered or one
 that ended in an error. An answer that read a table without its newest
-changes (fast mode, among others) has no age: `data_age_unknown` counts them,
+changes (fast mode, among others) is as old as the oldest instant its
+snapshot files record, the one a lag limit is measured by (see the lag limit
+above): a minute or more for a snapshot just taken, and as old as the update
+that last wrote the file for a table with no change. When a file it read
+records none, the answer has no age: `data_age_unknown` counts them,
 so with any the worst is a floor, and `data_age_unknown_reason` says why the
 last one has none. On a source with no write since, the age grows though
 nothing is missing; this machine's clock ahead of the source's makes it

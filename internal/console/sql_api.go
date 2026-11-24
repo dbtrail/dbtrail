@@ -1450,7 +1450,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			// none of the copy's tables (the change log, a probe) is not held
 			// to it.
 			if lim, ok := behindLimitFrom(ctx); ok && len(readTables) > 0 {
-				behind, why := s.statementBehind(ctx, b, lim.id, in, readTables, tailThrough, tailThroughID, allTailed)
+				behind, why := s.statementBehindFor(ctx, b, lim.id, in, readTables, tailThrough, tailThroughID, allTailed)
 				if why != "" || behind > lim.limit {
 					viewsRefusal = &sqlBehindRefusal{behind: behind, limit: lim.limit, unknown: why}
 					if ctx.Err() != nil {
@@ -1619,6 +1619,9 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 		observe.ObserveSQLStatementPhase(phase, d)
 	}
 	readFrom, readFromOK := copyReadFrom(in, readTables)
+	if !allTailed || tailThrough.IsZero() {
+		s.notePGSnapshotThrough(ctx, b, readTables)
+	}
 	res.DateScales = dateScales
 	return sqlOutcome{Result: res, CopyUpdatedAt: copyUpdatedAt, Phases: parent,
 		ReadFrom: readFrom, ReadFromOK: readFromOK, TailThrough: tailThrough, TailThroughID: tailThroughID, AllTailed: allTailed,

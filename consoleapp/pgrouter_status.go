@@ -93,7 +93,14 @@ type pgRouterServerNumbers struct {
 	// this machine's clock, rounded up; DataAgeMaxSeconds the worst since
 	// CountingSince. A source with no write since makes it grow though
 	// nothing is missing; this machine's clock ahead of the source's makes
-	// it larger, behind it smaller, down to 0. Absent until a fresh answer.
+	// it larger, behind it smaller, down to 0. Absent until an answer that
+	// has one.
+	//
+	// For an answer that read a table from its snapshot alone (#3125),
+	// DataAsOf is the oldest bound its snapshot files record: every change
+	// committed before it is in the file. It is a minute before the moment
+	// the file was written at, and a table with no change keeps the bound of
+	// the update that last wrote its file, so it only errs old.
 	DataAsOf          string `json:"data_as_of,omitempty"`
 	DataAgeSeconds    *int64 `json:"data_age_seconds,omitempty"`
 	DataAgeMaxSeconds *int64 `json:"data_age_max_seconds,omitempty"`
@@ -106,7 +113,7 @@ type pgRouterServerNumbers struct {
 
 // Why the copy's last answer has no age.
 const (
-	pgAgeSnapshotAlone = "the last answer read a table without its newest captured changes (fast mode, a table with none, a statement on the change log, an earlier copy, or a wait for them that ran out), and how far a PostgreSQL snapshot reaches is not recorded: it is as old as the snapshot it read"
+	pgAgeSnapshotAlone = "the last answer read a table without its newest captured changes (fast mode, a table with none, a statement on the change log, an earlier copy, or a wait for them that ran out), and a snapshot file it read does not record how far it reaches (a full read taken before that was recorded, a table capture lost or dropped changes of, a copy that is not in a local folder): it is as old as the snapshot it read"
 	pgAgeUnplaced      = "which snapshot files the last answer read could not be told"
 )
 
@@ -206,7 +213,7 @@ func (r *pgRouteStats) age(id string, a console.CopyRunAge) {
 		r.perServer[id] = t
 	}
 	latest := !a.Ran.Before(t.ageRan)
-	if !a.Tailed {
+	if !pgAgeKnown(a) {
 		t.unknown++
 		if latest {
 			t.ageRan, t.ageThrough, t.ageWhy = a.Ran, time.Time{}, pgAgeSnapshotAlone
@@ -223,6 +230,13 @@ func (r *pgRouteStats) age(id string, a console.CopyRunAge) {
 	if latest {
 		t.ageRan, t.ageThrough, t.ageWhy = a.Ran, a.Through, ""
 	}
+}
+
+// pgAgeKnown reports whether a has an age: every table it read had its
+// recent changes laid over it, or the snapshot files it read say how far
+// they reach (#3125).
+func pgAgeKnown(a console.CopyRunAge) bool {
+	return a.Tailed || (a.Snapshot && !a.Through.IsZero())
 }
 
 // pgAgeSeconds is d in whole seconds, rounded up: a lag is never said
