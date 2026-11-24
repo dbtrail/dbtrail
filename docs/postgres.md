@@ -2114,6 +2114,28 @@ The source answers a cheap statement for:
   count(*) FROM t`, a `*` inside a `WITH` whose outer query names other
   columns). An argument declared `bpchar` is the source's too: it compares
   without its trailing blanks.
+- **A text column under a nondeterministic collation** (an ICU collation
+  created with `deterministic = false`, one that ignores case or accents)
+  follows the same rule: PostgreSQL finds `'ab'` and `'AB'` equal, groups
+  them as one and sorts them by the collation, the copy compares bytes. A
+  statement that compares, groups, joins, sorts, aggregates, applies
+  `DISTINCT` to or passes to a function such a column goes to the source, or
+  is refused without a forwarding user; showing it stays on the copy. The
+  snapshot records each column's collation, and the port also reads it from
+  the source's catalog (`pg_attribute` and `pg_collation`, never a row of a
+  table) as the account it forwards with, at most once a minute: the
+  source's answer is the one that counts, so a column changed with `ALTER ...
+  COLLATE`, which keeps its type, is seen without a new snapshot. When the
+  source cannot be asked (it does not answer within two seconds; asked again
+  30 seconds later), the snapshot's answer stands. **A snapshot taken before
+  this version does not record collations**: then, while the source cannot
+  be asked, every text column of it is taken for nondeterministic, so a
+  statement that compares, groups or sorts its text goes to the source, or is
+  refused on a server that answers from the copy alone, until the table's
+  next full read records the collation (an update of the snapshot from
+  captured changes keeps what the last full read recorded). A
+  `COLLATE` written in the statement goes to the source. A database's default collation is always deterministic in
+  PostgreSQL, so it needs nothing of this.
   For a `char(n)` column, the type is
   the one the last snapshot recorded: a column changed from `text` to
   `char(n)` on the source is treated as `char(n)` from the next snapshot on.

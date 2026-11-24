@@ -1125,6 +1125,9 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		// Or as the capture account itself, when the server said yes to that
 		// and has no account of its own (#3054): then every statement passes
 		// the capture gate first (pgshim, capture_gate.go).
+		// Which columns are under a nondeterministic collation (#3111): read
+		// from the source's catalog, never from its rows.
+		collations := pgSourceCollations(fwd.DSN, tgt.ID)
 		{
 			untrack, ok := srv.TrackRoutedConn(tgt.ID, fwd.Gen, drop, nil)
 			if !ok {
@@ -1251,7 +1254,7 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 				// columns, and the screen cannot send a statement to the
 				// copy, or say why not, without it.
 				return copySQL.Run(console.WithPGCatalogRead(ctx), statement, pgPortSchema, sqlsandbox.Session{PostgresRules: true, TrimPadded: true, PostgresNames: true})
-			})
+			}, collations)
 		}
 		return bound, nil
 	}
