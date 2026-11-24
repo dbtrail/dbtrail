@@ -3,6 +3,8 @@ package pgshim
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 )
@@ -223,6 +225,7 @@ func TestTrimmedFor(t *testing.T) {
 	s := &session{user: "app"}
 	s.initSettings("public", "app")
 	s.reported = map[string]string{}
+	s.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	var fail error
 	s.bound = &Binding{Catalog: func(context.Context) ([]CatalogTable, error) { return cat, fail }}
 	if got := s.trimmedFor("SELECT id FROM a WHERE c = 'ab'"); len(got) != 1 || got[0] != "c" {
