@@ -167,4 +167,30 @@ func TestIntegrationPGRouterSnapshotAgeAndLagLimit_3125(t *testing.T) {
 	if got := ask(); got != "10" {
 		t.Errorf("the limit off: answered %s, want the copy's 10", got)
 	}
+
+	// The server is edited and capture no longer covers the table. Capture
+	// drops its changes before they reach the record of drops, and a snapshot
+	// update can still stamp its file with a new bound, so the file's word is
+	// not taken: the age is unknown and the source answers.
+	limit(3600)
+	if got := ask(); got != "10" {
+		t.Fatalf("before the edit, a limit of an hour: answered %s, want the copy's 10", got)
+	}
+	edited, ok := f.owner.Get(e.ID)
+	if !ok {
+		t.Fatal("the server is gone from the registry")
+	}
+	edited.Schemas = "another_schema"
+	if err := f.owner.Update(edited); err != nil {
+		t.Fatal(err)
+	}
+	srv.RefreshFollowedFiles()
+	before = numbers()
+	if got := ask(); got != "11" {
+		t.Errorf("a table outside what capture records: answered %s, want the source's 11; reasons %v", got, numbers().Reasons)
+	}
+	after = numbers()
+	if after.Reasons[pgshim.ReasonCopyAgeUnknown] != before.Reasons[pgshim.ReasonCopyAgeUnknown]+1 {
+		t.Errorf("a table outside what capture records: reasons before %v, after %v, want one more copy_age_unknown", before.Reasons, after.Reasons)
+	}
 }

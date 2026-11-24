@@ -2,6 +2,8 @@ package console
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -10,6 +12,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/snapshotdir"
+	"github.com/dbtrail/dbtrail/internal/status"
 	"github.com/dbtrail/dbtrail/internal/views"
 )
 
@@ -24,7 +27,7 @@ import (
 // instant is the answer's "through": the one a tail laid over the file starts
 // from (pgTailSource.cut), read the same way.
 //
-// It can only err OLD, and it does:
+// It errs OLD, with one limit named under "The clocks":
 //   - it is the bound of each file the statement read, the oldest of them,
 //     never a bound of the folder: a table with no change is published again
 //     as the file it was (pgCarryForwardEligible), with the bound of the
@@ -40,15 +43,22 @@ import (
 // The clocks: a full read's bound is the source's clock (its now() when the
 // read began), an update's is the older of the commit time of the newest
 // change the index held (the source's clock) and the update's own time (the
-// clock of the machine that ran it). The age is the reader's clock minus
-// that, as every age the router reports: a source clock ahead of the
-// reader's reads as less lag, down to zero.
+// clock of the machine that ran it). A source clock ahead of this machine's
+// would make that instant look newer than it is, so it is capped at when the
+// file was written, by this machine's clock (pgFileWritten): a file is never
+// younger than its last write. What the cap cannot see is the time between
+// the read and the write: with a source clock ahead, a file that took
+// minutes to write can read younger than its rows by up to the lesser of the
+// clock's lead and that time.
 //
 // A file that records no bound (a full read from before it was recorded),
 // one that is not a file of a local snapshot folder, one published over a
-// known loss of captured changes, and one of a table capture dropped changes
-// of since its rows were read (an update can have stamped it with a new
-// bound over them) have no age: unknown, as before.
+// known loss of captured changes, one of a table capture dropped changes of
+// since its rows were read (an update can have stamped it with a new bound
+// over them), one of a table outside what capture records now (its changes
+// are dropped before the record of drops, and an update can stamp it the
+// same way), and any file while capture has saved no state for longer than
+// pgNoCaptureStateBound have no age: unknown, as before.
 
 // pgFileThrough is the instant the file whose footer is md holds every change committed before, in the snapshot
 // folder taken at dirAt, or why it has none.
@@ -121,6 +131,14 @@ func (s *Server) pgTableThrough(t views.BaselineTable, loss pgLossOf) (time.Time
 	if why := loss(t, md); why != "" {
 		return time.Time{}, name + ": " + why
 	}
+	// Never younger than its last write, whatever the source's clock said.
+	written := pgFileWritten(t)
+	if written.IsZero() {
+		return time.Time{}, name + ": when its file was written could not be told"
+	}
+	if written.Before(through) {
+		through = written
+	}
 	return through, ""
 }
 
@@ -143,28 +161,61 @@ func (s *Server) pgReadThroughWith(read []views.BaselineTable, loss pgLossOf) (t
 	return oldest, ""
 }
 
-// pgReadThrough is pgReadThroughWith over capture's record of what it lost,
-// read from b's index now (strictly, pgCaptureLossState): an index that
-// cannot be asked leaves the statement with no instant. A capture that has
-// saved no state yet records no loss.
-func (s *Server) pgReadThrough(ctx context.Context, b *bundle, read []views.BaselineTable) (time.Time, string) {
+// pgSnapshotLossState is the part of the capture's state the age of a
+// snapshot answer depends on, in one read of the index: the lost slot and the
+// ledger of dropped changes, both as they are now (a cached record would be
+// an optimistic one). nil with no reason: capture has saved no state. Any
+// error, an index without these columns included, is a reason: the age is
+// then unknown.
+func pgSnapshotLossState(ctx context.Context, db *sql.DB) (*status.StreamStateInfo, string) {
+	var lost sql.NullTime
+	var skips sql.NullString
+	err := db.QueryRowContext(ctx, "SELECT gap_lost_at, capture_skips FROM stream_state WHERE id = 1").Scan(&lost, &skips)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, ""
+	case err != nil:
+		pgWarnLossStateUnread(err)
+		return nil, "the capture's record of lost and dropped changes could not be read from the index (DBTrail's log has the details)"
+	}
+	return &status.StreamStateInfo{GapColumnsPresent: true, GapLostAt: lost, CaptureSkips: skips}, ""
+}
+
+// pgReadThrough is pgReadThroughWith for server id over what capture records
+// now and its record of what it lost, read from b's index
+// (pgSnapshotLossState): a server whose capture filter is not known here, or
+// an index that cannot be asked, leaves the statement with no instant. So
+// does a table outside the filter, and a capture with no saved state past
+// pgNoCaptureStateBound, the rule of the port's list of tables not captured.
+func (s *Server) pgReadThrough(ctx context.Context, b *bundle, id string, read []views.BaselineTable) (time.Time, string) {
 	if len(read) == 0 {
 		return time.Time{}, "the statement read no table of the copy"
 	}
 	if b == nil || b.db == nil {
 		return time.Time{}, "the server's index, which records what capture lost, could not be reached"
 	}
+	captures, _, known := s.tailCapturesKeyed(id)
+	if !known {
+		return time.Time{}, "which tables capture records is not known here"
+	}
 	rctx, cancel := context.WithTimeout(ctx, copyUnchangedTimeout)
-	st, unreadable := pgCaptureLossState(rctx, b.db)
+	st, unreadable := pgSnapshotLossState(rctx, b.db)
 	cancel()
 	if unreadable != "" {
 		return time.Time{}, unreadable
 	}
+	now := time.Now()
 	return s.pgReadThroughWith(read, func(t views.BaselineTable, md baseline.DumpMetadata) string {
-		if st == nil {
-			return ""
+		if captures != nil && !captures(t.Schema, t.Table) {
+			return "it is outside what capture records"
 		}
 		lsn, at := reconstruct.PGReadPoint(md)
+		if st == nil {
+			if age, ok := pgSnapshotAge(now, at, pgFileWritten(t)); !ok || age >= pgNoCaptureStateBound {
+				return "capture has saved no state in the index since its snapshot was read, so its dropped changes are not on record"
+			}
+			return ""
+		}
 		return pgTailCaptureLoss(st, lsn, at, t.Schema, t.Table)
 	})
 }
@@ -186,7 +237,7 @@ func (s *Server) statementBehindFor(ctx context.Context, b *bundle, id string, i
 	if allTailed || b == nil || !s.SourceIsPostgres(id) {
 		return s.statementBehind(ctx, b, id, in, read, tailThrough, tailThroughID, allTailed)
 	}
-	cut, why := s.pgReadThrough(ctx, b, read)
+	cut, why := s.pgReadThrough(ctx, b, id, read)
 	if why != "" {
 		if ctx.Err() == nil {
 			s.copyAges.faults.warn(id, "Engine Routing: how far the copy's snapshot reaches is not known, so statements held to the server's lag limit are answered by the source (or refused on a connection that does not route)",
@@ -254,13 +305,19 @@ func WithPGSnapshotAge(ctx context.Context, into *PGSnapshotAge) context.Context
 
 // notePGSnapshotThrough fills the PGSnapshotAge ctx carries, when it carries
 // one that the lag limit's own measure did not fill already, with
-// pgReadThrough of the tables the statement read.
+// pgReadThrough of the tables the statement read. Its caller does not call it
+// for a statement that read every table with its tail, whose age is the
+// tails': this reads the index on the statement's turn.
 func (s *Server) notePGSnapshotThrough(ctx context.Context, b *bundle, read []views.BaselineTable) {
 	into, _ := ctx.Value(pgSnapshotAgeKey{}).(*PGSnapshotAge)
 	if into == nil || len(read) == 0 || !into.get().IsZero() {
 		return
 	}
-	if through, why := s.pgReadThrough(ctx, b, read); why == "" {
+	id, ok := tailsFor(ctx)
+	if !ok {
+		return
+	}
+	if through, why := s.pgReadThrough(ctx, b, id, read); why == "" {
 		into.set(through)
 	}
 }

@@ -135,3 +135,14 @@ func TestPGRouterStatusSnapshotAge(t *testing.T) {
 		t.Fatalf("SHOW dbtrail.router_status after a snapshot answer with no bound: %v", rows)
 	}
 }
+
+// The port's own probes report no age, so they do not pay for one (#3125):
+// measuring it reads the index.
+func TestPGSnapshotAgeForProbe(t *testing.T) {
+	if got := pgSnapshotAgeFor(pgshim.RunOptions{Probe: true}); got != nil {
+		t.Errorf("a probe asked for the snapshot's age: %v", got)
+	}
+	if got := pgSnapshotAgeFor(pgshim.RunOptions{}); got == nil {
+		t.Error("a client's statement did not ask for the snapshot's age")
+	}
+}

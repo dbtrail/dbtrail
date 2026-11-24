@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/snapshotdir"
@@ -79,11 +80,17 @@ func TestPGTableThroughOf(t *testing.T) {
 // since ("" for none).
 func pgAgeTable(t *testing.T, root string, dirAt time.Time, table string, lsn uint64, since string) views.BaselineTable {
 	t.Helper()
+	return pgAgeTableRead(t, root, dirAt, table, lsn, since, "2026-11-17T08:00:00Z")
+}
+
+// pgAgeTableRead is pgAgeTable for a file whose rows were read at readAt.
+func pgAgeTableRead(t *testing.T, root string, dirAt time.Time, table string, lsn uint64, since, readAt string) views.BaselineTable {
+	t.Helper()
 	md := map[string]string{
 		baseline.MetaKeyLSN:              strconv.FormatUint(lsn, 10),
 		baseline.MetaKeyLockMode:         baseline.LockStampPGRepeatableRead,
 		baseline.MetaKeySnapshotProducer: baseline.ProducerDump,
-		baseline.MetaKeyLastDumpAt:       "2026-11-17T08:00:00Z",
+		baseline.MetaKeyLastDumpAt:       readAt,
 		baseline.MetaKeyFoldGeneration:   "0",
 	}
 	if since != "" {
@@ -156,7 +163,7 @@ func TestPGReadThrough(t *testing.T) {
 		t.Errorf("another table of the same server: %v %q, want its instant", got, why)
 	}
 	// With no index to ask what capture lost, nothing is said.
-	if got, why := s.pgReadThrough(context.Background(), &bundle{pgSource: true}, []views.BaselineTable{written}); why == "" || !got.IsZero() {
+	if got, why := s.pgReadThrough(context.Background(), &bundle{pgSource: true}, "pg", []views.BaselineTable{written}); why == "" || !got.IsZero() {
 		t.Errorf("no index: %v %q, want no instant", got, why)
 	}
 	// Not a table file in a local snapshot folder: nothing is guessed.
@@ -192,6 +199,7 @@ func TestStatementBehindForPostgresSnapshot(t *testing.T) {
 	defer db.Close()
 	mock.MatchExpectationsInOrder(true)
 	srv := newRegistryServer(t)
+	srv.tailCapturesHook = pgAgeCapturesAll
 	pg := &bundle{pgSource: true, db: db}
 	srv.cm.mu.Lock()
 	srv.cm.boot = pg
@@ -200,8 +208,7 @@ func TestStatementBehindForPostgresSnapshot(t *testing.T) {
 	behind := func(tail time.Time, allTailed bool, read ...views.BaselineTable) (time.Duration, string) {
 		if !allTailed {
 			// What capture lost is asked of the index for each statement.
-			expectStreamState(mock, nil)
-			mock.ExpectQuery("SELECT capture_skips FROM").WillReturnRows(sqlmock.NewRows([]string{"capture_skips"}).AddRow(nil))
+			expectPGAgeLoss(mock)
 		}
 		return srv.statementBehindFor(ctx, pg, bootServerID, views.Input{Baselines: read}, read, tail, 0, allTailed)
 	}
@@ -225,8 +232,7 @@ func TestStatementBehindForPostgresSnapshot(t *testing.T) {
 		t.Errorf("a tail a second old beside the snapshot: %v %q, want the snapshot's eleven minutes", got, why)
 	}
 	// The ledger of dropped changes cannot be read: unknown, never an age.
-	expectStreamState(mock, nil)
-	mock.ExpectQuery("SELECT capture_skips FROM").WillReturnError(errors.New("connection refused"))
+	mock.ExpectQuery("SELECT gap_lost_at, capture_skips FROM stream_state").WillReturnError(errors.New("connection refused"))
 	if got, why := srv.statementBehindFor(ctx, pg, bootServerID, views.Input{}, []views.BaselineTable{recent}, time.Time{}, 0, false); why != copyAgeWhyNotPlaced || got != 0 {
 		t.Errorf("the record of dropped changes unreadable: %v %q, want unknown", got, why)
 	}
@@ -238,9 +244,8 @@ func TestStatementBehindForPostgresSnapshot(t *testing.T) {
 	// The measure is kept for a caller that asked for the instant, so the
 	// index is asked once for the statement.
 	var kept PGSnapshotAge
-	expectStreamState(mock, nil)
-	mock.ExpectQuery("SELECT capture_skips FROM").WillReturnRows(sqlmock.NewRows([]string{"capture_skips"}).AddRow(nil))
-	kctx := WithPGSnapshotAge(ctx, &kept)
+	expectPGAgeLoss(mock)
+	kctx := withTailsFor(WithPGSnapshotAge(ctx, &kept), bootServerID)
 	if _, why := srv.statementBehindFor(kctx, pg, bootServerID, views.Input{}, []views.BaselineTable{recent}, time.Time{}, 0, false); why != "" {
 		t.Fatalf("with a holder: %q", why)
 	}
@@ -274,20 +279,17 @@ func TestPGSnapshotAgePlace(t *testing.T) {
 	old := pgAgeTable(t, root, pgAgeDir, "legacy", 40, "")
 	want := time.Date(2026, 11, 20, 11, 58, 30, 0, time.UTC)
 	ran := pgAgeDir.Add(time.Hour)
-	s := &Server{}
+	s := &Server{tailCapturesHook: pgAgeCapturesAll}
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 	pg := &bundle{pgSource: true, db: db}
-	asked := func() {
-		expectStreamState(mock, nil)
-		mock.ExpectQuery("SELECT capture_skips FROM").WillReturnRows(sqlmock.NewRows([]string{"capture_skips"}).AddRow(nil))
-	}
+	asked := func() { expectPGAgeLoss(mock) }
 
 	var got PGSnapshotAge
-	ctx := WithPGSnapshotAge(context.Background(), &got)
+	ctx := withTailsFor(WithPGSnapshotAge(context.Background(), &got), "pg")
 	asked()
 	s.notePGSnapshotThrough(ctx, pg, []views.BaselineTable{written})
 	if a := got.Place(CopyRunAge{Ran: ran, Snapshot: true}); !a.Through.Equal(want) || !a.Snapshot || a.Tailed {
@@ -305,7 +307,7 @@ func TestPGSnapshotAgePlace(t *testing.T) {
 
 	var none PGSnapshotAge
 	asked()
-	s.notePGSnapshotThrough(WithPGSnapshotAge(context.Background(), &none), pg, []views.BaselineTable{written, old})
+	s.notePGSnapshotThrough(withTailsFor(WithPGSnapshotAge(context.Background(), &none), "pg"), pg, []views.BaselineTable{written, old})
 	if a := none.Place(CopyRunAge{Ran: ran, Snapshot: true}); !a.Through.IsZero() {
 		t.Errorf("a file with no bound, and the answer has an instant: %+v", a)
 	}
@@ -324,5 +326,144 @@ func TestPGSnapshotAgePlace(t *testing.T) {
 	}
 	if WithPGSnapshotAge(context.Background(), nil) != context.Background() {
 		t.Error("a nil holder changed the context")
+	}
+}
+
+func pgAgeCapturesAll(string) (func(string, string) bool, bool) { return nil, true }
+
+// expectPGAgeLoss is the one read of the index an age costs, with no loss
+// and no drop on record.
+func expectPGAgeLoss(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery("SELECT gap_lost_at, capture_skips FROM stream_state").
+		WillReturnRows(sqlmock.NewRows([]string{"gap_lost_at", "capture_skips"}).AddRow(nil, nil))
+}
+
+// What can make a file's own word about its age too young (#3125): each of
+// these leaves the statement with no age, or an older one.
+func TestPGReadThroughDoesNotReadYoung(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	rfc := func(d time.Duration) string { return now.Add(d).Format(time.RFC3339) }
+	dirAt := now.Add(-2 * time.Minute)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	pg := &bundle{pgSource: true, db: db}
+	ctx := context.Background()
+
+	t.Run("a table outside what capture records", func(t *testing.T) {
+		root := t.TempDir()
+		tbl := pgAgeTable(t, root, dirAt, "orders", 250, rfc(-3*time.Minute))
+		s := &Server{tailCapturesHook: func(string) (func(string, string) bool, bool) {
+			return func(schema, _ string) bool { return schema == "shop" }, true
+		}}
+		expectPGAgeLoss(mock)
+		if got, why := s.pgReadThrough(ctx, pg, "pg", []views.BaselineTable{tbl}); !got.IsZero() || !strings.Contains(why, "outside what capture records") {
+			t.Errorf("%v %q, want no instant", got, why)
+		}
+	})
+	t.Run("a table inside what capture records", func(t *testing.T) {
+		root := t.TempDir()
+		tbl := pgAgeTable(t, root, dirAt, "orders", 250, rfc(-3*time.Minute))
+		s := &Server{tailCapturesHook: func(string) (func(string, string) bool, bool) {
+			return func(schema, _ string) bool { return schema == "public" }, true
+		}}
+		expectPGAgeLoss(mock)
+		if got, why := s.pgReadThrough(ctx, pg, "pg", []views.BaselineTable{tbl}); why != "" || got.IsZero() {
+			t.Errorf("%v %q, want its instant", got, why)
+		}
+	})
+	t.Run("what capture records is not known", func(t *testing.T) {
+		root := t.TempDir()
+		tbl := pgAgeTable(t, root, dirAt, "orders", 250, rfc(-3*time.Minute))
+		s := &Server{tailCapturesHook: func(string) (func(string, string) bool, bool) { return nil, false }}
+		// No expectation: the index is not asked.
+		if got, why := s.pgReadThrough(ctx, pg, "pg", []views.BaselineTable{tbl}); !got.IsZero() || why == "" {
+			t.Errorf("%v %q, want no instant", got, why)
+		}
+	})
+	t.Run("a source clock ahead of this machine", func(t *testing.T) {
+		root := t.TempDir()
+		// Written 12 minutes ago here; the source's clock, 9 minutes ahead,
+		// put the bound 3 minutes ago.
+		tbl := pgAgeTable(t, root, dirAt, "orders", 250, rfc(-3*time.Minute))
+		wrote := now.Add(-12 * time.Minute)
+		if err := os.Chtimes(tbl.Path, wrote, wrote); err != nil {
+			t.Fatal(err)
+		}
+		s := &Server{tailCapturesHook: pgAgeCapturesAll}
+		expectPGAgeLoss(mock)
+		got, why := s.pgReadThrough(ctx, pg, "pg", []views.BaselineTable{tbl})
+		if why != "" || !got.Equal(wrote) {
+			t.Errorf("%v %q, want the file's write time %v", got, why, wrote)
+		}
+	})
+	t.Run("a file written before its bound on a slower source clock keeps the bound", func(t *testing.T) {
+		root := t.TempDir()
+		tbl := pgAgeTable(t, root, dirAt, "orders", 250, rfc(-30*time.Minute))
+		s := &Server{tailCapturesHook: pgAgeCapturesAll}
+		expectPGAgeLoss(mock)
+		if got, why := s.pgReadThrough(ctx, pg, "pg", []views.BaselineTable{tbl}); why != "" || !got.Equal(now.Add(-30*time.Minute)) {
+			t.Errorf("%v %q, want the bound", got, why)
+		}
+	})
+	noState := func() {
+		mock.ExpectQuery("SELECT gap_lost_at, capture_skips FROM stream_state").
+			WillReturnRows(sqlmock.NewRows([]string{"gap_lost_at", "capture_skips"}))
+	}
+	t.Run("no capture state, a snapshot just read", func(t *testing.T) {
+		root := t.TempDir()
+		tbl := pgAgeTableRead(t, root, dirAt, "orders", 250, rfc(-time.Minute), rfc(-5*time.Second))
+		s := &Server{tailCapturesHook: pgAgeCapturesAll}
+		noState()
+		if got, why := s.pgReadThrough(ctx, pg, "pg", []views.BaselineTable{tbl}); why != "" || got.IsZero() {
+			t.Errorf("%v %q, want its instant", got, why)
+		}
+	})
+	t.Run("no capture state, read past the bound", func(t *testing.T) {
+		root := t.TempDir()
+		tbl := pgAgeTableRead(t, root, dirAt, "orders", 250, rfc(-time.Minute), rfc(-pgNoCaptureStateBound-time.Second))
+		s := &Server{tailCapturesHook: pgAgeCapturesAll}
+		noState()
+		if got, why := s.pgReadThrough(ctx, pg, "pg", []views.BaselineTable{tbl}); !got.IsZero() || !strings.Contains(why, "saved no state") {
+			t.Errorf("%v %q, want no instant", got, why)
+		}
+	})
+	t.Run("no capture state, the file written past the bound", func(t *testing.T) {
+		root := t.TempDir()
+		tbl := pgAgeTableRead(t, root, dirAt, "orders", 250, rfc(-time.Minute), rfc(-5*time.Second))
+		wrote := now.Add(-pgNoCaptureStateBound - time.Second)
+		if err := os.Chtimes(tbl.Path, wrote, wrote); err != nil {
+			t.Fatal(err)
+		}
+		s := &Server{tailCapturesHook: pgAgeCapturesAll}
+		noState()
+		if got, why := s.pgReadThrough(ctx, pg, "pg", []views.BaselineTable{tbl}); !got.IsZero() || !strings.Contains(why, "saved no state") {
+			t.Errorf("%v %q, want no instant", got, why)
+		}
+	})
+	t.Run("a lost slot since the read", func(t *testing.T) {
+		root := t.TempDir()
+		tbl := pgAgeTableRead(t, root, dirAt, "orders", 250, rfc(-time.Minute), rfc(-30*time.Second))
+		s := &Server{tailCapturesHook: pgAgeCapturesAll}
+		mock.ExpectQuery("SELECT gap_lost_at, capture_skips FROM stream_state").
+			WillReturnRows(sqlmock.NewRows([]string{"gap_lost_at", "capture_skips"}).AddRow(now, nil))
+		if got, why := s.pgReadThrough(ctx, pg, "pg", []views.BaselineTable{tbl}); !got.IsZero() || !strings.Contains(why, "lost events") {
+			t.Errorf("%v %q, want no instant", got, why)
+		}
+	})
+	t.Run("an index without the columns", func(t *testing.T) {
+		root := t.TempDir()
+		tbl := pgAgeTable(t, root, dirAt, "orders", 250, rfc(-3*time.Minute))
+		s := &Server{tailCapturesHook: pgAgeCapturesAll}
+		mock.ExpectQuery("SELECT gap_lost_at, capture_skips FROM stream_state").
+			WillReturnError(&mysql.MySQLError{Number: 1054, Message: "Unknown column"})
+		if got, why := s.pgReadThrough(ctx, pg, "pg", []views.BaselineTable{tbl}); !got.IsZero() || why == "" {
+			t.Errorf("%v %q, want no instant", got, why)
+		}
+	})
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
 	}
 }

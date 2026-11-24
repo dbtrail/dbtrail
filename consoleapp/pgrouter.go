@@ -1189,8 +1189,8 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			sess := sqlsandbox.Session{PostgresRules: true, PostgresNames: true, TimeZone: opts.TimeZone}
 			// How far the snapshot files it reads reach (#3125), for an
 			// answer that reads a table without its recent changes.
-			var snapshot console.PGSnapshotAge
-			res, err := copySQL.Run(console.WithPGSnapshotAge(pgRunContext(ctx, opts), &snapshot), statement, schema, sess)
+			snapshot := pgSnapshotAgeFor(opts)
+			res, err := copySQL.Run(console.WithPGSnapshotAge(pgRunContext(ctx, opts), snapshot), statement, schema, sess)
 			if err == nil && !opts.Probe {
 				// How old what it read was, for /status (#2756), kept once
 				// the port says the client got it (bound.Routed).
@@ -1232,6 +1232,13 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 // under: one whose answer the port gives only with its tables' recent
 // changes (opts.NeedTails) is refused before it runs when they are not ready
 // (console.WithPGNeedTails, #3086).
+func pgSnapshotAgeFor(opts pgshim.RunOptions) *console.PGSnapshotAge {
+	if opts.Probe {
+		return nil
+	}
+	return &console.PGSnapshotAge{}
+}
+
 func pgRunContext(ctx context.Context, opts pgshim.RunOptions) context.Context {
 	if opts.NeedTails {
 		return console.WithPGNeedTails(ctx)
