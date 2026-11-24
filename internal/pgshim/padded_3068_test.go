@@ -162,7 +162,6 @@ func TestPadded_toTheSource(t *testing.T) {
 		`SELECT id, concat(code, '|') FROM codes`,
 		`SELECT id, upper(code) FROM codes`,
 		`SELECT id, trim(code) FROM codes`,
-		`SELECT id, substring(code, 1, 2) FROM codes`,
 		`SELECT id, coalesce(code, 'none') FROM codes`,
 		`SELECT id, code::text FROM codes`,
 		`SELECT id, CAST(code AS text) FROM codes`,

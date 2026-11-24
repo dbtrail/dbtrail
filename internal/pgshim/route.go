@@ -955,7 +955,7 @@ func firstWord(toks []rtToken) string {
 var copyFuncs = map[string]bool{
 	"count": true, "sum": true, "min": true, "max": true,
 	"coalesce": true, "nullif": true, "greatest": true, "least": true,
-	"length": true, "substring": true, "trim": true, "position": true, "concat": true,
+	"length": true, "substring": true, "substr": true, "trim": true, "position": true, "concat": true,
 	"abs": true, "bool_and": true, "string_agg": true,
 	// round(a / b, k), round(avg(x), k), round(x, k), round(x, -k) and
 	// round(x), as RewriteForCopy writes them: rounded as PostgreSQL rounds a
@@ -1721,6 +1721,12 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 					if !substringOK(a) {
 						return substringVeto
 					}
+				case "substr":
+					// The same function, with commas only: PostgreSQL has no
+					// substr(x FROM n).
+					if len(a) < 2 || !substringOK(a) {
+						return substringVeto
+					}
 				case "concat":
 					for _, arg := range a {
 						if len(arg) != 1 || !concatOK(arg[0]) {
@@ -1895,7 +1901,7 @@ var compareOps = map[string]bool{"=": true, "<>": true, "!=": true, "<": true, "
 
 // textMakers are the functions that make text of their arguments, whatever
 // those are.
-var textMakers = map[string]bool{"concat": true, "string_agg": true, "substring": true, "trim": true}
+var textMakers = map[string]bool{"concat": true, "string_agg": true, "substring": true, "substr": true, "trim": true}
 
 // zonedLiteral is a date and time written with a time zone: an offset, Z,
 // or a zone's name after the time (Europe/Paris, PST8PDT, Etc/GMT+5).

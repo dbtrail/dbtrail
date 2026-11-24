@@ -77,7 +77,6 @@ func TestCopyScreen_substringStart(t *testing.T) {
 		`SELECT id, SUBSTRING(word , - 1 , 3) FROM ` + x:            substringVeto,
 		`SELECT id, substring(substring(word, -1), 1, 2) FROM ` + x: substringVeto,
 		// Never the copy's, whatever they are given.
-		`SELECT id, substr(word, 2, 3) FROM ` + x:                           "the function substr()",
 		`SELECT id, left(word, 2) FROM ` + x:                                "the function left()",
 		`SELECT id, right(word, -2) FROM ` + x:                              "the function right()",
 		`SELECT id, overlay(word placing 'XX' from 2 for 1) FROM ` + x + ``: "the function overlay()",
@@ -420,5 +419,66 @@ func TestNumReader_bounded(t *testing.T) {
 	r = newNumReader(toks, exactTypes, matchParens(toks))
 	if v := r.name("rl"); v.kind != numReal {
 		t.Errorf("max(rl) AS rl: %+v", v)
+	}
+}
+
+// substr is substring with commas (#3219): the copy answers it under the same
+// rule. PostgreSQL has no substr(x FROM n).
+func TestCopyScreen_substr(t *testing.T) {
+	types := map[string][]string{"id": {"INTEGER"}, "word": {"VARCHAR"}, "whole": {"INTEGER"}, "code": {bpcharType}}
+	for _, q := range []string{
+		"SELECT id, substr(word, 2, 3) FROM t",
+		"SELECT substr(word, 1) FROM t",
+		"SELECT SUBSTR(word, 1, 1), count(*) FROM t GROUP BY 1",
+		"SELECT substr('apple', 2, 3)",
+		"SELECT substr(word, 1, 2147483647) FROM t",
+		// A char(n) column cut by whole numbers: the copy's (#3219).
+		"SELECT substr(code, 1, 1) FROM t",
+		"SELECT o.id, substr(o.code, 1, 2) FROM t o",
+		"SELECT substring(code, 2, 1), substring(code FROM 2 FOR 1), substring(code FROM 1) FROM t",
+		"SELECT id FROM t WHERE substr(code, 1, 1) IN ('1', '2')",
+		"SELECT substr(code, 1, 1), count(*) FROM t GROUP BY substr(code, 1, 1)",
+	} {
+		if veto := CopyScreen(q, types); veto != "" {
+			t.Errorf("%s: sent to the source for %s", q, veto)
+		}
+	}
+	for q, says := range map[string]string{
+		"SELECT substr(word, -1, 3) FROM t":         substringVeto,
+		"SELECT substr(word, 0, 3) FROM t":          substringVeto,
+		"SELECT substr(word, 0) FROM t":             substringVeto,
+		"SELECT substr(word, 2, 0) FROM t":          substringVeto,
+		"SELECT substr(word, 2, -1) FROM t":         substringVeto,
+		"SELECT substr(word, whole, 2) FROM t":      substringVeto,
+		"SELECT substr(word, 1 - whole) FROM t":     substringVeto,
+		"SELECT substr(word, 1, 3000000000) FROM t": substringVeto,
+		"SELECT substr(word, 2147483648) FROM t":    substringVeto,
+		"SELECT substr(word, 2.5) FROM t":           substringVeto,
+		"SELECT substr(word) FROM t":                substringVeto,
+		"SELECT substr(word FROM 2) FROM t":         substringVeto,
+		"SELECT substr(word, 1, 2, 3) FROM t":       substringVeto,
+		// Its answer is text, whatever it is given: sorted or compared by
+		// order, by the source's collation.
+		"SELECT id FROM t ORDER BY substr(id, 1, 1)":      "text sorted",
+		"SELECT id FROM t WHERE substr(id, 1, 1) < 'b'":   "text compared",
+		"SELECT id FROM t WHERE substr(word, 1, 1) > 'b'": "text compared",
+		// A char(n) column cut otherwise than by whole numbers written in the
+		// text, or used on its own: other rows on the copy.
+		"SELECT substr(code, whole, 1) FROM t":             "trailing blanks",
+		"SELECT substr(code, -1, 1) FROM t":                "trailing blanks",
+		"SELECT substr(code || 'x', 1, 1) FROM t":          "trailing blanks",
+		"SELECT substr(trim(code), 1, 1) FROM t":           "trailing blanks",
+		"SELECT substr(word, 1, length(code)) FROM t":      "",
+		"SELECT id FROM t WHERE code = 'ab'":               "trailing blanks",
+		"SELECT id FROM t WHERE code LIKE 'a%'":            "trailing blanks",
+		"SELECT id FROM t ORDER BY code":                   "trailing blanks",
+		"SELECT code, count(*) FROM t GROUP BY code":       "",
+		"SELECT a.id FROM t a JOIN t b ON a.code = b.code": "trailing blanks",
+		"SELECT length(code) FROM t":                       "trailing blanks",
+		"SELECT id FROM t WHERE substr(word, 1, 1) = code": "trailing blanks",
+	} {
+		if veto := CopyScreen(q, types); !strings.Contains(veto, says) {
+			t.Errorf("%s: veto %q, want one that says %q", q, veto, says)
+		}
 	}
 }

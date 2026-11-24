@@ -511,6 +511,12 @@ func paddedRead(toks []rtToken, types map[string][]string, exemptions bool) stri
 			if !padded {
 				continue
 			}
+			// Read without exemptions (paddedForNoSource), a cut counts as
+			// any other use, so a connection with no source runs the whole
+			// screen on it.
+			if exemptions && paddedCut(toks, i) {
+				continue
+			}
 			whole, alias := wholeItem(i)
 			if !whole && sized && !paddedArray(types, n) && wholeKey(i) {
 				// A key of GROUP BY: the same groups on both sides.

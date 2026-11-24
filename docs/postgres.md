@@ -1756,7 +1756,12 @@ The source answers:
   not at all.** The copy takes `count`, `sum`, `min`, `max`, `coalesce`,
   `nullif`, `greatest`, `least`, `length`, `substring` (with its start, and
   its length when given, written as whole numbers above zero:
-  `substring(name, 1, 3)`, `substring(name FROM 2 FOR 3)`), `trim`, `position`,
+  `substring(name, 1, 3)`, `substring(name FROM 2 FOR 3)`) and `substr` under
+  the same rule (`substr(name, 1, 3)`), also of a `char(n)` column, whose
+  padding the copy keeps: where the cut reaches it the copy answers `b  ` and
+  PostgreSQL `b`, and a comparison of that cut (`substr(code, 1, 3) = 'b'`)
+  can miss the row on the copy; a cut inside the part with data is the same
+  on both. `trim`, `position`,
   `concat`, `abs`, `bool_and`, `string_agg`, `row_number`, `rank`, `lag`, and
   `extract`, `date_part` and `date_trunc` of a year, month or day
   (`date_trunc` of a `timestamp` or a `timestamp with time zone` column,
@@ -1844,7 +1849,7 @@ The source answers:
   float, `substring` with a start of zero or below, or one that is not a
   number written in the statement (`substring('apple', -1, 3)` is `a` on
   PostgreSQL; the copy counts a negative start from the end and answers `e`;
-  `substr`, `left`, `right` and `overlay` always go to the source), a date or
+  `left`, `right` and `overlay` always go to the source), a date or
   time literal in any other form (`'26-01-05'::date` is 2026-01-05 on
   PostgreSQL and the year 26 on the copy, a seventh decimal of a second is
   rounded there and cut here, `TIME '24:00:00'` is a time there and midnight
