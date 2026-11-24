@@ -411,11 +411,18 @@ var afterNewestEventForTest = func() {}
 // one for the next (resolveRefreshCut); without it nothing is read from
 // cutFloors and nothing written.
 func resolveSnapshotCutOnce(ctx context.Context, db *sql.DB, at time.Time, floored bool) (*query.BinlogPos, error) {
+	cut, _, err := resolveSnapshotCutDetail(ctx, db, at, floored)
+	return cut, err
+}
+
+// resolveSnapshotCutDetail is resolveSnapshotCutOnce, and whether the cut is
+// the newest indexed event's end: nothing indexed was past at.
+func resolveSnapshotCutDetail(ctx context.Context, db *sql.DB, at time.Time, floored bool) (*query.BinlogPos, bool, error) {
 	// Newest FIRST, then the search: see "Why the newest event is read FIRST"
 	// on ResolveSnapshotCut. Swapping these two back reopens #1695.
 	newest, err := newestIndexedEvent(ctx, db)
 	if err != nil || newest == nil {
-		return nil, err
+		return nil, false, err
 	}
 	afterNewestEventForTest()
 	var floor uint64
@@ -424,7 +431,7 @@ func resolveSnapshotCutOnce(ctx context.Context, db *sql.DB, at time.Time, floor
 	}
 	cut, cutID, err := firstEventPast(ctx, db, at, floor)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	// What this search established, for the next one: every event below the
 	// one found is not past at; with none found, every event up to the
@@ -437,11 +444,68 @@ func resolveSnapshotCutOnce(ctx context.Context, db *sql.DB, at time.Time, floor
 		cutFloors.remember(newest.index, at, next, newest)
 	}
 	if cut != nil {
-		return cut, nil
+		return cut, false, nil
 	}
 	// Nothing indexed past at, up to and including the newest event read above:
 	// fold everything, and resume after that event.
-	return &query.BinlogPos{File: newest.file, Pos: newest.end}, nil
+	return &query.BinlogPos{File: newest.file, Pos: newest.end}, true, nil
+}
+
+// resolveCutPastCapture is the cut of a run that takes a read of some tables
+// (#2640, BaselineOverride). It is the usual cut, carried forward to capture's
+// saved position when that position is past it and nothing indexed is past at.
+//
+// A source that writes nothing after such a read leaves the usual cut before
+// the read's coordinate, made as it is of indexed changes, and the read would
+// be refused as ahead for as long as the source stays quiet. Capture's
+// position-mode checkpoint is where it can resume: every complete transaction
+// and DDL before it was written to the index (binlog_events, and schema_changes
+// by the parser's own hook) before it was saved. It is read BEFORE the cut, so
+// every change at or before it is in the picture the cut is resolved over:
+//
+//   - When the cut is the newest event's end, no indexed change lies between
+//     it and the checkpoint, and a fold to the checkpoint folds the same
+//     changes: every table ends at that one position, and a DDL between the
+//     two is inside each table's window, so it refuses as it would have.
+//   - When an indexed event is past at, the cut stays at it: on a source whose
+//     clock runs ahead, a change made before the read can be stamped after at,
+//     and carrying the run past it would leave it out of every table but the
+//     read one.
+//
+// A GTID-mode checkpoint's file and position can sit inside a transaction, so
+// they are not used. A checkpoint in another numbering of the binary log than
+// the cut cannot be ordered; the renumbering checks of the fold refuse that
+// run as they would any other.
+func resolveCutPastCapture(ctx context.Context, db *sql.DB, at time.Time, floored bool) (*query.BinlogPos, error) {
+	saved := captureCheckpoint(ctx, db)
+	cut, all, err := resolveSnapshotCutDetail(ctx, db, at, floored)
+	if err != nil || cut == nil || !all || saved == nil || cut.IsLSN() {
+		return cut, err
+	}
+	if cut.AtOrBefore(*saved) && !saved.AtOrBefore(*cut) {
+		return saved, nil
+	}
+	return cut, nil
+}
+
+// captureCheckpoint is capture's position-mode checkpoint, or nil when there
+// is none to use: no stream_state row, another mode, no position, or a read
+// that failed (said, since the run then waits for a change as before).
+func captureCheckpoint(ctx context.Context, db *sql.DB) *query.BinlogPos {
+	var mode, file sql.NullString
+	var pos sql.NullInt64
+	err := db.QueryRowContext(ctx, `SELECT mode, binlog_file, binlog_position FROM stream_state WHERE id = 1`).Scan(&mode, &file, &pos)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		slog.Warn("snapshot cut: could not read capture's saved position, so a read of some tables waits for a change after it as before", "error", err)
+		return nil
+	}
+	if mode.String != "position" || file.String == "" || !pos.Valid || pos.Int64 <= 0 {
+		return nil
+	}
+	return &query.BinlogPos{File: file.String, Pos: uint64(pos.Int64)}
 }
 
 // newestEvent is the newest indexed event that carries a coordinate, as

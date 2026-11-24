@@ -123,3 +123,54 @@ func scheduleSlot(t *testing.T, b *backupScheduler, id string, slot time.Time) c
 	b.sup.postRefresh.Wait()
 	return b.ScheduleState(id)
 }
+
+// A source that writes nothing after the read (#2640): a TRUNCATE and nothing
+// more. Capture's saved position shows it reached the read, so the slot
+// publishes from the read of that table alone, with no full read, and the
+// copy equals the source row for row. Before, the wait ran to its bound and
+// the slot took the full read after it.
+func TestIntegrationScheduleReread_aQuietSourceIsPublishedWithoutAFullRead_2640(t *testing.T) {
+	r := newRereadRig(t)
+	h, err := console.OpenBaselineHistory(t.TempDir() + "/h.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.sup.history = h
+	r.sup.rereadRefused = true
+	// Long enough for capture to save its position, short enough that a run
+	// which never sees it reached ends this test in minutes, not five.
+	prevWait := rereadCaptureWait
+	t.Cleanup(func() { rereadCaptureWait = prevWait })
+	rereadCaptureWait = 90 * time.Second
+	firstRead := r.sup.Status(r.req.ServerID).Since
+
+	e, ok := r.reg.Get(r.req.ServerID)
+	if !ok {
+		t.Fatal("the rig's server is not in its registry")
+	}
+	e.BackupSchedule = &console.BackupSchedule{Every: "1h", At: "00:00"}
+	if err := r.reg.Update(e); err != nil {
+		t.Fatal(err)
+	}
+	b := newBackupScheduler(r.sup, r.reg, true, true)
+	b.window = nil
+	t0 := time.Now().UTC().Truncate(time.Hour)
+	b.tick(context.Background(), t0.Add(5*time.Second))
+
+	truncateOrdersCaptured(t, r)
+	// Nothing is written from here on.
+	st := scheduleSlot(t, b, e.ID, t0.Add(time.Hour+5*time.Second))
+	if st.LastMethod != console.BackupMethodRefresh || st.Last == nil || st.Last.State != "succeeded" || !st.Last.Published {
+		t.Fatalf("the slot ended with %+v; want the update that read the table alone, published", st)
+	}
+	if got := r.sup.Status(e.ID).Since; got != firstRead {
+		t.Fatalf("a full read ran in the slot (the dump slot moved from %s to %s)", firstRead, got)
+	}
+	for _, rec := range h.List(e.ID) {
+		if rec.Kind == console.BaselineRunDump && rec.SkipReason == "" {
+			t.Fatalf("the history holds a full read: %+v", rec)
+		}
+	}
+	r.wantWorkEmpty(t)
+	r.wantSource(t)
+}
