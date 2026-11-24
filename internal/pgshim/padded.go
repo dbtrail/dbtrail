@@ -103,7 +103,17 @@ func screenTypes(tables []CatalogTable, read func(*CatalogTable) bool) map[strin
 			n := strings.ToLower(c.Name)
 			typ := strings.ToUpper(c.Type)
 			if m := sourceMark(c); m != "" && (read == nil || read(t)) {
-				typ = m
+				if m == charNType && c.TrimmedOnCopy {
+					// Read by the view without its padding: text to the
+					// screen, under trimmedUse's own rule (trimmed.go). The
+					// table is still named, for what reaches the column
+					// without its name (paddedRead).
+					out[trimmedKey] = []string{relType}
+					out[trimmedKey+n] = []string{relType}
+					out[relKey+strings.ToLower(t.Name)] = []string{relType}
+				} else {
+					typ = m
+				}
 			}
 			out[n] = append(out[n], typ)
 			if onlyTextOnCopy(c) && (read == nil || read(t)) {
@@ -248,10 +258,18 @@ func paddedWhat(name string, sized bool) string {
 // equal are two on the copy: beside one of those, DISTINCT and GROUP BY are
 // the source's as well.
 func paddedUse(toks []rtToken, types map[string][]string) string {
+	return paddedUseOrdered(toks, types, true)
+}
+
+// paddedUseOrdered is paddedUse; mainOrder as in trimmedUse.
+func paddedUseOrdered(toks []rtToken, types map[string][]string, mainOrder bool) string {
 	if why := userTypeUse(toks, types); why != "" {
 		return why
 	}
-	return paddedRead(toks, types, true)
+	if why := paddedRead(toks, types, true); why != "" {
+		return why
+	}
+	return trimmedUse(toks, types, mainOrder)
 }
 
 // paddedRead is paddedUse. exemptions false reads the statement without any
@@ -260,7 +278,13 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 func paddedRead(toks []rtToken, types map[string][]string, exemptions bool) string {
 	anyPadded, allSized := paddedAmong(types)
 	if !anyPadded {
-		return ""
+		// A char(n) the view trims is reached without its name as any other
+		// (NATURAL JOIN, TABLE, a list of column names, the table written as
+		// a value): those are refused below. Its own uses are trimmedUse's.
+		if _, ok := types[trimmedKey]; !ok {
+			return ""
+		}
+		allSized = true
 	}
 
 	if why := keywordColumnList(toks); why != "" {
@@ -629,10 +653,19 @@ func paddedInText(text string, types map[string][]string) string {
 	if why := userTypeInText(text, types); why != "" {
 		return why
 	}
+	low := strings.ToLower(text)
+	if _, ok := types[trimmedKey]; ok {
+		// A char(n) the view trims is safe only in the forms trimmedUse
+		// reads, and this text is not read.
+		for name := range types {
+			if n, ok := strings.CutPrefix(name, trimmedKey); ok && n != "" && strings.Contains(low, n) {
+				return fmt.Sprintf("the char(n) column %q, named in a statement the port does not read whole", n)
+			}
+		}
+	}
 	if padded, _ := paddedAmong(types); !padded {
 		return ""
 	}
-	low := strings.ToLower(text)
 	if strings.Contains(low, "*") || strings.Contains(low, "u&") {
 		return "a statement the port does not read whole, with a * or a name written with escapes, on a copy that holds a char(n) column"
 	}
@@ -703,7 +736,7 @@ func (s *session) paddedVeto(text string) string {
 // too: it was refused before, and the copy must not now answer it with text
 // sorted its own way.
 func paddedForNoSource(toks []rtToken, types map[string][]string) string {
-	veto := paddedUse(toks, types)
+	veto := paddedUseOrdered(toks, types, false)
 	if padded, _ := paddedAmong(types); veto != "" || !padded {
 		return veto
 	}
