@@ -1186,22 +1186,25 @@ func cnSameBytes(want, got *pgconn.Result) string {
 
 // cnKnown says which failures main already had when this battery was
 // written, and why, so that they are told from new ones without being hidden.
+// A failure is known when its hash, which includes how it fails (cnKind), is
+// in the list. The one exception: on the tables altered after their snapshot
+// (cn_alt, the group "screen against view"), whether a statement reaches the
+// copy right after the ALTER depends on timing, so those are not listed and
+// are known by their group (#3251); nowhere else does cn_alt excuse anything.
 func cnKnown(f cnFailure) string {
-	// Right after an ALTER, whether these reach the copy depends on timing.
-	if !cnBaseline[cnHash(f)] && !strings.Contains(f.key, "cn_alt") {
+	altered := f.group == "screen against view" && strings.Contains(f.key, "cn_alt")
+	if !cnBaseline[cnHash(f)] && !altered {
 		return ""
 	}
 	switch f.group {
 	case "ascii":
 		return "ascii() of a char(n) or of a cut of it"
-	case "output expression":
-		return "a cut of a char(n) (substr, substring) keeps its padding"
 	case "domain":
 		return "#3233, a domain over char(n)"
 	case "text-on-copy types":
 		return "a type the copy holds as text, sorted or compared as letters"
 	case "screen against view":
-		return "a column type changed after the snapshot"
+		return "a column type changed after the snapshot (#3251)"
 	case "parameter":
 		return "an argument declared bpchar, compared with no table in the statement"
 	case "describe then execute", "prepare in a transaction":
@@ -1210,7 +1213,25 @@ func cnKnown(f cnFailure) string {
 	if strings.HasPrefix(f.group, "stored as text: ") {
 		return "a built-in type the copy holds as text"
 	}
-	return "text sorted by bytes, with no forwarding user"
+	if f.phase == "no forwarding user" && cnKind(f) == "order" {
+		return "text sorted by bytes, with no forwarding user"
+	}
+	return "listed on main, group " + f.group + ", " + cnKind(f)
+}
+
+// cnKind is how a failure fails: other rows, another order, an error the
+// client sees or a statement on the wrong side, or an answer to what
+// PostgreSQL refuses. A known failure that starts failing another way is new.
+func cnKind(f cnFailure) string {
+	switch {
+	case strings.HasPrefix(f.class, "B"):
+		return "error or wrong side"
+	case strings.HasPrefix(f.why, "order differs"):
+		return "order"
+	case strings.HasPrefix(f.why, "PostgreSQL refuses it"):
+		return "answered what PostgreSQL refuses"
+	}
+	return "rows"
 }
 
 // cnClassOf classes a failure of a prepared statement: a 0A000 is an error
@@ -1225,6 +1246,13 @@ func cnClassOf(why string) string {
 // cnHash identifies one failure exactly: a new failure in a known category
 // is still new.
 func cnHash(f cnFailure) string {
+	h := fnv.New64a()
+	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s", f.phase, f.proto, f.group, f.key, cnKind(f))
+	return fmt.Sprintf("%012x", h.Sum64()>>16)
+}
+
+// cnHashOld is the hash before cnKind (TEMPORARY, to carry the list over).
+func cnHashOld(f cnFailure) string {
 	h := fnv.New64a()
 	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s", f.phase, f.proto, f.group, f.key)
 	return fmt.Sprintf("%012x", h.Sum64()>>16)
@@ -1311,7 +1339,7 @@ func TestIntegrationPGCharNTrimBattery(t *testing.T) {
 	for _, f := range fails {
 		why := cnKnown(f)
 		if out != nil {
-			fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%q\t%q\t%s\t%s\t%q\n", cnOr(why, "NEW"), f.phase, f.proto, f.group, f.key, f.why, cnHash(f), f.class, f.notice)
+			fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%q\t%q\t%s\t%s\t%q\t%s\n", cnOr(why, "NEW"), f.phase, f.proto, f.group, f.key, f.why, cnHash(f), f.class, f.notice, cnHashOld(f))
 		}
 		if why != "" {
 			known++
@@ -1378,7 +1406,7 @@ func cnPreparedInTx(t *testing.T, ctx context.Context, s *cnStack, fails *[]cnFa
 		var out []string
 		for rows.Next() {
 			var id int32
-			var v *string
+			var v any
 			dest := []any{&id, &v}
 			if len(rows.FieldDescriptions()) == 1 {
 				dest = []any{&v}
@@ -1386,9 +1414,15 @@ func cnPreparedInTx(t *testing.T, ctx context.Context, s *cnStack, fails *[]cnFa
 			if err := rows.Scan(dest...); err != nil {
 				return nil, err
 			}
+			// A text is compared without its padding; an array of char(n)
+			// (not trimmed on the copy) by its elements as they are.
 			cell := "NULL"
-			if v != nil {
-				cell = strings.TrimRight(*v, " ")
+			switch x := v.(type) {
+			case nil:
+			case string:
+				cell = strings.TrimRight(x, " ")
+			default:
+				cell = fmt.Sprint(x)
 			}
 			out = append(out, fmt.Sprintf("%d|%q", id, cell))
 		}
@@ -1402,6 +1436,8 @@ func cnPreparedInTx(t *testing.T, ctx context.Context, s *cnStack, fails *[]cnFa
 		"SELECT id, c FROM cn_cp WHERE id <= 4 ORDER BY id",
 		"SELECT id, c FROM (SELECT * FROM cn_cp) s WHERE id <= 4 ORDER BY id",
 		"SELECT id, c FROM cn_a WHERE id <= 6 ORDER BY id",
+		// An array of char(n): the source describes it as 1014.
+		"SELECT id, arr FROM cn_dm WHERE id <= 4 ORDER BY id",
 	} {
 		want, err := read(direct, q)
 		if err != nil {
