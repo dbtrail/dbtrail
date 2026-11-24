@@ -411,7 +411,11 @@ func TestScheduleReread_shutdownDuringTheReadStartsNothing_2640(t *testing.T) {
 		return reconstruct.ErrBaselineOverrideAhead
 	}
 	r.b.tick(context.Background(), time.Date(2026, 8, 28, 9, 0, 5, 0, time.UTC))
-	<-started
+	select {
+	case <-started:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the read of the refused table never started")
+	}
 	r.cancel()
 	r.b.watchers.Wait()
 	if r.reads.count() != 0 {
