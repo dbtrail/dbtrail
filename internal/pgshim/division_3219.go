@@ -70,8 +70,10 @@ const maxDivisionText = 256 << 10
 // Left as written: a division inside one of the port's own round or floor
 // macros (they take the division themselves, or refuse it) or inside a
 // round, floor, ceil or trunc left as written (roundsItsValue); one with a
-// cast, a parameter, a string, a typed literal, a CASE, a subquery, an
-// exponent or a subscript on a side, at any depth; one whose divisor is an
+// cast, a parameter, a string, a typed literal, a subquery, an exponent or a
+// subscript on a side, at any depth; a CASE just before or after the slash
+// (sum(CASE ... END) is read, and the screen decides it by caseClass); one
+// whose divisor is an
 // aggregate with OVER or FILTER; one in LIMIT or OFFSET; a division more
 // than two deep in others (a / b / c / d, a / (b / (c / d)): the macro's text
 // holds each side several times over); two whole numbers written in the
@@ -626,8 +628,9 @@ const maxClassTokens = 512
 // and the functions whose answer's type follows from their arguments'. It
 // is what PostgreSQL makes of the value: sum of an integer is a bigint, and
 // sum of a bigint a numeric, which the engine keeps a whole number, so that
-// one is not known. Anything else (a float, a string, a CASE, a division
-// left as written, a function not listed, a subquery) is not known.
+// one is not known. A CASE is what its values are (caseClass). Anything else
+// (a float, a string, a division left as written, a function not listed, a
+// subquery) is not known.
 func exactClass(toks []rtToken, typesOf func(string) []string) exactCls {
 	if len(toks) == 0 || len(toks) > maxClassTokens {
 		return clsUnknown
@@ -666,6 +669,12 @@ func exactClass(toks []rtToken, typesOf func(string) []string) exactCls {
 				c = clsWhole64
 			}
 			take(c)
+		case t.kind == rtWord && t.text == "case" && !isOpTok(toks, i-1, "."):
+			end := caseEnd(toks, i)
+			if end < 0 || !take(caseClass(toks[i:end+1], typesOf)) {
+				return clsUnknown
+			}
+			i = end
 		case (t.kind == rtWord || t.kind == rtQuoted) && isOpTok(toks, i+1, "("):
 			end := closingParen(toks, i+1)
 			if end < 0 || !take(callClass(strings.ToLower(t.text), toks[i+2:end], typesOf)) {
