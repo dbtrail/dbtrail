@@ -47,7 +47,9 @@ func newRereadFixture(t *testing.T, fold func(reconstruct.FullTableConfig) ([]*r
 		return time.Now().UTC().Add(-time.Hour).Truncate(time.Second), slices.Clone(rereadSnapshot), nil
 	}
 	snapshotSignersFunc = func(string, time.Time) ([]string, bool, error) { return nil, false, nil }
-	readIndexMark = func(context.Context, string) (indexMark, error) { return indexMark{}, errors.New("no index in this test") }
+	readIndexMark = func(context.Context, string) (indexMark, error) {
+		return indexMark{}, errors.New("no index in this test")
+	}
 	rereadCaptureReached = func(context.Context, reconstruct.FullTableConfig) error { return nil }
 	rereadCapturePoll = time.Millisecond
 
@@ -300,12 +302,12 @@ func TestRunRefresh_aPanicInTheFoldStillRemovesTheRead_2640(t *testing.T) {
 // What cannot work is refused before production is read.
 func TestRunRefresh_refusalsReadNothing_2640(t *testing.T) {
 	for name, change := range map[string]func(*refreshRequest, *baselineSupervisor){
-		"every table":        func(r *refreshRequest, _ *baselineSupervisor) { r.Reread.Tables = slices.Clone(rereadSnapshot) },
+		"every table":         func(r *refreshRequest, _ *baselineSupervisor) { r.Reread.Tables = slices.Clone(rereadSnapshot) },
 		"not in the snapshot": func(r *refreshRequest, _ *baselineSupervisor) { r.Reread.Tables = []string{"shop.new"} },
-		"no table":           func(r *refreshRequest, _ *baselineSupervisor) { r.Reread.Tables = nil },
-		"postgres request":   func(r *refreshRequest, _ *baselineSupervisor) { r.SourcePostgres = true },
-		"postgres source":    func(r *refreshRequest, _ *baselineSupervisor) { r.Reread.Source.Flavor = console.FlavorPostgres },
-		"another server":     func(r *refreshRequest, _ *baselineSupervisor) { r.Reread.Source.ServerID = "s2" },
+		"no table":            func(r *refreshRequest, _ *baselineSupervisor) { r.Reread.Tables = nil },
+		"postgres request":    func(r *refreshRequest, _ *baselineSupervisor) { r.SourcePostgres = true },
+		"postgres source":     func(r *refreshRequest, _ *baselineSupervisor) { r.Reread.Source.Flavor = console.FlavorPostgres },
+		"another server":      func(r *refreshRequest, _ *baselineSupervisor) { r.Reread.Source.ServerID = "s2" },
 		"working folder inside the snapshots": func(r *refreshRequest, s *baselineSupervisor) {
 			s.stagingDir = filepath.Join(r.BaselineDir, "work")
 		},

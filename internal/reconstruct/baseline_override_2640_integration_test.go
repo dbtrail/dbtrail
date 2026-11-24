@@ -43,6 +43,11 @@ func stageTable(t *testing.T, staging, table string, readAt time.Time, pos uint6
 
 func writeOrdersShaped(t *testing.T, path string, at time.Time, pos uint64, rows [][]string) {
 	t.Helper()
+	writeOrdersShapedIn(t, path, at, "binlog.000003", pos, rows)
+}
+
+func writeOrdersShapedIn(t *testing.T, path string, at time.Time, file string, pos uint64, rows [][]string) {
+	t.Helper()
 	cols, err := baseline.ParseSchemaText(ordersCreateSQL)
 	if err != nil {
 		t.Fatalf("ParseSchemaText: %v", err)
@@ -52,7 +57,7 @@ func writeOrdersShaped(t *testing.T, path string, at time.Time, pos uint64, rows
 		RowGroupSize: 100,
 		Metadata: map[string]string{
 			baseline.MetaKeyCreateTableSQL:    ordersCreateSQL,
-			baseline.MetaKeyBinlogFile:        "binlog.000003",
+			baseline.MetaKeyBinlogFile:        file,
 			baseline.MetaKeyBinlogPos:         strconv.FormatUint(pos, 10),
 			baseline.MetaKeySnapshotTimestamp: at.UTC().Format(time.RFC3339),
 			baseline.MetaKeySnapshotProducer:  baseline.ProducerDump,
