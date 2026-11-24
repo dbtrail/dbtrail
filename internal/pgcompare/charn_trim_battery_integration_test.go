@@ -1251,13 +1251,6 @@ func cnHash(f cnFailure) string {
 	return fmt.Sprintf("%012x", h.Sum64()>>16)
 }
 
-// cnHashOld is the hash before cnKind (TEMPORARY, to carry the list over).
-func cnHashOld(f cnFailure) string {
-	h := fnv.New64a()
-	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s", f.phase, f.proto, f.group, f.key)
-	return fmt.Sprintf("%012x", h.Sum64()>>16)
-}
-
 // cnBaseline is what failed on main when the battery was written.
 var cnBaseline = func() map[string]bool {
 	m := map[string]bool{}
@@ -1268,14 +1261,14 @@ var cnBaseline = func() map[string]bool {
 }()
 
 const cnBaselineList = `
-04fe5497dcb0 0867d3dedcf6 0ba758833ca7 1694f68a3356 19b37d3e5a77 1d136b1e7d68 1f2a8407f1de 1f5fafdf8e48
-28ab7fd3742a 329fc380b89b 3a80ac4b757c 3a95256b73c5 3aeff8897f61 3baf4ef4c59c 3c4f97d31741 407d27468a3b
-40ad24582dc2 4aaf402b4fbf 4d4c22a8bb4b 4edef248365d 515de861b371 5342fe1ff542 5544d6083008 55985e30dea1
-58b5f87fe4a3 58d6a210f987 62980d3c1957 6945e7650d8d 69aac233975f 711093b55589 76ebbafa933a 7c0d76ee8f2a
-7ffd12582621 82ce6a90c5e4 8649d31846e2 89800cabc9fc 8a3fab00633c 8b5e8da65bf6 92f99f9d36ee 9cf83c02e9e3
-9d427e0d8dde 9d4d5dc0aeee a500add2bb72 a90eae9a7de2 a9f8f6270fc0 aa8e1b62a2ab aca69a6c21df b1972ccfcd7c
-b97225e8474b bcc43cacc73f bd7ece175874 bdc565f1d2fa c56272730e9c d3287065c51d d90678b89476 d9303f5e99cd
-da450aa33108 e0219c386099 e8834991c0a5 ec12ac35acfc ec22f814558d f17e75f8fc2a fe1fd97c0ea8
+00c5f5576173 0221cce0b3e2 02a5e7ebf199 1e53e6764221 20bd4466d264 250b601fa1dc 252970817959 2ccb2740a8d4
+2d8c6787c45e 2f7d37be6f85 339432e478a7 390cc6ace6ab 46b8a5d9d6c3 489b6d28ed8f 4ce38fb70692 4db661d577d9
+5395ea082085 54aedff045a8 5a6fb7147f9f 5eb0e65aecf3 6039f7484f1d 67dc3ba3b959 67f54ed753d5 69d6d23a79b0
+6f951269e53d 6fba56791169 724498701571 73b98eb2782a 78486743df83 81ad3f69d0d6 863f98d2b053 96fc7e18c0d7
+9a3977590e9c 9b3ad49d9748 9d53309d8d54 a60c711b3220 a8308dae410b a8d682396b25 b1aa547af55e b34669505a99
+b440bf4dce8f bd7e9896561c c136da616bd9 c6f9759b2cba ca545980546d cb7f0481bd72 cd7a208b45c1 d2e67d0da1ec
+d3e2d712f27d d67e3cbff662 d7fc747b8a8d dd3a1afb4277 de65cb4d0b8e e1c8b1d1c4d4 e26b2013f075 ea0be441c06c
+ed458d5131e9 edc7773bc61d f109684da0aa f19358ff3916 f7b4177d4693 f98921365dbe fe209b9c985b
 `
 
 func TestIntegrationPGCharNTrimBattery(t *testing.T) {
@@ -1339,7 +1332,7 @@ func TestIntegrationPGCharNTrimBattery(t *testing.T) {
 	for _, f := range fails {
 		why := cnKnown(f)
 		if out != nil {
-			fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%q\t%q\t%s\t%s\t%q\t%s\n", cnOr(why, "NEW"), f.phase, f.proto, f.group, f.key, f.why, cnHash(f), f.class, f.notice, cnHashOld(f))
+			fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%q\t%q\t%s\t%s\t%q\n", cnOr(why, "NEW"), f.phase, f.proto, f.group, f.key, f.why, cnHash(f), f.class, f.notice)
 		}
 		if why != "" {
 			known++
