@@ -9,21 +9,21 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/pgshim"
 )
 
 // A column's collation on the PostgreSQL port's catalog (#3111).
 
 // pgColumnCollation is what a snapshot's shape says of one column's
-// collation. A snapshot taken before collations were recorded says nothing;
+// collation: recorded is the shape's Collations, nondeterministic the
+// column's. A snapshot taken before collations were recorded says nothing;
 // of two columns whose names differ only in case (the copy cannot tell them
 // apart) a nondeterministic one is kept.
-func pgColumnCollation(rel *baseline.PGRelation, rc baseline.PGColumn, prev pgshim.Collation) pgshim.Collation {
+func pgColumnCollation(recorded, nondeterministic bool, prev pgshim.Collation) pgshim.Collation {
 	switch {
-	case !rel.Collations || prev == pgshim.CollationNondeterministic:
+	case !recorded || prev == pgshim.CollationNondeterministic:
 		return prev
-	case rc.Nondeterministic:
+	case nondeterministic:
 		return pgshim.CollationNondeterministic
 	}
 	return pgshim.CollationDeterministic

@@ -27,7 +27,7 @@ func TestPGColumnCollation_3111(t *testing.T) {
 		// one is kept.
 		{recorded, baseline.PGColumn{}, pgshim.CollationNondeterministic, pgshim.CollationNondeterministic},
 	} {
-		if got := pgColumnCollation(tc.rel, tc.col, tc.prev); got != tc.want {
+		if got := pgColumnCollation(tc.rel.Collations, tc.col.Nondeterministic, tc.prev); got != tc.want {
 			t.Errorf("%+v, %+v after %d: %d, want %d", tc.rel, tc.col, tc.prev, got, tc.want)
 		}
 	}

@@ -65,7 +65,7 @@ func pgCopyCatalog(ctx context.Context, copySQL pgCatalogSource, run func(contex
 						c.SourceType, c.SourceTypeMod = rc.TypeOID, rc.TypeMod
 					}
 					c.TrimmedOnCopy = c.TrimmedOnCopy || rec.Trimmed[rc.Name]
-					c.Collation = pgColumnCollation(rec.Relation, rc, c.Collation)
+					c.Collation = pgColumnCollation(rec.Relation.Collations, rc.Nondeterministic, c.Collation)
 				}
 			}
 		}
