@@ -74,6 +74,11 @@ type Binding struct {
 	// type, and what the source recorded of each. Nil: such statements are
 	// refused.
 	Catalog func(ctx context.Context) ([]CatalogTable, error)
+	// CatalogStamp, when set, names the snapshot the copy reads now, read
+	// without one of the copy's workers: the catalog a connection keeps
+	// (catalogCacheFor) is read again as soon as it changes, not only once
+	// it is ten seconds old. Nil: it is kept the ten seconds.
+	CatalogStamp func(ctx context.Context) (string, error)
 	// CopyTableNames, when set, is the schema and name of each table a
 	// statement on the copy can read, read without one of the copy's workers:
 	// what the capture gate asks of every statement sent to the source, which

@@ -2,8 +2,12 @@ package console
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
@@ -133,13 +137,59 @@ type CopyTable struct {
 // CopyTables are the tables the copy serves this connection, after the
 // server's hidden rules: the ones a statement can read, no more.
 func (q *SQLOnCopy) CopyTables(ctx context.Context) ([]CopyTable, error) {
-	in, err := q.s.buildViewsInput(ctx, q.b, viewsRequest{PinSnapshot: true, OmitEvents: true, StateOnly: true, ForStatement: true, LocalCopy: true, ApplyHidden: true})
+	out, _, err := q.CopyTablesStamped(ctx)
+	return out, err
+}
+
+// CopyTablesStamped is CopyTables with the stamp (PGCopyStamp) of the
+// snapshot files they were read from.
+func (q *SQLOnCopy) CopyTablesStamped(ctx context.Context) ([]CopyTable, string, error) {
+	in, err := q.s.buildViewsInput(ctx, q.b, pgCopyRequest)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	out := make([]CopyTable, 0, len(in.Baselines))
 	for _, t := range in.Baselines {
 		out = append(out, CopyTable{Schema: t.Schema, Table: t.Table, Hidden: t.HiddenColumns, Relation: t.PGRelation})
 	}
-	return out, nil
+	return out, pgCopyStamp(in), nil
+}
+
+// PGCopyStamp names the snapshot files a statement on the copy reads now,
+// and the columns the server hides of each: two calls give the same stamp
+// only when the copy's tables, their columns and their types are the same.
+// It reads no table and needs none of the copy's workers. The PostgreSQL
+// port reads it before reusing the catalog it keeps, so that a new snapshot
+// (a column's type changed with it, #3251) is not answered with the old
+// one's list of columns.
+func (q *SQLOnCopy) PGCopyStamp(ctx context.Context) (string, error) {
+	in, err := q.s.buildViewsInput(ctx, q.b, pgCopyRequest)
+	if err != nil {
+		return "", err
+	}
+	return pgCopyStamp(in), nil
+}
+
+// pgCopyRequest is the views input the port's catalog is read from.
+var pgCopyRequest = viewsRequest{PinSnapshot: true, OmitEvents: true, StateOnly: true, ForStatement: true, LocalCopy: true, ApplyHidden: true}
+
+// pgCopyStamp is in's stamp: each table's name, file and hidden columns.
+// Names and paths are hashed whole, each with its length, so that no two
+// lists run together into the same text.
+func pgCopyStamp(in views.Input) string {
+	rows := make([]string, 0, len(in.Baselines))
+	for _, t := range in.Baselines {
+		parts := append([]string{t.Schema, t.Table, t.Path}, t.HiddenColumns...)
+		var b strings.Builder
+		for _, p := range parts {
+			fmt.Fprintf(&b, "%d:%s,", len(p), p)
+		}
+		rows = append(rows, b.String())
+	}
+	sort.Strings(rows)
+	h := sha256.New()
+	for _, r := range rows {
+		fmt.Fprintf(h, "%d:%s\n", len(r), r)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }

@@ -1211,6 +1211,16 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			}
 			return copySQL.PGCopyViewNames(ctx)
 		}
+		// Which snapshot the copy reads now, with no worker of the copy:
+		// the catalog a connection keeps is read again when it changes.
+		bound.CatalogStamp = func(ctx context.Context) (string, error) {
+			if timeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, timeout)
+				defer cancel()
+			}
+			return copySQL.PGCopyStamp(ctx)
+		}
 		bound.Catalog = func(ctx context.Context) ([]pgshim.CatalogTable, error) {
 			if timeout > 0 {
 				var cancel context.CancelFunc

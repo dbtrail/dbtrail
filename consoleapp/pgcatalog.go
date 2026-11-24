@@ -26,18 +26,8 @@ const pgCatalogColumnsSQL = "SELECT table_schema, table_name, column_name, data_
 // column the snapshot does not describe is reported with nothing of the
 // source's; a primary key one of whose columns the server hides is not
 // reported at all.
-func pgCopyCatalog(ctx context.Context, copySQL *console.SQLOnCopy, run func(context.Context, string) (sqlsandbox.Result, error)) ([]pgshim.CatalogTable, error) {
-	res, err := run(ctx, pgCatalogColumnsSQL)
-	if res.Spool != nil {
-		_ = res.Spool.Close()
-	}
-	if err != nil {
-		return nil, err
-	}
-	if res.Truncated {
-		return nil, &pgshim.Error{Code: "54000", Message: "the copy has more columns than one statement returns on this port, so its catalog cannot be listed whole"}
-	}
-	copyTables, err := copySQL.CopyTables(ctx)
+func pgCopyCatalog(ctx context.Context, copySQL pgCatalogSource, run func(context.Context, string) (sqlsandbox.Result, error)) ([]pgshim.CatalogTable, error) {
+	res, copyTables, err := pgCatalogOneSnapshot(ctx, copySQL, run)
 	if err != nil {
 		return nil, err
 	}
@@ -99,6 +89,50 @@ func pgCopyCatalog(ctx context.Context, copySQL *console.SQLOnCopy, run func(con
 		}
 	}
 	return out, nil
+}
+
+// pgCatalogSource is what pgCopyCatalog reads of the copy besides its
+// columns (console.SQLOnCopy).
+type pgCatalogSource interface {
+	PGCopyStamp(ctx context.Context) (string, error)
+	CopyTablesStamped(ctx context.Context) ([]console.CopyTable, string, error)
+}
+
+// pgCatalogOneSnapshot reads the copy's columns and what the snapshot
+// recorded of each table, both of one snapshot: each is a read of its own,
+// and a new snapshot between them would list one snapshot's columns with
+// the other's types, and say a column the view trims is not trimmed, or the
+// other way round (TrimmedOnCopy). The stamp before the columns and the one
+// with the tables must agree; a snapshot changes about every few minutes,
+// so one more try settles it, and a second change is an error the client
+// can try again (40001), never a mix of the two.
+func pgCatalogOneSnapshot(ctx context.Context, copySQL pgCatalogSource, run func(context.Context, string) (sqlsandbox.Result, error)) (sqlsandbox.Result, []console.CopyTable, error) {
+	for try := 0; ; try++ {
+		before, err := copySQL.PGCopyStamp(ctx)
+		if err != nil {
+			return sqlsandbox.Result{}, nil, err
+		}
+		res, err := run(ctx, pgCatalogColumnsSQL)
+		if res.Spool != nil {
+			_ = res.Spool.Close()
+		}
+		if err != nil {
+			return sqlsandbox.Result{}, nil, err
+		}
+		if res.Truncated {
+			return sqlsandbox.Result{}, nil, &pgshim.Error{Code: "54000", Message: "the copy has more columns than one statement returns on this port, so its catalog cannot be listed whole"}
+		}
+		copyTables, after, err := copySQL.CopyTablesStamped(ctx)
+		if err != nil {
+			return sqlsandbox.Result{}, nil, err
+		}
+		if before == after {
+			return res, copyTables, nil
+		}
+		if try == 1 {
+			return sqlsandbox.Result{}, nil, &pgshim.Error{Code: "40001", Message: "the copy took a new snapshot twice while its catalog was read; try the statement again"}
+		}
+	}
 }
 
 // lookupRecorded finds a table's snapshot record, its schema and name
