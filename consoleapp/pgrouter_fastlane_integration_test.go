@@ -61,7 +61,10 @@ func TestIntegrationPGRouterFastLane(t *testing.T) {
 	})
 
 	short := "SELECT sum(amount) FROM " + table
-	joined := "SELECT count(*) FROM " + table + " a JOIN " + table + " b ON a.id = b.id"
+	// Not on the key: PostgreSQL 18 removes a join of a table to itself on
+	// its primary key, and its plan then reads one table (short). Every
+	// amount is 1, which matches one id: the count is the rows.
+	joined := "SELECT count(*) FROM " + table + " a JOIN " + table + " b ON a.amount = b.id"
 	holder := "SELECT count(*) FROM " + table + " a, " + table + " b, " + table + " c WHERE a.amount + b.amount + c.amount > 0"
 	// The plans this test stands on, asked of the source first.
 	planOf := func(stmt string) string {

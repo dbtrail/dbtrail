@@ -2504,7 +2504,8 @@ connections. So one worker is kept for short statements:
   table read in more than one partition, a `UNION`), a `Subquery Scan`, a
   function, or any other node is not short. PostgreSQL folds some of those
   shapes into the query before it plans it: a `WITH` used once, a subquery in
-  `FROM`, a partitioned table pruned to one partition. When its plan then
+  `FROM`, a partitioned table pruned to one partition, and from PostgreSQL 18
+  a join of a table to itself on its primary key. When its plan then
   reads one table alone, the statement is short, and on the copy it is one
   pass over one table.
 - **Short means one table, not fast.** A grouping of a large table into many
