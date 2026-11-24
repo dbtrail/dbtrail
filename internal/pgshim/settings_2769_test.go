@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -493,7 +494,7 @@ func TestSettings_zoneAndSchemaReachTheCopy(t *testing.T) {
 	r.query("SET search_path TO sales")
 	want(t, "a timestamp with time zone", r.query("SELECT tstz FROM t"),
 		"Columns tstz:1184", "DataRow 2026-01-01 05:00:00-05", "DataRow infinity", "CommandComplete SELECT 2", "ReadyForQuery I")
-	if _, opts := l.last(); opts != (RunOptions{Schema: "sales", TimeZone: "America/Bogota"}) {
+	if _, opts := l.last(); !reflect.DeepEqual(opts, RunOptions{Schema: "sales", TimeZone: "America/Bogota"}) {
 		t.Fatalf("the statement ran in %+v", opts)
 	}
 	// Binary: the instant, whatever the zone, and infinity's end of the count.
@@ -526,7 +527,7 @@ func TestSettings_zoneAndSchemaReachTheCopy(t *testing.T) {
 	r.fe.Send(&pgproto3.Sync{})
 	_ = r.fe.Flush()
 	r.until()
-	if st, opts := l.last(); !strings.Contains(st, "dbtrail_describe") || opts != (RunOptions{Schema: "sales", TimeZone: "America/Bogota"}) {
+	if st, opts := l.last(); !strings.Contains(st, "dbtrail_describe") || !reflect.DeepEqual(opts, RunOptions{Schema: "sales", TimeZone: "America/Bogota"}) {
 		t.Fatalf("the describe ran %q in %+v", st, opts)
 	}
 }
