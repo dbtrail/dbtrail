@@ -1,10 +1,12 @@
 package consoleapp
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
@@ -32,7 +34,7 @@ import (
 
 // rereadKey is the bound's key for a refused table: one read per table and
 // verdict, until an ordinary update goes through.
-func rereadKey(t console.RefusedTable) string { return t.Name + "\x00" + t.Verdict }
+func rereadKey(t console.RefusedTable) string { return t.Verdict + " " + t.Name }
 
 // rereadChoice returns the tables a read of their own can fix after the update
 // failed, or nil and why not. tried holds the keys already read again since
@@ -96,8 +98,8 @@ func (b *backupScheduler) rereadInstead(e console.ServerEntry, failed console.Ba
 	if !b.sup.rereadRefused || e.IsPostgres() {
 		return false
 	}
+	tried := b.rereadsTried(e.ID)
 	b.mu.Lock()
-	tried := maps.Clone(b.rereadTried[e.ID])
 	_, observed := b.seen[e.ID]
 	b.mu.Unlock()
 	if !observed {
@@ -131,9 +133,34 @@ func (b *backupScheduler) rereadInstead(e console.ServerEntry, failed console.Ba
 			"server", e.Name, "id", e.ID, "reason", why)
 		return false
 	}
+	// A table dropped and not created again is not there to read: the read
+	// would fail after its lock, and the full read is what takes it out.
+	if missing, err := rereadTablesMissing(b.sup.ctx, source, tables); err != nil || len(missing) > 0 {
+		why := fmt.Sprintf("%s is not on the source now (dropped and not created again)", strings.Join(missing, ", "))
+		if err != nil {
+			why = "the source could not be asked whether the tables are there: " + err.Error()
+		}
+		slog.Info("snapshot schedule: the refused tables are not read again alone; the full read is taken in place of the update, as before",
+			"server", e.Name, "id", e.ID, "reason", why)
+		return false
+	}
 	p, err := e.BackupSchedule.Parse()
 	if err != nil {
 		slog.Warn("snapshot schedule: the refused tables are not read again alone, since the schedule could not be read", "server", e.Name, "id", e.ID, "error", err)
+		return false
+	}
+	// The bound is on disk before the read starts: a daemon that dies in the
+	// read must not read the same table alone again after every restart.
+	marked := maps.Clone(tried)
+	if marked == nil {
+		marked = make(map[string]bool)
+	}
+	for _, rt := range failed.RefusedTables {
+		marked[rereadKey(rt)] = true
+	}
+	if err := b.setRereadsTried(e.ID, marked); err != nil {
+		slog.Warn("snapshot schedule: the refused tables are not read again alone, since the record that bounds those reads could not be saved; the full read is taken in place of the update, as before",
+			"server", e.Name, "id", e.ID, "error", err)
 		return false
 	}
 	stamp := now.Format(time.RFC3339)
@@ -146,16 +173,11 @@ func (b *backupScheduler) rereadInstead(e console.ServerEntry, failed console.Ba
 		// records the skip in today's words.
 		slog.Warn("snapshot schedule: the read of the refused tables alone could not start; the full read is taken in place of the update, as before",
 			"server", e.Name, "id", e.ID, "tables", tables, "error", err)
+		if err := b.setRereadsTried(e.ID, tried); err != nil {
+			slog.Warn("snapshot schedule: could not take back the record of a read that did not start; those tables take the full read next time", "server", e.Name, "id", e.ID, "error", err)
+		}
 		return false
 	}
-	b.mu.Lock()
-	if b.rereadTried[e.ID] == nil {
-		b.rereadTried[e.ID] = make(map[string]bool)
-	}
-	for _, rt := range failed.RefusedTables {
-		b.rereadTried[e.ID][rereadKey(rt)] = true
-	}
-	b.mu.Unlock()
 	refused := failed
 	b.recordStart(e, scheduledStart{method: console.BackupMethodRefresh, at: stamp, since: since, updateWhy: req.UpdateWhy,
 		rereadFor: &refused, rereadTables: tables})
@@ -181,8 +203,20 @@ func (b *backupScheduler) afterReread(e console.ServerEntry, own scheduledStart,
 		// The full read stages a dump of every table in the same working
 		// folder, so it would run out of room the same way: as for any update
 		// the disk refused, none is taken. Said, with the update's refusal.
-		b.skip(e, time.Now().UTC(), "the update from the recorded changes was refused ("+own.rereadFor.LastError+
-			"), and reading the refused tables again ran out of disk space, so no full read is taken in its place, which needs that space too: "+last.LastError)
+		// Named in the log only: the slot's reason reaches sessions whose data
+		// profile hides table names (see stuckReason). The tables are read
+		// alone again once space is freed, so their bound is taken back.
+		slog.Warn("snapshot schedule: reading the refused tables again ran out of disk space in the working folder; no full read is taken, which needs that space too",
+			"server", e.Name, "id", e.ID, "tables", own.rereadTables, "reason", last.LastError)
+		tried := b.rereadsTried(e.ID)
+		for _, rt := range own.rereadFor.RefusedTables {
+			delete(tried, rereadKey(rt))
+		}
+		if err := b.setRereadsTried(e.ID, tried); err != nil {
+			slog.Warn("snapshot schedule: could not take back the record of a read that ran out of disk; those tables take the full read next time", "server", e.Name, "id", e.ID, "error", err)
+		}
+		b.skip(e, time.Now().UTC(), "the update from the recorded changes was refused for "+tableCount(len(own.rereadTables))+
+			", and reading them again ran out of disk space in the working folder, so no full read is taken in its place, which needs that space too. They are read again alone once space is freed")
 		return
 	}
 	if !fullReadStandsIn(last) {
@@ -199,7 +233,60 @@ func (b *backupScheduler) afterReread(e console.ServerEntry, own scheduledStart,
 
 // forgetRereads ends the bound: an ordinary update went through.
 func (b *backupScheduler) forgetRereads(serverID string) {
+	if err := b.setRereadsTried(serverID, nil); err != nil {
+		slog.Warn("snapshot schedule: could not clear the record of tables read again alone; they take the full read the next time they are refused", "id", serverID, "error", err)
+	}
+}
+
+// rereadsTried is the bound for the server: what this process recorded, and
+// what the run history kept across a restart.
+func (b *backupScheduler) rereadsTried(serverID string) map[string]bool {
 	b.mu.Lock()
-	delete(b.rereadTried, serverID)
+	tried := maps.Clone(b.rereadTried[serverID])
 	b.mu.Unlock()
+	if h := b.sup.history; h != nil {
+		for _, k := range h.RereadsTried(serverID) {
+			if tried == nil {
+				tried = make(map[string]bool)
+			}
+			tried[k] = true
+		}
+	}
+	return tried
+}
+
+// setRereadsTried replaces the bound for the server, on disk first when there
+// is a run history. In memory it is set whatever the disk said: the bound
+// holds for this process either way.
+func (b *backupScheduler) setRereadsTried(serverID string, tried map[string]bool) error {
+	b.mu.Lock()
+	if len(tried) == 0 {
+		delete(b.rereadTried, serverID)
+	} else {
+		b.rereadTried[serverID] = maps.Clone(tried)
+	}
+	b.mu.Unlock()
+	if b.sup.history == nil {
+		return nil
+	}
+	return b.sup.history.SetRereadsTried(serverID, slices.Collect(maps.Keys(tried)))
+}
+
+// rereadTablesMissing is the tables of want the source does not hold now.
+func rereadTablesMissing(ctx context.Context, source console.BaselineRequest, want []string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, sourceTablesTimeout)
+	defer cancel()
+	have, foldCase, err := listSourceTables(ctx, source.SourceDSN, source.SourceSSL, source.Schemas)
+	if err != nil {
+		return nil, err
+	}
+	return tablesLeftOut(have, want, foldCase), nil
+}
+
+// tableCount is "1 table" or "N tables".
+func tableCount(n int) string {
+	if n == 1 {
+		return "1 table"
+	}
+	return fmt.Sprintf("%d tables", n)
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/spf13/cobra"
@@ -63,10 +64,13 @@ type rereadSched struct {
 func newRereadSched(t *testing.T, on bool) *rereadSched {
 	t.Helper()
 	r := &rereadSched{refuse: func(reconstruct.FullTableConfig) []reconstruct.TableFailure { return nil }}
-	prevList, prevReached, prevWait, prevPoll := newestSnapshotTables, rereadCaptureReached, rereadCaptureWait, rereadCapturePoll
+	prevList, prevReached, prevWait, prevPoll, prevSource := newestSnapshotTables, rereadCaptureReached, rereadCaptureWait, rereadCapturePoll, listSourceTables
 	t.Cleanup(func() {
-		newestSnapshotTables, rereadCaptureReached, rereadCaptureWait, rereadCapturePoll = prevList, prevReached, prevWait, prevPoll
+		newestSnapshotTables, rereadCaptureReached, rereadCaptureWait, rereadCapturePoll, listSourceTables = prevList, prevReached, prevWait, prevPoll, prevSource
 	})
+	listSourceTables = func(context.Context, string, config.SSL, []string) ([]string, bool, error) {
+		return slices.Clone(rereadSchedTables), false, nil
+	}
 	newestSnapshotTables = func(context.Context, string) (time.Time, []string, error) {
 		return refreshAt.Add(-time.Hour), slices.Clone(rereadSchedTables), nil
 	}
@@ -108,6 +112,12 @@ func newRereadSched(t *testing.T, on bool) *rereadSched {
 	r.reads = stubFullReads(t, r.sup)
 	r.e = addScheduled(t, r.reg, true)
 	r.b.tick(context.Background(), time.Date(2026, 8, 28, 8, 0, 5, 0, time.UTC))
+	// Registered last, so it runs first: every job and watcher of the test
+	// ends before the functions it replaced are put back and its folders go.
+	t.Cleanup(func() {
+		r.b.watchers.Wait()
+		r.sup.postRefresh.Wait()
+	})
 	return r
 }
 
@@ -577,10 +587,24 @@ func TestScheduleReread_aReadOutOfDiskIsSaidNotSilent_2640(t *testing.T) {
 	if len(*r.dumps) != 1 || r.reads.count() != 0 {
 		t.Fatalf("dumps %d, full reads %d; want the read and no full read", len(*r.dumps), r.reads.count())
 	}
-	if !strings.Contains(state.LastSkipReason, "ran out of disk space") || !strings.Contains(state.LastSkipReason, "TRUNCATE TABLE in the window") {
+	if !strings.Contains(state.LastSkipReason, "ran out of disk space") || !strings.Contains(state.LastSkipReason, "1 table") {
 		t.Fatalf("the slot does not say why nothing stands in: %q", state.LastSkipReason)
 	}
+	// The card and the history reach sessions whose data profile hides
+	// table names: counted, never named.
+	if strings.Contains(state.LastSkipReason, "orders") || strings.Contains(state.LastSkipReason, "demo") {
+		t.Fatalf("the slot names a table: %q", state.LastSkipReason)
+	}
 	r.wantNoReadLeft(t)
+	// Space freed: the table is read alone again, not sent to the full read.
+	if got := r.sup.history.RereadsTried(r.e.ID); len(got) != 0 {
+		t.Fatalf("a read that ran out of disk still bounds the next one: %v", got)
+	}
+	r.setRefuse(curedByRead(truncated("orders")))
+	r.slot(t, 10)
+	if len(*r.dumps) != 2 || r.reads.count() != 0 {
+		t.Fatalf("after the disk refusal: dumps %d, full reads %d; want the table read alone again", len(*r.dumps), r.reads.count())
+	}
 }
 
 // A lock mode a read of some tables cannot use starts no read: the full read,
@@ -596,5 +620,80 @@ func TestScheduleReread_aLockModeItCannotUseTakesTheFullRead_2640(t *testing.T) 
 	}
 	if !strings.Contains(log.String(), "lock mode no-lock") {
 		t.Fatalf("the log does not say why the tables were not read alone:\n%s", log.String())
+	}
+}
+
+// A table dropped and not created again is not read alone: it is not there
+// to read. The full read, as before, and the log says why. A source that
+// cannot be asked takes the full read too.
+func TestScheduleReread_aTableNotOnTheSourceTakesTheFullRead_2640(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		list  func(context.Context, string, config.SSL, []string) ([]string, bool, error)
+		inLog string
+	}{
+		{"dropped and not created again", func(context.Context, string, config.SSL, []string) ([]string, bool, error) {
+			return []string{"demo.mydumper_0", "demo.mydumper_1", "demo.plain"}, false, nil
+		}, "demo.orders is not on the source now"},
+		{"the source does not answer", func(context.Context, string, config.SSL, []string) ([]string, bool, error) {
+			return nil, false, errors.New("connection refused")
+		}, "connection refused"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			log := captureSlogFor(t)
+			r := newRereadSched(t, true)
+			listSourceTables = c.list
+			r.setRefuse(curedByRead(truncated("orders")))
+			state := r.slot(t, 9)
+			if len(*r.dumps) != 0 || r.reads.count() != 1 || state.LastFallbackAt == "" {
+				t.Fatalf("dumps %d, full reads %d, state %+v; want today's full read", len(*r.dumps), r.reads.count(), state)
+			}
+			if !strings.Contains(log.String(), c.inLog) {
+				t.Fatalf("the log does not say %q:\n%s", c.inLog, log.String())
+			}
+		})
+	}
+}
+
+// The bound is on disk before the read starts, and a restarted daemon reads
+// it: a table refused again after a restart takes the full read, not a
+// second read alone. An ordinary update through clears it on disk too.
+func TestScheduleReread_theBoundSurvivesARestart_2640(t *testing.T) {
+	noEmergencyCap(t)
+	r := newRereadSched(t, true)
+	r.setRefuse(curedByRead(truncated("orders")))
+	var during []string
+	rereadCaptureReached = func(context.Context, reconstruct.OverrideProbe) error {
+		h, err := console.OpenBaselineHistory(r.sup.history.Path())
+		if err != nil {
+			return err
+		}
+		during = h.RereadsTried(r.e.ID)
+		return nil
+	}
+	r.slot(t, 9)
+	if len(during) != 1 {
+		t.Fatalf("while the read ran, the file held %v; want the table's mark written before it started", during)
+	}
+
+	// The daemon restarts: a new loop, the history read back from its file.
+	h2, err := console.OpenBaselineHistory(r.sup.history.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.sup.history = h2
+	r.b = newBackupScheduler(r.sup, r.reg, true, false)
+	r.b.window = nil
+	r.b.tick(context.Background(), time.Date(2026, 8, 28, 9, 30, 5, 0, time.UTC))
+	r.slot(t, 10)
+	if len(*r.dumps) != 1 || r.reads.count() != 1 {
+		t.Fatalf("after a restart: dumps %d, full reads %d; want no second read alone and the full read", len(*r.dumps), r.reads.count())
+	}
+
+	nextSecond()
+	r.setRefuse(always())
+	r.slot(t, 11)
+	if got := r.sup.history.RereadsTried(r.e.ID); len(got) != 0 {
+		t.Fatalf("an update that went through left the bound on disk: %v", got)
 	}
 }

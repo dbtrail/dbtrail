@@ -1704,6 +1704,12 @@ func (b *backupScheduler) Forget(serverID string) {
 	delete(b.rereadTried, serverID)
 	delete(b.windows, serverID)
 	b.mu.Unlock()
+	// The schedule is gone, and so is the bound of its reads of some tables.
+	if h := b.sup.history; h != nil {
+		if err := h.SetRereadsTried(serverID, nil); err != nil {
+			slog.Warn("snapshot schedule: could not clear the record of tables read again alone for a removed schedule", "id", serverID, "error", err)
+		}
+	}
 	// A schedule set again starts silent: its first skipped slot is said.
 	b.sup.gateEdge.Resolve(unconfirmedSkipKey + serverID)
 	b.sup.gateEdge.Resolve(unconfirmedUpdateKey + serverID)
