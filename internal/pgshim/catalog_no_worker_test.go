@@ -144,18 +144,28 @@ func TestCatalogNoWorker_aTypedVetoStillKeepsItFromTheCopy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := costPortConn(t, ctx, tc.l)
 			got := costSimple(ctx, c, tc.l, typed)
-			if n := tc.l.runs.Load(); n != 0 {
-				t.Errorf("the copy ran it: %+v", got)
+			if tc.name == "by its plan" {
+				// Expensive on the source: the copy answers it anyway
+				// (heavy.go), on the simple protocol.
+				if got.side != RouteCopy || got.reason != ReasonHeavyOnCopy {
+					t.Errorf("%+v, want the copy as %s", got, ReasonHeavyOnCopy)
+				}
+			} else {
+				if n := tc.l.runs.Load(); n != 0 {
+					t.Errorf("the copy ran it: %+v", got)
+				}
+				if got.side != RouteSource || got.reason != ReasonVeto {
+					t.Errorf("%+v, want the source as %s", got, ReasonVeto)
+				}
 			}
-			if got.side != RouteSource || got.reason != ReasonVeto {
-				t.Errorf("%+v, want the source as %s", got, ReasonVeto)
-			}
-			// The same through the extended protocol, with its own decision.
+			// The same through the extended protocol, with its own decision:
+			// the veto stands there.
+			before := tc.l.runs.Load()
 			res := c.ExecParams(ctx, typed, nil, nil, nil, nil).Read()
 			if !tc.l.refuse && (res.Err != nil || len(res.Rows) != 1 || string(res.Rows[0][0]) != "42") {
 				t.Errorf("with the extended protocol: %v %q, want the source's 42", res.Err, res.Rows)
 			}
-			if n := tc.l.runs.Load(); n != 0 {
+			if n := tc.l.runs.Load(); n != before {
 				t.Errorf("with the extended protocol the copy ran it")
 			}
 			if n := tc.l.last(); n.Side != RouteSource || n.Reason != ReasonVeto {
@@ -223,20 +233,22 @@ func TestCatalogNoWorker_dateTruncReachesThePlan(t *testing.T) {
 	if got := costSimple(ctx, c, l, report); got.side != RouteCopy {
 		t.Errorf("of a timestamp: %+v, want the copy", got)
 	}
-	// Of a date the typed screen still keeps it from the copy.
+	// Of a date the typed screen vetoes it; expensive, the copy answers it
+	// anyway on the simple protocol (heavy.go).
 	d := &costLogin{src: src, catalog: col("DATE")}
 	e := costPortConn(t, ctx, d)
-	if got := costSimple(ctx, e, d, report); got.side != RouteSource || got.reason != ReasonVeto {
-		t.Errorf("of a date: %+v, want the source as %s", got, ReasonVeto)
+	if got := costSimple(ctx, e, d, report); got.side != RouteCopy || got.reason != ReasonHeavyOnCopy {
+		t.Errorf("of a date: %+v, want the copy as %s", got, ReasonHeavyOnCopy)
 	}
+	before := d.runs.Load()
 	// With the extended protocol too, whose decision is its own: nothing
 	// later on the way to the copy would catch this one.
 	res := e.ExecParams(ctx, report, nil, nil, nil, nil).Read()
 	if res.Err != nil || len(res.Rows) != 1 || string(res.Rows[0][0]) != "42" {
 		t.Errorf("of a date, with parameters: %v %q, want the source's 42", res.Err, res.Rows)
 	}
-	if n := d.runs.Load(); n != 0 {
-		t.Errorf("of a date: the copy ran it %d times", n)
+	if n := d.runs.Load(); n != before {
+		t.Errorf("of a date, with parameters: the copy ran it %d times", n-before)
 	}
 }
 
