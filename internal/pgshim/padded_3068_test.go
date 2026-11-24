@@ -30,8 +30,6 @@ func paddedCatalog() []CatalogTable {
 			col("label", "VARCHAR", oidText, -1),        // text
 			col("tags", "VARCHAR[]", oidBpcharArray, 7), // char(3)[]
 			col("free", "VARCHAR", oidBpchar, -1),       // bpchar, no length
-			col("one", "VARCHAR", oidChar, -1),          // "char", one byte
-			col("kind", "VARCHAR", 16400, -1),           // a type of the user's (an enum)
 			col("k", "INTEGER", oidInt4, -1),
 		}},
 		{Schema: "public", Name: "plain", Columns: []CatalogColumn{
@@ -54,7 +52,7 @@ func paddedScreen(stmt string) string { return CopyScreenFor(stmt, paddedCatalog
 
 // isPaddedVeto reports whether a veto is paddedUse's.
 func isPaddedVeto(veto string) bool {
-	return strings.Contains(veto, "char(n) column") || strings.Contains(veto, "bpchar")
+	return strings.Contains(veto, "char(n) column") || strings.Contains(veto, "bpchar") || strings.Contains(veto, "does not compare as PostgreSQL")
 }
 
 func TestPadded_sourceMark(t *testing.T) {
@@ -268,9 +266,6 @@ func TestPadded_leftToTheCopy(t *testing.T) {
 		`SELECT k, count(*) FROM codes GROUP BY k`,
 		`SELECT id FROM (SELECT id, k FROM codes) s WHERE k = 1`,
 		`WITH x AS (SELECT id, label FROM codes) SELECT count(*) FROM x WHERE label = 'a'`,
-		// "char" (one byte) and a type of the user's are not padded.
-		`SELECT id FROM codes WHERE one = 'a'`,
-		`SELECT id FROM codes WHERE kind = 'new'`,
 	} {
 		if veto := paddedScreen(q); veto != "" {
 			t.Errorf("%s: sent to the source (%s), want the copy", q, veto)

@@ -751,9 +751,10 @@ func (s *session) runPortal(p *portal) *pgErr {
 	// must be written for the copy the same way (rewrittenNames).
 	s.screened = p.stmt.query
 	s.argsBound = len(p.stmt.paramOIDs) > 0
+	s.argsPadded = paddedArgument(p.stmt.paramOIDs)
 	cols, types, rows, tag, perr := s.run(p.text)
 	s.screened = ""
-	s.argsBound = false
+	s.argsBound, s.argsPadded = false, false
 	if why := s.takeBusyRefused(); why != "" && perr != nil && p.route.side == RouteCopy {
 		// The copy was busy (#3109, route.go): refused, and counted so.
 		p.route = routeDecision{RouteRefused, why}

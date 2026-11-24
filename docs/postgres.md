@@ -1969,9 +1969,29 @@ The source answers:
   table whose snapshot was taken before DBTrail recorded column types (the
   next snapshot records them). Beside one of those, `DISTINCT` and `GROUP
   BY` go to the source too. An array of `char(n)` is treated as a `char(n)`.
-  Not told apart: a **domain over `char(n)`**. The snapshot records the
-  domain's name, not what it is made of, so the port reads such a column as
-  it reads an enum, and the copy still compares its padding. The type is
+  The snapshot records a **domain's** name, not what it is made of, so the
+  port cannot tell a domain over `char(n)` from any other type.
+- **A column the copy does not compare as PostgreSQL does.** That is a type
+  that is not built in (a domain, an enum, a composite, a range of your own,
+  an extension's type), a built-in type the copy holds as text (`inet`,
+  `cidr`, `macaddr`, `json`, `jsonb`, `xml`, `money`, a `numeric` wider than
+  38 digits, `tsvector`, `tsquery`, the geometric types, the ranges, `pg_lsn`,
+  `bit`, `"char"`), `bytea` and `oid`. PostgreSQL compares them by value; the
+  copy compares what is written, so `WHERE dc = 'a'` on a domain over
+  `char(4)` found no rows where PostgreSQL finds nine. **A statement that
+  compares, groups, joins, sorts, aggregates, applies `DISTINCT` to or passes
+  to a function such a column is not answered by the copy**: it goes to the
+  source, or is refused on a server without a forwarding user. The cost is
+  plain: those reports run on the source, at the source's speed, even when the
+  copy would have answered them right. **Only showing the column stays on the
+  copy**, as a whole item of a plain select list or through its `*`
+  (`SELECT id, doc FROM t WHERE id = 7`): both sides write the same value.
+  The port still announces such a column as `text`. A statement that does not
+  read the column stays on the copy (`SELECT id, total FROM t`, `SELECT
+  count(*) FROM t`, a `*` inside a `WITH` whose outer query names other
+  columns). An argument declared `bpchar` is the source's too: it compares
+  without its trailing blanks.
+  For a `char(n)` column, the type is
   the one the last snapshot recorded: a column changed from `text` to
   `char(n)` on the source is treated as `char(n)` from the next snapshot on.
   When the copy's list of columns cannot be read at all (a copy with more
