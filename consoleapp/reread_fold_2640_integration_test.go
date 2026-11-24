@@ -185,7 +185,7 @@ func TestIntegrationRereadFold_twoReadTablesAndAPlainOne_2640(t *testing.T) {
 	r := newRereadRig(t)
 	r.truncateBoth(t)
 	if st := r.refresh(r.req); st.State != "failed" || len(st.RefusedTables) != 2 {
-		t.Fatalf("the ordinary update: %q, refused %+v; want it to refuse the two tables", st.State, st.RefusedTables)
+		t.Fatalf("the ordinary update: %q, refused %+v (%s); want it to refuse the two tables", st.State, st.RefusedTables, st.LastError)
 	}
 
 	var stop atomic.Bool
