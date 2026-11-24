@@ -119,6 +119,9 @@ func (r *rereadRig) captured(t *testing.T) {
 }
 
 func (r *rereadRig) refresh(req refreshRequest) console.BaselineStatus {
+	// A snapshot folder is named to the second and written once: a run in the
+	// second of the previous one is refused for that alone.
+	time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(1100 * time.Millisecond)))
 	r.sup.mu.Lock()
 	r.sup.refreshes[req.ServerID] = &console.BaselineStatus{State: "running"}
 	r.sup.mu.Unlock()
