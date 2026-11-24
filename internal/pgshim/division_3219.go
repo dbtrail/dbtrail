@@ -669,7 +669,7 @@ func exactClass(toks []rtToken, typesOf func(string) []string) exactCls {
 				c = clsWhole64
 			}
 			take(c)
-		case t.kind == rtWord && t.text == "case" && !isOpTok(toks, i-1, "."):
+		case t.kind == rtWord && t.text == "case":
 			end := caseEnd(toks, i)
 			if end < 0 || !take(caseClass(toks[i:end+1], typesOf)) {
 				return clsUnknown

@@ -260,7 +260,8 @@ func TestIntegrationPGRouterDivisionOfACase(t *testing.T) {
 	for _, tc := range []struct {
 		name, stmt string
 		args       []string
-		// side is who answers the first run: the copy, or the source.
+		// side is who answers the first run: the copy, the source, or the
+		// copy asked and refusing when it runs (the source answers).
 		side string
 		// sameBytes: PostgreSQL writes this quotient with 16 decimals, so
 		// the port's bytes are PostgreSQL's.
@@ -278,8 +279,8 @@ func TestIntegrationPGRouterDivisionOfACase(t *testing.T) {
 		// The copy refuses when it runs, and the source answers: PostgreSQL's
 		// error for a divisor of zero, and its quotient for one too small.
 		{"a divisor of zero in a CASE", "SELECT amount / (CASE WHEN qty > 2 THEN qty ELSE 0 END) AS r FROM " + T + " WHERE id = $1", []string{"1", "2", "1", "2", "5"}, "copy", false},
-		{"a share of all zeros as the divisor", "SELECT sum(amount) / sum(CASE WHEN qty > 100 THEN amount ELSE 0 END) AS r FROM " + T + " WHERE id < $1", []string{"9"}, "copy", false},
-		{"a quotient under 0.000001", "SELECT sum(CASE WHEN id = 2 THEN amount ELSE 0 END) / 90000000 AS r FROM " + T + " WHERE id < $1", []string{"9"}, "copy", false},
+		{"a share of all zeros as the divisor", "SELECT sum(amount) / sum(CASE WHEN qty > 100 THEN amount ELSE 0 END) AS r FROM " + T + " WHERE id < $1", []string{"9"}, "refused", false},
+		{"a quotient under 0.000001", "SELECT sum(CASE WHEN id = 2 THEN amount ELSE 0 END) / 90000000 AS r FROM " + T + " WHERE id < $1", []string{"9"}, "refused", false},
 		// What the screen cannot show to be a numeric goes to the source up
 		// front: PostgreSQL divides two whole numbers as whole numbers, a
 		// float is a float, and a sum of a bigint is a numeric there and a
@@ -299,6 +300,10 @@ func TestIntegrationPGRouterDivisionOfACase(t *testing.T) {
 		onCopy := after[pgshim.ReasonAnswersTheSame] > before[pgshim.ReasonAnswersTheSame]
 		if tc.side == "copy" && (!onCopy || after[pgshim.ReasonVeto] != before[pgshim.ReasonVeto]) {
 			t.Errorf("%s: %s: want the copy to be asked; reasons went from %v to %v", tc.name, tc.stmt, before, after)
+		}
+		refused := after[pgshim.ReasonCopyRefused] > before[pgshim.ReasonCopyRefused]
+		if tc.side == "refused" && (onCopy || !refused || after[pgshim.ReasonVeto] != before[pgshim.ReasonVeto]) {
+			t.Errorf("%s: %s: want the copy to be asked and to refuse; reasons went from %v to %v", tc.name, tc.stmt, before, after)
 		}
 		if tc.side == "source" && (onCopy || after[pgshim.ReasonVeto] == before[pgshim.ReasonVeto]) {
 			t.Errorf("%s: %s: want the screen to send it to the source; reasons went from %v to %v", tc.name, tc.stmt, before, after)

@@ -80,8 +80,11 @@ func TestExactClass_case(t *testing.T) {
 		{`CASE amount END`, clsUnknown},
 		{`CASE WHEN qty > 1 THEN amount END END`, clsUnknown},
 		{`CASE END`, clsUnknown},
-		// A column named case is a column.
+		// A column named case is a column, and one named like a word of a
+		// CASE leaves the CASE not known.
 		{`t.case`, clsUnknown},
+		{`CASE WHEN qty > 1 THEN t.end ELSE 0 END`, clsUnknown},
+		{`CASE WHEN qty > 1 THEN t.case ELSE 0 END`, clsUnknown},
 	} {
 		toks, why := lexSQL(c.expr)
 		if why != "" {
