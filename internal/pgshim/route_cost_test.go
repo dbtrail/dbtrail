@@ -783,7 +783,8 @@ func TestRouteByCost_simple(t *testing.T) {
 		{"a plan refused for the moment", "SELECT count(*) FROM locked", costOutcome{"42", "", RouteSource, ReasonExplainFailed}, "EXPLAIN (FORMAT JSON) SELECT count(*) FROM locked"},
 		{"cancelled while its plan was asked for: not run anywhere", "SELECT count(*) FROM canceled", costOutcome{"", "57014", RouteSource, ReasonExplainFailed}, "EXPLAIN (FORMAT JSON) SELECT count(*) FROM canceled"},
 		// Asked of nothing: the screen sends it to the source already.
-		{"a veto", "SELECT now()", costOutcome{"42", "", RouteSource, ReasonVeto}, ""},
+		// Its plan is asked (heavy.go): cheap, the screen's veto stands.
+		{"a veto", "SELECT now()", costOutcome{"42", "", RouteSource, ReasonVeto}, "EXPLAIN (FORMAT JSON) SELECT now()"},
 		// EXPLAIN of the first would run the second on the source.
 		{"two statements", "SELECT sum(n) FROM big; SELECT sum(n) FROM big", costOutcome{"42", "", RouteSource, ReasonExplainFailed}, ""},
 	} {
