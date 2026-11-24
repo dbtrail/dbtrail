@@ -49,9 +49,9 @@ func TestIntegrationPGRouterFastLane(t *testing.T) {
 			e.SourceDSN, e.SourceSlot, e.SourcePublication = pgFwdSourceDSN(t), "fastlane_slot", "fastlane_pub"
 			e.RouteDSN = withAccount(t, e.SourceDSN, role, pass)
 		},
-		cost:     &pgshim.CostPolicy{ScanRows: 100},
-		workers:  2,
-		maxWait:  maxWait,
+		cost:    &pgshim.CostPolicy{ScanRows: 100},
+		workers: 2,
+		maxWait: maxWait,
 	})
 	source := pgClient(t, ctx, env.sourceDSN, nil)
 	t.Cleanup(func() {
