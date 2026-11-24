@@ -15,10 +15,8 @@ func caseClass(toks []rtToken, typesOf func(string) []string) exactCls {
 		if len(v) == 1 && v[0].kind == rtWord && v[0].text == "null" {
 			continue
 		}
+		// joinCls keeps a value not known not known.
 		c := exactClass(v, typesOf)
-		if c == clsUnknown {
-			return clsUnknown
-		}
 		if known {
 			cls = joinCls(cls, c)
 		} else {
