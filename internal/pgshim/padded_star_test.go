@@ -203,7 +203,7 @@ func TestPaddedStar_aKeywordAsLabel(t *testing.T) {
 func TestPaddedStar_sortedTextStaysOnTheSource(t *testing.T) {
 	tables := paddedStarCatalog()
 	screen := func(q string) string {
-		return CopyScreen(q, withColumnOrder(screenTypes(tables, tablesRead(RewriteForCopy(q), tables)), tables))
+		return CopyScreenSortingLikeSource(q, withColumnOrder(screenTypes(tables, tablesRead(RewriteForCopy(q), tables)), tables))
 	}
 	for _, q := range []string{
 		`SELECT * FROM (SELECT id, label FROM codes) s ORDER BY 2`,

@@ -27,9 +27,8 @@ const (
 func TestIntegrationPGRouterCutOfACharColumn(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
-	env := startPGPortFor(t, ctx, nil, pgPortFixture{table: pgCutCustomer, slot: "pgcut_slot", pub: "pgcut_pub",
+	env := startPGPortFor(t, ctx, nil, pgPortFixture{table: pgCutCustomer + ", " + pgCutOrders, slot: "pgcut_slot", pub: "pgcut_pub",
 		setup: []string{
-			"DROP TABLE IF EXISTS " + pgCutOrders,
 			"CREATE TABLE " + pgCutOrders + " (o_id int PRIMARY KEY, o_c_id int, o_w_id int, o_d_id int)",
 			"INSERT INTO " + pgCutOrders + " VALUES (1, 1, 1, 1), (2, 3, 1, 1)",
 			"CREATE TABLE " + pgCutCustomer + " (c_id int, c_w_id int, c_d_id int, c_state char(2), c_phone char(16), c_balance numeric(12,2), c_since date DEFAULT '2026-01-02', c_bin bytea DEFAULT '\\x6162', c_word text DEFAULT 'a😀b', PRIMARY KEY (c_w_id, c_d_id, c_id))",
@@ -56,7 +55,7 @@ func TestIntegrationPGRouterCutOfACharColumn(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		bg := context.Background()
-		for _, s := range []string{"DROP TABLE IF EXISTS " + pgCutOrders, "DROP OWNED BY " + pgCutRole, "DROP ROLE IF EXISTS " + pgCutRole} {
+		for _, s := range []string{"DROP OWNED BY " + pgCutRole, "DROP ROLE IF EXISTS " + pgCutRole} {
 			_, _ = source.Exec(bg, s).ReadAll()
 		}
 	})
@@ -138,6 +137,9 @@ func TestIntegrationPGRouterCutOfACharColumn(t *testing.T) {
 	after := reasons()
 	if got != want {
 		t.Errorf("Q22:\n  the port:   %s\n  PostgreSQL: %s", got, want)
+	}
+	if after[pgshim.ReasonAnswersTheSame] <= before[pgshim.ReasonAnswersTheSame] || after[pgshim.ReasonVeto] != before[pgshim.ReasonVeto] {
+		t.Errorf("Q22: want the copy to answer it; reasons %v to %v", before, after)
 	}
 	t.Logf("Q22: rows %s; reasons %v to %v", got, before, after)
 }

@@ -459,9 +459,9 @@ func TestCopyScreen_substr(t *testing.T) {
 		"SELECT substr(word, 1, 2, 3) FROM t":       substringVeto,
 		// Its answer is text, whatever it is given: sorted or compared by
 		// order, by the source's collation.
-		"SELECT id FROM t ORDER BY substr(id, 1, 1)":      "text sorted",
-		"SELECT id FROM t WHERE substr(id, 1, 1) < 'b'":   "text compared",
-		"SELECT id FROM t WHERE substr(word, 1, 1) > 'b'": "text compared",
+		"SELECT count(*) FROM (SELECT id FROM t ORDER BY substr(id, 1, 1) LIMIT 5) s": "text sorted",
+		"SELECT id FROM t WHERE substr(id, 1, 1) < 'b'":                               "text compared",
+		"SELECT id FROM t WHERE substr(word, 1, 1) > 'b'":                             "text compared",
 		// A char(n) column cut otherwise than by whole numbers written in the
 		// text, or used on its own: other rows on the copy.
 		"SELECT substr(code, whole, 1) FROM t":             "trailing blanks",

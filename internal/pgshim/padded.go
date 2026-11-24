@@ -106,6 +106,10 @@ func screenTypes(tables []CatalogTable, read func(*CatalogTable) bool) map[strin
 				typ = m
 			}
 			out[n] = append(out[n], typ)
+			if onlyTextOnCopy(c) && (read == nil || read(t)) {
+				out[onlyCopyTextKey] = []string{relType}
+				out[onlyCopyTextKey+n] = []string{relType}
+			}
 			if !provenNotPadded(c) && (read == nil || read(t)) {
 				out[starUnprovenKey] = []string{relType}
 			}
@@ -692,7 +696,7 @@ func paddedForNoSource(toks []rtToken, types map[string][]string) string {
 		return veto
 	}
 	if len(paddedExempt(toks, types)) > 0 || paddedRead(toks, types, false) != "" {
-		return screenForCopy(toks, types)
+		return screenWith(toks, types, false, true)
 	}
 	return ""
 }

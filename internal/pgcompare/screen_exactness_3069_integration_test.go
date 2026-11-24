@@ -26,6 +26,11 @@ func screenExactness() []expectation {
 		asReal   = "#3069: PostgreSQL computes a real as a double precision, and sums it as a real"
 	)
 	return []expectation{
+		// --- the main ORDER BY of text (#3219): the copy's, by bytes ----------
+		// Known and accepted: 'Ana, bruno, Carla' on PostgreSQL is 'Ana, Carla,
+		// bruno' here, and a LIMIT then keeps other rows.
+		differs("order", "the copy sorts text by bytes: accepted for the main ORDER BY", `SELECT name FROM pgcmp_customers WHERE id < 4 ORDER BY name, id`),
+		differs("text", "the copy sorts text by bytes, and the LIMIT keeps other rows: accepted", `SELECT name FROM pgcmp_customers ORDER BY name LIMIT 2`),
 		// --- a division whose left side is a product ------------------------
 		// PostgreSQL divides the whole product: sum of a bigint is a numeric
 		// there (13.5) and a whole number on the copy (13).

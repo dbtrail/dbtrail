@@ -1868,9 +1868,23 @@ The source answers:
 - **The clock and the session**: `now()`, `CURRENT_DATE`, `CURRENT_TIMESTAMP`,
   `LOCALTIMESTAMP`, `current_user` and the like. The copy's data is as old as
   its last update, and its clock and session are not the source's.
-- **Text sorted or compared by order** (`ORDER BY` a text column, `min()` of
-  one, `name > 'B'`): PostgreSQL orders text by the database's collation, the
-  copy by bytes. Text compared for equality, grouped or matched with `LIKE`
+- **Text sorted or compared by order** (an `ORDER BY` of text anywhere but
+  the main statement, `min()` of one, `name > 'B'`): PostgreSQL orders text by
+  the database's collation, the copy by bytes. **The `ORDER BY` of the main
+  statement is the exception, and the copy answers it**, by a text column,
+  an expression, a position or an alias, with or without `LIMIT`: the same
+  rows, sorted by bytes (`B, a, c` where PostgreSQL writes `a, B, c`), and
+  with a `LIMIT` or an `OFFSET` the rows kept can be other rows. To have
+  PostgreSQL's order, write `COLLATE "default"` on the key
+  (`ORDER BY name COLLATE "default"`): the statement goes to the source. A
+  column the copy holds as text and PostgreSQL does not (an enum, a domain,
+  `money`, `inet`, `json`, a `numeric` wider than 38 digits) sorts by its
+  meaning on PostgreSQL, so when a statement reads one, only a key that is a
+  real text column written by its name stays on the copy. A
+  `char(n)` column sorted, a window, `string_agg(x ORDER BY y)`, `DISTINCT ON`
+  and an `ORDER BY` inside a subquery or a `WITH` stay with the source, where
+  the order decides a value or which rows are counted. On a server without a
+  forwarding user nothing changes. Text compared for equality, grouped or matched with `LIKE`
   stays on the copy. A sort key that is one call of `count`, `sum`, `rank`
   and the like is a number whatever text the statement reads elsewhere
   (`ORDER BY sum(amount) DESC` beside a selected name stays on the copy), and

@@ -117,6 +117,24 @@ func CopyScreen(stmt string, types map[string][]string) string {
 	return screenForCopy(toks, types)
 }
 
+// CopyScreenSortingLikeSource is CopyScreen with every ORDER BY of text kept
+// from the copy, the main statement's too (text_order.go): what the copy is
+// left when it may not sort text by bytes. For internal/pgcompare and the
+// tests of what sorts text.
+func CopyScreenSortingLikeSource(stmt string, types map[string][]string) string {
+	if w := ownName(stmt); w != "" {
+		return w
+	}
+	toks, why := lexSQL(RewriteForCopyTyped(stmt, types))
+	if why != "" {
+		return why
+	}
+	if w := firstWord(toks); w != "select" && w != "with" {
+		return "not a SELECT"
+	}
+	return screenWith(toks, types, false, true)
+}
+
 // route decides which side answers a statement. side "" is a statement
 // neither side runs: the port answers it itself, or refuses it.
 func (s *session) route(c classified, qstr string) routeDecision {
@@ -1088,7 +1106,7 @@ func typeIsFloat(t string) bool { return t == "DOUBLE" || t == "FLOAT" || t == "
 // types by name (columnTypes); nil when they are not known, and then every
 // name may be a text column.
 func screenForCopy(in []rtToken, types map[string][]string) string {
-	return screenWith(in, types, false)
+	return screenWith(in, types, false, false)
 }
 
 // screenUntyped is what screenForCopy vetoes whatever the types of the
@@ -1097,11 +1115,15 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 // which the screen vetoes least, and the one rule that asks for a type rather
 // than against one (date_trunc of a timestamp) is left to screenForCopy.
 func screenUntyped(in []rtToken) string {
-	return screenWith(in, untypedAsInteger(in), true)
+	return screenWith(in, untypedAsInteger(in), true, false)
 }
 
 // screenWith is screenForCopy; untyped: types are not the columns' own.
-func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
+//
+// sortsLikeSource keeps every ORDER BY of text from the copy, the main
+// statement's too (text_order.go): for a connection with no source, which
+// passes this screen only for what an exemption of padded.go let through.
+func screenWith(in []rtToken, types map[string][]string, untyped, sortsLikeSource bool) string {
 	if why := paddedUse(in, types); why != "" {
 		return why
 	}
@@ -1123,6 +1145,8 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 	// nothing in the statement names (star_position.go). Not asked without
 	// the columns' own types.
 	starText := !untyped && starMayBeText(in, types)
+	catalogTypes := types
+	var textOrder *mainTextOrder
 	types = withAliasTypes(in, types, untyped)
 	// A typed literal (DATE '...', '...'::date) is one value, never text:
 	// its string is folded into one token.
@@ -1604,10 +1628,16 @@ func screenWith(in []rtToken, types map[string][]string, untyped bool) string {
 			case t.text == "for" && next.kind == rtWord && (next.text == "update" || next.text == "share" || next.text == "no" || next.text == "key"):
 				return "FOR UPDATE or FOR SHARE"
 			case t.text == "order" && next.kind == rtWord && next.text == "by":
+				// With the columns not known any name may be a char(n), so
+				// whatever sorts stays with the source.
+				if textOrder == nil && !sortsLikeSource {
+					textOrder = newMainTextOrder(toks, types, catalogTypes)
+				}
 				for _, key := range orderByKeys(i) {
-					if sortKeyText(key) {
-						return "text sorted by ORDER BY (the source sorts it by its collation)"
+					if !sortKeyText(key) || textOrder != nil && textOrder.relaxes(i, key) {
+						continue
 					}
+					return "text sorted by ORDER BY (the source sorts it by its collation)"
 				}
 			case t.text == "between":
 				// x BETWEEN a AND b is x >= a AND x <= b: each bound is
