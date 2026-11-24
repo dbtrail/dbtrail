@@ -120,7 +120,7 @@ func TestCatalogNoWorker_theCaptureGateStillRefuses(t *testing.T) {
 func TestCatalogNoWorker_aTypedVetoStillKeepsItFromTheCopy(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	const typed = "SELECT label FROM big ORDER BY label"
+	const typed = "SELECT label FROM big WHERE label > 'b'"
 	cat := func() []CatalogTable {
 		return []CatalogTable{{Schema: "public", Name: "big", Columns: []CatalogColumn{{Name: "label", Type: "VARCHAR"}, {Name: "n", Type: "INTEGER"}}}}
 	}

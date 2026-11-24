@@ -1494,6 +1494,22 @@ complete transactions wait before they are written (`BINTRAIL_COMMIT_WITHIN`),
 so a statement there often runs out of a 200 ms wait. Not yet per server
 (environment only). PostgreSQL sources do not wait.
 
+**During an update of the recent changes, a statement does not wait, and may
+answer from the version before that update, with no notice.** That is usually
+seconds behind, and a minute or more in a long update. With
+`BINTRAIL_SQL_FRESH_WAIT` on, a statement the wait applies to first waits for
+the running update, for at most half of the statement's time limit (30 of 60
+seconds by default), and only then for the source. A write captured before
+that update began is read; a write made during it needs the next update to
+finish within the wait, or the statement answers from the version before it.
+A table with no version yet
+(the first statement on it, the first after a new snapshot) waits for the
+running update under the same limit, with the switch on or off; past it the
+statement goes on: under routing MySQL answers, and on a connection that does
+not route the copy answers from the snapshot with a warning. While the index
+holds no captured change at all, the first change can be missing from
+statements that run during the update that brings it.
+
 Two budgets bound the tails, because they live in the router's memory:
 
 - `BINTRAIL_SQL_TAIL_MAX_KEYS` is the most keys one table's tail holds,
@@ -2621,10 +2637,34 @@ What this is and is not:
     reason a client that asks for such a character set when it connects
     does not get it on a read-only port: its session stays under
     `utf8mb4_0900_ai_ci`, and the log says so.
+  - **The session on your MySQL is read-only too.** On a read-only port
+    every connection the router opens to the source starts with `SET
+    SESSION TRANSACTION READ ONLY`, before anything of the client's. From
+    then on MySQL itself refuses a write, with its own error 1792, whatever
+    the statement's text was. What would take that back never reaches the
+    source, and the port answers it as a MySQL server running with
+    `read_only=ON` answers an ordinary account: `SET SESSION TRANSACTION READ
+    WRITE`, `SET TRANSACTION READ WRITE` and a `SET` of
+    `transaction_read_only` (`tx_read_only`) get OK from the port, with no
+    error, and writes stay refused; `START TRANSACTION READ WRITE` gets
+    error 1290. So a driver or a pool that switches a connection back from
+    read-only (a Java application does it after each read-only transaction)
+    works as before. Two things to know: `SELECT
+    @@session.transaction_read_only` on the port answers 1 even after such a
+    `SET`, because that is what the session on the source is; and those `SET`
+    statements are answered only as plain statements, alone or in a list of
+    unquoted settings (as a prepared statement, or in a `SET` that also holds
+    quoted text, they are refused with error 1290). If the source refuses
+    the first statement, the connection to it is not opened, the client
+    gets the error rather than a session that is not protected, and the
+    router's log says why.
   - **What it cannot see.** The check reads the statement's text. A
     `SELECT` that calls a stored function, or reads a view built on one,
-    looks like a read and is forwarded; if the function writes, MySQL runs
-    it. The mode screens by statement class; the grants of the account the
+    looks like a read and is forwarded; if the function writes, MySQL
+    refuses it (error 1792), because the session is read-only there. A
+    read-only transaction still lets a function do what is not a write to
+    a table: take a named lock, sleep, or write to the session's own
+    temporary tables. The grants of the account the
     port forwards with are what bounds the rest, which is what the
     forwarding account above is for. Refusals are counted as
     `route="refused"`, `reason="read_only"`, and the **Connect a SQL
@@ -2903,6 +2943,22 @@ as the router applies it:
 - **The line is long.** Up to 4,096 statements may wait at once. One more
   gets error 1040 without waiting (`copy_queue_full`), or error 1203 on a
   connection that is not routed.
+- **How many clients connect.** At most 256 clients are connected to the
+  router at once. One more is refused before it logs in with MySQL error
+  1040, "Too many connections", the answer a MySQL server gives at its
+  `max_connections`, which drivers and pools know. The router's log says
+  so at most once every 10 seconds, with how many were refused. Change the
+  number with `--max-connections` (`BINTRAIL_ROUTER_MAX_CONNECTIONS`, 1 to
+  1024; in the Docker stack, a line under the `router` service's
+  `environment:`). A pool in front of the router (ProxySQL, an application's
+  own) should be given a maximum at or under this number.
+- **30 seconds to log in.** A client that connects and does not finish
+  logging in within 30 seconds is disconnected. When the port is full and
+  a new client arrives, the connection that has gone longest without
+  logging in is closed to make room, if it has gone more than one second;
+  a client that logged in is never closed for this. This is not a firewall: the port
+  forwards statements to your MySQL, so keep it on `127.0.0.1` or on a
+  network only your applications reach.
 - **What else ends a wait.** The client disconnecting: the statement leaves
   the line at once and nothing runs, on the copy or on MySQL (`cancelled`
   in the counter). The router stopping does the same.

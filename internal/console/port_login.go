@@ -223,14 +223,22 @@ func (s *Server) FlashbackPasswordsFor(user string) (passwords []string, loginSe
 	return out, ""
 }
 
-// AllFlashbackPasswords is every password FlashbackPasswordsFor can return,
-// for any username: the port's own and every application login's, under the
-// same conditions. A front end that derives each password ahead of a login
-// (SCRAM) reads them all here, so that the work a login does never depends on
-// which username it names.
+// AllFlashbackPasswords is every password a login on the port can be checked
+// with, for any username: the port's own, every application login's
+// (FlashbackPasswordsFor) and the monitor login's (MonitorPasswordFor), each
+// under the conditions it is accepted in. A front end that derives each
+// password ahead of a login (SCRAM) reads them all here, so that the work a
+// login does never depends on which username it names: a password left out
+// would be derived at the login of the one username it belongs to.
 func (s *Server) AllFlashbackPasswords() []string {
 	out := s.FlashbackPasswords()
-	if len(out) == 0 || s.loginsUnreadable.Load() {
+	if len(out) == 0 {
+		return out
+	}
+	if mp := s.usableMonitorPassword(); mp != "" {
+		out = append(out, mp)
+	}
+	if s.loginsUnreadable.Load() {
 		return out
 	}
 	for _, e := range s.cm.reg.List() {
@@ -239,6 +247,21 @@ func (s *Server) AllFlashbackPasswords() []string {
 		}
 	}
 	return out
+}
+
+// usableMonitorPassword is the monitor login's password while
+// MonitorPasswordFor would give it for the monitor's username ("" when
+// there is none, or the saved login cannot be used). It warns of nothing:
+// the login itself does (warnMonitorProblem).
+func (s *Server) usableMonitorPassword() string {
+	fb := &s.flashback
+	fb.mu.Lock()
+	mu, mp, startup := fb.saved.MonitorUser, fb.saved.MonitorPassword, fb.startup
+	fb.mu.Unlock()
+	if startup || mu == "" || mp == "" || s.monitorProblem(mu, mp) != "" {
+		return ""
+	}
+	return mp
 }
 
 // setLoginsUnreadable records whether the registry file this process follows

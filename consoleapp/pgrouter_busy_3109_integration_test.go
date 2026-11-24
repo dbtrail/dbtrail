@@ -195,6 +195,9 @@ func TestIntegrationPGRouterBusyCopyRefusesNotForwards(t *testing.T) {
 	// the copy is refused all the same.
 	fresh := pgClient(t, ctx, env.portDSN(), nil)
 	busy("simple protocol, the list of columns not read", one(ctx, fresh, heavy))
+	// A column over a number written in the text is the engine's or the
+	// macro's by the column's type, and is a busy refusal like any other.
+	busy("a column over a number, the list of columns not read", one(ctx, pgClient(t, ctx, env.portDSN(), nil), "SELECT amount / 3 FROM "+pgBusyTable))
 	for name, mode := range map[string]pgx.QueryExecMode{
 		"cache_statement": pgx.QueryExecModeCacheStatement, "cache_describe": pgx.QueryExecModeCacheDescribe,
 		"describe_exec": pgx.QueryExecModeDescribeExec, "exec": pgx.QueryExecModeExec, "simple_protocol": pgx.QueryExecModeSimpleProtocol,
@@ -241,6 +244,19 @@ func TestIntegrationPGRouterBusyCopyRefusesNotForwards(t *testing.T) {
 		t.Errorf("COMMIT: %s", got)
 	}
 	scansReach("the block's sum", func(seq, _ int) bool { return seq > seq0 })
+
+	// A division or an avg: whether the copy may answer it is told by the
+	// columns' types (#3219), so with the list not read it is the source's,
+	// as it was before the copy answered any, and not a statement refused.
+	for _, stmt := range []string{
+		"SELECT avg(amount) FROM " + pgBusyTable,
+		"SELECT sum(amount) / count(*) FROM " + pgBusyTable,
+	} {
+		want := one(ctx, source, stmt)
+		if got := one(ctx, pgClient(t, ctx, env.portDSN(), nil), stmt); got != want {
+			t.Errorf("%s, the copy busy and its columns not read: %q, want the source's %q", stmt, got, want)
+		}
+	}
 
 	// Counted under its own reason, as refused, in /status, the status
 	// statement and the status line.

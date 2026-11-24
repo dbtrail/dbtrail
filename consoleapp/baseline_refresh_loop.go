@@ -106,6 +106,10 @@ type refreshRequest struct {
 	// SourcePublication is a PostgreSQL server's publication, whose tables
 	// are what its source "has" for that check (#2759).
 	SourcePublication string
+	// pgSourceShapes is what a PostgreSQL source says its tables' columns are
+	// now, read by this run's checkNewTables and handed to the fold (#3112).
+	// nil for a restore, and when the source was not asked or did not answer.
+	pgSourceShapes map[reconstruct.PGTableName]reconstruct.PGSourceShape
 	// laneWait, when set, adds up the time the fold waited for the snapshot
 	// lane (#2385). runRefresh takes it off the run's measured time: a wait
 	// behind another server is not what an update costs, and UpdateSeconds
@@ -1900,6 +1904,9 @@ func (s *baselineSupervisor) executeRefresh(req refreshRequest, at time.Time) (p
 	// Before the fold, against the very list the fold is handed: a table
 	// missing from it is a table this snapshot will not hold (#1993).
 	gap = s.checkNewTables(req, tableList)
+	// And the columns the source has now for each of them (#3112): a table
+	// that changed with no write after it refuses in the fold.
+	req.pgSourceShapes = gap.pgShapes
 	req.TableDeltas = s.tableDeltas
 	tables, refused, reuse, err = s.foldSnapshot(req, at, tableList)
 	if err != nil {
@@ -2120,7 +2127,7 @@ func (s *baselineSupervisor) foldSnapshot(req refreshRequest, at time.Time, tabl
 	}
 	reports, failures, runErr := func() ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
 		defer release() // deferred: a panic in the fold must not keep the lane
-		return foldTables(laneCtx(s.ctx, laneSnapshot), refreshFoldConfig(req, at, tableList))
+		return foldTables(reconstruct.WithPGSourceShapes(laneCtx(s.ctx, laneSnapshot), req.pgSourceShapes), refreshFoldConfig(req, at, tableList))
 	}()
 	tables, refused, reuse, err = foldOutcome(tableList, reports, failures, runErr)
 	// Which tables refused, and why, from the rule the command line prints

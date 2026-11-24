@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/query"
@@ -229,6 +230,12 @@ type tailKeeper struct {
 	mu  sync.Mutex
 	src tailSource
 	pub tailPublish
+
+	// dirNow is the directory of the tails and what it is, for a statement
+	// that must not wait for an update of the tails (ensureDir). Nil when
+	// there is none, or none this keeper holds open.
+	dirNow atomic.Pointer[tailDirSeen]
+
 	// life is the keeper's lifetime: every build runs under it, and stop
 	// (close) ends them all when the keeper is replaced or forgotten.
 	life context.Context
@@ -1154,7 +1161,20 @@ func (k *tailKeeper) write(t views.BaselineTable, e *tailEntry) error {
 // statement's sandbox is allowed to read it before the first version is
 // written into it.
 func (k *tailKeeper) ensureDir() (string, error) {
-	k.mu.Lock()
+	if !k.mu.TryLock() {
+		// An update of the tails holds the lock, for as long as it takes, and
+		// checked the directory when it began. A statement needs no more than
+		// the directory's name while that is still the very directory the
+		// keeper made: Lstat, so a link put under its name is not taken for
+		// it, against the handle the keeper holds open, so its number cannot
+		// have gone to another. Anything else waits and takes the normal way.
+		if seen := k.dirNow.Load(); seen != nil {
+			if fi, err := os.Lstat(seen.path); err == nil && os.SameFile(fi, seen.id) {
+				return seen.path, nil
+			}
+		}
+		k.mu.Lock()
+	}
 	defer k.mu.Unlock()
 	// The directory a statement's sandbox allows must be the one its tails
 	// are in: one found gone is made again here, not after.
@@ -1174,12 +1194,21 @@ func (k *tailKeeper) dirCheckLocked() {
 	}
 	slog.Warn("Engine Routing: the directory of the copy's tails was removed while this process used it; "+
 		"it is made again and every tail is built again from the index", "dir", k.dir)
+	// Before the handle goes: what it vouches for is over.
+	k.dirNow.Store(nil)
 	if k.dirLock != nil {
 		k.dirLock.Close()
 	}
 	k.dir, k.dirLock = "", nil
 	k.dropAll()
 	k.orphans = nil
+}
+
+// tailDirSeen is a directory of the tails by name and by what it is, read
+// from the handle the keeper holds open on it.
+type tailDirSeen struct {
+	path string
+	id   os.FileInfo
 }
 
 func (k *tailKeeper) makeDir() (string, error) {
@@ -1202,6 +1231,11 @@ func (k *tailKeeper) makeDir() (string, error) {
 			})
 		}
 		k.dir, k.dirLock = dir, lock
+		if lock != nil {
+			if id, err := lock.Stat(); err == nil {
+				k.dirNow.Store(&tailDirSeen{path: dir, id: id})
+			}
+		}
 	}
 	return k.dir, nil
 }

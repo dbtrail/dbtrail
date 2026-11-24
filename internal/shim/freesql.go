@@ -472,9 +472,27 @@ type routeOps struct {
 	toFile bool
 }
 
+// readWriteRefused is why a read-only port refuses a statement that would
+// make the session's transactions writable and that it cannot answer itself.
+const readWriteRefused = "READ WRITE would make the session's transactions writable (send SET SESSION TRANSACTION READ WRITE, or a SET of transaction_read_only, alone and as a plain statement: the port answers those and stays read-only)"
+
 // routeStatement is HandleQuery's path with a Router bound: the time-travel
 // shapes were already served, so what arrives here is MySQL traffic.
 func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) {
+	if h.routerCfg.ReadOnly {
+		// The session on the source is marked read-only, and stays so: a
+		// statement that would take the mark back is answered here, as a
+		// server with read_only=ON answers it (readrouter.ReadOnlyMark).
+		switch action, send := readrouter.ReadOnlyMark(qstr); action {
+		case readrouter.MarkAnswer:
+			h.logger.Debug("Engine Routing: answered by the port, the session stays read-only on the source")
+			return &mysql.Result{Status: h.SessionStatus()}, nil
+		case readrouter.MarkRewrite:
+			qstr = send
+		case readrouter.MarkRefuse:
+			return nil, h.refuseReadOnly(readWriteRefused)
+		}
+	}
 	ctx, cancel := h.queryContext()
 	defer cancel()
 	// A text statement's answer can be streamed to the client, so a large
@@ -1018,6 +1036,11 @@ func (h *Handler) readOnlyRefusal(qstr string) error {
 	if why == "" {
 		return nil
 	}
+	return h.refuseReadOnly(why)
+}
+
+// refuseReadOnly is the read-only refusal for the given reason.
+func (h *Handler) refuseReadOnly(why string) error {
 	// The reason alone: it is fixed text and known keywords, where the
 	// statement's first word can be anything the client typed.
 	h.logger.Debug("Engine Routing: refused by read-only mode", "reason", why)
