@@ -28,14 +28,14 @@ func caseClass(toks []rtToken, typesOf func(string) []string) exactCls {
 
 // caseValues are the values of the CASE that toks are, from its CASE to the
 // END that closes it: each from after a THEN or an ELSE of this CASE (not of
-// one inside it) to the next WHEN, ELSE or its END. A column named like one
-// of these words (t.end) splits a value, and the CASE is not known.
+// one inside it) to the next WHEN, ELSE or its END. A word after a dot is a
+// column's name (o.case, o.then), as caseEnd reads it.
 func caseValues(toks []rtToken) [][]rtToken {
 	var values [][]rtToken
 	start, nested := -1, 0
 	for j := 1; j < len(toks); j++ {
 		t := toks[j]
-		if t.kind != rtWord {
+		if t.kind != rtWord || isOpTok(toks, j-1, ".") {
 			continue
 		}
 		switch t.text {

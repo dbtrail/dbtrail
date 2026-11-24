@@ -120,8 +120,10 @@ func pgCaseSame(src, port string) bool {
 		return 0
 	}
 	k := min(decimals(src), decimals(port))
-	if !strings.Contains(src, ".") || !strings.Contains(port, ".") {
-		// A whole number of the source must come back as the same text.
+	if !strings.Contains(src, ".") || !strings.Contains(port, ".") || k < 12 {
+		// A whole number of the source must come back as the same text, and
+		// a quotient cut below PostgreSQL's fewest decimals (12) is another
+		// number.
 		return false
 	}
 	round := func(x *big.Rat) *big.Int {

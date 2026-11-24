@@ -80,11 +80,13 @@ func TestExactClass_case(t *testing.T) {
 		{`CASE amount END`, clsUnknown},
 		{`CASE WHEN qty > 1 THEN amount END END`, clsUnknown},
 		{`CASE END`, clsUnknown},
-		// A column named case is a column, and one named like a word of a
-		// CASE leaves the CASE not known.
+		// A word of a CASE after a dot is a column's name, read as one: a
+		// value it stands in is still read whole.
 		{`t.case`, clsUnknown},
-		{`CASE WHEN qty > 1 THEN t.end ELSE 0 END`, clsUnknown},
-		{`CASE WHEN qty > 1 THEN t.case ELSE 0 END`, clsUnknown},
+		{`CASE WHEN qty > 1 THEN amount ELSE t.case END`, clsUnknown},
+		{`CASE WHEN qty > 1 THEN t.ratio * t.then * amount END`, clsUnknown},
+		{`CASE WHEN qty > 1 THEN t.qty * t.end * amount END`, clsUnknown},
+		{`CASE WHEN t.case > 1 THEN amount ELSE t.qty END`, clsDecimal},
 	} {
 		toks, why := lexSQL(c.expr)
 		if why != "" {
@@ -137,8 +139,8 @@ func TestCopyScreen_caseInDivision(t *testing.T) {
 		`SELECT sum(CASE WHEN qty > 1 THEN 1 ELSE 0 END) / count(*) FROM t`:                          whole,
 		`SELECT sum(CASE WHEN qty > 1 THEN 1 ELSE 0 END) / sum(CASE WHEN qty > 0 THEN 1 END) FROM t`: whole,
 		`SELECT qty / (CASE WHEN qty > 1 THEN qty ELSE 1 END) FROM t`:                                whole,
-		`SELECT CASE WHEN qty > 1 THEN qty ELSE 1 END / 2 FROM t`:                                    "",
-		`SELECT amount / CASE WHEN qty > 1 THEN qty ELSE 1 END FROM t`:                               "",
+		`SELECT CASE WHEN qty > 1 THEN qty ELSE 1 END / 2 FROM t`:                                    "a division",
+		`SELECT amount / CASE WHEN qty > 1 THEN qty ELSE 1 END FROM t`:                               "a division",
 		// A sum of a bigint is a numeric on PostgreSQL and a whole number on
 		// the copy.
 		`SELECT sum(CASE WHEN qty > 1 THEN big ELSE 0 END) / sum(amount) FROM t`:        unknown,
@@ -150,12 +152,11 @@ func TestCopyScreen_caseInDivision(t *testing.T) {
 		`SELECT avg(CASE WHEN qty > 1 THEN ratio ELSE 0 END) FROM t`:                    "avg()",
 	} {
 		veto := CopyScreen(q, caseTypes)
-		if want == "" {
+		if want == "a division" {
 			// A CASE just before or after the slash is a division left as
-			// written: the
-			// screen's own rule for one decides it, as before.
-			if veto == "" {
-				t.Errorf("left to the copy, want the source: %s", q)
+			// written: the screen's own rule for one decides it, as before.
+			if veto != want {
+				t.Errorf("%q, want %q: %s", veto, want, q)
 			}
 			continue
 		}
