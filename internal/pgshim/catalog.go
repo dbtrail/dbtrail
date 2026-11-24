@@ -120,7 +120,9 @@ func (s *session) catalog() (*catalogView, *pgErr) {
 		if s.bound.CatalogStamp != nil {
 			// An error leaves no stamp, so the next statement reads the
 			// catalog again; Catalog says why, if it fails too.
-			stamp, _ = s.bound.CatalogStamp(ctx)
+			if st, err := s.bound.CatalogStamp(ctx); err == nil {
+				stamp = st
+			}
 		}
 		tables, err := s.bound.Catalog(ctx)
 		stopped := ctx.Err() != nil
