@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/pgshim"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
@@ -47,7 +46,6 @@ func pgCopyCatalog(ctx context.Context, copySQL pgCatalogSource, run func(contex
 		t := &out[len(out)-1]
 		c := pgshim.CatalogColumn{Name: col, Type: typ}
 		if rec, ok := lookupRecorded(recorded, schema, table); ok && rec.Relation != nil {
-			trimmed := baseline.PGPaddedToTrim(rec.Relation)
 			for _, rc := range rec.Relation.Columns {
 				// The copy's engine matches names without regard to case.
 				if strings.EqualFold(rc.Name, col) {
@@ -59,7 +57,7 @@ func pgCopyCatalog(ctx context.Context, copySQL pgCatalogSource, run func(contex
 					if !pgshim.PaddedOnSource(c.SourceType) {
 						c.SourceType, c.SourceTypeMod = rc.TypeOID, rc.TypeMod
 					}
-					c.TrimmedOnCopy = c.TrimmedOnCopy || trimmed[rc.Name]
+					c.TrimmedOnCopy = c.TrimmedOnCopy || rec.Trimmed[rc.Name]
 				}
 			}
 		}

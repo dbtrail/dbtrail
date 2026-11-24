@@ -132,6 +132,10 @@ type CopyTable struct {
 	Schema, Table string
 	Hidden        []string
 	Relation      *baseline.PGRelation
+	// Trimmed are the columns of Relation the view reads without their
+	// padding (baseline.PGPaddedToTrim): what the PostgreSQL port's catalog
+	// says of each (TrimmedOnCopy).
+	Trimmed map[string]bool
 }
 
 // CopyTables are the tables the copy serves this connection, after the
@@ -150,7 +154,7 @@ func (q *SQLOnCopy) CopyTablesStamped(ctx context.Context) ([]CopyTable, string,
 	}
 	out := make([]CopyTable, 0, len(in.Baselines))
 	for _, t := range in.Baselines {
-		out = append(out, CopyTable{Schema: t.Schema, Table: t.Table, Hidden: t.HiddenColumns, Relation: t.PGRelation})
+		out = append(out, CopyTable{Schema: t.Schema, Table: t.Table, Hidden: t.HiddenColumns, Relation: t.PGRelation, Trimmed: baseline.PGPaddedToTrim(t.PGRelation)})
 	}
 	return out, pgCopyStamp(in), nil
 }

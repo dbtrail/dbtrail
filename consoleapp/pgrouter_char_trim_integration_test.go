@@ -12,6 +12,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/pgshim"
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
 
 const (
@@ -56,6 +57,30 @@ func TestIntegrationPGRouterCharWithoutPadding(t *testing.T) {
 		}
 	})
 	onCopy := func() uint64 { return env.routes.doc("").Servers[env.serverID].Reasons[pgshim.ReasonAnswersTheSame] }
+
+	// The port's catalog says which columns the view trims, from the same
+	// snapshot: the char(n), not the text.
+	tgt, err := env.srv.ResolveFlashback(ctx, "pgsrv")
+	if err != nil || tgt.SQL == nil {
+		t.Fatalf("target: %v", err)
+	}
+	tables, err := pgCopyCatalog(ctx, tgt.SQL, func(ctx context.Context, statement string) (sqlsandbox.Result, error) {
+		return tgt.SQL.Run(console.WithPGCatalogRead(ctx), statement, pgPortSchema, sqlsandbox.Session{PostgresRules: true, TrimPadded: true, PostgresNames: true})
+	})
+	if err != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	trimmed := map[string]bool{}
+	for _, tb := range tables {
+		if tb.Name == pgTrimTable {
+			for _, c := range tb.Columns {
+				trimmed[c.Name] = c.TrimmedOnCopy
+			}
+		}
+	}
+	if !trimmed["code"] || trimmed["word"] || trimmed["id"] {
+		t.Fatalf("TrimmedOnCopy by column: %v, want code only", trimmed)
+	}
 
 	// Shown from the copy: no padding, and a text column keeps its blanks.
 	c := pgClient(t, ctx, env.portDSN(), nil)
