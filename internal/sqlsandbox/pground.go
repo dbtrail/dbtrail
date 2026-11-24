@@ -285,6 +285,11 @@ CREATE OR REPLACE TEMP MACRO _bintrail_pg_div(n, d) AS (
     ELSE _bintrail_pg_q16(_bintrail_pg_uns(n), _bintrail_pg_scale(n), _bintrail_pg_uns(d), _bintrail_pg_scale(d))
   END AS DECIMAL(38,0)) * CAST(0.0000000000000001 AS DECIMAL(16,16))
 );
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_ascii(x) AS (
+  CASE WHEN ascii(x) > 127
+    THEN error('the copy cannot answer ascii() of this character: it depends on the source database''s encoding')
+    ELSE ascii(x) END
+);
 CREATE OR REPLACE TEMP MACRO _bintrail_pg_avgn(x) AS (
   CAST(CASE
     WHEN NOT _bintrail_pg_exact(min(x))

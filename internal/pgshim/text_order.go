@@ -53,25 +53,33 @@ func newMainTextOrder(toks []rtToken, types, raw map[string][]string) *mainTextO
 	r.padded, _ = paddedAmong(types)
 	_, r.onlyCopy = raw[onlyCopyTextKey]
 	if r.onlyCopy {
-		defined := map[string]bool{}
-		for name := range aliasDefinitions(toks) {
-			defined[strings.ToLower(name)] = true
-		}
-		listed := columnList(toks)
-		r.plain = func(name string) bool {
-			if _, opaque := raw[onlyCopyTextKey+name]; opaque || listed || defined[name] {
-				return false
-			}
-			ts := raw[name]
-			for _, t := range ts {
-				if !anyTextType([]string{t}) {
-					return false
-				}
-			}
-			return len(ts) > 0
-		}
+		r.plain = plainTextNames(toks, raw)
 	}
 	return r
+}
+
+// plainTextNames says of a column's name whether it is text on the source too
+// (no column of that name is only text on the copy), that no alias of the
+// statement may stand for it and that the statement names no columns in a
+// list. One pass over toks, however many names are asked about.
+func plainTextNames(toks []rtToken, raw map[string][]string) func(string) bool {
+	defined := map[string]bool{}
+	for name := range aliasDefinitions(toks) {
+		defined[strings.ToLower(name)] = true
+	}
+	listed := columnList(toks)
+	return func(name string) bool {
+		if _, opaque := raw[onlyCopyTextKey+name]; opaque || listed || defined[name] {
+			return false
+		}
+		ts := raw[name]
+		for _, t := range ts {
+			if !anyTextType([]string{t}) {
+				return false
+			}
+		}
+		return len(ts) > 0
+	}
 }
 
 // relaxes reports whether the key of the ORDER at toks[i] may sort on the copy.
