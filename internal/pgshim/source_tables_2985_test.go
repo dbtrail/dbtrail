@@ -369,7 +369,9 @@ func TestSourceTables_2985_theSameNameInTwoSchemas(t *testing.T) {
 	defer cancel()
 	// On this source "big" resolves to other.big.
 	p := newTablesPort(t, func(f *fakeSource) { f.tables["big"] = [2]string{"other", "big"} })
-	const bySource = "SELECT n FROM big WHERE id = 1 AND now() IS NOT NULL"
+	// Sent to the source whatever its plan: the copy is never handed a
+	// dollar-quoted string.
+	const bySource = "SELECT n FROM big WHERE id = 1 AND $$x$$ IS NOT NULL"
 	c := costPortConn(t, ctx, p.l)
 	if got := costSimple(ctx, c, p.l, bySource); got.side != RouteSource {
 		t.Fatalf("the source's statement: %+v", got)
