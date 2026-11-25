@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.141.1] - 2026-11-25
+
+v0.141.0 was tagged but never built or published; this release carries its changes, listed under 0.141.0 below.
+
+- **A statement on the copy no longer waits up to 30 seconds behind the update of its tables' recent changes** (#3272). When a statement asked for its tables' recent changes at the moment the background updater started (the first statement over a server, or one landing as an update began), it could wait for that update's whole read of the index, up to 30 seconds when the index was slow, instead of its own 2 seconds. It now gives up as soon as an update is running and reads what that update publishes, as was intended.
+- **Release: the job that waits for main's CI checks out the repository first** (#3271). Without it, the job could not find its script and v0.141.0 stopped before building anything; v0.141.1 carries the same changes as v0.141.0.
+
 ## [0.141.0] - 2026-11-25
 
 - **PostgreSQL port: a text column under a nondeterministic collation is the source's when a statement uses it** (#3111). Under an ICU collation that ignores case, PostgreSQL finds `'ab'` and `'AB'` equal and the copy compared bytes, so `WHERE t = 'AB'` gave 1 row instead of 3 with no notice, even with a forwarding user. The snapshot now records each column's collation, and a statement that compares, groups, joins, sorts, aggregates or passes such a column to a function goes to the source, or is refused without a forwarding user; showing it stays on the copy. The port also reads the collations from the source's catalog, so a later `ALTER ... COLLATE` is seen. While the source cannot be asked, a snapshot taken before this version has its text columns treated as nondeterministic until its next full read, so statements that compare or sort that text go to the source, or are refused on a server answered from the copy alone.
