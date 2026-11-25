@@ -136,12 +136,12 @@ func TestPGRunCutFile_3084(t *testing.T) {
 			dir func(t *testing.T) string
 		}{
 			// A MySQL run has no pgRun at all.
-			"no run (a MySQL source)":          {nil, snapDir},
-			"an index with no change":          {none, snapDir},
-			"a run with no record":             {noRecord, snapDir},
-			"no table held through the end":    {newRun(), snapDir},
+			"no run (a MySQL source)":           {nil, snapDir},
+			"an index with no change":           {none, snapDir},
+			"a run with no record":              {noRecord, snapDir},
+			"no table held through the end":     {newRun(), snapDir},
 			"a directory whose name is no time": {held, func(t *testing.T) string { return t.TempDir() }},
-			"no directory":                     {held, func(*testing.T) string { return "" }},
+			"no directory":                      {held, func(*testing.T) string { return "" }},
 		} {
 			t.Run(name, func(t *testing.T) {
 				dir := c.dir(t)
