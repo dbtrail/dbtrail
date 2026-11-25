@@ -2317,6 +2317,11 @@ func aliasUse(toks []rtToken, types map[string][]string, untyped bool) string {
 	// An expression this cannot read hides as much.
 	hiddenBehind := map[string]bool{}
 	defs := aliasDefinitions(toks)
+	if defs == nil {
+		// No AS anywhere: aliasDefinitions reads nothing, not even the
+		// names of a WITH's column list.
+		defs = cteListDefinitions(toks)
+	}
 	for changed := true; changed; {
 		changed = false
 		for name, exprs := range defs {
