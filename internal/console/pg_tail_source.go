@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"path/filepath"
 	"strings"
@@ -417,10 +418,12 @@ func (x *pgTailSource) BaseFile(t views.BaselineTable) string {
 func (x *pgTailSource) KeepsChainOver(old, t views.BaselineTable) bool {
 	was, err := x.s.copyCuts.footer(old.Path)
 	if err != nil {
+		slog.Debug("Engine Routing: a copy's footer could not be read; the tail's chain starts again", "file", old.Path, "error", err)
 		return false
 	}
 	now, err := x.s.copyCuts.footer(t.Path)
 	if err != nil {
+		slog.Debug("Engine Routing: a copy's footer could not be read; the tail's chain starts again", "file", t.Path, "error", err)
 		return false
 	}
 	a, b := baseline.SourceReadOf(was).At, baseline.SourceReadOf(now).At

@@ -96,6 +96,14 @@ func (k *tailKeeper) pgPruneKeepingChain(e *tailEntry, t views.BaselineTable, cu
 			// is a wait, and the general path writes the tail when it can.
 			// Anything else (a full disk, a file that cannot be written) an
 			// operator must be able to see.
+			// A refusal from the writer is not a failure to write: the general
+			// path meets it again at the next view, which ends the tail
+			// (k.refuse) and says so there.
+			var r *reconstruct.TailRefusal
+			if errors.As(err, &r) {
+				slog.Debug("Engine Routing: a table's tail was refused by its writer before its prune", "table", t.Schema+"."+t.Table, "reason", r.Reason)
+				return false
+			}
 			log := slog.Warn
 			if errors.Is(err, reconstruct.ErrPGTailTxnOpen) || errors.Is(err, reconstruct.ErrPGTailCopyPending) {
 				log = slog.Debug
