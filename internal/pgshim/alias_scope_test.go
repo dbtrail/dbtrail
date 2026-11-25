@@ -47,7 +47,9 @@ func TestAliasScope_outerReadsInnerName(t *testing.T) {
 		"SELECT n FROM (SELECT k AS y, count(*) AS n FROM a GROUP BY k) s WHERE y = 1 AND n > 2",
 		"SELECT y, count(*) FROM (SELECT k AS y FROM a) s GROUP BY y HAVING y > 1",
 	} {
-		if why := aliasUse(lexOrFail(t, q), nil, false); why != "" {
+		// Scope only: every name a number (untypedAsInteger).
+		toks := lexOrFail(t, q)
+		if why := aliasUse(toks, untypedAsInteger(toks), true); why != "" {
 			t.Errorf("%s\n    vetoed: %s", q, why)
 		}
 	}
@@ -151,6 +153,7 @@ func TestAliasScope_untypedLetsThrough(t *testing.T) {
 // the source's.
 func TestAliasScope_route(t *testing.T) {
 	cat := append(chCatalog(), trimmedCatalog()...)
+	cat = append(cat, CatalogTable{Schema: "public", Name: "o", Columns: []CatalogColumn{{Name: "id", Type: "INTEGER", SourceType: 23, SourceTypeMod: -1}, {Name: "placed_at", Type: "TIMESTAMP", SourceType: 1114, SourceTypeMod: -1}}})
 	b := &Binding{Schema: "public", Catalog: func(context.Context) ([]CatalogTable, error) { return cat, nil },
 		Forward: &Forward{DSN: "postgres://fwd:pw@127.0.0.1:1/db"}}
 	s := &session{bound: b, logger: discardLogger(), currentDB: "public"}
@@ -158,7 +161,7 @@ func TestAliasScope_route(t *testing.T) {
 	for stmt, want := range map[string]routeDecision{
 		chQ2:  {RouteCopy, ReasonAnswersTheSame},
 		chQ15: {RouteCopy, ReasonAnswersTheSame},
-		"WITH w (y) AS (SELECT ol_delivery_d FROM order_line) SELECT count(*) FROM w WHERE y = '2026-03-02 10:00:00+02'": {RouteSource, ReasonVeto},
+		"WITH w (y) AS (SELECT placed_at FROM o) SELECT count(*) FROM w WHERE y = '2026-03-02 10:00:00+02'": {RouteSource, ReasonVeto},
 		"SELECT y FROM (SELECT c AS y FROM a) s WHERE y = 'ab  '":                                                        {RouteSource, ReasonVeto},
 		"WITH w(y) AS (SELECT c FROM a) SELECT y FROM w WHERE y = 'ab  '":                                                {RouteSource, ReasonVeto},
 	} {
@@ -315,6 +318,12 @@ func TestAliasScope_typedThroughName(t *testing.T) {
 		"SELECT id FROM (SELECT id, coalesce(placed_at, now()) AS p FROM o) s WHERE p = '2026-03-02 10:00:00+02'",
 		"SELECT id FROM (SELECT id, p AS q FROM (SELECT id, placed_at AS p FROM o) i) s WHERE q = '2026-3-2'",
 		"SELECT * FROM t WHERE y = '2026-03-02 10:00:00+02' AND id IN (SELECT id AS y FROM o)",
+		// The type comes from a later branch, or from no column.
+		"SELECT id FROM (SELECT id, NULL AS p FROM o UNION ALL SELECT id, placed_at FROM o) s WHERE p = '2026-03-02 10:00:00+02'",
+		"WITH w (p) AS (SELECT NULL FROM o UNION ALL SELECT placed_at FROM o) SELECT count(*) FROM w WHERE p = '2026-03-02 10:00:00+02'",
+		"SELECT id FROM (SELECT id, timestamp '2026-03-02 10:00' AS p FROM o) s WHERE p = '2026-03-02 10:00:00+02'",
+		"SELECT id FROM (SELECT id, id::text AS p FROM o) s WHERE p = 5",
+		"SELECT id FROM (SELECT id, 'x' AS p FROM o) s WHERE p = 5",
 	} {
 		if why := aliasUse(lexOrFail(t, q), screenTypes(cat, nil), false); why == "" {
 			t.Errorf("%s\n    left to the copy", q)
@@ -325,6 +334,7 @@ func TestAliasScope_typedThroughName(t *testing.T) {
 		"SELECT id FROM (SELECT id, amount AS p FROM o) s WHERE p > 5",
 		"WITH w (k, total) AS (SELECT id, sum(amount) FROM o GROUP BY id) SELECT k FROM w WHERE total > 5",
 		"SELECT n FROM (SELECT id, count(*) AS n FROM o GROUP BY id) s WHERE n > 2",
+		"SELECT p FROM (SELECT o.id, max(o.amount) AS p FROM o GROUP BY o.id) s WHERE p > 5",
 	} {
 		if why := aliasUse(lexOrFail(t, q), screenTypes(cat, nil), false); why != "" {
 			t.Errorf("%s\n    vetoed: %s", q, why)

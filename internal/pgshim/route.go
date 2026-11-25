@@ -2100,14 +2100,27 @@ func heldOtherwise(types map[string][]string, n string) bool {
 	return false
 }
 
-// definitionHides reports whether an expression a name stands for reads a
-// column the name hides from the rules that know it: one the copy does not
-// hold as PostgreSQL does (heldOtherwise), one whose type is not a number,
-// or another name that hides one.
+// definitionHides reports whether an expression a name stands for may hide
+// a column from the rules that know it. It is let through only when it is
+// known to be a number: every word in it a column whose every type is a
+// number, a table's name before a dot, or a function or keyword that keeps
+// numbers numbers (count, sum, min, mod, OVER, ...), and no string, no
+// parameter, no || and no cast. Anything else hides: a column the copy does
+// not hold as PostgreSQL does (heldOtherwise), a date, a timestamp, text,
+// NULL, a typed string (timestamp '...'), another name that hides one.
 func definitionHides(e []rtToken, types map[string][]string, hidden map[string]bool) bool {
-	for _, d := range e {
-		if d.kind != rtWord && d.kind != rtQuoted {
+	for i, d := range e {
+		switch d.kind {
+		case rtNumber:
 			continue
+		case rtOp:
+			if d.text == "||" || d.text == "::" {
+				return true
+			}
+			continue
+		case rtWord, rtQuoted:
+		default:
+			return true
 		}
 		n := d.text
 		if d.kind == rtQuoted {
@@ -2116,14 +2129,42 @@ func definitionHides(e []rtToken, types map[string][]string, hidden map[string]b
 		if heldOtherwise(types, n) || hidden[n] {
 			return true
 		}
-		ts, column := types[n]
-		if !column {
+		if isOpTok(e, i+1, ".") {
 			continue
 		}
-		for _, t := range ts {
-			if !typeIsInteger(t) && !typeIsFloat(t) && !strings.HasPrefix(t, "DECIMAL") {
+		if ts, column := types[n]; column {
+			if len(ts) == 0 {
 				return true
 			}
+			for _, t := range ts {
+				if !typeIsInteger(t) && !typeIsFloat(t) && !strings.HasPrefix(t, "DECIMAL") {
+					return true
+				}
+			}
+			continue
+		}
+		if d.kind == rtWord && (neverText[n] || asTheirArguments[n] != 0 || numberKeepers[n]) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// numberKeepers are the words besides neverText and asTheirArguments a
+// number's expression may hold and stay a number.
+var numberKeepers = map[string]bool{
+	"mod": true, "distinct": true, "all": true, "over": true, "partition": true, "by": true,
+	"order": true, "asc": true, "desc": true,
+}
+
+// setOperation reports whether the statement joins the rows of two
+// statements (UNION, INTERSECT, EXCEPT): the names of the first are the
+// columns', and the types may come from any of them.
+func setOperation(toks []rtToken) bool {
+	for _, t := range toks {
+		if t.kind == rtWord && (t.text == "union" || t.text == "intersect" || t.text == "except") {
+			return true
 		}
 	}
 	return false
@@ -2343,8 +2384,9 @@ func aliasUse(toks []rtToken, types map[string][]string, untyped bool) string {
 			}
 		}
 	}
+	sets := setOperation(toks)
 	columnOfInner := func(name string, readIn int) bool {
-		if hiddenBehind[name] {
+		if hiddenBehind[name] || sets {
 			return false
 		}
 		// A column of a table of that name too: the rules read the
