@@ -1002,6 +1002,8 @@ var copyFuncs = map[string]bool{
 	// extract(epoch from x) of a timestamp and to_timestamp(n) of whole
 	// seconds, as RewriteForCopy writes them.
 	pgEpochMacro: true, pgToTimestampMacro: true,
+	// extract of a whole field, cast to PostgreSQL's numeric.
+	pgExtractWhole: true,
 	"row_number": true, "rank": true, "lag": true,
 	"date_trunc": true, "date_part": true, "extract": true,
 }
