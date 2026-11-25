@@ -976,6 +976,10 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Download Go modules
+        if: env.RUN == 'true'
+        run: bash scripts/go-mod-download.sh
+
       # Pulled ahead of the containers below, with three tries per image: a
       # registry that does not answer for a moment costs a retry here, where
       # the `docker run` that starts the server would fail the job at once.
@@ -1160,6 +1164,10 @@ jobs:
         if: env.RUN == 'true'
         with:
           go-version-file: go.mod
+
+      - name: Download Go modules
+        if: env.RUN == 'true'
+        run: bash scripts/go-mod-download.sh
 
       - name: Pull the test images
         if: env.RUN == 'true'
