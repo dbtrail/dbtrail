@@ -2,6 +2,7 @@ package pgshim
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 )
@@ -12,7 +13,7 @@ import (
 // announced no rows: the run must be vetoed too, whatever the value, or rows
 // would follow a NoData.
 func TestPaddedVeto_aParameterComparedWithATrimmedCharIsVetoedWhateverItsValue(t *testing.T) {
-	s := &session{user: "app"}
+	s := &session{user: "app", logger: slog.New(slog.DiscardHandler)}
 	s.initSettings("public", "app")
 	s.reported = map[string]string{}
 	s.database = "orders"
