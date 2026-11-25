@@ -232,11 +232,15 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 	// current. The table is published as the file it is, footer and all, so
 	// every reader that asks PGSkippedSince of that footer still finds it not
 	// covered, and the other tables of the snapshot are brought up to date.
+	// notCovered: the table is folded although capture dropped some of its
+	// changes (AllowGaps), so it does not hold through the run's end.
+	notCovered := false
 	if why, err := PGNotCovered(ctx, db, schema, table, bmeta); err != nil {
 		return nil, "", err
 	} else if why != "" {
 		switch {
 		case cfg.AllowGaps:
+			notCovered = true
 			slog.Warn("the table is rebuilt from the index although capture dropped some of its changes; they are missing from the result",
 				"schema", schema, "table", table, "reason", why)
 		case carryForwardEligible(cfg.CarryForwardUnchanged, cfg.OutputFormat, p.baselinePath, 0, nil) && bmeta.PGDeltaSince != "":
@@ -351,6 +355,7 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 		rep.CarriedForward, rep.CarriedByLink = true, linked
 		rep.Files = append([]string{filepath.Join(schema, table+".parquet")}, delta...)
 		rep.Duration = time.Since(start)
+		pgHoldThroughRun(cfg, schema, table, capGap, notCovered)
 		slog.Info("table carried forward unchanged", "schema", schema, "table", table,
 			"reason", "no events in the window", "linked", linked,
 			"lsn", lsnText(bmeta.LSN), "reads_from", fileSince.UTC().Format(time.RFC3339),
@@ -435,6 +440,7 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 		}
 		if written {
 			rep.Duration = time.Since(start)
+			pgHoldThroughRun(cfg, schema, table, capGap, notCovered)
 			return rep, "", nil
 		}
 		if prev != nil && fromPair == "" {
@@ -485,6 +491,7 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 		return nil, "", err
 	}
 	rep.Duration = time.Since(start)
+	pgHoldThroughRun(cfg, schema, table, capGap, notCovered)
 	slog.Info("table reconstructed",
 		"schema", schema, "table", table,
 		"lsn", lsnText(b.Next),

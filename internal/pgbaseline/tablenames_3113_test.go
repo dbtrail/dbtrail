@@ -72,6 +72,7 @@ func TestUnstorableSchema_3113(t *testing.T) {
 		baseline.SuccessMarker, baseline.IncompleteMarker, baseline.ChangesOnlyMarkerFile,
 		baseline.ViewsSkippedName, baseline.NewestPointerName, baselineintegrity.ManifestName,
 		"_ARCHIVE_CHECKED", "_ARCHIVE_CHECKED.tmp", "_PRUNING", baseline.WriterMarkerPrefix + "abc",
+		"_PG_RUN_CUT", "_PG_RUN_CUT.tmp",
 		views.SnapshotFileName, views.SnapshotFileTempPrefix + "1",
 	} {
 		if unstorableSchema(name) == nil {

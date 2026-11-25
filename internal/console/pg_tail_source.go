@@ -98,6 +98,9 @@ type pgTailSource struct {
 	// tail being built: the tails' memory budget, 0 for no bound. Set before
 	// the source is used, never after.
 	copyBytes int64
+	// runCuts are the snapshot folders' records of where their update ended
+	// (pg_run_cut.go).
+	runCuts pgRunCutMemo
 }
 
 // pgBrokenMemo is one table's last answer to Broken and what it was made
@@ -333,7 +336,8 @@ func (x *pgTailSource) pairCut(t views.BaselineTable, name string, file baseline
 }
 
 // Cut is where Fill starts t's window, as the keeper orders it. A PostgreSQL
-// footer records no event id.
+// footer records no event id; the update that published t's folder can move
+// the start to where it ended and name one (runCutFloor, #3084).
 //
 // None for a full read's file capture has not passed (anchorReached): the
 // tail the table had is then not laid over it.
@@ -345,7 +349,7 @@ func (x *pgTailSource) Cut(t views.BaselineTable) (tailFloor, string) {
 	if why := x.anchorReached(t, c.md); why != "" {
 		return tailFloor{}, why
 	}
-	return tailFloor{anchor: reconstruct.PGTailPos(c.floor)}, ""
+	return x.runCutFloor(t, c), ""
 }
 
 // anchorReached says why t's file cannot have a tail laid over it yet: it
