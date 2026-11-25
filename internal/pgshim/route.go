@@ -2100,6 +2100,35 @@ func heldOtherwise(types map[string][]string, n string) bool {
 	return false
 }
 
+// definitionHides reports whether an expression a name stands for reads a
+// column the name hides from the rules that know it: one the copy does not
+// hold as PostgreSQL does (heldOtherwise), one whose type is not a number,
+// or another name that hides one.
+func definitionHides(e []rtToken, types map[string][]string, hidden map[string]bool) bool {
+	for _, d := range e {
+		if d.kind != rtWord && d.kind != rtQuoted {
+			continue
+		}
+		n := d.text
+		if d.kind == rtQuoted {
+			n = strings.ToLower(n)
+		}
+		if heldOtherwise(types, n) || hidden[n] {
+			return true
+		}
+		ts, column := types[n]
+		if !column {
+			continue
+		}
+		for _, t := range ts {
+			if !typeIsInteger(t) && !typeIsFloat(t) && !strings.HasPrefix(t, "DECIMAL") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // cteColumnList is, when the word at i names a WITH and a list of its
 // columns follows (WITH name (a, b) AS (...), or after a comma of the same
 // WITH), the index of the "(" that opens the WITH's body; -1 otherwise.
@@ -2280,17 +2309,23 @@ func aliasUse(toks []rtToken, types map[string][]string, untyped bool) string {
 	// A name stands for a column the copy does not hold as PostgreSQL does
 	// when its expression reads one, or reads a name that does (SELECT y AS
 	// z FROM (SELECT c AS y ...)).
+	//
+	// So does a name whose expression reads a column that is not a number:
+	// the rules of a comparison read the column's type (a timestamp against
+	// a string with a time zone, a loose date, text against a number), and
+	// the name has none of it, so they would let the comparison through.
+	// An expression this cannot read hides as much.
 	hiddenBehind := map[string]bool{}
+	defs := aliasDefinitions(toks)
 	for changed := true; changed; {
 		changed = false
-		for i := range at {
-			if hiddenBehind[toks[i].text] {
+		for name, exprs := range defs {
+			if hiddenBehind[name] {
 				continue
 			}
-			for _, d := range aliasDefinitionAt(toks, i) {
-				n := strings.ToLower(d.text)
-				if (d.kind == rtWord || d.kind == rtQuoted) && (heldOtherwise(types, n) || hiddenBehind[n]) {
-					hiddenBehind[toks[i].text] = true
+			for _, e := range exprs {
+				if len(e) == 0 || definitionHides(e, types, hiddenBehind) {
+					hiddenBehind[name] = true
 					changed = true
 					break
 				}
@@ -2299,6 +2334,12 @@ func aliasUse(toks []rtToken, types map[string][]string, untyped bool) string {
 	}
 	columnOfInner := func(name string, readIn int) bool {
 		if untyped || hiddenBehind[name] {
+			return false
+		}
+		// A column of a table of that name too: the rules read the
+		// column's type, not what the name stands for (SELECT * FROM t
+		// WHERE y = ... AND id IN (SELECT k AS y FROM a)).
+		if _, column := types[name]; column {
 			return false
 		}
 		for _, s := range givenIn[name] {

@@ -270,3 +270,38 @@ func TestSelectItems(t *testing.T) {
 		t.Errorf("items without their names: %v", items)
 	}
 }
+
+// A name that stands for a column that is not a number hides the column's
+// type from the rules of a comparison (a timestamp against a string with a
+// time zone, a loose date, text against a number): every use of it is the
+// source's. So is a name a table read beside it has as a column.
+func TestAliasScope_typedThroughName(t *testing.T) {
+	cat := []CatalogTable{
+		{Schema: "public", Name: "o", Columns: []CatalogColumn{{Name: "id", Type: "INTEGER", SourceType: 23, SourceTypeMod: -1}, {Name: "placed_at", Type: "TIMESTAMP", SourceType: 1114, SourceTypeMod: -1}, {Name: "day", Type: "DATE", SourceType: 1082, SourceTypeMod: -1}, {Name: "note", Type: "VARCHAR", SourceType: 25, SourceTypeMod: -1}, {Name: "amount", Type: "DECIMAL(6,2)", SourceType: 1700, SourceTypeMod: 393222}}},
+		{Schema: "public", Name: "t", Columns: []CatalogColumn{{Name: "id", Type: "INTEGER", SourceType: 23, SourceTypeMod: -1}, {Name: "y", Type: "TIMESTAMP", SourceType: 1114, SourceTypeMod: -1}}},
+	}
+	for _, q := range []string{
+		"SELECT id FROM (SELECT id, placed_at AS p FROM o) s WHERE p = '2026-03-02 10:00:00+02'",
+		"WITH w (p) AS (SELECT placed_at FROM o) SELECT count(*) FROM w WHERE p = '2026-03-02 10:00:00+02'",
+		"SELECT id FROM (SELECT id, placed_at AS p FROM o) s WHERE p = '2026-3-2'",
+		"SELECT id FROM (SELECT id, day AS p FROM o) s WHERE p IN ('2026-3-2')",
+		"SELECT id FROM (SELECT id, note AS p FROM o) s WHERE p = 5",
+		"SELECT id FROM (SELECT id, coalesce(placed_at, now()) AS p FROM o) s WHERE p = '2026-03-02 10:00:00+02'",
+		"SELECT id FROM (SELECT id, p AS q FROM (SELECT id, placed_at AS p FROM o) i) s WHERE q = '2026-3-2'",
+		"SELECT * FROM t WHERE y = '2026-03-02 10:00:00+02' AND id IN (SELECT id AS y FROM o)",
+	} {
+		if why := aliasUse(lexOrFail(t, q), screenTypes(cat, nil), false); why == "" {
+			t.Errorf("%s\n    left to the copy", q)
+		}
+	}
+	// A number renamed keeps reading as before.
+	for _, q := range []string{
+		"SELECT id FROM (SELECT id, amount AS p FROM o) s WHERE p > 5",
+		"WITH w (k, total) AS (SELECT id, sum(amount) FROM o GROUP BY id) SELECT k FROM w WHERE total > 5",
+		"SELECT n FROM (SELECT id, count(*) AS n FROM o GROUP BY id) s WHERE n > 2",
+	} {
+		if why := aliasUse(lexOrFail(t, q), screenTypes(cat, nil), false); why != "" {
+			t.Errorf("%s\n    vetoed: %s", q, why)
+		}
+	}
+}
