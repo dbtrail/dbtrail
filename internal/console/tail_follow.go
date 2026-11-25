@@ -194,19 +194,56 @@ func (k *tailKeeper) latest(ctx context.Context, d time.Duration, read []views.B
 	if !wake {
 		return out
 	}
-	p := &k.pub
-	p.mu.Lock()
-	running := p.updating
-	p.mu.Unlock()
-	if running {
+	// Within d counted from here, the wait for the keeper's lock included.
+	ctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	if !k.lockUnlessUpdating(ctx) {
 		// Not behind it: the update that runs publishes them, and the
 		// statement does not wait out a read the follower may take its whole
 		// deadline over.
 		return out
 	}
-	k.followOnce(ctx, d)
+	k.follow(ctx, d, true)
 	out, _ = k.published(read)
 	return out
+}
+
+// lockUnlessUpdating takes the keeper's lock for a statement's own update,
+// and says whether it did: not while an update runs, and not past ctx. An
+// update holds that lock for as long as its read of the index takes, up to
+// the follower's deadline (and past it on a write, which takes no context).
+// Asking whether one runs and then waiting for the lock was not enough: the
+// follower that published just started, or one whose pause ended, can mark
+// itself running and take the lock between the two, and the statement then
+// waited out that read whole, many times its own d. Here the lock is only
+// tried, never waited for, and an update marked running ends the try.
+func (k *tailKeeper) lockUnlessUpdating(ctx context.Context) bool {
+	p := &k.pub
+	var tick *time.Ticker
+	for {
+		p.mu.Lock()
+		running := p.updating
+		p.mu.Unlock()
+		if running {
+			return false
+		}
+		if k.mu.TryLock() {
+			return true
+		}
+		// Held by no update (a build installing, the directory checked):
+		// briefly, so the try is made again.
+		if tick == nil {
+			tick = time.NewTicker(5 * time.Millisecond)
+			defer tick.Stop()
+		}
+		select {
+		case <-tick.C:
+		case <-ctx.Done():
+			return false
+		case <-k.life.Done():
+			return false
+		}
+	}
 }
 
 // published is latest without the update: the views over read's cuts, and
@@ -257,16 +294,35 @@ func (k *tailKeeper) published(read []views.BaselineTable) (map[string]tailView,
 // updates that overlap (a statement's and the follower's), the one that
 // started last is published.
 func (k *tailKeeper) followOnce(ctx context.Context, d time.Duration) bool {
+	return k.follow(ctx, d, false)
+}
+
+// follow is followOnce; held says the caller holds the keeper's lock
+// (lockUnlessUpdating), which follow lets go.
+func (k *tailKeeper) follow(ctx context.Context, d time.Duration, held bool) bool {
 	p := &k.pub
 	// Before the update's first read of the index, so that a statement
 	// waiting for an update begun after a moment never takes one that read
 	// the index before it (waitPublishedSince).
 	began := k.now()
+	// The lock is let go however this ends, a panic included: runFollower
+	// recovers from one, and a lock kept would stop every update after.
+	unlock := func() {}
+	if held {
+		unlock = sync.OnceFunc(k.mu.Unlock)
+		defer unlock()
+	}
 	tables, cuts, gen := k.toFollow()
 	if tables == nil {
 		return false
 	}
-	got, building, dropped, err := k.refreshWithinBuilding(ctx, d, tables)
+	if !held {
+		k.mu.Lock()
+		unlock = sync.OnceFunc(k.mu.Unlock)
+		defer unlock()
+	}
+	got, building, dropped, err := k.refreshWithinBuildingLocked(ctx, d, tables)
+	unlock()
 	if k.life.Err() == nil {
 		// Not a keeper closed under its update: nothing reads it any more.
 		k.note(err)
