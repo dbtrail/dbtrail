@@ -22,7 +22,9 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -1276,6 +1278,16 @@ func cnSameBytes(want, got *pgconn.Result) string {
 // copy right after the ALTER depends on timing, so those are not listed and
 // are known by their group (#3251); nowhere else does cn_alt excuse anything.
 func cnKnown(f cnFailure) string {
+	// The copy sorts a trimmed char(n) as it sorts text, by bytes, which is
+	// the copy's answer to every ORDER BY of text by decision (#3247): the
+	// same rows in another order, or the rows a LIMIT picks after that sort.
+	// Counted and shown with the known ones, not failed.
+	if cnKind(f) == "order" && cnSortsChar(f.key) {
+		return "text sorted by bytes (#3247: ORDER BY of text is the copy's)"
+	}
+	if f.group == "rows chosen by a sort" && cnKind(f) == "rows" && cnSortsChar(f.key) {
+		return "the rows a LIMIT picks after text sorted by bytes (#3247)"
+	}
 	altered := f.group == "screen against view" && strings.Contains(f.key, "cn_alt")
 	if !cnBaseline[cnHash(f)] && !altered {
 		return ""
@@ -1715,4 +1727,59 @@ func cnASCIICases() []cnCase {
 		add("SELECT count(*) FROM customer c WHERE " + a + " BETWEEN 65 AND 90")
 	}
 	return out
+}
+
+// cnCharCols are the columns the battery's own tables declare char(n)
+// (cnSeed, cnHammerSeed), lowercased.
+var cnCharCols = sync.OnceValue(func() map[string]bool {
+	out := map[string]bool{}
+	re := regexp.MustCompile(`(?i)\b([a-z_][a-z_0-9]*) (?:char|character|bpchar)\(\d+\)`)
+	for _, ddl := range append(cnSeed(), cnHammerSeed()...) {
+		for _, m := range re.FindAllStringSubmatch(ddl, -1) {
+			out[strings.ToLower(m[1])] = true
+		}
+	}
+	return out
+})
+
+// cnSortsChar reports whether the last ORDER BY of stmt has a key that is one
+// of cnCharCols: written by name (qualified or not), or by its position in
+// the first select list. An order that differs on any other key is not
+// #3247's and stays a failure.
+func cnSortsChar(stmt string) bool {
+	low := strings.ToLower(stmt)
+	i := strings.LastIndex(low, "order by ")
+	if i < 0 {
+		return false
+	}
+	clause := low[i+len("order by "):]
+	for _, stop := range []string{" limit ", " offset ", ")"} {
+		if j := strings.Index(clause, stop); j >= 0 {
+			clause = clause[:j]
+		}
+	}
+	var items []string
+	if s := strings.Index(low, "select "); s >= 0 {
+		list := low[s+len("select "):]
+		list = strings.TrimPrefix(list, "distinct ")
+		if f := strings.Index(list, " from "); f >= 0 {
+			items = strings.Split(list[:f], ",")
+		}
+	}
+	for _, key := range strings.Split(clause, ",") {
+		key = strings.Fields(strings.TrimSpace(key) + " ")[0]
+		if n, err := strconv.Atoi(key); err == nil {
+			if n < 1 || n > len(items) {
+				continue
+			}
+			key = strings.Fields(strings.TrimSpace(items[n-1]) + " ")[0]
+		}
+		if j := strings.LastIndex(key, "."); j >= 0 {
+			key = key[j+1:]
+		}
+		if cnCharCols()[strings.Trim(key, `"`)] {
+			return true
+		}
+	}
+	return false
 }

@@ -16,10 +16,13 @@ import (
 )
 
 // A char(n) column on the PostgreSQL port (#3068), against a real PostgreSQL
-// and the snapshot of it the port serves: the copy holds the column as text
-// with its padding and compares the padding, PostgreSQL does not, so a
-// statement that uses the column where the padding counts is answered by
-// the source, and refused by a server that sends nothing there.
+// and the snapshot of it the port serves: the copy holds the column without
+// its padding (#3219), so it answers the uses where the padding cannot
+// change the rows (a plain string with no trailing blank, IN of such strings,
+// the column shown), and a statement that uses the column where the padding
+// counts (a string with a trailing blank, a parameter, length, ||, another
+// column) is answered by the source, and refused by a server that sends
+// nothing there.
 
 const (
 	pgCharRole = "dbtrail_fwd_3068"
@@ -123,6 +126,13 @@ func TestIntegrationPGRouterCharPadding_3068(t *testing.T) {
 			{"SELECT id, code FROM " + table + " WHERE k = 1 ORDER BY id", "1|ab\n2|ab"},
 			{"SELECT * FROM " + table + " WHERE id = 3", "3|abcde|abcde|2"},
 			{"SELECT count(*) FROM " + table + " WHERE label = 'ab'", "2"},
+			// Compared with plain strings with no trailing blank: the copy's
+			// rows, which PostgreSQL finds the same over the same rows.
+			{"SELECT count(*) FROM " + table + " WHERE code = 'ab'", "2"},
+			{"SELECT id FROM " + table + " WHERE code = 'ab' ORDER BY id", "1\n2"},
+			{"SELECT id FROM " + table + " WHERE code <> 'ab' ORDER BY id", "3\n4"},
+			{"SELECT id FROM " + table + " WHERE code IN ('ab', 'x') ORDER BY id", "1\n2\n4"},
+			{"SELECT count(*) FROM (SELECT * FROM " + table + ") s WHERE s.code = 'ab'", "2"},
 		} {
 			got, reason := answered(c, tc.stmt)
 			if got != tc.want || reason != pgshim.ReasonAnswersTheSame {
@@ -130,19 +140,21 @@ func TestIntegrationPGRouterCharPadding_3068(t *testing.T) {
 			}
 		}
 		// What the copy would answer otherwise: the source's rows, the
-		// fifth among them, as a veto. On the copy the first is 0.
+		// fifth among them, as a veto. A string with a trailing blank is one
+		// PostgreSQL compares without it and the copy with it: on the copy
+		// the first is 0.
 		for _, stmt := range []string{
-			"SELECT count(*) FROM " + table + " WHERE code = 'ab'",
-			"SELECT id FROM " + table + " WHERE code = 'ab' ORDER BY id",
-			"SELECT id FROM " + table + " WHERE code <> 'ab' ORDER BY id",
+			"SELECT count(*) FROM " + table + " WHERE code = 'ab '",
+			"SELECT id FROM " + table + " WHERE code = 'ab ' ORDER BY id",
+			"SELECT id FROM " + table + " WHERE code <> 'ab ' ORDER BY id",
 			"SELECT id, length(code) FROM " + table + " ORDER BY id",
 			"SELECT id, code || 'x' FROM " + table + " ORDER BY id",
 			"SELECT id FROM " + table + " WHERE code = label ORDER BY id",
-			"SELECT id FROM " + table + " WHERE code IN ('ab', 'x') ORDER BY id",
+			"SELECT id FROM " + table + " WHERE code IN ('ab ', 'x') ORDER BY id",
 			"SELECT a.id, b.id FROM " + table + " a JOIN " + table + " b ON a.code = b.label ORDER BY a.id, b.id",
 			"SELECT DISTINCT length(code) FROM " + table + " ORDER BY 1",
 			"SELECT label FROM " + table + " INTERSECT SELECT code FROM " + table + " ORDER BY 1",
-			"SELECT count(*) FROM (SELECT * FROM " + table + ") s WHERE s.code = 'ab'",
+			"SELECT count(*) FROM (SELECT * FROM " + table + ") s WHERE s.code = 'ab '",
 		} {
 			want := pgRows(t, source, stmt)
 			got, reason := answered(c, stmt)
@@ -150,17 +162,26 @@ func TestIntegrationPGRouterCharPadding_3068(t *testing.T) {
 				t.Errorf("%s: %q (%s), want PostgreSQL's %q from the source, as a veto", stmt, got, reason, want)
 			}
 		}
-		if got := pgRows(t, source, "SELECT count(*) FROM "+table+" WHERE code = 'ab'"); got != "3" {
-			t.Fatalf("PostgreSQL itself counts %s rows whose code is 'ab', want 3: the test's premise", got)
+		if got := pgRows(t, source, "SELECT count(*) FROM "+table+" WHERE code = 'ab '"); got != "3" {
+			t.Fatalf("PostgreSQL itself counts %s rows whose code is 'ab ', want 3: the test's premise", got)
 		}
 
-		// A prepared statement, in each of pgx's modes: an argument compared
-		// with the column is the source's too.
+		// A prepared statement, in each of pgx's modes: an argument with a
+		// trailing blank compared with the column is the source's too, with
+		// PostgreSQL's answer for the type the driver gives the argument in
+		// that mode.
+		const argStmt = "SELECT count(*) AS n FROM " + table + " WHERE code = $1"
 		for _, mode := range []pgx.QueryExecMode{pgx.QueryExecModeCacheStatement, pgx.QueryExecModeCacheDescribe, pgx.QueryExecModeDescribeExec, pgx.QueryExecModeExec, pgx.QueryExecModeSimpleProtocol} {
+			direct := pgxConn(t, ctx, env.sourceDSN, mode)
+			want := pgxAnswer(ctx, direct, argStmt, "ab ")
+			direct.Close(ctx)
+			if !strings.HasPrefix(want, "[n]") {
+				t.Fatalf("mode %v: PostgreSQL itself: %s", mode, want)
+			}
 			conn := pgxConn(t, ctx, env.portDSN(), mode)
 			for i := range 2 {
-				if got := pgxAnswer(ctx, conn, "SELECT count(*) AS n FROM "+table+" WHERE code = $1", "ab"); got != `[n] ["3"]` {
-					t.Errorf("mode %v, run %d: a count by the char(5) column: %s, want the source's 3", mode, i, got)
+				if got := pgxAnswer(ctx, conn, argStmt, "ab "); got != want {
+					t.Errorf("mode %v, run %d: a count by the char(5) column with 'ab ': %s, want the source's %s", mode, i, got, want)
 				}
 			}
 			conn.Close(ctx)
@@ -182,28 +203,51 @@ func TestIntegrationPGRouterCharPadding_3068(t *testing.T) {
 			// A star over the char(5) column that nothing goes on to read.
 			{"SELECT count(*) FROM (SELECT * FROM " + table + ") s", "4"},
 			{"WITH x AS (SELECT * FROM " + table + ") SELECT id FROM x WHERE id = 3", "3"},
+			// Compared with a plain string with no trailing blank: the
+			// copy's rows are PostgreSQL's.
+			{"SELECT count(*) FROM " + table + " WHERE code = 'ab'", "2"},
+			{"SELECT count(*) FROM (SELECT * FROM " + table + ") s WHERE s.code = 'ab'", "2"},
 		} {
 			if got := pgRows(t, c, tc.stmt); got != tc.want {
 				t.Errorf("%s: %q, want %q", tc.stmt, got, tc.want)
 			}
 		}
 		for _, stmt := range []string{
-			"SELECT count(*) FROM " + table + " WHERE code = 'ab'",
+			"SELECT count(*) FROM " + table + " WHERE code = 'ab '",
 			"SELECT id, length(code) FROM " + table,
 			"SELECT id, code || 'x' FROM " + table,
-			"SELECT count(*) FROM (SELECT * FROM " + table + ") s WHERE s.code = 'ab'",
+			"SELECT count(*) FROM (SELECT * FROM " + table + ") s WHERE s.code = 'ab '",
 		} {
 			got := pgRows(t, c, stmt)
 			if !strings.HasPrefix(got, "error 0A000") || !strings.Contains(got, "char(n)") || !strings.Contains(got, "refused rather than answered with other rows") {
 				t.Errorf("%s: %q, want it refused (0A000) for the char(n) column", stmt, got)
 			}
 		}
-		conn := pgxConn(t, ctx, env.portDSN(), pgx.QueryExecModeCacheStatement)
-		if got := pgxAnswer(ctx, conn, "SELECT count(*) AS n FROM "+table+" WHERE code = $1", "ab"); !strings.HasPrefix(got, "error 0A000") {
-			t.Errorf("a prepared count by the char(5) column: %s, want it refused (0A000)", got)
-		}
-		if got := pgxAnswer(ctx, conn, "SELECT count(*) AS n FROM "+table+" WHERE label = $1", "ab"); got != `[n] ["2"]` {
-			t.Errorf("a prepared count by the text column: %s, want the copy's 2", got)
+		// A prepared statement, in each of pgx's modes. The column compared
+		// with a parameter is refused whatever the value: 'ab ' is one
+		// PostgreSQL compares without its blank (3 rows) and the copy with it
+		// (none), and 'ab' is refused too, as its Describe was (written with
+		// NULL), so no rows follow a Describe that announced none. Only the
+		// simple protocol, where pgx writes 'ab' into the text itself, is the
+		// copy's.
+		for _, mode := range []pgx.QueryExecMode{pgx.QueryExecModeCacheStatement, pgx.QueryExecModeCacheDescribe, pgx.QueryExecModeDescribeExec, pgx.QueryExecModeExec, pgx.QueryExecModeSimpleProtocol} {
+			conn := pgxConn(t, ctx, env.portDSN(), mode)
+			wantAB := "error 0A000"
+			if mode == pgx.QueryExecModeSimpleProtocol {
+				wantAB = `[n] ["2"]`
+			}
+			for i := range 2 {
+				if got := pgxAnswer(ctx, conn, "SELECT count(*) AS n FROM "+table+" WHERE code = $1", "ab "); !strings.HasPrefix(got, "error 0A000") {
+					t.Errorf("mode %v, run %d: a prepared count by the char(5) column with 'ab ': %s, want it refused (0A000)", mode, i, got)
+				}
+				if got := pgxAnswer(ctx, conn, "SELECT count(*) AS n FROM "+table+" WHERE code = $1", "ab"); !strings.HasPrefix(got, wantAB) {
+					t.Errorf("mode %v, run %d: a prepared count by the char(5) column with 'ab': %s, want %s", mode, i, got, wantAB)
+				}
+				if got := pgxAnswer(ctx, conn, "SELECT count(*) AS n FROM "+table+" WHERE label = $1", "ab"); got != `[n] ["2"]` {
+					t.Errorf("mode %v, run %d: a prepared count by the text column: %s, want the copy's 2", mode, i, got)
+				}
+			}
+			conn.Close(ctx)
 		}
 		if c.TxStatus() != 'I' {
 			t.Errorf("the connection is left in status %c", c.TxStatus())

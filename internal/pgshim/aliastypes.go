@@ -243,7 +243,7 @@ var neverText = map[string]bool{
 	"round": true, "floor": true, "ceil": true, "ceiling": true, "trunc": true, "stddev": true,
 	"stddev_pop": true, "stddev_samp": true, "variance": true, "var_pop": true, "var_samp": true,
 	"bool_and": true, "bool_or": true, "every": true, pgRoundDiv: true, pgRoundAvg: true, pgRoundK: true, pgRoundNeg: true, pgRoundWhole: true, pgAvg: true, pgAvgN: true, pgDiv: true, pgFloorDiv: true,
-	pgFloorEpoch: true, pgEpochMacro: true, pgToTimestampMacro: true, "to_timestamp": true,
+	pgFloorEpoch: true, pgEpochMacro: true, pgExtractWhole: true, pgToTimestampMacro: true, "to_timestamp": true,
 }
 
 // asTheirArguments are the functions that answer a value of their first

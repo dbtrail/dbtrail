@@ -1301,9 +1301,11 @@ func pgSnapshotAgeFor(opts pgshim.RunOptions) *console.PGSnapshotAge {
 
 func pgRunContext(ctx context.Context, opts pgshim.RunOptions) context.Context {
 	if opts.NeedTails {
-		return console.WithPGNeedTails(ctx)
+		ctx = console.WithPGNeedTails(ctx)
 	}
-	return ctx
+	// The char(n) columns the screen took as read without their padding,
+	// checked against the snapshot the statement reads (#3219).
+	return console.WithPGTrimmed(ctx, opts.Trimmed)
 }
 
 // pgCostSides is a port's pgshim.CostSides, one per server: a server's

@@ -1391,6 +1391,15 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 				viewsRefusal = &sqlRefusal{http.StatusUnprocessableEntity, why}
 				return "", viewsRefusal
 			}
+			// The char(n) columns the PostgreSQL port took as read without
+			// their padding are so in the snapshot this statement reads
+			// (pg_trimmed.go). Before anything heavier: the source answers.
+			if names := pgTrimmed(ctx); len(names) > 0 {
+				if why := pgTrimmedMoved(names, readTables); why != "" {
+					viewsRefusal = &sqlChangedRefusal{why}
+					return "", viewsRefusal
+				}
+			}
 			// Not over a statement whose tables the parse could not tell: it
 			// would build a tail for every table of the copy. Which tables
 			// get a tail is not which views are installed (#3043): see

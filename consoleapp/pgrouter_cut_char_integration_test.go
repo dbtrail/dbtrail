@@ -87,8 +87,17 @@ func TestIntegrationPGRouterCutOfACharColumn(t *testing.T) {
 		{"a cut inside the data", "SELECT substr(c_phone, 1, 2) FROM " + pgCutCustomer + " WHERE c_id < 6 ORDER BY c_id", true},
 		{"substring of it", "SELECT substring(c_state FROM 1 FOR 1) FROM " + pgCutCustomer + " WHERE c_id < 3 ORDER BY c_id", true},
 		{"a cut compared", "SELECT c_id FROM " + pgCutCustomer + " WHERE substr(c_phone, 1, 1) IN ('1', '3') ORDER BY c_id", true},
-		{"the column compared on its own stays with the source", "SELECT c_id FROM " + pgCutCustomer + " WHERE c_state = 'B' ORDER BY c_id", false},
-		{"the column sorted stays with the source", "SELECT c_state FROM " + pgCutCustomer + " ORDER BY c_state, c_id", false},
+		// The column on its own: compared with a plain string with no
+		// trailing blank, or the main statement's sort, the copy answers
+		// (#3219); its rows and their order are PostgreSQL's.
+		{"the column compared on its own", "SELECT c_id FROM " + pgCutCustomer + " WHERE c_state = 'B' ORDER BY c_id", true},
+		{"the column sorted", "SELECT c_id FROM " + pgCutCustomer + " ORDER BY c_state, c_id", true},
+		// Compared with a string with a trailing blank, which PostgreSQL
+		// compares without it (row 6) and the copy with it (no row), or
+		// sorted by a window, whose order is not the main statement's: the
+		// source answers.
+		{"the column compared with a trailing blank stays with the source", "SELECT c_id FROM " + pgCutCustomer + " WHERE c_state = 'B ' ORDER BY c_id", false},
+		{"the column sorted in a window stays with the source", "SELECT c_id, row_number() OVER (ORDER BY c_state, c_id) FROM " + pgCutCustomer + " ORDER BY c_id", false},
 	} {
 		want := rows(source, tc.stmt)
 		c := pgClient(t, ctx, env.portDSN(), nil)

@@ -5,6 +5,7 @@ package consoleapp
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -184,6 +185,26 @@ FROM deciles GROUP BY decile ORDER BY decile`
 SELECT r.w_id, r.d_id, r.rnk, c.c_first, c.c_credit, r.amount
 FROM ranked r JOIN ` + cu + ` c ON c.c_w_id = r.w_id AND c.c_d_id = r.d_id AND c.c_id = r.c_id
 WHERE r.rnk <= 3 ORDER BY r.w_id, r.d_id, r.rnk LIMIT 500`
+	// Q07 writes c_credit out, which the copy holds without its padding
+	// (#3219, a decision of the product): its answer must be PostgreSQL's with
+	// only that column's trailing blanks gone, which is PostgreSQL's answer
+	// to q07 with the column trimmed there. Over these rows Q07 joins no
+	// customer, so the same is asked of the column written out on its own,
+	// over every row: empty, all blanks, NULL.
+	q07Trimmed := strings.Replace(q07, "c.c_credit,", "rtrim(c.c_credit) AS c_credit,", 1)
+	if q07Trimmed == q07 {
+		t.Fatal("Q07 no longer writes c.c_credit out: the test's premise")
+	}
+	credit := `SELECT c_id, c_credit FROM ` + cu + ` ORDER BY c_w_id, c_d_id, c_id`
+	creditTrimmed := `SELECT c_id, rtrim(c_credit) AS c_credit FROM ` + cu + ` ORDER BY c_w_id, c_d_id, c_id`
+	// What keeps Q07 from the copy: sorted by the char(n), whose only answer
+	// here would be the copy's order of text, and compared with a string
+	// with a trailing blank, which PostgreSQL compares without it.
+	q07Sorted := strings.Replace(q07, "ORDER BY r.w_id, r.d_id, r.rnk", "ORDER BY r.w_id, r.d_id, c.c_credit, r.rnk", 1)
+	q07Blank := strings.Replace(q07, "WHERE r.rnk <= 3", "WHERE r.rnk <= 3 AND c.c_credit <> 'G '", 1)
+	if q07Sorted == q07 || q07Blank == q07 {
+		t.Fatal("Q07 changed shape: the test's premise")
+	}
 
 	onCopy := []struct{ name, stmt string }{
 		{"Q08", q08},
@@ -194,13 +215,22 @@ WHERE r.rnk <= 3 ORDER BY r.w_id, r.d_id, r.rnk LIMIT 500`
 		{"two levels", `WITH y AS (SELECT * FROM ` + cu + `), z AS (SELECT * FROM y) SELECT c_id FROM z ORDER BY c_w_id, c_d_id, c_id`},
 		{"a qualified star", `WITH y AS (SELECT a.* FROM ` + cu + ` a WHERE a.c_w_id = 2) SELECT y.c_id, length(y.c_first) FROM y ORDER BY y.c_d_id, y.c_id`},
 		{"a star of no char(n)", `WITH y AS (SELECT c_id, c_balance FROM ` + cu + `) SELECT * FROM y ORDER BY c_id, c_balance`},
+		// Through a star, a char(n) the copy holds without its padding is
+		// text to the rest of the screen (#3219): compared with a plain
+		// string with no trailing blank, and text sorted by the main
+		// statement, as without the star.
+		{"the column compared", `WITH y AS (SELECT * FROM ` + cu + `) SELECT c_id FROM y WHERE c_credit = 'G' ORDER BY 1`},
+		{"text sorted by position through a star", `SELECT * FROM (SELECT c_id, c_first FROM ` + cu + `) s ORDER BY 2`},
+		{"text sorted by name through a star", `SELECT * FROM (SELECT c_id, c_first FROM ` + cu + `) s ORDER BY c_first`},
+		{"text renamed and sorted through a star", `SELECT * FROM (SELECT c_id, c_first AS n FROM ` + cu + `) s ORDER BY n`},
 	}
 	toSource := []struct{ name, stmt string }{
-		{"Q07, returns a char(n)", q07},
-		{"the column compared", `WITH y AS (SELECT * FROM ` + cu + `) SELECT c_id FROM y WHERE c_credit = 'G' ORDER BY 1`},
+		{"Q07, sorted by a char(n)", q07Sorted},
+		{"Q07, a char(n) compared with a trailing blank", q07Blank},
+		{"the column compared with a trailing blank", `WITH y AS (SELECT * FROM ` + cu + `) SELECT c_id FROM y WHERE c_credit = 'G ' ORDER BY 1`},
 		{"the column measured", `WITH y AS (SELECT * FROM ` + cu + `) SELECT length(c_credit) FROM y`},
 		{"the column concatenated", `SELECT s.c_credit || 'x' FROM (SELECT * FROM ` + cu + `) s`},
-		{"the column grouped", `WITH y AS (SELECT * FROM ` + cu + `) SELECT c_credit, count(*) FROM y GROUP BY c_credit`},
+		{"the column sorted by a window", `WITH y AS (SELECT * FROM ` + cu + `) SELECT c_id, rank() OVER (ORDER BY c_credit) FROM y`},
 		{"a star to the client", `WITH y AS (SELECT * FROM ` + cu + `) SELECT * FROM y`},
 		{"DISTINCT on the star", `WITH y AS (SELECT DISTINCT * FROM ` + cu + `) SELECT c_id FROM y`},
 		{"the whole row", `WITH y AS (SELECT * FROM ` + cu + `) SELECT to_json(y) FROM y`},
@@ -209,9 +239,7 @@ WHERE r.rnk <= 3 ORDER BY r.w_id, r.d_id, r.rnk LIMIT 500`
 		{"a domain over char(n), measured", `SELECT sum(length(dc)) FROM (SELECT * FROM ` + pgStarDomain + `) s`},
 		{"a literal cast to char(n)", `SELECT 'a '::char(3) = 'a' FROM (SELECT * FROM ` + pgStarFlags + `) s`},
 		{"a keyword after a dot", pgStarDotted()},
-		{"text sorted by position through a star", `SELECT * FROM (SELECT c_id, c_first FROM ` + cu + `) s ORDER BY 2`},
-		{"text sorted by name through a star", `SELECT * FROM (SELECT c_id, c_first FROM ` + cu + `) s ORDER BY c_first`},
-		{"text renamed and sorted through a star", `SELECT * FROM (SELECT c_id, c_first AS n FROM ` + cu + `) s ORDER BY n`},
+		{"a bpchar sorted through a star", `SELECT * FROM (SELECT k, c FROM ` + pgStarBare + `) s ORDER BY 2`},
 		{"the one-byte \"char\", returned", pgStarOneByte[0].stmt},
 		{"the one-byte \"char\", compared", pgStarOneByte[1].stmt},
 		{"the one-byte \"char\", through a subquery", pgStarOneByte[2].stmt},
@@ -254,6 +282,36 @@ WHERE r.rnk <= 3 ORDER BY r.w_id, r.d_id, r.rnk LIMIT 500`
 			if got := pgStarRead(ctx, port, stmt, extended); got != want {
 				t.Errorf("%s, %s: the copy's answer differs\n got: %s\nwant: %s", how, name, got, want)
 			}
+		}
+		for _, c := range []struct {
+			name, stmt, trimmed string
+			// anyOrder: the statement sets no order, so the rows are
+			// compared as a set.
+			anyOrder bool
+		}{
+			{"Q07, returns a char(n)", q07, q07Trimmed, false},
+			{"a char(n) written out", credit, creditTrimmed, false},
+			{"the column grouped", `WITH y AS (SELECT * FROM ` + cu + `) SELECT c_credit, count(*) FROM y GROUP BY c_credit`,
+				`WITH y AS (SELECT * FROM ` + cu + `) SELECT rtrim(c_credit) AS c_credit, count(*) FROM y GROUP BY c_credit`, true},
+		} {
+			sorted := func(a string) string {
+				if !c.anyOrder {
+					return a
+				}
+				lines := strings.Split(a, "\n")
+				slices.Sort(lines[1:])
+				return strings.Join(lines, "\n")
+			}
+			want := sorted(pgStarRead(ctx, source, c.trimmed, extended))
+			if strings.HasPrefix(want, "error") {
+				t.Fatalf("%s, %s: PostgreSQL itself: %s", how, c.name, want)
+			}
+			if got := sorted(pgStarRead(ctx, port, c.stmt, extended)); got != want {
+				t.Errorf("%s, %s: the copy's answer differs from PostgreSQL's beyond the padding\n got: %s\nwant: %s", how, c.name, got, want)
+			}
+		}
+		if want := pgStarRead(ctx, source, creditTrimmed, extended); strings.Count(want, "\n") != 30 {
+			t.Fatalf("%s: PostgreSQL itself: %q, want 30 rows: the test's premise", how, want)
 		}
 		for _, c := range toSource {
 			name, stmt := c.name, c.stmt

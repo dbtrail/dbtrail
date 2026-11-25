@@ -197,12 +197,24 @@ type RunOptions struct {
 	// and the source answers it (#3086). Without it a snapshot alone
 	// answers, as on a connection with nowhere else to send the statement.
 	NeedTails bool
+	// Trimmed are the names (lowercased) of the char(n) columns the screen
+	// took as read without their padding (trimmed.go): the host refuses the
+	// statement before running it, with a *sqlsandbox.MayHaveChangedError,
+	// when a table it reads holds one as a char(n) its view does not trim,
+	// and the source answers it. TrimmedUnknown among them: which ones could
+	// not be read.
+	Trimmed []string
 	// FastLane says the source's plan of the statement reads one table and
 	// joins nothing (fastlane.go): the host may run it on a worker it keeps
 	// for such statements, so it does not wait behind a report. False when
 	// there was no plan, and for a probe.
 	FastLane bool
 }
+
+// TrimmedUnknown, among RunOptions.Trimmed, says which columns a statement
+// takes as trimmed could not be read: any table it reads that holds a
+// trimmed char(n) refuses it (console.PGTrimmedUnknown).
+const TrimmedUnknown = "\x00"
 
 // runOptions are the options the connection's next statement runs in.
 func (s *session) runOptions() RunOptions {
@@ -402,6 +414,7 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		// does not run one it would answer from the snapshot alone (#3086).
 		opts := s.runOptions()
 		opts.NeedTails = s.holdsBackCopy(apart && named > 0)
+		opts.Trimmed = s.trimmedFor(text)
 		res, err = s.bound.Run(ctx, text, opts)
 		var changed *sqlsandbox.MayHaveChangedError
 		if opts.NeedTails && errors.As(err, &changed) {
