@@ -191,7 +191,8 @@ func BaselineOverridesReached(ctx context.Context, p OverrideProbe) error {
 		return fmt.Errorf("connect to index DB: %w", err)
 	}
 	defer db.Close()
-	cut, err := ResolveSnapshotCut(ctx, db, cfg.At)
+	// The cut such a run resolves, capture's saved position included.
+	cut, err := resolveCutPastCapture(ctx, db, cfg.At, false)
 	if err != nil {
 		return err
 	}

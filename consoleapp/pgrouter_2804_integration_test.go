@@ -30,7 +30,7 @@ func TestIntegrationPGRouter_answersAreCountedInThePortsResultBudget(t *testing.
 	f := newRouterFiles(t)
 	hour := time.Now().UTC().Truncate(time.Hour)
 	dsn := seedFlashbackIndex(t, "alice", hour)
-	if _, err := f.owner.Add(console.ServerEntry{Name: "pgsrv", DSN: dsn, Flavor: console.FlavorPostgres, BaselineDir: t.TempDir()}); err != nil {
+	if _, err := addServedPG(t, f.owner, console.ServerEntry{Name: "pgsrv", DSN: dsn, BaselineDir: t.TempDir(), SourceDSN: pgFwdSourceDSN(t)}); err != nil {
 		t.Fatal(err)
 	}
 	f.savePortFile(t, true, "tok")
@@ -41,7 +41,7 @@ func TestIntegrationPGRouter_answersAreCountedInThePortsResultBudget(t *testing.
 	t.Cleanup(runner.Close)
 	srv.RefreshFollowedFiles()
 	budget := pgshim.NewResultBudget(1 << 20)
-	router := &pgRouterPort{srv: srv, addr: freeAddr(t), maxConns: 4, poll: 20 * time.Millisecond, out: io.Discard, budget: budget}
+	router := &pgRouterPort{srv: srv, addr: freeAddr(t), maxConns: 4, poll: 20 * time.Millisecond, out: io.Discard, budget: budget, cost: &pgshim.CostPolicy{}}
 	portCtx, stopPort := context.WithCancel(context.Background())
 	served := make(chan struct{})
 	go func() { _ = router.serve(portCtx); close(served) }()

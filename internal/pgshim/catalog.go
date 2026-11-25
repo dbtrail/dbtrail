@@ -80,6 +80,9 @@ type CatalogColumn struct {
 	// padding (baseline.PGPaddedToTrim, the list the view itself uses). The
 	// screen may treat a column as trimmed only when this says so.
 	TrimmedOnCopy bool
+	// Collation is what is known of the column's collation (#3111,
+	// collation.go): the zero value compares as the copy does.
+	Collation Collation
 }
 
 // catalogCacheFor is how long one connection reuses the catalog it read: a

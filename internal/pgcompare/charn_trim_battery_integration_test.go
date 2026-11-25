@@ -6,16 +6,21 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"io/fs"
+	"maps"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -27,6 +32,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
@@ -677,13 +683,20 @@ func cnClip(s string, n int) string {
 }
 
 // cnSide is the side the port says answered the connection's last statement.
-func cnSide(ctx context.Context, c *pgconn.PgConn) string {
+func cnSide(ctx context.Context, c *pgconn.PgConn) string { return cnStatus(ctx, c, "last_answer") }
+
+// cnReason is why the port's last answer on c was given where it was.
+func cnReason(ctx context.Context, c *pgconn.PgConn) string {
+	return cnStatus(ctx, c, "last_answer_reason")
+}
+
+func cnStatus(ctx context.Context, c *pgconn.PgConn, row string) string {
 	res, err := c.Exec(ctx, "SHOW dbtrail.router_status").ReadAll()
 	if err != nil || len(res) == 0 {
 		return "unknown"
 	}
 	for _, r := range res[0].Rows {
-		if len(r) == 2 && string(r[0]) == "last_answer" {
+		if len(r) == 2 && string(r[0]) == row {
 			return string(r[1])
 		}
 	}
@@ -707,6 +720,56 @@ type cnStack struct {
 	fwd     string
 	portDSN string
 	procs   []*exec.Cmd
+}
+
+// cnNeverHidden is the table the server hides in the phases with no
+// forwarding user: no database has it.
+const cnNeverHidden = "public.cn_never_there"
+
+// setHidden saves the tables the server hides (and no column), through the
+// daemon's own API, as the web interface saves them.
+func (s *cnStack) setHidden(t *testing.T, ctx context.Context, tables []string) {
+	t.Helper()
+	acc, err := console.ReadLocalAccess(console.LocalAccessPath(filepath.Join(s.dir, "console-auth.yaml")))
+	if err != nil {
+		t.Fatalf("the daemon's local access file: %v", err)
+	}
+	call := func(method, path string, body []byte) []byte {
+		t.Helper()
+		req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(acc.URL, "/")+path, bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+acc.Token)
+		req.Header.Set("Content-Type", "application/json")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		defer res.Body.Close()
+		out, _ := io.ReadAll(res.Body)
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("%s %s: %d %s", method, path, res.StatusCode, out)
+		}
+		return out
+	}
+	var list struct {
+		Servers []struct{ ID, Name string } `json:"servers"`
+	}
+	if err := json.Unmarshal(call(http.MethodGet, "/api/servers", nil), &list); err != nil {
+		t.Fatal(err)
+	}
+	id := ""
+	for _, sv := range list.Servers {
+		if sv.Name == cnServer {
+			id = sv.ID
+		}
+	}
+	if id == "" {
+		t.Fatalf("server %q is not listed", cnServer)
+	}
+	body, _ := json.Marshal(map[string][]string{"tables": tables, "columns": {}})
+	call(http.MethodPut, "/api/servers/"+id+"/hidden", body)
 }
 
 func cnFreeAddr(t *testing.T) string {
@@ -891,6 +954,17 @@ func cnStart(t *testing.T, ctx context.Context) *cnStack {
 		"--password-stdin", "-d", s.db, "--publication", cnPub, "--slot", cnSlot+"_"+id, "--schemas", "public", "--no-forward"); err != nil {
 		t.Fatalf("server add: %v\n%s\n%s", err, out, s.logTail("watch"))
 	}
+	// The phases with no forwarding user: since 0.140.0 the port serves a
+	// PostgreSQL server only when it can forward, and the one served server
+	// that still sends nothing to its source is one that hides tables or
+	// columns. So the server forwards as the capture account and hides a
+	// table nobody has: the copy answers every statement alone, as a server
+	// with no forwarding user did. Both are taken back before the phase with
+	// a forwarding user.
+	if out, err := s.cli(ctx, "", "server", "forward-user", cnServer, "--capture-account"); err != nil {
+		t.Fatalf("forward-user --capture-account: %v\n%s", err, out)
+	}
+	s.setHidden(t, ctx, []string{cnNeverHidden})
 	if out, err := s.cli(ctx, "", "snapshot", "run", cnServer); err != nil {
 		t.Fatalf("snapshot run: %v\n%s\n%s", err, out, s.logTail("watch"))
 	}
@@ -942,6 +1016,10 @@ type cnTally struct {
 	total, copy, source, refused int
 	wanted, wantedOn             int
 	byGroup                      map[string]*[3]int // statements, on the copy, wrong
+	// heavyOnCopy counts, by group, the answers the copy gave because the
+	// statement was expensive on the source (heavy_on_copy) and that differ
+	// from PostgreSQL's: accepted by the product, said, not failed.
+	heavyOnCopy map[string]int
 }
 
 type cnFailure struct {
@@ -957,7 +1035,7 @@ func cnRun(t *testing.T, ctx context.Context, s *cnStack, phase string, cases []
 	if extended {
 		proto = "extended"
 	}
-	tl := cnTally{byGroup: map[string]*[3]int{}}
+	tl := cnTally{byGroup: map[string]*[3]int{}, heavyOnCopy: map[string]int{}}
 	var notices []string
 	connect := func() (*pgconn.PgConn, error) {
 		cfg, err := pgconn.ParseConfig(s.portDSN)
@@ -1018,6 +1096,12 @@ func cnRun(t *testing.T, ctx context.Context, s *cnStack, phase string, cases []
 			}
 			if why == "" && cs.noCopy {
 				why, class = "a domain over char(n) was answered by the copy, with the right rows; it must go to the source", "B"
+			}
+			if why != "" && cnReason(ctx, port) == "heavy_on_copy" {
+				// Expensive on the source, so the copy answered it though it
+				// may answer otherwise: counted, not failed.
+				tl.heavyOnCopy[cs.group]++
+				break
 			}
 			if why != "" {
 				g[2]++
@@ -1192,6 +1276,16 @@ func cnSameBytes(want, got *pgconn.Result) string {
 // copy right after the ALTER depends on timing, so those are not listed and
 // are known by their group (#3251); nowhere else does cn_alt excuse anything.
 func cnKnown(f cnFailure) string {
+	// The copy sorts a trimmed char(n) as it sorts text, by bytes, which is
+	// the copy's answer to every ORDER BY of text by decision (#3247): the
+	// same rows in another order, or the rows a LIMIT picks after that sort.
+	// Counted and shown with the known ones, not failed.
+	if cnKind(f) == "order" {
+		return "text sorted by bytes (#3247: ORDER BY of text is the copy's)"
+	}
+	if f.group == "rows chosen by a sort" && cnKind(f) == "rows" {
+		return "the rows a LIMIT picks after text sorted by bytes (#3247)"
+	}
 	altered := f.group == "screen against view" && strings.Contains(f.key, "cn_alt")
 	if !cnBaseline[cnHash(f)] && !altered {
 		return ""
@@ -1285,6 +1379,14 @@ func TestIntegrationPGCharNTrimBattery(t *testing.T) {
 			}
 			tl := cnRun(t, ctx, s, phase, cases, extended, &fails)
 			t.Logf("%s, %s: %d statements: %d answered by the copy, %d by the source, %d refused; of the %d that should reach the copy, %d did", phase, proto, tl.total, tl.copy, tl.source, tl.refused, tl.wanted, tl.wantedOn)
+			heavy := 0
+			for _, n := range tl.heavyOnCopy {
+				heavy += n
+			}
+			t.Logf("%s, %s: %d answers of the copy differ from PostgreSQL's because the statement was expensive on the source (heavy_on_copy, accepted)", phase, proto, heavy)
+			for _, g := range slices.Sorted(maps.Keys(tl.heavyOnCopy)) {
+				t.Logf("    %-24s %5d differ, heavy_on_copy", g, tl.heavyOnCopy[g])
+			}
 			names := make([]string, 0, len(tl.byGroup))
 			for g := range tl.byGroup {
 				names = append(names, g)
@@ -1297,6 +1399,10 @@ func TestIntegrationPGCharNTrimBattery(t *testing.T) {
 		}
 	}
 	report("no forwarding user")
+	s.setHidden(t, ctx, []string{})
+	if out, err := s.cli(ctx, "", "server", "forward-user", cnServer, "--no-capture-account"); err != nil {
+		t.Fatalf("forward-user --no-capture-account: %v\n%s", err, out)
+	}
 	if out, err := s.cli(ctx, cnFwdPass+"\n", "server", "forward-user", cnServer, "-u", s.fwd, "--password-stdin"); err != nil {
 		t.Fatalf("forward-user: %v\n%s", err, out)
 	}
@@ -1306,10 +1412,16 @@ func TestIntegrationPGCharNTrimBattery(t *testing.T) {
 			return false, err.Error()
 		}
 		defer c.Close(ctx)
-		if _, err := c.Exec(ctx, "SELECT now() FROM cn_mark").ReadAll(); err != nil {
+		// Inside a block: the source's, cheap or expensive, once the port
+		// can forward.
+		if _, err := c.Exec(ctx, "BEGIN").ReadAll(); err != nil {
+			return false, err.Error()
+		}
+		if _, err := c.Exec(ctx, "SELECT 1 FROM cn_mark").ReadAll(); err != nil {
 			return false, err.Error()
 		}
 		side := cnSide(ctx, c)
+		_, _ = c.Exec(ctx, "ROLLBACK").ReadAll()
 		return side == "source", side
 	})
 	report("forwarding user")

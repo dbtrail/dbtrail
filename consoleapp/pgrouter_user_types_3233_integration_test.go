@@ -179,9 +179,11 @@ func TestIntegrationPGRouterUserTypes_3233(t *testing.T) {
 		}
 	})
 
+	// A server that hides tables or columns sends nothing to its source, so
+	// the copy answers alone and must refuse (0.140.0).
 	t.Run("without one a statement that reads the column is refused", func(t *testing.T) {
 		const table = "pguser_alone"
-		env := startPGPortFor(t, ctx, nil, pgPortFixture{table: table, slot: "pguser_alone_slot", pub: "pguser_alone_pub", setup: pgUserSetup(table)})
+		env := startPGPortFor(t, ctx, nil, pgPortFixture{table: table, slot: "pguser_alone_slot", pub: "pguser_alone_pub", copyOnly: true, setup: pgUserSetup(table)})
 		source, err := pgconn.Connect(ctx, env.sourceDSN)
 		if err != nil {
 			t.Fatal(err)

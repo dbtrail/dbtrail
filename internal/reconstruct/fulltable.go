@@ -1046,7 +1046,14 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 		// after it, so every row up to it is one those checks placed.
 		cfg.ddlMark = readRunDDLMark(ctx, db)
 		mark := readRunEventMark(ctx, db)
-		cut, cutErr := resolveRefreshCut(ctx, db, cfg.At)
+		resolve := resolveRefreshCut
+		if len(cfg.BaselineOverride) > 0 {
+			// A run with a read of some tables (#2640): see resolveCutPastCapture.
+			resolve = func(ctx context.Context, db *sql.DB, at time.Time) (*query.BinlogPos, error) {
+				return resolveCutPastCapture(ctx, db, at, true)
+			}
+		}
+		cut, cutErr := resolve(ctx, db, cfg.At)
 		if cutErr != nil {
 			return nil, cutErr
 		}

@@ -292,6 +292,15 @@ When watch refreshes a snapshot and a table had no changes, the new snapshot reu
 - Environment variable: `BINTRAIL_BASELINE_CARRY_FORWARD_UNCHANGED`
 - Read by: watch.
 
+### `baseline-reread-refused-tables`
+
+When a scheduled snapshot update is refused for tables changed by a statement that leaves no row changes to apply (a TRUNCATE, a table dropped and created again, a change of its columns), watch reads only those tables again from the source and brings every table to one point, instead of reading the whole server. A table refused again before an update goes through, and a read that ends without a snapshot, take the full read as before, at most once a day, except a read that ran out of disk space, since a full read needs that space too. Set false to always take the full read.
+
+- Default: on.
+- Example: `baseline-reread-refused-tables = false`
+- Environment variable: `BINTRAIL_BASELINE_REREAD_REFUSED_TABLES`
+- Read by: watch.
+
 ### `key-index`
 
 During a snapshot refresh that writes table deltas, finds the changed rows through a small key index file kept beside each table (&lt;table&gt;.keyidx), building it when missing, instead of scanning the whole table file. 0, false, no or off turns it off: every refresh scans the file and no key index is built.

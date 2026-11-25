@@ -65,6 +65,10 @@ func TestIntegrationPGRouterBusyCopyRefusesNotForwards(t *testing.T) {
 		cost:    &pgshim.CostPolicy{ScanRows: 100},
 		workers: 1,
 		maxWait: 2 * time.Second,
+		// The runner's own busy refusal, with its one worker held: the sum
+		// below reads one table, which the worker kept for short
+		// statements would answer (TestIntegrationPGRouterFastLane).
+		noFastLane: true,
 	})
 	source := pgClient(t, ctx, env.sourceDSN, nil)
 	t.Cleanup(func() {

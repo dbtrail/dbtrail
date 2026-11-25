@@ -31,6 +31,7 @@ type rereadRig struct {
 	src, index  *sql.DB
 	srcName     string
 	sup         *baselineSupervisor
+	reg         *console.Registry
 	work, local string
 	req         refreshRequest
 	source      console.BaselineRequest
@@ -92,7 +93,7 @@ func newRereadRig(t *testing.T) *rereadRig {
 	sup := newBaselineSupervisor(ctx, work, baseline.LockModeLockAll)
 	sup.lockModeChosen = true
 	source := console.BaselineRequestFor(ent)
-	r := &rereadRig{ctx: ctx, src: src, index: index, srcName: srcName, sup: sup, work: work, local: local, source: source,
+	r := &rereadRig{ctx: ctx, src: src, index: index, srcName: srcName, sup: sup, reg: reg, work: work, local: local, source: source,
 		req: refreshRequest{ServerID: ent.ID, ServerName: ent.Name, IndexDSN: indexDSN, BaselineDir: local, CarryForwardUnchanged: true}}
 	if _, err := sup.execute(source); err != nil {
 		t.Fatalf("the first full read: %v", err)

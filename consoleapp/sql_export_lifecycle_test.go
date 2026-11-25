@@ -131,7 +131,19 @@ func TestSQLExportReaper_expiresAnUnwatchedBuild(t *testing.T) {
 	defer cancel()
 	sup.exportReapEvery = 5 * time.Millisecond
 	dir := seedFinishedExport(t, sup, "srv1")
-	go sup.runSQLExportReaper()
+	// The reaper must be gone before the test returns: cancel alone does not
+	// wait for it, and a tick still in flight reads package seams
+	// (removeStagedBuildFn) that the next test replaces, a data race seen on
+	// CI in TestSQLExportRemoval_triggerMidRemovalKeepsTheNewBuild.
+	reaped := make(chan struct{})
+	go func() {
+		defer close(reaped)
+		sup.runSQLExportReaper()
+	}()
+	defer func() {
+		cancel()
+		<-reaped
+	}()
 
 	clk.advance(sqlExportTTL + time.Second)
 	// Wait on the LAST thing the reaper does, not the first (#1628).

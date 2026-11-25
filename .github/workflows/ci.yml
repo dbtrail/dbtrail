@@ -157,6 +157,8 @@ jobs:
               - '.github/workflows/ci.yml'
               # Every job that starts a container pulls its images with it.
               - 'scripts/pull-test-images.sh'
+              # Every Go job downloads its modules with it.
+              - 'scripts/go-mod-download.sh'
               # The MySQL regression gate's reviewed answers and its fixed
               # dump (#2814): a pull request that changes only those must run
               # the gate, or the answers could be rewritten with nothing
@@ -171,6 +173,8 @@ jobs:
               - '.github/workflows/ci.yml'
               # Every job that starts a container pulls its images with it.
               - 'scripts/pull-test-images.sh'
+              # Every Go job downloads its modules with it.
+              - 'scripts/go-mod-download.sh'
               # The S3 test store actions run inside the integration job
               # (#1884): a change to one must be able to run that job.
               - '.github/actions/**'
@@ -212,6 +216,8 @@ jobs:
               - '.github/workflows/ci.yml'
               # Every job that starts a container pulls its images with it.
               - 'scripts/pull-test-images.sh'
+              # Every Go job downloads its modules with it.
+              - 'scripts/go-mod-download.sh'
               - '.github/actions/**'
               - 'scripts/mysql-integration-shard.sh'
               # Which of the console's tests need a PostgreSQL, and the
@@ -239,6 +245,12 @@ jobs:
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
+
+      # Every module before anything compiles, with three tries: a module
+      # missing from the restored cache is otherwise fetched mid-build with
+      # one. Why the cache misses modules: scripts/go-mod-download.sh.
+      - name: Download Go modules
+        run: bash scripts/go-mod-download.sh
 
       - name: go vet
         run: go vet ./...
@@ -381,6 +393,13 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Every module before anything compiles, with three tries: a module
+      # missing from the restored cache is otherwise fetched mid-build with
+      # one. Why the cache misses modules: scripts/go-mod-download.sh.
+      - name: Download Go modules
+        if: env.RUN == 'true'
+        run: bash scripts/go-mod-download.sh
+
       # Pulled ahead of the containers below, with three tries per image: a
       # registry that does not answer for a moment costs a retry here, where
       # the `docker run` that starts the server would fail the job at once.
@@ -508,8 +527,7 @@ jobs:
       # An S3-compatible store for the #1453/#1454 leg: the SDK half uploads
       # through BINTRAIL_S3_ENDPOINT and the DuckDB half reads the object back
       # through the session's endpoint settings. The image, its pin and its
-      # mirror live in .github/actions/s3-test-store (shared with
-      # release.yaml). That action never fails: when the store cannot start
+      # mirror live in .github/actions/s3-test-store. That action never fails: when the store cannot start
       # (the image was withdrawn twice in September 2026, #1884), the S3 tests
       # skip, every other test still runs, and the "S3-compatible leg" step
       # at the end turns this job red.
@@ -683,8 +701,7 @@ jobs:
     # these legs are what prove it for 11.8 and 12.3. 12.3 runs with its
     # default file-based binlog: the opt-in binlog_storage_engine=innodb is
     # not supported (docs/mariadb.md). The minimum is also in
-    # internal/doctor/mariadb_version.go, and release.yaml must list the same
-    # versions (scripts/check-mariadb-matrix-lockstep.sh).
+    # internal/doctor/mariadb_version.go.
     strategy:
       fail-fast: false
       matrix:
@@ -715,6 +732,13 @@ jobs:
         if: env.RUN == 'true'
         with:
           go-version-file: go.mod
+
+      # Every module before anything compiles, with three tries: a module
+      # missing from the restored cache is otherwise fetched mid-build with
+      # one. Why the cache misses modules: scripts/go-mod-download.sh.
+      - name: Download Go modules
+        if: env.RUN == 'true'
+        run: bash scripts/go-mod-download.sh
 
       # Pulled ahead of the containers below, with three tries per image: a
       # registry that does not answer for a moment costs a retry here, where
@@ -929,9 +953,14 @@ jobs:
       # (#2813): this is the only job with a MySQL index AND a PostgreSQL
       # source, and the console's tests that need both run here or nowhere.
       # Step-level because of the matrix — see the note on the `changes` job.
-      # A console PR starts the two servers only on the cells its tests run
-      # on (16 and 18); DATA is what the data-path suite below still waits for.
-      RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' || (needs.changes.outputs.console == 'true' && (matrix.postgres == '16' || matrix.postgres == '18')) }}
+      # A pull request runs on one PostgreSQL version, the newest (18): the
+      # other three cells report green without starting a server. main, the
+      # nightly run and a dispatch run every version, and a release waits
+      # for main's run on its commit. That trades a regression that only
+      # one older version shows, caught on main instead of in the PR, for
+      # 10 to 15 minutes less per PR. DATA is what the data-path suite below
+      # still waits for.
+      RUN: ${{ github.event_name != 'pull_request' || (matrix.postgres == '18' && (needs.changes.outputs.data == 'true' || needs.changes.outputs.console == 'true')) }}
       DATA: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' }}
 
     steps:
@@ -944,6 +973,10 @@ jobs:
         if: env.RUN == 'true'
         with:
           go-version-file: go.mod
+
+      - name: Download Go modules
+        if: env.RUN == 'true'
+        run: bash scripts/go-mod-download.sh
 
       # Pulled ahead of the containers below, with three tries per image: a
       # registry that does not answer for a moment costs a retry here, where
@@ -1019,10 +1052,10 @@ jobs:
         if: env.RUN == 'true' && env.DATA == 'true'
         run: |
           set -o pipefail
-          # -timeout: internal/pgcompare runs every measured statement on
-          # PostgreSQL and on the copy, about nine minutes under -race.
-          go test -tags=integration -race -p 1 -count=1 -v -timeout 20m \
-            ./internal/pgcapture/ ./internal/pgstreamrun/ ./internal/pgbaseline/ ./internal/pgshim/ ./internal/pgverifysource/ ./internal/pgcompare/ ./internal/pgdrill/ 2>&1 | tee /tmp/pg-it.out
+          # internal/pgcompare, the slowest package, runs in its own job
+          # (integration-pgcompare below), at the same time as this one.
+          go test -tags=integration -race -p 1 -count=1 -v -timeout 25m \
+            ./internal/pgcapture/ ./internal/pgstreamrun/ ./internal/pgbaseline/ ./internal/pgshim/ ./internal/pgverifysource/ ./internal/pgdrill/ 2>&1 | tee /tmp/pg-it.out
           grep -q -- '--- PASS: TestOne_EndToEnd_PostgresToIndexToRecovery' /tmp/pg-it.out \
             || { echo "FATAL: PG end-to-end integration test did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationPGVerifyLiveSourceUnderWrites2198' /tmp/pg-it.out \
@@ -1031,8 +1064,6 @@ jobs:
             || { echo "FATAL: pgbaseline integration suite did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '--- PASS: TestPGWire_PostgresSourceRoundTrip' /tmp/pg-it.out \
             || { echo "FATAL: pgwire PostgreSQL-source E2E did not run — false-green tripwire" >&2; exit 1; }
-          grep -q -- '--- PASS: TestIntegrationPGCompare' /tmp/pg-it.out \
-            || { echo "FATAL: the PostgreSQL source-against-copy comparison did not run — false-green tripwire" >&2; exit 1; }
 
       # The forwarding test over TLS needs a PostgreSQL that serves TLS, as its
       # superuser, and one that is not the source above: it makes the
@@ -1040,8 +1071,7 @@ jobs:
       # The image carries a self-signed certificate (Debian's "snakeoil"),
       # enough for a test that asks whether the connection is encrypted and
       # that verify-full refuses a certificate nobody signed. Only on the
-      # cells the console's tests run on. Not named "Start PostgreSQL source":
-      # scripts/check-postgres-source-lockstep.sh reads those steps.
+      # cells the console's tests run on.
       - name: Start a PostgreSQL that serves TLS (bintrail-test-postgres-tls, ${{ matrix.postgres }})
         if: env.RUN == 'true' && (matrix.postgres == '16' || matrix.postgres == '18')
         run: |
@@ -1105,6 +1135,95 @@ jobs:
               || { echo "FATAL: psql $major did not run the catalog test against the PostgreSQL port" >&2; exit 1; }
           done
 
+  integration-pgcompare:
+    # internal/pgcompare on its own runner, at the same time as
+    # integration-postgres-source: it was the slowest package of that job
+    # (about nine minutes under -race for the measured statements, some five
+    # more for the char(n) battery) and ran after all the others. Same
+    # servers and the same version rule as that job: one version (18) on a
+    # pull request, all four on main, nightly and dispatch.
+    needs: changes
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["15", "16", "17", "18"]
+    env:
+      BINTRAIL_TEST_DSN: "root:testroot@tcp(127.0.0.1:13306)"
+      BINTRAIL_TEST_PG_DSN: "postgres://postgres:testpg@127.0.0.1:15432/pgtest?sslmode=disable"
+      BINTRAIL_REQUIRE_POSTGRES: "1"
+      RUN: ${{ github.event_name != 'pull_request' || (matrix.postgres == '18' && needs.changes.outputs.data == 'true') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.RUN == 'true'
+
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        if: env.RUN == 'true'
+        with:
+          go-version-file: go.mod
+
+      - name: Download Go modules
+        if: env.RUN == 'true'
+        run: bash scripts/go-mod-download.sh
+
+      - name: Pull the test images
+        if: env.RUN == 'true'
+        run: |
+          bash scripts/pull-test-images.sh \
+            "${TEST_IMAGES}/library/mysql:8.4" \
+            "${TEST_IMAGES}/library/postgres:${{ matrix.postgres }}"
+
+      # The probes are integration-postgres-source's: see the notes there.
+      - name: Start MySQL index (bintrail-test-mysql, 8.4)
+        if: env.RUN == 'true'
+        run: |
+          docker run -d --name bintrail-test-mysql \
+            -e MYSQL_ROOT_PASSWORD=testroot \
+            -p 13306:3306 \
+            "${TEST_IMAGES}/library/mysql:8.4" \
+            --binlog-format=ROW --binlog-row-image=FULL --log-bin=binlog --server-id=1
+          consecutive=0
+          for i in $(seq 1 60); do
+            if docker run --rm --network host "${TEST_IMAGES}/library/mysql:8.4" \
+                 mysql --protocol=TCP -h 127.0.0.1 -P 13306 -u root -ptestroot -e "SELECT 1" >/dev/null 2>&1; then
+              consecutive=$((consecutive + 1))
+              [ "$consecutive" -ge 3 ] && { echo "MySQL index is ready."; exit 0; }
+            else
+              consecutive=0
+            fi
+            sleep 2
+          done
+          echo "MySQL did not become ready in time" >&2
+          docker logs bintrail-test-mysql >&2 || true
+          exit 1
+
+      - name: Start PostgreSQL source (bintrail-test-postgres, ${{ matrix.postgres }})
+        if: env.RUN == 'true'
+        run: |
+          docker run -d --name bintrail-test-postgres \
+            -e POSTGRES_PASSWORD=testpg \
+            -e POSTGRES_DB=pgtest \
+            -p 15432:5432 \
+            "${TEST_IMAGES}/library/postgres:${{ matrix.postgres }}" \
+            -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10 -c track_commit_timestamp=on
+          for i in $(seq 1 60); do
+            if docker exec bintrail-test-postgres pg_isready -h 127.0.0.1 -U postgres -d pgtest --quiet 2>/dev/null; then
+              echo "PostgreSQL source is ready."; exit 0
+            fi
+            sleep 2
+          done
+          echo "PostgreSQL did not become ready in time" >&2
+          docker logs bintrail-test-postgres >&2 || true
+          exit 1
+
+      - name: PostgreSQL source-against-copy comparison
+        if: env.RUN == 'true'
+        run: |
+          set -o pipefail
+          go test -tags=integration -race -p 1 -count=1 -v -timeout 30m ./internal/pgcompare/ 2>&1 | tee /tmp/pgcompare-it.out
+          grep -q -- '--- PASS: TestIntegrationPGCompare' /tmp/pgcompare-it.out \
+            || { echo "FATAL: the PostgreSQL source-against-copy comparison did not run — false-green tripwire" >&2; exit 1; }
+
   integration-postgres-extensions:
     # Extension-type round-trip coverage (#1210): PostGIS geometry/geography
     # and pgvector's vector are text-decoded through pgoutput like any other
@@ -1147,6 +1266,13 @@ jobs:
         if: env.RUN == 'true'
         with:
           go-version-file: go.mod
+
+      # Every module before anything compiles, with three tries: a module
+      # missing from the restored cache is otherwise fetched mid-build with
+      # one. Why the cache misses modules: scripts/go-mod-download.sh.
+      - name: Download Go modules
+        if: env.RUN == 'true'
+        run: bash scripts/go-mod-download.sh
 
       # Pulled ahead of the containers below, with three tries per image: a
       # registry that does not answer for a moment costs a retry here, where
@@ -1230,6 +1356,12 @@ jobs:
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
+
+      # Every module before anything compiles, with three tries: a module
+      # missing from the restored cache is otherwise fetched mid-build with
+      # one. Why the cache misses modules: scripts/go-mod-download.sh.
+      - name: Download Go modules
+        run: bash scripts/go-mod-download.sh
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -1315,6 +1447,12 @@ jobs:
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
+
+      # Every module before anything compiles, with three tries: a module
+      # missing from the restored cache is otherwise fetched mid-build with
+      # one. Why the cache misses modules: scripts/go-mod-download.sh.
+      - name: Download Go modules
+        run: bash scripts/go-mod-download.sh
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -1480,26 +1618,21 @@ jobs:
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "$artifact"
 
-  # ci.yml and release.yaml start and check the S3-compatible test store
-  # through shared actions, and the image pin must match what the mirror
-  # workflow copies (#1884). This job fails when either drifts, and when the
-  # two files test different MariaDB versions. No `changes` gate on purpose:
-  # a workflow-only PR is exactly the one that can drift.
+  # ci.yml starts and checks the S3-compatible test store through shared
+  # actions, and the image pin must match what the mirror workflow copies
+  # (#1884). This job fails when either drifts. A release runs no tests of
+  # its own (it waits for main's CI on its commit), so there is no second
+  # copy of the integration jobs to keep in step. No `changes` gate on
+  # purpose: a workflow-only PR is exactly the one that can drift.
   workflow-lockstep:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: S3 test store lockstep (ci.yml, release.yaml, mirror)
+      - name: S3 test store lockstep (ci.yml, mirror)
         run: bash scripts/check-s3-store-lockstep.sh
       - name: The integration job reads each shard's newest attempt
         run: bash scripts/test-mysql-integration-collect.sh
-      - name: MariaDB matrix lockstep (ci.yml, release.yaml)
-        run: bash scripts/check-mariadb-matrix-lockstep.sh
-      - name: MySQL shards lockstep (ci.yml, release.yaml)
-        run: bash scripts/check-mysql-shard-lockstep.sh
-      - name: PostgreSQL source settings lockstep (ci.yml, release.yaml)
-        run: bash scripts/check-postgres-source-lockstep.sh
       - name: The check that no PostgreSQL console test is left out or skipped
         run: bash scripts/pg-console-tests.sh --self-test
-      - name: Test images come from the mirror, not Docker Hub (ci.yml, release.yaml, managed-pg-smoke.yml)
+      - name: Test images come from the mirror, not Docker Hub (ci.yml, managed-pg-smoke.yml)
         run: bash scripts/check-test-image-registry.sh
