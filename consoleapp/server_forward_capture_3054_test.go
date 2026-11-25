@@ -69,9 +69,9 @@ func TestServerForwardUserCaptureAccountPostgres(t *testing.T) {
 		{"no, with that user", fwdFlags{NoCaptureAccount: true}, "",
 			`"shop" does not forward with the user DBTrail captures with. It forwards as its forwarding user, app_ro, as before.` + "\n", false},
 		{"the user removed", fwdFlags{Remove: true}, "",
-			`"shop" has no forwarding user now: the PostgreSQL port answers its clients from the copy alone. A statement the copy cannot answer gets an error, and nothing is sent to your PostgreSQL.` + "\n", false},
+			`"shop" has no forwarding user now, so the PostgreSQL port does not serve it: a client that connects gets an error that says why and how to serve it. Serve it again:  bintrail-console server forward-user shop --capture-account` + "\n", false},
 		{"no, and no user", fwdFlags{NoCaptureAccount: true}, "",
-			`"shop" does not forward with the user DBTrail captures with. It has no forwarding user, so the PostgreSQL port answers its clients from the copy alone.` + "\n", false},
+			`"shop" does not forward with the user DBTrail captures with. It has no forwarding user of its own, so the PostgreSQL port does not serve it: a client that connects gets an error that says why and how to serve it.` + "\n", false},
 	}
 	for _, s := range steps {
 		var out bytes.Buffer
@@ -193,7 +193,8 @@ func TestServerForwardUserCaptureAccountOtherCases(t *testing.T) {
 		t.Errorf("MySQL with a forwarding user:\n%s\nwant\n%s", got, want)
 	}
 
-	// A PostgreSQL whose saved forwarding user is the capture user by hand.
+	// A PostgreSQL whose saved forwarding user is the capture user by hand:
+	// with the yes, the port forwards as the capture account (0.140.0).
 	_, _, c = newCaptureDaemon(t, func() console.ServerEntry {
 		e := pgCaptureEntry()
 		e.RouteDSN = pgAddSourceURL
@@ -203,7 +204,7 @@ func TestServerForwardUserCaptureAccountOtherCases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := `Saved, and not used yet: "shop" has a saved forwarding user that the port refuses (it is the user DBTrail captures with, or it cannot be read), and while it is saved nothing is forwarded. Remove it:  bintrail-console server forward-user shop --remove` + "\n"; got != want {
+	if want := `"shop" forwards with the user DBTrail captures with (dbtrail): the PostgreSQL port sends to your PostgreSQL, read-only, a SELECT the copy does not answer, and only when every table it reads is a table of the copy. Anything else is refused and not sent. A server that hides tables or columns sends nothing.` + "\n"; got != want {
 		t.Errorf("a saved capture user:\n%s\nwant\n%s", got, want)
 	}
 

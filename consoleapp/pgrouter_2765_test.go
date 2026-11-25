@@ -203,11 +203,11 @@ func pgLoginCode(t *testing.T, addr, user, password, database string) string {
 
 func TestPGRouter_login(t *testing.T) {
 	f := newRouterFiles(t)
-	prod, err := f.owner.Add(console.ServerEntry{Name: "prod", Flavor: console.FlavorPostgres, DSN: "u:p@tcp(127.0.0.1:1)/idx_prod"})
+	prod, err := addServedPG(t, f.owner, console.ServerEntry{Name: "prod", DSN: "u:p@tcp(127.0.0.1:1)/idx_prod"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.owner.Add(console.ServerEntry{Name: "staging", Flavor: console.FlavorPostgres, DSN: "u:p@tcp(127.0.0.1:1)/idx_staging"}); err != nil {
+	if _, err := addServedPG(t, f.owner, console.ServerEntry{Name: "staging", DSN: "u:p@tcp(127.0.0.1:1)/idx_staging"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.owner.SetPortLogin(prod.ID, "app1", "pw-one"); err != nil {
@@ -286,7 +286,7 @@ func TestPGRouterPort_routingSwitchKeepsClientsAReplacedPasswordDoesNot(t *testi
 	// its snapshot, not the tails laid over it.
 	t.Setenv("BINTRAIL_SQL_TAILS", "off")
 	f := newRouterFiles(t)
-	prod, err := f.owner.Add(console.ServerEntry{Name: "prod", Flavor: console.FlavorPostgres, DSN: "u:p@tcp(127.0.0.1:1)/idx_prod"})
+	prod, err := addServedPG(t, f.owner, console.ServerEntry{Name: "prod", DSN: "u:p@tcp(127.0.0.1:1)/idx_prod"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +394,7 @@ servers:
     name: ledger
     flavor: postgres
     index_dsn: u:p@tcp(127.0.0.1:1)/idx_ledger
-  - id: aaaa000000000003
+` + servedPGYAML + `  - id: aaaa000000000003
     name: wiki
     flavor: mariadb
     index_dsn: u:p@tcp(127.0.0.1:1)/idx_wiki
@@ -446,7 +446,7 @@ servers:
 // server.
 func TestPGRouter_monitorLogin(t *testing.T) {
 	f := newRouterFiles(t)
-	if _, err := f.owner.Add(console.ServerEntry{Name: "prod", Flavor: console.FlavorPostgres, DSN: "u:p@tcp(127.0.0.1:1)/idx_prod"}); err != nil {
+	if _, err := addServedPG(t, f.owner, console.ServerEntry{Name: "prod", DSN: "u:p@tcp(127.0.0.1:1)/idx_prod"}); err != nil {
 		t.Fatal(err)
 	}
 	body := "version: 1\nenabled: true\npassword: port-pw\nmonitor_user: monitor\nmonitor_password: monitor-pw\n"
@@ -504,11 +504,11 @@ func TestPGRouter_monitorLogin(t *testing.T) {
 // someone who wrote dbname=staging with the login of prod read prod.
 func TestPGRouter_loginNamesAnotherServer(t *testing.T) {
 	f := newRouterFiles(t)
-	prod, err := f.owner.Add(console.ServerEntry{Name: "prod", Flavor: console.FlavorPostgres, DSN: "u:p@tcp(127.0.0.1:1)/idx_prod"})
+	prod, err := addServedPG(t, f.owner, console.ServerEntry{Name: "prod", DSN: "u:p@tcp(127.0.0.1:1)/idx_prod"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	staging, err := f.owner.Add(console.ServerEntry{Name: "staging", Flavor: console.FlavorPostgres, DSN: "u:p@tcp(127.0.0.1:1)/idx_staging"})
+	staging, err := addServedPG(t, f.owner, console.ServerEntry{Name: "staging", DSN: "u:p@tcp(127.0.0.1:1)/idx_staging"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -601,7 +601,7 @@ func TestPGRouter_loginNamesAnotherServer(t *testing.T) {
 	// The lookup finds the id first, so without its own server being
 	// accepted first this login would be refused under its own name, and
 	// told to connect with the very name it gave.
-	twin, err := f.owner.Add(console.ServerEntry{Name: prod.ID, Flavor: console.FlavorPostgres, DSN: "u:p@tcp(127.0.0.1:1)/idx_twin"})
+	twin, err := addServedPG(t, f.owner, console.ServerEntry{Name: prod.ID, DSN: "u:p@tcp(127.0.0.1:1)/idx_twin"})
 	if err != nil {
 		t.Fatal(err)
 	}

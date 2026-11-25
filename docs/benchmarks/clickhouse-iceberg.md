@@ -7,7 +7,11 @@ every minute under a steady write load, measures how far behind ClickHouse is an
 report query takes, compacts with Athena, and compares the result with MySQL row by row.
 
 Versions we ran: MySQL 8.0.46, DBTrail 0.125.3, ClickHouse 26.10.3.7, Altinity Antalya
-26.6.8.20002, Athena engine version 3.
+26.6.8.20002, Athena engine version 3. The S3 Tables run (step 13) used DBTrail 0.130.0.
+
+DBTrail 0.131.0 and later compact their own tables once a table holds `--compact-after` delete
+files (default 10). To see the slowdown this procedure measures, add `--compact-after 0` to every
+export command below.
 
 Everything below is what we ran, with our bucket and account replaced by placeholders. It takes
 about two hours and a few dollars. Commands that start with `aws` run on your own computer with
@@ -349,7 +353,102 @@ grep -o '"verdict":"[a-z-]*"' /root/log/export.jsonl | sort | uniq -c   # no "re
 
 `toDecimalString` makes ClickHouse print `3.70` the way MySQL does instead of `3.7`.
 
-## 13. Clean up
+## 13. Optional: the same run on S3 Tables
+
+On November 12 we ran the S3 test again with the tables in an
+[S3 Tables](https://aws.amazon.com/s3/features/tables/) table bucket instead of Glue, to see
+whether AWS's automatic compaction would replace the Athena step. Same machine size and load, one
+export a minute, for two hours and ten minutes, with DBTrail 0.130.0.
+
+Create the table bucket and let the role use it (on your computer):
+
+```bash
+export TABLE_BUCKET=dbtrail-chbench
+ARN=$(aws s3tables create-table-bucket --name $TABLE_BUCKET --query arn --output text)
+aws iam put-role-policy --role-name $ROLE --policy-name $ROLE-s3tables --policy-document \
+  '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3tables:*","Resource":["'$ARN'","'$ARN'/*"]}]}'
+echo $ARN
+```
+
+On the machine, start the export with the table bucket as the catalog instead of the Glue command
+in step 6. There is no `--warehouse`: S3 Tables picks where the files go.
+
+```bash
+ARN=arn:aws:s3tables:us-west-2:<account>:bucket/dbtrail-chbench
+AWS_REGION=us-west-2 nohup bintrail export iceberg --index-dsn "$IDX" --baseline-dir /data/baselines \
+  --catalog rest --catalog-uri https://s3tables.us-west-2.amazonaws.com/iceberg \
+  --catalog-warehouse $ARN --catalog-sigv4 --every 1m --format json \
+  > /root/log/export.jsonl 2> /root/log/export.err &
+```
+
+After the first export, set the compaction target of both tables to 64 MB, the smallest S3 Tables
+accepts (the default is 512 MB), and check that compaction is enabled:
+
+```bash
+for t in orders heartbeat; do
+  aws s3tables put-table-maintenance-configuration --table-bucket-arn $ARN --namespace shop --name $t \
+    --type icebergCompaction \
+    --value '{"status":"enabled","settings":{"icebergCompaction":{"targetFileSizeMB":64}}}'
+  aws s3tables get-table-maintenance-configuration --table-bucket-arn $ARN --namespace shop --name $t
+done
+```
+
+Point ClickHouse at the table bucket, then run steps 8 and 9 with ``T=s3t.`shop.orders`;
+H=s3t.`shop.heartbeat` ``:
+
+```sql
+SET allow_database_iceberg = 1;
+CREATE DATABASE s3t ENGINE = DataLakeCatalog('https://s3tables.us-west-2.amazonaws.com/iceberg')
+  SETTINGS catalog_type = 's3tables', region = 'us-west-2',
+           warehouse = 'arn:aws:s3tables:us-west-2:<account>:bucket/dbtrail-chbench';
+```
+
+Every half hour or so, ask AWS when its maintenance last ran:
+
+```bash
+aws s3tables get-table-maintenance-job-status --table-bucket-arn $ARN --namespace shop --name orders
+```
+
+What we saw. The configuration read back `"status": "enabled"`, `"strategy": "auto"`,
+`"targetFileSizeMB": 64`. The tables were created at about 22:10 UTC:
+
+| Asked (UTC) | Compaction status | Last compaction |
+|---|---|---|
+| 22:11 | `Not_Yet_Run` | |
+| 22:40 | `Successful` | 22:13:38 |
+| 23:05 | `Successful` | 22:13:38 |
+| 00:35 | `Successful` | 22:13:38 |
+
+Compaction ran once, three minutes after the table was created, when there was nothing to merge,
+and not again. Snapshot expiry (22:18) and unreferenced file removal (22:15) also ran once each. By
+the end `orders` had 129 data files and 128 delete files, about 2.5 MB in all. The report query
+slowed down as it did on Glue (medians):
+
+| Exports | S3 Tables | S3 and Glue |
+|---|---|---|
+| 10 | 1.6 s | 1.1 s |
+| 20 | 4.5 s | 3.8 s |
+| 29 | 8.4 s | 8.1 s |
+
+It kept climbing for as long as nothing compacted the table. The rows were still exact: step 12
+found all 107,940 identical to MySQL, after 128 exports per table with no refusals.
+
+AWS does not document when automatic compaction starts. We do not know whether it waits for enough
+data to write a file near the target size (this whole table was 25 times smaller than one 64 MB
+file), or whether it applies equality deletes, since it never had anything to compact.
+
+## 14. Clean up
+
+If you ran step 13, delete the S3 Tables part first:
+
+```bash
+for t in orders heartbeat; do aws s3tables delete-table --table-bucket-arn $ARN --namespace shop --name $t; done
+aws s3tables delete-namespace --table-bucket-arn $ARN --namespace shop
+aws s3tables delete-table-bucket --table-bucket-arn $ARN
+aws iam delete-role-policy --role-name $ROLE --policy-name $ROLE-s3tables
+```
+
+Then the rest:
 
 ```bash
 aws ec2 terminate-instances --instance-ids i-XXXX
@@ -369,3 +468,4 @@ aws iam delete-role --role-name $ROLE
 - Tables larger than 100,000 rows, and a schedule that compacts over days rather than once.
 - Spark or other engines for the compaction.
 - Antalya swarms, which spread one query over several machines.
+- S3 Tables for longer than two hours, or with a table large enough to fill a 64 MB file.

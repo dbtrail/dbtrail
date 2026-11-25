@@ -27,7 +27,7 @@ func pgForwardsAsLine(name, user string) string {
 // pgNoForwardYetLine says where a PostgreSQL server stands when it forwards
 // with nothing, and the two commands that change that.
 func pgNoForwardYetLine(name string) string {
-	return fmt.Sprintf("Until %q forwards, the copy answers its statements alone, and a statement it cannot answer gets an error. Let the port forward with the user DBTrail connects with:\n  bintrail-console server forward-user %s --capture-account\nor set a forwarding user of its own:\n  bintrail-console server forward-user %s -u <user> -p", name, mysqlLineUser(name), mysqlLineUser(name))
+	return fmt.Sprintf("Until %q forwards, the PostgreSQL port does not serve it: a client that connects gets an error that says why and how to serve it. Let the port forward with the user DBTrail connects with:\n  bintrail-console server forward-user %s --capture-account\nor set a forwarding user of its own:\n  bintrail-console server forward-user %s -u <user> -p", name, mysqlLineUser(name), mysqlLineUser(name))
 }
 
 // addForwardUserPG is addForwardUser for a PostgreSQL: it sets the

@@ -247,7 +247,9 @@ func TestRewriteForCopyTyped(t *testing.T) {
 		{"SELECT avg(coalesce(amount, 0)), avg(abs(qty)), avg(length(note)) FROM orders", "SELECT " + an + "(coalesce(amount, 0)), " + an + "(abs(qty)), " + an + "(length(note)) FROM orders"},
 		{"SELECT 3 * avg(amount) FROM orders", "SELECT 3 * " + an + "(amount) FROM orders"},
 		{"SELECT avg(ratio), avg(note), avg(total), avg(mixed), avg(ratio * amount) FROM orders", "SELECT " + af + "(ratio), " + af + "(note), " + af + "(total), " + af + "(mixed), " + af + "(ratio * amount) FROM orders"},
-		{"SELECT avg(CASE WHEN qty > 1 THEN amount END) FROM orders", "SELECT " + af + "(CASE WHEN qty > 1 THEN amount END) FROM orders"},
+		// A CASE is what its values are (caseClass, #3219).
+		{"SELECT avg(CASE WHEN qty > 1 THEN amount END) FROM orders", "SELECT " + an + "(CASE WHEN qty > 1 THEN amount END) FROM orders"},
+		{"SELECT avg(CASE WHEN qty > 1 THEN ratio END) FROM orders", "SELECT " + af + "(CASE WHEN qty > 1 THEN ratio END) FROM orders"},
 		{"SELECT avg(qty / 2) FROM orders", "SELECT " + af + "(qty / 2) FROM orders"},
 		// A round took its avg and its division first.
 		{"SELECT round(avg(amount), 2), round(amount / 100, 2) FROM orders", "SELECT _bintrail_pg_round_avg(amount, 2, 0.01), _bintrail_pg_round_div(amount, 100, 2, 0.01) FROM orders"},
@@ -369,10 +371,11 @@ func TestExactClass(t *testing.T) {
 		"sum(qty)": clsWhole64, "sum(amount)": clsDecimal, "sum(qty * amount)": clsDecimal, "min(qty)": clsWhole32, "max(amount)": clsDecimal, "abs(id)": clsWhole64,
 		"coalesce(amount, 0)": clsDecimal, "coalesce(qty, 0)": clsWhole32, "nullif(qty, 0)": clsWhole32, "greatest(qty, id, 1)": clsWhole64, "least(amount, 1)": clsDecimal,
 		"_bintrail_pg_div(amount, qty)": clsDecimal, "_bintrail_pg_avgn(qty)": clsDecimal, "_bintrail_pg_round_k(amount, 2, 0.01)": clsDecimal,
+		"CASE WHEN qty > 0 THEN amount END": clsDecimal,
 		// Not known.
 		"": clsUnknown, "ratio": clsUnknown, "note": clsUnknown, "mixed": clsUnknown, "nosuch": clsUnknown, "amount * ratio": clsUnknown,
 		"sum(id)": clsUnknown, "sum(ratio)": clsUnknown, "avg(amount)": clsUnknown, "random()": clsUnknown, "amount / qty": clsUnknown, "qty % 2": clsUnknown,
-		"'1'": clsUnknown, "$1": clsUnknown, "amount::int": clsUnknown, "CASE WHEN qty > 0 THEN amount END": clsUnknown,
+		"'1'": clsUnknown, "$1": clsUnknown, "amount::int": clsUnknown, "CASE WHEN qty > 0 THEN ratio END": clsUnknown,
 		"(SELECT sum(amount) FROM orders)": clsUnknown, "sum(amount) OVER ()": clsUnknown, "count(*) FILTER (WHERE qty > 0)": clsUnknown,
 		"coalesce(amount, ratio)": clsUnknown, "coalesce()": clsUnknown, "amount.": clsUnknown, "o.": clsUnknown, "(": clsUnknown, "sum(": clsUnknown,
 		"+": clsUnknown,

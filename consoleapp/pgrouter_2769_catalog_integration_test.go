@@ -38,7 +38,7 @@ const (
 
 func startPGCatalogPort(t *testing.T, ctx context.Context) pgExtEnv {
 	t.Helper()
-	return startPGPortFor(t, ctx, nil, pgPortFixture{table: catTable + ", " + catItems + ", " + catText, slot: "bintrail_c2769_slot", pub: "bintrail_c2769_pub", setup: []string{
+	return startPGPortFor(t, ctx, nil, pgPortFixture{table: catTable + ", " + catItems + ", " + catText, copyOnly: true, slot: "bintrail_c2769_slot", pub: "bintrail_c2769_pub", setup: []string{
 		"CREATE SCHEMA IF NOT EXISTS " + catSchema,
 		"CREATE TABLE " + catTable + " (id int PRIMARY KEY, note text, amount numeric(10,2), created timestamptz, d date, code text NOT NULL DEFAULT 'x', big bigint, flags bool[], u uuid, ok boolean, r real)",
 		"INSERT INTO " + catTable + " (id) VALUES (1)",

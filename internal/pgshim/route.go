@@ -65,6 +65,7 @@ const (
 	ReasonCopyTooOld        = "copy_too_old"        // the copy's answer was older than one the source already gave this connection
 	ReasonTableNotCaptured  = "table_not_captured"  // it reads a table whose capture lost or dropped changes since its snapshot (not_captured.go)
 	ReasonResultOverRowCap  = "result_over_row_cap" // an expensive plan whose result is estimated over the copy's row cap: not tried on the copy (route_cost.go)
+	ReasonHeavyOnCopy       = "heavy_on_copy"       // expensive on the source, so the copy answers it, though it may answer otherwise than PostgreSQL (heavy.go)
 
 	// Nobody ran it.
 	ReasonReadOnly        = "read_only"         // not a read, and the port is read-only toward the source
@@ -141,7 +142,7 @@ func (s *session) route(c classified, qstr string) routeDecision {
 	// A rule saved while a block was open on the source: that block fails
 	// here, before another statement can read there.
 	s.leaveBarredSource()
-	s.screenBusy = ""
+	s.screenBusy, s.untypedVeto = "", ""
 	switch c.kind {
 	case kindRefused:
 		if s.forwarding() && c.perr == catalogRefusal {
@@ -201,6 +202,7 @@ func (s *session) routeFree(qstr string) routeDecision {
 	// port, a statement the source answers never waits for the copy.
 	if veto := screenUntyped(toks); veto != "" {
 		s.logger.Debug("pgshim: sent to the source", "reason", ReasonVeto, "construct", veto)
+		s.untypedVeto = veto
 		return routeDecision{RouteSource, ReasonVeto}
 	}
 	return routeDecision{RouteCopy, ReasonAnswersTheSame}
@@ -247,6 +249,11 @@ func (s *session) screenTyped(qstr string, d routeDecision) routeDecision {
 	}
 	if veto == "" {
 		veto = screenForCopy(toks, types)
+	}
+	if veto != "" && s.heavy {
+		// Expensive on the source: the copy answers it even so (heavy.go).
+		s.logger.Debug("pgshim: sent to the copy, expensive on the source, though the copy may answer otherwise", "reason", ReasonHeavyOnCopy, "construct", veto)
+		return routeDecision{RouteCopy, ReasonHeavyOnCopy}
 	}
 	if veto != "" {
 		s.logger.Debug("pgshim: sent to the source", "reason", ReasonVeto, "construct", veto)

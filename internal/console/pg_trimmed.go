@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/views"
 )
 
@@ -51,7 +50,7 @@ func pgTrimmedMoved(names []string, tables []views.BaselineTable) string {
 		if t.PGRelation == nil {
 			return fmt.Sprintf("the snapshot of %s.%s does not record its columns, so whether a char(n) of it is read without its padding cannot be told", t.Schema, t.Table)
 		}
-		trimmed := baseline.PGPaddedToTrim(t.PGRelation)
+		trimmed := pgTrimmedOnCopy(t.PGRelation)
 		for _, c := range t.PGRelation.Columns {
 			padded := c.TypeOID == pgOIDBpchar || c.TypeOID == pgOIDBpcharArray
 			if !padded {

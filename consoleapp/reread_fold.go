@@ -159,9 +159,12 @@ func pathInside(p, root string) bool {
 // runs ahead of this host can stamp one before the read's coordinate.
 //
 // Only "not reached yet" is tried again. A source with no write after the read
-// also lands on the bound, since the cut is made of indexed changes, and so
-// does a binary log renumbered under the read: the error does not claim to
-// know which.
+// is reached once capture saves a position past it (the engine's
+// resolveCutPastCapture), but only when that position shows it: capture by
+// GTID, a binary log rotated after the last transaction and an index holding no
+// change all land on the bound, and so does a binary log renumbered under the
+// read. The error does
+// not claim to know which.
 func (s *baselineSupervisor) waitForRereadCapture(req refreshRequest, read stagedReread) error {
 	deadline := time.Now().Add(rereadCaptureWait)
 	for {
@@ -176,7 +179,7 @@ func (s *baselineSupervisor) waitForRereadCapture(req refreshRequest, read stage
 			return fmt.Errorf("check the read of some tables against the index: %w", err)
 		}
 		if !time.Now().Before(deadline) {
-			return fmt.Errorf("%w (waited %s; capture is stopped or behind, the source has written nothing since the read, or its binary log was renumbered): %w",
+			return fmt.Errorf("%w (waited %s; capture is stopped or behind, the source has written nothing since the read and capture's saved position does not show it reached (capture by GTID, a binary log rotated after the last transaction, an index holding no change), or its binary log was renumbered): %w",
 				errRereadCaptureBehind, rereadCaptureWait, err)
 		}
 		timer := time.NewTimer(rereadCapturePoll)

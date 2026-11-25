@@ -61,7 +61,20 @@ func newPGFixture(t *testing.T) *pgFixture {
 	if err := indexer.EnsureSchema(db); err != nil {
 		t.Fatalf("EnsureSchema: %v", err)
 	}
-	f := &pgFixture{t: t, db: db, dsn: testutil.BaseDSN() + "/" + dbName, base: time.Now().UTC().Truncate(time.Hour)}
+	// The base is the index's first hour, read back from the index: a clock
+	// read here would be a later instant than CreateIndexTables's own, and
+	// across an hour boundary it names the next hour, so a time meant to be
+	// before the index's first hour would fall inside it.
+	var first string
+	if err := db.QueryRow(`SELECT PARTITION_NAME FROM information_schema.PARTITIONS
+		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'binlog_events' ORDER BY PARTITION_ORDINAL_POSITION LIMIT 1`, dbName).Scan(&first); err != nil {
+		t.Fatalf("the index's first partition: %v", err)
+	}
+	base, ok := indexer.PartitionDate(first)
+	if !ok {
+		t.Fatalf("the index's first partition is %q, not an hour's", first)
+	}
+	f := &pgFixture{t: t, db: db, dsn: testutil.BaseDSN() + "/" + dbName, base: base}
 	f.shape(0x300, pgOrdersRel.Columns...)
 	// Another table's shape, recorded after: a PostgreSQL stream writes one
 	// schema snapshot per table, so the newest one alone does not describe
