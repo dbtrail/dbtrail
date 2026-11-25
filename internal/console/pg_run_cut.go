@@ -104,9 +104,11 @@ func (x *pgTailSource) runCutFloor(t views.BaselineTable, c pgCut) tailFloor {
 		return f
 	}
 	clean := filepath.Clean(dir)
-	if fi, err := os.Lstat(clean); err != nil || fi.Mode()&os.ModeSymlink != 0 || filepath.Base(clean) == baseline.CurrentLinkName {
+	if fi, err := os.Lstat(clean); err != nil || fi.Mode()&os.ModeSymlink != 0 {
 		return f
 	}
+	// The pointer to the newest snapshot is refused here too: its name is
+	// not a time.
 	dirAt, ok := snapshotdir.ParseTime(filepath.Base(clean))
 	if !ok {
 		return f
