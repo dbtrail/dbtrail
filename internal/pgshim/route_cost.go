@@ -122,6 +122,8 @@ type pgPlan struct {
 	cost           float64
 	maxSeqScanRows float64
 	resultRows     float64
+	// oneTable: the plan reads one table and joins nothing (fastlane.go).
+	oneTable bool
 }
 
 // parsePGPlan reads EXPLAIN (FORMAT JSON)'s answer: an array with one object
@@ -152,6 +154,7 @@ func parsePGPlan(raw []byte) (pgPlan, error) {
 		return pgPlan{}, err
 	}
 	pl.resultRows = resultEstimate(top)
+	pl.oneTable = readsOneTable(top)
 	return pl, nil
 }
 
@@ -697,8 +700,10 @@ func (s *session) costVerdictKey(text string) string {
 
 // routeByCostRemembered is routeByCost for a simple query, with the verdicts
 // the connection remembers: a remembered one is used without asking, and a
-// new one is kept when it may be.
-func (s *session) routeByCostRemembered(text string) (routeDecision, *pgErr) {
+// new one is kept when it may be. oneTable says the plan it decided by reads
+// one table and joins nothing (fastlane.go); false when it decided without
+// one, as by a remembered verdict, which is only ever the source's.
+func (s *session) routeByCostRemembered(text string) (d routeDecision, oneTable bool, stop *pgErr) {
 	pol := s.costPolicy()
 	keepFor := pol.remember()
 	key := ""
@@ -707,12 +712,13 @@ func (s *session) routeByCostRemembered(text string) (routeDecision, *pgErr) {
 		if v, ok := s.costVerdicts[key]; ok {
 			if time.Since(v.at) < keepFor {
 				s.logger.Debug("pgshim: routed by a remembered plan", "side", v.d.side, "reason", v.d.reason)
-				return v.d, nil
+				return v.d, false, nil
 			}
 			delete(s.costVerdicts, key)
 		}
 	}
 	d, keep, stop, pl := s.routeByCostPlan(text, false)
+	oneTable = pl != nil && pl.oneTable
 	// Only a verdict for the source is kept: the source answers by its own
 	// tables whatever happened to them since, while a kept verdict for the
 	// copy would send the shape there after its table was dropped and made
@@ -728,7 +734,7 @@ func (s *session) routeByCostRemembered(text string) (routeDecision, *pgErr) {
 		}
 		s.costVerdicts[key] = costVerdict{d: d, at: time.Now()}
 	}
-	return d, stop
+	return d, oneTable, stop
 }
 
 // explainOnSource runs one EXPLAIN as a simple query on the source, outside

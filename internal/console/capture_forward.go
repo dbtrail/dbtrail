@@ -154,7 +154,19 @@ func forwardChanged(old, next ServerEntry) bool {
 	if forwardDSNOf(old) != forwardDSNOf(next) {
 		return true
 	}
-	return old.RouteDSN == "" && next.RouteDSN == "" && captureAnswerHolds(old) != captureAnswerHolds(next)
+	return !ownForwardAccount(old) && !ownForwardAccount(next) && captureAnswerHolds(old) != captureAnswerHolds(next)
+}
+
+// ownForwardAccount reports whether e forwards with an account of its own,
+// whatever the answer about the capture account says. For a PostgreSQL that
+// is a separate account only: the capture account saved as the forwarding
+// user forwards as the capture account once the answer is yes.
+func ownForwardAccount(e ServerEntry) bool {
+	if e.IsPostgres() {
+		state, _ := pgRouteAccountState(e.RouteDSN, e.SourceDSN)
+		return state == routeSeparate
+	}
+	return e.RouteDSN != ""
 }
 
 // PGForwardTarget is what the PostgreSQL port forwards with for a server.
@@ -182,25 +194,41 @@ type PGForwardTarget struct {
 func (s *Server) PostgresForwardTarget(id string) PGForwardTarget {
 	gen := s.routed.generation(id)
 	entry, ok := s.cm.reg.Get(id)
-	if !ok || entry.SourceDSN == "" || !entry.IsPostgres() {
+	if !ok {
 		return PGForwardTarget{Gen: gen}
+	}
+	t := pgForwardTargetOf(entry)
+	t.Gen = gen
+	return t
+}
+
+// pgForwardTargetOf is PostgresForwardTarget for one entry, with no
+// generation: empty for a server that is not PostgreSQL or has no source.
+// The capture account saved as the forwarding user is used as the capture
+// account once the answer is yes (behind its gate, as when the field is
+// empty), and refused while it is not.
+func pgForwardTargetOf(entry ServerEntry) PGForwardTarget {
+	if entry.SourceDSN == "" || !entry.IsPostgres() {
+		return PGForwardTarget{}
 	}
 	state, cfg := pgRouteAccountState(entry.RouteDSN, entry.SourceDSN)
 	switch state {
 	case routeSeparate:
-		return PGForwardTarget{DSN: entry.RouteDSN, Gen: gen, Account: "forwarding user " + cfg.user}
+		return PGForwardTarget{DSN: entry.RouteDSN, Account: "forwarding user " + cfg.user}
 	case routeIsCapture:
-		return PGForwardTarget{Gen: gen, Refused: PGRouteRefusedIsCapture}
+		if !captureAnswerHolds(entry) {
+			return PGForwardTarget{Refused: PGRouteRefusedIsCapture}
+		}
 	case routeUnreadable:
-		return PGForwardTarget{Gen: gen, Refused: PGRouteRefusedUnreadable}
+		return PGForwardTarget{Refused: PGRouteRefusedUnreadable}
 	}
 	if !captureAnswerHolds(entry) {
-		return PGForwardTarget{Gen: gen, Refused: PGRouteRefusedNoAccount}
+		return PGForwardTarget{Refused: PGRouteRefusedNoAccount}
 	}
 	if why := pgCaptureURLRefusal(entry.SourceDSN); why != "" {
-		return PGForwardTarget{Gen: gen, Refused: why}
+		return PGForwardTarget{Refused: why}
 	}
-	return PGForwardTarget{DSN: entry.SourceDSN, Gen: gen, CaptureAccount: true, Account: PGForwardsWithCapture}
+	return PGForwardTarget{DSN: entry.SourceDSN, CaptureAccount: true, Account: PGForwardsWithCapture}
 }
 
 // pgCaptureFix ends both refusals of a source URL the port cannot forward

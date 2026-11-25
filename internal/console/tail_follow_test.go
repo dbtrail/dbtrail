@@ -358,3 +358,57 @@ func TestTailFollowIdleWithinTheKeepersOwn(t *testing.T) {
 		t.Fatalf("the follower goes on for %s after the last statement, past the %s the keeper keeps a tail", tailFollowIdle, tailIdle)
 	}
 }
+
+// A statement's own update of the tails never waits behind another update.
+// The follower a statement starts (or one whose pause ends) can take the
+// keeper's lock between the statement asking whether an update runs and the
+// statement's own update; the statement then waited for that lock, out the
+// follower's whole read (its deadline, 30 s, on an index that does not
+// answer), instead of its own d. Here the lock is held as the follower holds
+// it in that moment, not yet said to run.
+func TestTailLatestDoesNotWaitBehindAnUpdate(t *testing.T) {
+	ctx := context.Background()
+	f := &fakeIndex{}
+	f.add("orders", "1")
+	k := newTailKeeper(f, t.TempDir(), tailBudget{Keys: 3}, time.Minute, time.Hour)
+	read := []views.BaselineTable{keeperTable("orders")}
+	updates := func() uint64 {
+		k.pub.mu.Lock()
+		defer k.pub.mu.Unlock()
+		return k.pub.gen
+	}
+
+	k.mu.Lock()
+	held := true
+	release := func() {
+		if held {
+			held = false
+			k.mu.Unlock()
+		}
+	}
+	defer release()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		k.latest(ctx, 100*time.Millisecond, read)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		release()
+		<-done
+		t.Fatal("the statement waited for the lock an update holds, past its own time")
+	}
+	if n := updates(); n != 0 {
+		t.Errorf("%d updates started by a statement that could not run one", n)
+	}
+	release()
+
+	// The lock free, the statement brings its table up to date itself, as
+	// before.
+	k.latest(ctx, time.Minute, read)
+	if n := updates(); n != 1 {
+		t.Errorf("%d updates with the lock free, want the statement's own", n)
+	}
+	k.settle()
+}

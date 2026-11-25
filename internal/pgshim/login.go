@@ -204,6 +204,11 @@ type RunOptions struct {
 	// and the source answers it. TrimmedUnknown among them: which ones could
 	// not be read.
 	Trimmed []string
+	// FastLane says the source's plan of the statement reads one table and
+	// joins nothing (fastlane.go): the host may run it on a worker it keeps
+	// for such statements, so it does not wait behind a report. False when
+	// there was no plan, and for a probe.
+	FastLane bool
 }
 
 // TrimmedUnknown, among RunOptions.Trimmed, says which columns a statement
@@ -213,7 +218,7 @@ const TrimmedUnknown = "\x00"
 
 // runOptions are the options the connection's next statement runs in.
 func (s *session) runOptions() RunOptions {
-	return RunOptions{Schema: s.schema(), TimeZone: s.set.zone.duck}
+	return RunOptions{Schema: s.schema(), TimeZone: s.set.zone.duck, FastLane: s.fastLane}
 }
 
 // handleLoginConn runs one connection of a port with a login of its own.
@@ -383,8 +388,10 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	if err == nil {
 		// A char(n) column used where the copy counts its padding (#3068):
 		// the source's, or refused where nothing is sent there.
-		if refusal := s.paddedRefusal(text); refusal != nil {
-			return nil, nil, nil, "", refusal
+		if !s.heavy {
+			if refusal := s.paddedRefusal(text); refusal != nil {
+				return nil, nil, nil, "", refusal
+			}
 		}
 		// A table whose capture dropped its changes (not_captured.go): the
 		// copy holds old rows of it, and the source answers, before the copy

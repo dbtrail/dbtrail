@@ -84,6 +84,7 @@ func BuildPGReport(ctx context.Context, cfg PGDoctorConfig) *doctor.Report {
 		// publishes, do not hang on wal_level.
 		addTruncateCheck(ctx, r, conn, cfg.Publication)
 		addReadAccessCheck(ctx, r, conn, cfg.Publication, filters)
+		addCaptureRoleCheck(ctx, r, conn)
 		return r
 	}
 
@@ -102,6 +103,7 @@ func BuildPGReport(ctx context.Context, cfg PGDoctorConfig) *doctor.Report {
 	addReplicaIdentityChecks(ctx, r, conn, cfg.Publication, filters)
 
 	addReadAccessCheck(ctx, r, conn, cfg.Publication, filters)
+	addCaptureRoleCheck(ctx, r, conn)
 	addGeneratedColumnsCheck(ctx, r, conn, cfg.Publication, filters)
 	addDeferrableKeysCheck(ctx, r, conn, cfg.Publication)
 	addUnloggedCheck(ctx, r, conn, cfg.Publication, filters)

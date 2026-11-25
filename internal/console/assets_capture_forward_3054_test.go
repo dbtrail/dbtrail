@@ -82,7 +82,12 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
   // 1. A new PostgreSQL.
   let f = fresh("postgres");
   out.pgNewLook = look(f);
+  out.pgNewUntouched = await run(f, pgNew, "ok");
+  f = fresh("postgres"); f.elements.forward_capture.checked = false; f.elements.forward_capture.fire("change");
   out.pgNewUnticked = await run(f, pgNew, "ok");
+  f = fresh("postgres"); f.elements.forward_capture.checked = false; f.elements.forward_capture.fire("change");
+  f.elements.forward_capture.checked = true; f.elements.forward_capture.fire("change"); f.elements.route_user.value = "app_ro"; f.elements.route_password.value = "pw2";
+  out.pgNewBothByHand = await run(f, pgNew, "ok");
   f = fresh("postgres"); f.elements.forward_capture.checked = true;
   out.pgNewTicked = await run(f, pgNew, "ok");
   f = fresh("postgres"); f.elements.forward_capture.checked = true;
@@ -209,14 +214,14 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
 	}
 	type line struct{ Tone, Text string }
 	var got struct {
-		PgNewLook, PgNewOpened, PgEditYesLook, PgEditNoLook, PgEditOwnLook, PgEditRefusedLook, PgReaderLook look
-		MyNewLook, TypedThenPG, MyEditLook, MyEditYesLook                                                   look
-		PgNewUnticked, PgNewTicked, PgNewRouteFails, PgNewRouteIgnored, PgNewBoth, PgNewOwnUser             ran
-		PgEditYesUntouched, PgEditUnticked, PgEditNoUntouched, PgEditTicked, PgEditSourceChanged            ran
-		PgEditOwnTicked, MyNew, MyNewAfterPGTick, MariaNew, MyEdit, MyEditYes                               ran
-		PgRemoveYes, PgRemoveNo, PgRemoveFails, PgRemoveKept, PgRemoveAndTick, MyRemove                     ran
-		PgRemoveSaveRefused, MyNewTypeChangedMeanwhile                                                      ran
-		PgRemoveSaveRefusedBox                                                                              struct {
+		PgNewLook, PgNewOpened, PgEditYesLook, PgEditNoLook, PgEditOwnLook, PgEditRefusedLook, PgReaderLook                      look
+		MyNewLook, TypedThenPG, MyEditLook, MyEditYesLook                                                                        look
+		PgNewUntouched, PgNewUnticked, PgNewTicked, PgNewRouteFails, PgNewRouteIgnored, PgNewBoth, PgNewBothByHand, PgNewOwnUser ran
+		PgEditYesUntouched, PgEditUnticked, PgEditNoUntouched, PgEditTicked, PgEditSourceChanged                                 ran
+		PgEditOwnTicked, MyNew, MyNewAfterPGTick, MariaNew, MyEdit, MyEditYes                                                    ran
+		PgRemoveYes, PgRemoveNo, PgRemoveFails, PgRemoveKept, PgRemoveAndTick, MyRemove                                          ran
+		PgRemoveSaveRefused, MyNewTypeChangedMeanwhile                                                                           ran
+		PgRemoveSaveRefusedBox                                                                                                   struct {
 			Ticked bool
 			Again  ran
 		}
@@ -263,16 +268,18 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
 		}
 	}
 
-	// A new PostgreSQL: the box is there, unticked, and the separate
+	// A new PostgreSQL: the box is there, ticked (0.140.0: the port serves
+	// a PostgreSQL server only when it can forward), and the separate
 	// forwarding user is folded.
-	if got.PgNewLook != (look{Box: true, Open: true}) {
-		t.Errorf("a new PostgreSQL's form = %+v, want the box shown and unticked, the separate user folded, and the button that opens it", got.PgNewLook)
+	if got.PgNewLook != (look{Box: true, Ticked: true, Open: true}) {
+		t.Errorf("a new PostgreSQL's form = %+v, want the box shown and ticked, the separate user folded, and the button that opens it", got.PgNewLook)
 	}
-	if got.PgNewOpened != (look{Box: true, User: true, Password: true}) {
+	if got.PgNewOpened != (look{Box: true, Ticked: true, User: true, Password: true}) {
 		t.Errorf("after the button = %+v, want the two fields shown and the button gone", got.PgNewOpened)
 	}
-	calls("a new PostgreSQL, box unticked", got.PgNewUnticked, `POST /api/servers {} flavor=postgres`)
-	silent("a new PostgreSQL, box unticked", got.PgNewUnticked)
+	calls("a new PostgreSQL, box untouched", got.PgNewUntouched, `POST /api/servers {} flavor=postgres`, at(yes, "n1"))
+	calls("a new PostgreSQL, box unticked by hand", got.PgNewUnticked, `POST /api/servers {} flavor=postgres`)
+	silent("a new PostgreSQL, box unticked by hand", got.PgNewUnticked)
 	calls("a new PostgreSQL, box ticked", got.PgNewTicked, `POST /api/servers {} flavor=postgres`, at(yes, "n1"))
 	says("a new PostgreSQL, box ticked", got.PgNewTicked, "toast: Monitoring started. Events will appear within a minute. shop: the PostgreSQL port now sends to this PostgreSQL, read-only and as dbtrail, a SELECT the copy does not answer, when every table it reads is a table of the copy.")
 	calls("a new PostgreSQL, the answer refused", got.PgNewRouteFails, `POST /api/servers {} flavor=postgres`, at(yes, "n1"))
@@ -283,9 +290,12 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
 			t.Errorf("the answer %s, and the save still says the port forwards: %v", name, g.Said)
 		}
 	}
-	// Ticked beside a typed forwarding user: stopped before anything is sent.
-	calls("a new PostgreSQL, the box and a typed forwarding user", got.PgNewBoth)
-	says("a new PostgreSQL, the box and a typed forwarding user", got.PgNewBoth, "form: The box that lets the port forward as the source user is ticked, and a separate forwarding user was typed too.")
+	// Ticked by default beside a typed forwarding user: that user, and
+	// nothing about the source user. Ticked by hand beside one: stopped
+	// before anything is sent.
+	calls("a new PostgreSQL, the default box and a typed forwarding user", got.PgNewBoth, `POST /api/servers {"route_user":"app_ro","route_password":"pw2"} flavor=postgres`)
+	calls("a new PostgreSQL, the box ticked by hand and a typed forwarding user", got.PgNewBothByHand)
+	says("a new PostgreSQL, the box ticked by hand and a typed forwarding user", got.PgNewBothByHand, "form: The box that lets the port forward as the source user is ticked, and a separate forwarding user was typed too.")
 	calls("a new PostgreSQL with a forwarding user of its own", got.PgNewOwnUser, `POST /api/servers {"route_user":"app_ro","route_password":"pw2"} flavor=postgres`)
 
 	// An edited PostgreSQL: the box shows what is saved, and only a change
@@ -298,7 +308,7 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
 	calls("an edited PostgreSQL, saved no, untouched", got.PgEditNoUntouched, `PUT /api/servers/x {} flavor=postgres`)
 	silent("an edited PostgreSQL, saved no, untouched", got.PgEditNoUntouched)
 	calls("an edited PostgreSQL, unticked", got.PgEditUnticked, `PUT /api/servers/x {} flavor=postgres`, at(no, "x"))
-	says("an edited PostgreSQL, unticked", got.PgEditUnticked, "toast: Server updated. shop: the PostgreSQL port sends nothing to this PostgreSQL now. The copy answers alone.")
+	says("an edited PostgreSQL, unticked", got.PgEditUnticked, "toast: Server updated. shop: the PostgreSQL port does not serve this server now: a client that connects gets an error that says why. Tick the box again, or set a separate forwarding user, to serve it.")
 	calls("an edited PostgreSQL, ticked", got.PgEditTicked, `PUT /api/servers/x {} flavor=postgres`, at(yes, "x"))
 	says("an edited PostgreSQL, ticked", got.PgEditTicked, "toast: Server updated. shop: the PostgreSQL port now sends")
 	// The yes was about another account: it is not given again by a box
@@ -315,7 +325,7 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
 	// Removing the forwarding account: the control says the port stops
 	// forwarding, so the yes about the source user goes first, and the save
 	// says who forwards now from what the server answered.
-	const nobody = "For shop, nothing is sent to your PostgreSQL: the copy answers alone, and a statement it cannot answer gets an error. To change it, edit the server (Servers, Edit)."
+	const nobody = "The PostgreSQL port does not serve shop: a client that connects gets an error that says why. Tick the box about the source user, or set a separate forwarding user. To change it, edit the server (Servers, Edit)."
 	for name, g := range map[string]ran{"a yes saved": got.PgRemoveYes, "no yes saved": got.PgRemoveNo} {
 		calls("removing a PostgreSQL's forwarding account, "+name, g, at(no, "x"), `PUT /api/servers/x {"route_user":""} flavor=postgres`)
 		says("removing a PostgreSQL's forwarding account, "+name, g, "toast: Server updated. "+nobody)
@@ -375,14 +385,14 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
 	for name, g := range map[string]ran{"a new MySQL": got.MyNew, "after a PostgreSQL tick": got.MyNewAfterPGTick, "MariaDB": got.MariaNew, "an edited MySQL": got.MyEdit, "an edited MySQL, yes saved": got.MyEditYes} {
 		silent(name, g)
 	}
-	if got.TypedThenPG != (look{Box: true, User: true, Password: true}) {
+	if got.TypedThenPG != (look{Box: true, Ticked: true, User: true, Password: true}) {
 		t.Errorf("a forwarding user typed, then PostgreSQL picked = %+v, want the typed user in sight", got.TypedThenPG)
 	}
 
 	// The texts, whole.
 	wantSaid := map[string]line{
 		"yes":            {"ok", "shop: the PostgreSQL port now sends to this PostgreSQL, read-only and as dbtrail, a SELECT the copy does not answer, when every table it reads is a table of the copy."},
-		"no":             {"ok", "shop: the PostgreSQL port sends nothing to this PostgreSQL now. The copy answers alone."},
+		"no":             {"ok", "shop: the PostgreSQL port does not serve this server now: a client that connects gets an error that says why. Tick the box again, or set a separate forwarding user, to serve it."},
 		"noOwn":          {"ok", "shop: the PostgreSQL port does not forward as the source user. Its forwarding user, app_ro, stays as it was."},
 		"yesHides":       {"err", "shop: saved, and not used. This server hides tables or columns, so the port sends nothing to this PostgreSQL."},
 		"yesOwn":         {"ok", "shop: saved. The PostgreSQL port keeps forwarding as its forwarding user, app_ro, while that one is set. Once it is removed, the source user takes its place."},
@@ -401,7 +411,7 @@ const look = (f) => ({ box: on(f, "forward_capture"), ticked: !!f.elements.forwa
 		t.Errorf("the box reads %q", got.Ask)
 	}
 	// Two short lines each, the rest behind a link to the docs site.
-	if got.Hint != "Unticked: the copy answers alone, and a statement it cannot answer gets an error. Ticked: the port sends that SELECT to this PostgreSQL as the source user, read-only, and only when every table it reads is in the copy. No second user to create." {
+	if got.Hint != "Ticked: the port sends that SELECT to this PostgreSQL as the source user, read-only, and only when every table it reads is in the copy. No second user to create. Unticked, with no separate forwarding user, the PostgreSQL port does not serve this server." {
 		t.Errorf("the box's hint reads %q", got.Hint)
 	}
 	if got.OwnHint != "For a port that should send this PostgreSQL more than the box allows: transactions, and every statement the copy does not answer as PostgreSQL does. It must be another user than the source user: a role that can log in, with SELECT on what the port should read and nothing more. While it is set, the box above is not used." {

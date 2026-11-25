@@ -106,8 +106,8 @@ the copy does not answer it
 ([forwarding with the capture account](#forwarding-with-the-capture-account))?
 Enter is yes. Without a terminal (a script, or the Docker `dbtrail` command,
 which sends the option file on standard input) nothing is asked and the answer
-is no, and the command says so, unless `--capture-account` or this line in the
-option file says yes:
+is no, and the command says so and how to turn it on, unless
+`--capture-account` or this line in the option file says yes:
 
 ```ini
 [dbtrail-forward]
@@ -116,8 +116,9 @@ capture-account = yes
 
 `--no-capture-account` (or `capture-account = no`) says no. `capture-account`
 alone on its line is yes, as an option alone is in MySQL, even with a comment
-after it; `capture-account =` with nothing after it says nothing. With no the copy
-answers alone, and a statement it cannot answer gets an error;
+after it; `capture-account =` with nothing after it says nothing. With no, and
+no forwarding user of its own, the
+[PostgreSQL port does not serve the server](#the-port-serves-a-server-only-when-it-can-forward);
 `bintrail-console server forward-user <server> --capture-account` turns it on
 later.
 
@@ -1185,12 +1186,10 @@ listener, its own workers, its own memory.
   answer as PostgreSQL does, and a client's transaction block, run on your
   PostgreSQL as that user, read-only
   ([the forwarding user](#transactions-on-the-source-the-forwarding-user)).
-  With neither (the answer no, `--no-forward`, or a script that said nothing)
-  the copy answers every statement, nothing is sent to your PostgreSQL, and a
-  statement the copy cannot answer gets an error, as does one it would answer
-  with other rows than PostgreSQL (a `char(n)` column
-  [compared, measured or concatenated](#which-side-answers-a-statement-on-the-postgresql-port),
-  refused with `0A000`), until one is set
+  With neither (the box unticked, the answer no, or `--no-forward`) the
+  [PostgreSQL port does not serve the server](#the-port-serves-a-server-only-when-it-can-forward):
+  a client that connects gets an error at login that says why and how to
+  serve it, until one is set
   (`bintrail-console server forward-user <server> --capture-account`, or
   `-u <user> -p` for a user of its own, or the box and the Forwarding user on
   the server's form in the web interface).
@@ -1229,6 +1228,14 @@ listener, its own workers, its own memory.
     out of the box, with 256 clients connected at most
     (`--max-connections`); in the compose `.env`, `PG_ROUTER_WORKERS` and
     `PG_ROUTER_MAX_CONNECTIONS`. The measurement above ran 8 at once.
+  - **One worker more is kept for short statements.** The copy runs up to
+    `--workers` plus 1 statements at once. The extra one is for statements
+    whose plan on your PostgreSQL reads one table and joins nothing (a sum of
+    one warehouse, a count with a filter), so they do not wait behind a
+    report. The reports, and every statement the port has no plan for, run
+    as before: at most `--workers` at once. A short statement takes any free
+    worker. See
+    [The copy's worker for short statements](#the-copys-worker-for-short-statements).
   - **Switching a server from fresh to fast** makes the connections already
     open read the snapshot from their next statement on: an answer older
     than the one before it on the same connection, which is told once by a
@@ -1324,8 +1331,8 @@ listener, its own workers, its own memory.
   A transaction block the client opens, and a catalog statement the copy does
   not answer, go to the source too (see
   [Transactions on the source](#transactions-on-the-source-the-forwarding-user)).
-  A server without a forwarding user is answered from the copy alone, and a
-  statement the copy cannot answer gets its error. `round()` and `avg()` are
+  A server the port cannot forward for is not served at all
+  ([below](#the-port-serves-a-server-only-when-it-can-forward)). `round()` and `avg()` are
   written PostgreSQL's way on every connection (see
   [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port)):
   `round(avg(amount), 2)` of a `numeric` is `500.00`, as on the source, not
@@ -1335,7 +1342,8 @@ listener, its own workers, its own memory.
   PostgreSQL writes 12 for a quotient of 10000 and more and 20 for one
   below 1 (see
   [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port)).
-  Without a forwarding user, a `round()` or an `avg()` the copy would
+  On a server that hides tables or columns, which sends nothing to its
+  source, a `round()` or an `avg()` the copy would
   write otherwise (`avg()` of a `numeric`, `round()` of a `double precision`,
   a `round()` beside a `UNION`) is refused with error `0A000`, never answered
   with other digits. A statement that is not a
@@ -1377,8 +1385,8 @@ listener, its own workers, its own memory.
   `numeric`, with exactly the decimals PostgreSQL writes, on every
   connection (`avg()` of a `numeric` or of whole numbers and a division of a
   `numeric`, which PostgreSQL writes with 12 to 20 decimals, are a `numeric`
-  of 16 decimals on the copy; without a forwarding user such an `avg()` is
-  refused), and an aggregate or a literal of a `numeric` keeps its
+  of 16 decimals on the copy; on a server that hides tables or columns such an
+  `avg()` is refused), and an aggregate or a literal of a `numeric` keeps its
   precision and scale here (`numeric(10,2)`) where PostgreSQL reports none. A
   `numeric` declared without precision is a `numeric(38,18)` here and is
   written with its 18 decimals (`12345.678000000000000000` where the source
@@ -1517,7 +1525,7 @@ starts it.
 | `--listen` | `BINTRAIL_PG_ROUTER_LISTEN` | `127.0.0.1:5433` | Where the port listens |
 | `--tls-cert` | `BINTRAIL_PG_ROUTER_TLS_CERT` | none: a certificate made up at start | The certificate (PEM, its chain after it) a client that asks for TLS gets. Requires `--tls-key` |
 | `--tls-key` | `BINTRAIL_PG_ROUTER_TLS_KEY` | none | Its private key (PEM, not encrypted with a passphrase) |
-| `--workers` | `BINTRAIL_PG_ROUTER_WORKERS` | 4 | How many statements run on the copy at once (1 to 16). The rest wait their turn |
+| `--workers` | `BINTRAIL_PG_ROUTER_WORKERS` | 4 | How many statements run on the copy at once (1 to 16). The rest wait their turn. The copy has one worker more, kept for statements that read one table and join nothing, so it runs up to this plus 1 at once ([why](#the-copys-worker-for-short-statements)) |
 | `--threads` | `BINTRAIL_PG_ROUTER_THREADS` | 2 | Threads each statement may use (1 to 16) |
 | `--sql-memory` | `BINTRAIL_CONSOLE_SQL_MEMORY` | 2GB, or the value saved in the web interface | Memory each statement may use |
 | `--max-connections` | `BINTRAIL_PG_ROUTER_MAX_CONNECTIONS` | 256 | Clients connected at once (1 to 1024). One more is refused with an error |
@@ -1599,8 +1607,8 @@ laid over the source's own address, database and parameters (`sslmode`
 included), and must be another user than the one DBTrail captures with: the
 port never runs anything as that one, which holds `REPLICATION` and reads every
 published table, unless the server says yes to that
-([below](#forwarding-with-the-capture-account)). Without a forwarding user, every statement, a transaction
-block's too, is answered by the copy alone, as before. Changing the forwarding user, or removing the
+([below](#forwarding-with-the-capture-account)). A server with neither is
+[not served](#the-port-serves-a-server-only-when-it-can-forward). Changing the forwarding user, or removing the
 server, closes the connections that use it; clients reconnect.
 
 - **Read-only, three ways.** A statement that is not a read is refused before
@@ -1701,6 +1709,61 @@ server, closes the connections that use it; clients reconnect.
   the catalog statements it recognizes, time travel).
 
 
+### The port serves a server only when it can forward
+
+Since 0.140.0 the PostgreSQL port serves a server only when it can send what
+the copy does not answer to the server's PostgreSQL: as a forwarding user of
+the server's own ([above](#transactions-on-the-source-the-forwarding-user)), or
+as the user DBTrail connects with
+([below](#forwarding-with-the-capture-account)). Either one serves the
+server; a server with neither is refused. Statements the port forwards to the source do not leave an audit record yet: with this release every PostgreSQL server the port serves forwards part of its statements, so fewer of the port's reads are recorded, and those reads run on the source as the forwarding account. This is fixed later (#3256). Where a person is asked, the
+capture account is what is offered first: Enter is yes at `server add` on a
+terminal, and the box is ticked on the web form of a new server. A script
+that says nothing gets no. A forwarding user of its own that can only read
+is still what this guide recommends, and nothing requires it; a server that
+already forwards as the capture account needs nothing at the upgrade. A connection that could reach only the copy got,
+for some statements, rows PostgreSQL would not return, with no error, so such
+a connection is no longer made.
+
+A client of a server the port cannot forward for is refused at login, before
+any statement, with `FATAL` error `08004` that names the server, says why,
+and gives both ways to serve it:
+
+```text
+FATAL:  the PostgreSQL port does not serve server "shop": it has no forwarding user, and forwarding as the account DBTrail captures with is turned off for it. ...
+```
+
+The reasons: no forwarding user and the answer about the capture account is
+no; a saved forwarding user that is the user DBTrail connects with while that
+answer is no (with the answer yes the port forwards as that account, behind
+its gate); a saved forwarding user that cannot be read; a source URL the
+capture account cannot forward over (a socket, a `replication` parameter, a
+user named in a parameter); a server with no source.
+
+Everything else of the server goes on: capture records its changes,
+snapshots are taken, and the web interface and the MySQL port read it as
+before. The daemon says once at boot, per server, that the port does not
+serve it; the server's Overview has a card with the same words; and
+`GET /api/servers` carries them in `pg_port_refused`. Once the server can
+forward, the next connection is served, without a restart.
+
+When the user DBTrail connects with is a superuser, or can bypass row-level
+security (`BYPASSRLS`), the checks of `server add` and of the web form warn
+(**Power of the user DBTrail connects with**), and so does saving the yes
+(`server forward-user <server> --capture-account`). What the port sends as
+that user is still a read-only `SELECT` whose every table is a plain table of
+the copy, and a table under row-level security is never sent; the warning
+says that less power leaves less behind that check, and gives the statements
+for a role that can only replicate and read the published tables, to point
+the server's source at. A forwarding user of its own is not held to that
+check: it reads whatever its own grants allow, so grant it only what the
+port should read.
+
+A server that hides tables or columns is refused at login the same way when
+it cannot forward. When it can, it sends nothing to its source, as before:
+the copy answers it alone. What such a server refuses changes in a later
+release.
+
 ### Forwarding with the capture account
 
 A server can forward without a second role: say yes to forwarding with the
@@ -1790,10 +1853,27 @@ the copy only when everything in it is something the copy is known to answer
 the way PostgreSQL does. What "known" means is measured, not assumed: the
 comparison harness (`internal/pgcompare`) runs the same statements on a real
 PostgreSQL and on its copy, and only what it found answering the same is let
-through. When in doubt, the source answers: the cost is a slower answer, never
-a different one.
+through. When in doubt, a cheap statement goes to the source: the cost is a
+slower answer, never a different one.
 
-The source answers:
+**An expensive statement goes to the copy even where it may answer
+otherwise.** Since 0.140.0, a statement sent without preparing it (the simple
+protocol: `psql`, and drivers that put the values in the text themselves)
+whose plan on the source is over the port's cost thresholds (`--cost-threshold`,
+`--scan-rows`) is answered by the copy, even when the list below would send it
+to the source. Such an answer can differ from PostgreSQL's: text sorted by
+bytes instead of by the database's collation (and, under `LIMIT`, other rows),
+the last decimals of a division or an average, a `char(n)` compared with a
+string that ends in blanks, a `now()` read on the copy, a name given in the
+select list and used in `WHERE`. The port counts these under
+`heavy_on_copy` on `/status`. A statement the copy cannot run at all still
+goes to the source, and the client does not see the copy's error. A cheap
+statement, one inside a transaction block, one under a session time zone, and
+a prepared statement (the extended protocol) are decided as before. For the
+answer PostgreSQL gives, send the statement inside a transaction block
+(`BEGIN; ...; COMMIT;`): every statement of a block is the source's.
+
+The source answers a cheap statement for:
 
 - **A function, operator, cast or construct the copy answers differently or
   not at all.** The copy takes `count`, `sum`, `min`, `max`, `coalesce`,
@@ -1847,7 +1927,11 @@ The source answers:
   numbers, columns of whole numbers or of a `numeric` of at most 20 digits
   and 8 decimals, `+`, `-`, `*`, parentheses, `count`,
   `sum`, `min`, `max`, `abs`, `coalesce`, `nullif`, `greatest`, `least` and
-  `length` over them. A divisor of zero is PostgreSQL's error, from the
+  `length` over them, and a `CASE` whose values are such
+  (`sum(CASE WHEN c THEN amount ELSE 0 END) / sum(amount)`, a share of a
+  total): its conditions do not count, a `NULL` among its values takes the
+  others' type, and a value of another type sends the statement to the
+  source. A divisor of zero is PostgreSQL's error, from the
   source;
   `floor(a / b)` of numerics, as PostgreSQL takes it (`95`, not `95.0`);
   `ntile(n)`; `extract(epoch from x)` of a timestamp (a `numeric` with six
@@ -1875,7 +1959,9 @@ The source answers:
   show to be a `numeric` or a whole number (a `double precision` or a
   `real`, a `numeric` without precision or past 20 digits or 8 decimals, a name from a subquery or a `WITH`, `sum()` of a `bigint`, which
   PostgreSQL sums to a `numeric`, a function not in the list above, a
-  `CASE`, a cast, a parameter), a division more than two deep in others
+  `CASE` with such a value or with only `NULL`, a cast, a parameter), a
+  division with a `CASE` just before or after its slash (`CASE ... END / 2`;
+  in parentheses it is read), a division more than two deep in others
   (`a / b / c / d`), a division in `LIMIT` or `OFFSET` or inside `ceil` or
   `trunc` (the quotient could fall on the other side of the cut),
   `avg(DISTINCT x)` and an `avg` with `FILTER` or `OVER`, a `round`
@@ -2036,6 +2122,28 @@ The source answers:
   count(*) FROM t`, a `*` inside a `WITH` whose outer query names other
   columns). An argument declared `bpchar` is the source's too: it compares
   without its trailing blanks.
+- **A text column under a nondeterministic collation** (an ICU collation
+  created with `deterministic = false`, one that ignores case or accents)
+  follows the same rule: PostgreSQL finds `'ab'` and `'AB'` equal, groups
+  them as one and sorts them by the collation, the copy compares bytes. A
+  statement that compares, groups, joins, sorts, aggregates, applies
+  `DISTINCT` to or passes to a function such a column goes to the source, or
+  is refused without a forwarding user; showing it stays on the copy. The
+  snapshot records each column's collation, and the port also reads it from
+  the source's catalog (`pg_attribute` and `pg_collation`, never a row of a
+  table) as the account it forwards with, at most once a minute: the
+  source's answer is the one that counts, so a column changed with `ALTER ...
+  COLLATE`, which keeps its type, is seen without a new snapshot. When the
+  source cannot be asked (it does not answer within two seconds; asked again
+  30 seconds later), the snapshot's answer stands. **A snapshot taken before
+  this version does not record collations**: then, while the source cannot
+  be asked, every text column of it is taken for nondeterministic, so a
+  statement that compares, groups or sorts its text goes to the source, or is
+  refused on a server that answers from the copy alone, until the table's
+  next full read records the collation (an update of the snapshot from
+  captured changes keeps what the last full read recorded). A
+  `COLLATE` written in the statement goes to the source. A database's default collation is always deterministic in
+  PostgreSQL, so it needs nothing of this.
   For a `char(n)` column, the type is
   the one the last snapshot recorded: a column changed from `text` to
   `char(n)` on the source is treated as `char(n)` from the next snapshot on.
@@ -2069,7 +2177,11 @@ The source answers:
   default) a statement waits for its turn as long as its client stays
   connected, and the line holds 4096, more than `--max-connections` lets
   connect: so the refusal is in practice what `--max-wait` sets. The MySQL
-  router does the same with error 1040.
+  router does the same with error 1040. A statement that is not short
+  ([one worker is kept for short ones](#the-copys-worker-for-short-statements))
+  waits for its turn among the others first, then for a worker, which it waits
+  for only behind short statements; each of the two waits is bounded by
+  `--max-wait`.
 - **What is not a query**: `EXPLAIN`, cursors and savepoints outside a block,
   `VALUES`, `TABLE`. A statement that writes is refused (`25006`). `SHOW
   TABLES` and `DESCRIBE`, the copy's own, stay on the copy.
@@ -2268,7 +2380,7 @@ statement the copy refuses, not a transaction block, not a catalog statement:
 the rules are applied by the copy's views, and a statement run on the source
 reads past them, whatever the forwarding user's grants (a view there runs with
 its owner's rights, as a `SECURITY DEFINER` function does). Such a server is
-answered by the copy alone, as without a forwarding user; a rule saved while a
+answered by the copy alone; a rule saved while a
 block is open on the source fails that block. A statement that uses a
 `char(n)` column where its trailing blanks count has no source to go to
 there, on either kind of server, and is refused (`0A000`, with the column's
@@ -2316,8 +2428,8 @@ STATUS`, with the same row names where they mean the same. The rows:
 
 - `server`: the id of the server this connection reads.
 - `forwarding`: `on` when statements of this connection may go to the source,
-  `off` when the copy answers alone; `forwarding_off_reason` then says why (no
-  forwarding user, or a server that hides tables or columns).
+  `off` when the copy answers alone, which on a server the port serves happens
+  only when it hides tables or columns; `forwarding_off_reason` then says why.
 - `forwarding_account`: the account statements are sent with, `forwarding
   user <name>` or `capture account, read-only, tables of the copy only`
   ([above](#forwarding-with-the-capture-account)); `none` when there is none.
@@ -2367,6 +2479,73 @@ What to know about it:
 - The time-travel port of `bintrail-pg flashback` routes nothing and does not
   answer it.
 
+#### The copy's worker for short statements
+
+The copy runs `--workers` statements at once, and one more kept for short
+statements. Without it, a short statement waited in the same line as the
+reports, and with reports of many seconds holding every worker, a sum that
+takes a second alone took 13 to 31 seconds under 30 connections.
+
+- **The reports do not change.** Every statement that is not short runs on
+  `--workers` workers at most, as many as before this worker was added.
+- **Short** is told before the statement runs, from the plan your PostgreSQL
+  already gave the port to route it: the plan reads **one table** and **joins
+  nothing**. It is not told by the plan's cost: on the copy a report is long
+  for its joins, and a sum over a table of 30 million rows costs about as much
+  on PostgreSQL as the cheapest reports.
+- **A short statement takes any free worker**: the one kept, or one of
+  `--workers` no report holds. So the copy can run up to `--workers` plus 1
+  statements at once.
+- **One table** is counted on the safe side, on the plan PostgreSQL gives,
+  not on how the statement is written. Short is a plan with exactly one scan
+  of a table (`Seq Scan`, `Index Scan`, `Index Only Scan`, `Bitmap Heap
+  Scan`) and only `Aggregate`, `Limit`, `Sort`, `Incremental Sort`, `Gather`,
+  `Gather Merge`, `Unique`, `Group` or `WindowAgg` above it. A plan with a
+  join (a self-join too), a `SubPlan` or an `InitPlan` (a subquery PostgreSQL
+  kept apart), a `CTE Scan`, an `Append` or a `Merge Append` (a partitioned
+  table read in more than one partition, a `UNION`), a `Subquery Scan`, a
+  function, or any other node is not short. PostgreSQL folds some of those
+  shapes into the query before it plans it: a `WITH` used once, a subquery in
+  `FROM`, a partitioned table pruned to one partition, and from PostgreSQL 18
+  a join of a table to itself on its primary key. When its plan then reads one
+  table alone, the statement is short, and on the copy it is one pass over one
+  table.
+- **Not short** is also any statement the port has no plan for: routing by
+  plan turned off, a server with no forwarding user, a plan the source
+  refused.
+- **Short means one table, not fast.** A grouping of a large table into many
+  groups, a `count(DISTINCT ...)` or a window over it reads one table and
+  counts as short. Several of those at once can take every worker, the extra
+  one included; they still take their turn in order with the reports, so a
+  report is never kept waiting for good. What a short statement is kept from
+  is waiting behind reports that join tables. Nothing is stopped for it: a
+  short statement that turns out long runs to its end.
+- **What the extra worker costs.** Memory and threads are given to each
+  statement, not shared among the workers: the extra statement has its own
+  `--threads` and up to its own `--sql-memory`, so the copy can use one
+  statement's memory more than `--workers` alone would, and keeps one more
+  worker process warm between statements. Each statement's share of the spill
+  disk (half the free disk, split between the statements that can run at
+  once) is a little smaller. To spend no more than before, give the router
+  one worker less (`--workers`, `PG_ROUTER_WORKERS` in the compose `.env`):
+  the copy then runs as many statements at once as before, one of them kept
+  for short statements, and the reports run one fewer at a time. There is no
+  setting that removes the extra worker.
+- The port's own checks (a `SET` checked on the copy) and its reads of the
+  copy's columns do not wait among the reports.
+
+`/status` says how it stands now, in `copy_lanes`: `kept_for_short` (1),
+`long_limit` (`--workers`: how many statements that are not short run at
+once), `long_admitted` (those that have their turn: running, or about to,
+waiting for a worker behind short statements only), `long_waiting` (those that
+wait for their turn), and `refused_wait_timeout` and `refused_queue_full` (the
+ones refused for want of a turn since the router started, also counted as
+`copy_wait_timeout` and `copy_queue_full` in the reasons). A statement the copy
+refuses at once as unavailable (a copy that lives only on S3, among others) is
+answered by the source; after the first such refusal, the next statements of
+that connection do not wait their turn among the reports to be refused, until
+the copy answers one.
+
 #### The port's status
 
 ```bash
@@ -2415,8 +2594,8 @@ The reasons, with the MySQL port's names where they mean the same:
 |---|---|---|
 | copy | `answers_the_same` | everything in it answers on the copy as on PostgreSQL |
 | copy | `copy_command` | a command of the copy's own (`SHOW TABLES`, `DESCRIBE`) |
-| copy | `no_forward_account` | the server has no forwarding user: the copy answers alone |
 | copy | `hidden_rules` | the server hides tables or columns: nothing is sent to its source |
+| copy | `heavy_on_copy` | its plan on the source is expensive, so the copy answers it even though the port would otherwise send it to the source for how the copy answers it: the answer may differ from PostgreSQL's (simple protocol only, since 0.140.0) |
 | copy | `capture_gate` | the server forwards with the capture account, and the statement did not pass that account's check, so the copy answered it without asking the source for its plan |
 | source | `cheap_plan` | its plan on the source is under both thresholds: the source answers it, by its indexes |
 | source | `result_over_row_cap` | its plan on the source is expensive and says it returns more rows than the copy returns for one statement (`--sql-port-max-rows`): the copy would refuse the result, so it is not tried there |

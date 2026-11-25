@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Keeps the test images of CI, of a release and of the managed-PostgreSQL
+# Keeps the test images of CI and of the managed-PostgreSQL
 # smoke test off Docker Hub. Run from the repository root, or pass the root
 # as the first argument. Exits 1 and says what it found.
 #
@@ -10,7 +10,7 @@
 #   env:
 #     TEST_IMAGES: mirror.gcr.io
 #
-# 1. ci.yml, release.yaml and managed-pg-smoke.yml each set TEST_IMAGES
+# 1. ci.yml and managed-pg-smoke.yml each set TEST_IMAGES
 #    exactly once, to the same registry host, and not to Docker Hub.
 # 2. In those files every `docker run` and `docker pull` names its image
 #    under "${TEST_IMAGES}/". A bare `mysql:8.4` is a pull from Docker Hub,
@@ -22,11 +22,12 @@
 #    mirror: test/console-e2e/first-run-walk.sh starts a database of its own
 #    and would otherwise pull a bare `mysql:8.4`.
 #
-# What it reads is `docker run` and `docker pull` in those three files. It
+# What it reads is `docker run` and `docker pull` in those two files. It
 # does not follow the scripts they call, and it does not know `services:`
-# blocks, `docker compose` or `docker build`: none of the three uses them for
-# a test image today. The `release` job of release.yaml builds the product
-# images, whose base images still come from Docker Hub.
+# blocks, `docker compose` or `docker build`: neither uses them for a test
+# image today. release.yaml runs no tests (it waits for main's CI) and is
+# not read; its `release` job builds the product images, whose base images
+# still come from Docker Hub.
 set -euo pipefail
 
 root="${1:-.}"
@@ -61,7 +62,7 @@ commands() {
 }
 
 hosts=""
-for name in ci.yml release.yaml managed-pg-smoke.yml; do
+for name in ci.yml managed-pg-smoke.yml; do
   f="$root/.github/workflows/$name"
   if [ ! -f "$f" ]; then
     fail "$name is missing"

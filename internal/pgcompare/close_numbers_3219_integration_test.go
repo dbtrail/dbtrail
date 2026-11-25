@@ -80,6 +80,38 @@ func closeCases() []closeCase {
 		// PostgreSQL's own error: a divisor of zero.
 		{stmt: `SELECT id, amount / qty FROM ` + o + ` ORDER BY id`, sourceFails: true},
 		{stmt: `SELECT sum(amount) / sum(qty - qty) FROM ` + o, sourceFails: true},
+
+		// A CASE on a side, read by its values (caseClass): the shapes of
+		// CH-benCHmark's Q8 and Q14, a share of a total.
+		{stmt: `SELECT sum(CASE WHEN qty > 5 THEN amount ELSE 0 END) / sum(amount) FROM ` + o},
+		{stmt: `SELECT 100.00 * sum(CASE WHEN status LIKE 'p%' THEN amount ELSE 0 END) / (1 + sum(amount)) AS promo FROM ` + o},
+		{stmt: `SELECT (100.00 * sum(CASE WHEN status LIKE 'p%' THEN amount ELSE 0 END) / (1 + sum(amount))) AS promo FROM ` + o + ` WHERE id < 3`},
+		// No row matching: a sum of NULLs is NULL, and a share of zero.
+		{stmt: `SELECT customer_id, sum(CASE WHEN qty > 5 THEN amount END) / count(*), sum(CASE WHEN qty > 5 THEN amount ELSE 0 END) / nullif(sum(amount), 0) FROM ` + o + ` GROUP BY customer_id ORDER BY customer_id`},
+		{stmt: `SELECT sum(CASE WHEN qty > 5 THEN amount END) / sum(amount) FROM ` + o + ` WHERE id = 7`},
+		// A whole number and a numeric among the values, and a count of
+		// matches over a count, made a numeric by its factor.
+		{stmt: `SELECT sum(CASE WHEN qty > 5 THEN qty ELSE amount END) / sum(amount), sum(CASE WHEN qty > 5 THEN qty ELSE 0 END) / sum(amount) FROM ` + o},
+		{stmt: `SELECT 100.0 * sum(CASE WHEN qty > 5 THEN 1 ELSE 0 END) / count(*) FROM ` + o},
+		// Signs on either side, a simple CASE, one inside another.
+		{stmt: `SELECT -sum(CASE WHEN qty > 5 THEN amount ELSE 0 END) / sum(amount), sum(amount) / -sum(CASE WHEN qty > 5 THEN amount ELSE 0 END) FROM ` + o},
+		{stmt: `SELECT sum(CASE WHEN qty < 3 THEN amount ELSE 0 END) / sum(CASE WHEN qty < 3 THEN -amount END) FROM ` + o},
+		{stmt: `SELECT sum(CASE customer_id WHEN 1 THEN amount WHEN 2 THEN qty ELSE 0 END) / sum(amount) FROM ` + o},
+		{stmt: `SELECT sum(CASE WHEN qty > 5 THEN CASE WHEN status = 'paid' THEN amount ELSE 1 END ELSE 0 END) / sum(amount) FROM ` + o},
+		// Quotients past 16 decimals, which round.
+		{stmt: `SELECT sum(CASE WHEN id <= 2 THEN amount ELSE 0 END) / 7, sum(CASE WHEN id = 2 THEN amount ELSE 0 END) / 3, sum(CASE WHEN id = 9 THEN amount END) / 9 FROM ` + o},
+		// Row by row, with a divisor that is NULL where it would be zero.
+		{stmt: `SELECT id, amount / nullif(CASE WHEN qty > 5 THEN qty ELSE 0 END, 0) FROM ` + o + ` ORDER BY id`},
+		// avg of a CASE.
+		{stmt: `SELECT avg(CASE WHEN qty > 5 THEN amount ELSE 0 END), avg(CASE WHEN qty > 5 THEN qty END) FROM ` + o},
+		// Used to choose and to sort the rows.
+		{stmt: `SELECT customer_id FROM ` + o + ` GROUP BY customer_id HAVING sum(CASE WHEN qty > 5 THEN amount ELSE 0 END) / nullif(sum(amount), 0) > 0.5 ORDER BY customer_id`},
+		{stmt: `SELECT customer_id, sum(CASE WHEN qty > 5 THEN amount ELSE 0 END) / nullif(sum(amount), 0) AS share FROM ` + o + ` GROUP BY customer_id ORDER BY share DESC NULLS LAST, customer_id`},
+		// Too small a quotient: the copy refuses, the source answers.
+		{stmt: `SELECT sum(CASE WHEN id = 1 THEN amount ELSE 0 END) / 90000000 FROM ` + o, refused: "under 0.000001"},
+		// A divisor of zero, as a sum and in a row: PostgreSQL's error.
+		{stmt: `SELECT sum(amount) / sum(CASE WHEN qty > 1000 THEN qty ELSE 0 END) FROM ` + o, sourceFails: true},
+		{stmt: `SELECT id, amount / (CASE WHEN qty > 5 THEN qty ELSE 0 END) FROM ` + o + ` ORDER BY id`, sourceFails: true},
 	}
 }
 

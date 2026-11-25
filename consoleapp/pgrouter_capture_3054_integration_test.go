@@ -4,6 +4,7 @@ package consoleapp
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -72,13 +73,21 @@ func TestIntegrationPGRouterCaptureAccount(t *testing.T) {
 		return got
 	}
 
-	t.Run("no answer saved: nothing is sent to the source, as before", func(t *testing.T) {
-		c := pgClient(t, ctx, env.portDSN(), nil)
-		// The copy answers (its snapshot holds 2 rows), not the source (3).
-		if got := inBlock(c, "SELECT count(*) FROM "+pgCapTable); got != "2" {
-			t.Fatalf("a block with no account and no answer: %q, want the copy's 2", got)
+	// notServed is what a client gets at login for the server while it has
+	// no account of its own and no yes (0.140.0).
+	notServed := func(t *testing.T) {
+		t.Helper()
+		c, err := pgconn.Connect(ctx, env.portDSN())
+		if err == nil {
+			c.Close(ctx)
+			t.Fatal("served with no account and no yes")
 		}
-	})
+		var pe *pgconn.PgError
+		if !errors.As(err, &pe) || pe.Code != "08004" || pe.Message != console.PGPortNotServed("pgsrv", console.PGRouteRefusedNoAccount) {
+			t.Fatalf("the login: %v", err)
+		}
+	}
+	t.Run("no answer saved: the server is not served", notServed)
 
 	if _, err := env.owner.SetForwardWithCaptureAccount(env.serverID, true); err != nil {
 		t.Fatal(err)
@@ -231,14 +240,11 @@ func TestIntegrationPGRouterCaptureAccount(t *testing.T) {
 		t.Logf("SHOW dbtrail.router_status:\n%s", strings.Join(lines, "\n"))
 	})
 
-	t.Run("taken back: nothing is sent again", func(t *testing.T) {
+	t.Run("taken back: the server is not served again", func(t *testing.T) {
 		if _, err := env.owner.SetForwardWithCaptureAccount(env.serverID, false); err != nil {
 			t.Fatal(err)
 		}
 		env.srv.RefreshFollowedFiles()
-		c := pgClient(t, ctx, env.portDSN(), nil)
-		if got := inBlock(c, "SELECT count(*) FROM "+pgCapTable); got != "2" {
-			t.Errorf("after no: %q, want the copy's 2", got)
-		}
+		notServed(t)
 	})
 }

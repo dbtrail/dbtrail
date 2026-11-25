@@ -377,6 +377,12 @@ func (k *tailKeeper) refreshWithin(ctx context.Context, d time.Duration, tables 
 func (k *tailKeeper) refreshWithinBuilding(ctx context.Context, d time.Duration, tables []views.BaselineTable) (map[string]tailView, map[string]bool, bool, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	return k.refreshWithinBuildingLocked(ctx, d, tables)
+}
+
+// refreshWithinBuildingLocked is refreshWithinBuilding with k.mu held by the
+// caller.
+func (k *tailKeeper) refreshWithinBuildingLocked(ctx context.Context, d time.Duration, tables []views.BaselineTable) (map[string]tailView, map[string]bool, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, d)
 	defer cancel()
 	drops := k.drops

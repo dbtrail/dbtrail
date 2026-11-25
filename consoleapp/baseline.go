@@ -131,6 +131,11 @@ type baselineSupervisor struct {
 	// tableDeltas is --baseline-table-deltas (#1638): a refresh keeps a changed
 	// table's file and writes the change beside it. Read by executeRefresh.
 	tableDeltas bool
+	// rereadRefused is --baseline-reread-refused-tables (#2640): a scheduled
+	// update refused for tables a read of their own fixes reads only those
+	// tables again instead of the whole server (rereadInstead). Off in a
+	// supervisor built without the daemon's configuration, as in most tests.
+	rereadRefused bool
 	// sqlChainLine is the console's live SQL-on-the-copy line (#2210); a
 	// refresh ends a table's chain at half of it. Unset: no such rule (a
 	// supervisor without a console, as in most tests). Atomic: watch starts

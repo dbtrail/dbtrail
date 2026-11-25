@@ -444,6 +444,7 @@ func pgRouterStartupLines(st pgRouterSettings, memory, memoryFrom string, memory
 	}
 	fmt.Fprintf(&b, "PostgreSQL router: %s on the copy at once, %s and up to %s of memory each (%s), and at most %d clients connected. These are set where this is started (--workers, --threads, --sql-memory, --max-connections); nothing is worked out from the machine.\n",
 		countOfStatements(st.Workers), countOfThreads(st.Threads), memory, memoryFrom, st.MaxConns)
+	b.WriteString(pgFastLaneLine(st.Workers))
 	fmt.Fprintf(&b, "PostgreSQL router: the results being sent to clients are held in memory up to %d MB in all; past that a statement is refused with an error (53000) until clients have read their answers.\n", int64(defaultFlashbackResultBudget)>>20)
 	if memoryErr != nil {
 		fmt.Fprintf(&b, "PostgreSQL router: the SQL memory saved in the web interface could NOT be read, so the default is used: %v\n", memoryErr)
@@ -513,7 +514,9 @@ func runPGRouter(cmd *cobra.Command, _ []string) error {
 	if memory == "" {
 		memory = sqlsandbox.DefaultLimits().MemoryLimit
 	}
-	srv, runner, err := newPGRouterConsole(shared, console.SQLPool{Workers: st.Workers, Threads: st.Threads})
+	// One worker more than --workers, kept for short statements
+	// (pgrouter_fastlane.go): the others run no more than --workers at once.
+	srv, runner, err := newPGRouterConsole(shared, console.SQLPool{Workers: pgCopySlots(st.Workers), Threads: st.Threads})
 	if err != nil {
 		return err
 	}
@@ -552,6 +555,10 @@ func runPGRouter(cmd *cobra.Command, _ []string) error {
 	}
 	routes := newPGRouteStats(time.Now(), st.StatusStatements && st.StatusAddr != "")
 	routes.modes = srv
+	// One of the copy's workers kept for short statements, for the port
+	// and the status document (pgrouter_fastlane.go).
+	lanes := newPGCopyLanes(runner)
+	routes.lanes = lanes
 	// One line a minute per server in this service's log (pgrouter_statuslog.go).
 	startPGPortStatusLog(ctx, func() map[string]pgRouterServerNumbers { return routes.doc(st.Listen).Servers }, srv.ServerName)
 	if st.StatusAddr != "" {
@@ -560,7 +567,7 @@ func runPGRouter(cmd *cobra.Command, _ []string) error {
 		}, os.Stderr)()
 	}
 	port := &pgRouterPort{srv: srv, addr: st.Listen, maxConns: st.MaxConns, poll: console.DefaultFollowInterval, out: os.Stderr, tls: served.Config,
-		sources: newPGSourceSlots(st.MaxSourceConns), routes: routes, cost: &st.Cost}
+		sources: newPGSourceSlots(st.MaxSourceConns), routes: routes, cost: &st.Cost, lanes: lanes}
 	return port.serve(ctx)
 }
 
@@ -634,6 +641,9 @@ type pgRouterPort struct {
 	// cost is when a statement the copy can answer goes there rather than
 	// to the source; nil for pgshim's default.
 	cost *pgshim.CostPolicy
+	// lanes keeps one of the copy's workers for short statements
+	// (pgrouter_fastlane.go); nil keeps none.
+	lanes *pgCopyLanes
 
 	mu    sync.Mutex
 	bound string
@@ -736,7 +746,7 @@ func (p *pgRouterPort) serve(ctx context.Context) error {
 		p.bound, p.stop, p.passwords = ln.Addr().String(), cancel, passwords
 		p.mu.Unlock()
 		slog.Info("PostgreSQL router: the port is open", "listen", ln.Addr().String())
-		err = servePGPortRouted(child, p.srv, ln, p.maxConns, budget, p.tls, sources, p.routes, p.cost)
+		err = servePGPortRouted(child, p.srv, ln, p.maxConns, budget, p.tls, sources, p.routes, p.cost, p.lanes)
 		cancel()
 		p.mu.Lock()
 		p.bound, p.stop, p.passwords = "", nil, nil
@@ -751,6 +761,17 @@ func (p *pgRouterPort) serve(ctx context.Context) error {
 	}
 	return nil
 }
+
+// pgFastLaneLine says, where the router starts, that a worker beyond
+// --workers is kept for short statements (pgrouter_fastlane.go), and what
+// that adds.
+func pgFastLaneLine(workers int) string {
+	return fmt.Sprintf("PostgreSQL router: one worker more than --workers is kept for statements whose plan on the source reads one table and joins nothing, so they do not wait behind a report: the copy runs up to %d statements at once, each with its own threads and memory, and the other statements never more than %d, as many as --workers says.\n", pgCopySlots(workers), workers)
+}
+
+// pgCopySlots is how many statements the copy runs at once for --workers:
+// one more, kept for short statements.
+func pgCopySlots(workers int) int { return workers + 1 }
 
 // pgRouterQueryTimeout bounds each statement end to end, a wait for a worker
 // included: the same five minutes as the MySQL port's.
@@ -920,13 +941,15 @@ func (p *pgSourceSlots) acquire(ctx context.Context) (release func(), ok bool) {
 // servePGPortWith is servePGPortWithin with the bound on connections to the
 // sources (#2771).
 func servePGPortWith(ctx context.Context, srv *console.Server, ln net.Listener, maxConns int, budget *pgshim.ResultBudget, tlsConfig *tls.Config, sources *pgSourceSlots) error {
-	return servePGPortRouted(ctx, srv, ln, maxConns, budget, tlsConfig, sources, nil, nil)
+	return servePGPortRouted(ctx, srv, ln, maxConns, budget, tlsConfig, sources, nil, nil, nil)
 }
 
 // servePGPortRouted is servePGPortWith with the tally of which side answered
-// each statement (#2770), nil counting nothing, and when a statement the copy
-// can answer goes there rather than to the source, nil for pgshim's default.
-func servePGPortRouted(ctx context.Context, srv *console.Server, ln net.Listener, maxConns int, budget *pgshim.ResultBudget, tlsConfig *tls.Config, sources *pgSourceSlots, routes *pgRouteStats, cost *pgshim.CostPolicy) error {
+// each statement (#2770), nil counting nothing, when a statement the copy
+// can answer goes there rather than to the source, nil for pgshim's default,
+// and the copy's lanes (pgrouter_fastlane.go), nil keeping no worker for
+// short statements.
+func servePGPortRouted(ctx context.Context, srv *console.Server, ln net.Listener, maxConns int, budget *pgshim.ResultBudget, tlsConfig *tls.Config, sources *pgSourceSlots, routes *pgRouteStats, cost *pgshim.CostPolicy, lanes *pgCopyLanes) error {
 	logger := slog.Default()
 	// Accept returns when the listener is closed; the connections end with
 	// ctx (pgshim closes each one's socket), and Serve waits for them.
@@ -938,7 +961,7 @@ func servePGPortRouted(ctx context.Context, srv *console.Server, ln net.Listener
 	// travel is refused on this wire, so nothing waits on it; the engine
 	// asks for it all the same.
 	gate := shim.NewGate(defaultFlashbackMaxFullTable)
-	return pgshim.Serve(ctx, ln, pgshim.Config{Login: pgPortLogin(srv, pgRouterQueryTimeout, gate, logger, sources, routes, cost), Logger: logger, MaxConns: maxConns, ResultBudget: budget, TLS: tlsConfig})
+	return pgshim.Serve(ctx, ln, pgshim.Config{Login: pgPortLogin(srv, pgRouterQueryTimeout, gate, logger, sources, routes, cost, lanes), Logger: logger, MaxConns: maxConns, ResultBudget: budget, TLS: tlsConfig})
 }
 
 // pgLoginOtherServer is the refusal of a connection opened with the
@@ -978,10 +1001,13 @@ func pgLoginOtherServer(srv *console.Server, user, database, loginServer string)
 // sources bounds the connections to the servers' sources that the logins'
 // connections share (#2771), and routes counts which side answered each of
 // their statements (#2770; nil counts nothing).
-func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, logger *slog.Logger, sources *pgSourceSlots, routes *pgRouteStats, cost *pgshim.CostPolicy) pgshim.LoginFunc {
+func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, logger *slog.Logger, sources *pgSourceSlots, routes *pgRouteStats, cost *pgshim.CostPolicy, lanes *pgCopyLanes) pgshim.LoginFunc {
 	// The side each statement shape of a server was last sent to by its
 	// plan, for all the port's connections to it (#3045).
 	sides := &pgCostSides{}
+	// The refusal last logged per server, so a client that retries is not a
+	// line per attempt.
+	notServedSaid := &sync.Map{}
 	return func(ctx context.Context, user, database string, password *pgshim.Password, drop func()) (*pgshim.Binding, *pgshim.Error) {
 		// Before the passwords are read: a connection opened with an
 		// application login is served only if no login changed since
@@ -1060,6 +1086,25 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			return nil, &pgshim.Error{Code: "0A000", Message: fmt.Sprintf(
 				"server %q is not a PostgreSQL server, and this port serves PostgreSQL servers only; the copy of a MySQL or MariaDB server is read with a MySQL client on the MySQL port", tgt.ID)}
 		}
+		// The port serves a PostgreSQL server only when it can forward
+		// (0.140.0): a connection that reaches the copy alone could get rows
+		// PostgreSQL would not return, with no error. Refused here, before
+		// anything is opened, with the cause and both ways to serve it.
+		// Capture and everything else of the server go on.
+		fwd := srv.PostgresForwardTarget(tgt.ID)
+		if fwd.DSN == "" {
+			why := srv.PGPortRefusal(tgt.ID)
+			if why == "" {
+				// Saved between the two reads: what was read first decides,
+				// and the client reconnects.
+				return nil, &pgshim.Error{Code: "57P03", Message: "the server's forwarding account changed while connecting; reconnect"}
+			}
+			if prev, _ := notServedSaid.Swap(tgt.ID, why); prev != why {
+				logger.Warn("PostgreSQL router: refused a connection to a server the port does not serve", "server", tgt.ID, "reason", why)
+			}
+			return nil, &pgshim.Error{Code: "08004", Message: why}
+		}
+		notServedSaid.Delete(tgt.ID)
 		ages := routes.agesFor(tgt.ID)
 		bound := &pgshim.Binding{Actor: "server:" + tgt.ID, Schema: pgPortSchema, Routed: ages.routed()}
 		// SHOW dbtrail.router_status on this connection (#3021); it reads
@@ -1103,8 +1148,10 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		// Or as the capture account itself, when the server said yes to that
 		// and has no account of its own (#3054): then every statement passes
 		// the capture gate first (pgshim, capture_gate.go).
-		switch fwd := srv.PostgresForwardTarget(tgt.ID); {
-		case fwd.DSN != "":
+		// Which columns are under a nondeterministic collation (#3111): read
+		// from the source's catalog, never from its rows.
+		collations := pgSourceCollations(fwd.DSN, tgt.ID)
+		{
 			untrack, ok := srv.TrackRoutedConn(tgt.ID, fwd.Gen, drop, nil)
 			if !ok {
 				bound.Close()
@@ -1113,8 +1160,6 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			closers = append(closers, untrack)
 			bound.Forward = &pgshim.Forward{DSN: fwd.DSN, CaptureAccount: fwd.CaptureAccount, Acquire: sources.acquire, Park: sources.park, Limit: sources.limit(), Timeout: timeout,
 				Barred: pgForwardBarred(tgt.ID, tgt.TimeTravelRefusal, routes, logger), Cost: cost, Sides: sides.of(tgt.ID)}
-		case fwd.Refused != "":
-			bound.Forward = &pgshim.Forward{Refused: fwd.Refused}
 		}
 		if tgt.SQL == nil {
 			// The connection is made and every statement says why it cannot
@@ -1174,6 +1219,7 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			}
 			return pgshim.CopyNoWait, why
 		}
+		lane := &pgConnLane{lanes: lanes}
 		bound.Run = func(ctx context.Context, statement string, opts pgshim.RunOptions) (sqlsandbox.Result, error) {
 			if timeout > 0 {
 				var cancel context.CancelFunc
@@ -1190,7 +1236,11 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			// How far the snapshot files it reads reach (#3125), for an
 			// answer that reads a table without its recent changes.
 			snapshot := pgSnapshotAgeFor(opts)
-			res, err := copySQL.Run(console.WithPGSnapshotAge(pgRunContext(ctx, opts), snapshot), statement, schema, sess)
+			// A long statement first takes its place in the copy's lanes,
+			// so one worker stays for short ones (pgrouter_fastlane.go).
+			res, err := lane.run(ctx, opts, func(ctx context.Context) (sqlsandbox.Result, error) {
+				return copySQL.Run(console.WithPGSnapshotAge(pgRunContext(ctx, opts), snapshot), statement, schema, sess)
+			})
 			if err == nil && !opts.Probe {
 				// How old what it read was, for /status (#2756), kept once
 				// the port says the client got it (bound.Routed).
@@ -1232,7 +1282,7 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 				// columns, and the screen cannot send a statement to the
 				// copy, or say why not, without it.
 				return copySQL.Run(console.WithPGCatalogRead(ctx), statement, pgPortSchema, sqlsandbox.Session{PostgresRules: true, TrimPadded: true, PostgresNames: true})
-			})
+			}, collations)
 		}
 		return bound, nil
 	}

@@ -98,6 +98,7 @@ var (
 	upBaselineRefreshEvery  string
 	upBaselineCarryForward  bool
 	upBaselineTableDeltas   bool
+	upBaselineRereadRefused bool
 	upConsoleServersFile    string
 	upConsoleAuthFile       string
 	upConsoleMCPTokenFile   string
@@ -292,6 +293,14 @@ func init() {
 			"pair of small files beside it (<table>.000001.posdel, <table>.000001.upserts, then 000002, ...), linking the earlier pairs forward, and writes the table again in full when the chain's files together pass half of its size, the chain is a "+
 			"day old, or the chain's start comes close to the oldest events the index keeps. The generated DuckDB views read the chain; every other reader uses the table file and the index, as before. A snapshot written this way "+
 			"must not be read by a bintrail older than this one. Turning it off needs nothing else: the next refresh writes every table in full. A DuckDB view that follows the newest snapshot keeps working when a pair appears or goes away, except over a table whose schema it could not read, or when another table in the same schema is named after it plus a dot (orders and orders.old): the generated file names those, and they refuse once a pair appears, until the views are generated again.")
+	watchCmd.Flags().BoolVar(&upBaselineRereadRefused, "baseline-reread-refused-tables", true,
+		"On by default (=false, or the environment variable set to false, turns it off). When a scheduled "+
+			"snapshot update is refused for tables changed by a statement that leaves no row changes to apply (a TRUNCATE, a table dropped and "+
+			"created again, a change of its columns), only those tables are read again from the source, and every table of the server is "+
+			"brought to one point with the others updated from the recorded changes, instead of a full read of the whole server. A table "+
+			"refused again before an update goes through, and a read that ends without a snapshot, take the full read as before, at most once a day; "+
+			"a read that runs out of disk in the working folder takes none, since a full read needs that space too, and the slot says so. "+
+			"Off, every such refusal takes the full read.")
 	watchCmd.Flags().StringVar(&upBaselineRefreshEvery, "baseline-refresh-interval", "", "Periodically refresh each server's newest baseline snapshot from the index (Nm/Nh/Nd; default: off). Runs with the conservative DuckDB budget, folds at most 2 tables at a time, and never publishes over a known capture gap.")
 	watchCmd.Flags().StringVar(&upConsoleBaselineRetain, snapshotRetainFlag, "", "The old way to bound local snapshots, still honored: prune those older than this (Nd/Nh) once a durable copy exists in S3 (never the only copy or the newest snapshot per table). Each server's own count, Keep by count"+console.OnPage(console.PageSnapshots)+", is the control now")
 	watchCmd.Flags().StringVar(&upConsoleServersFile, "console-servers-file", "", "Path to the server registry YAML managed by the web interface (default ~/.config/bintrail/console-servers.yaml)")
@@ -641,6 +650,7 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	// baseline features off, no supervisor would ever remove a previous
 	// process's staged dump.
 	sweepWorkingFoldersAtBoot(registry, time.Now())
+	warnPGPortNotServedAtBoot(registry, nil)
 	go runUnusedDefaultSweep(ctx, registry, 0)
 	var baselineSup *baselineSupervisor
 	if upConsoleBaselineTrigger || upBaselineRefreshEvery != "" {
@@ -988,6 +998,7 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	// baseline features off, no supervisor would ever remove a previous
 	// process's staged dump.
 	sweepWorkingFoldersAtBoot(registry, time.Now())
+	warnPGPortNotServedAtBoot(registry, nil)
 	go runUnusedDefaultSweep(ctx, registry, 0)
 	var baselineSup *baselineSupervisor
 	if upConsoleBaselineTrigger || upBaselineRefreshEvery != "" {
@@ -1227,6 +1238,7 @@ func newBaselineSupervisorFromConfig(ctx context.Context, stagingDir string, reg
 	// The settings store the lock mode is re-read from per job (#1682).
 	sup.reg = reg
 	sup.tableDeltas = upBaselineTableDeltas
+	sup.rereadRefused = upBaselineRereadRefused
 	// The key index switch (BINTRAIL_KEY_INDEX, #2496) says its state once
 	// per process, the first time it is read. Read here, because every
 	// daemon that refreshes builds this supervisor, whether the refresh is
@@ -1326,6 +1338,9 @@ func resolveUpConsoleEnv(cmd *cobra.Command) error {
 	}
 	if !cmd.Flags().Changed("baseline-table-deltas") {
 		upBaselineTableDeltas = envBoolOr("BINTRAIL_BASELINE_TABLE_DELTAS", upBaselineTableDeltas)
+	}
+	if !cmd.Flags().Changed("baseline-reread-refused-tables") {
+		upBaselineRereadRefused = envBoolOr("BINTRAIL_BASELINE_REREAD_REFUSED_TABLES", upBaselineRereadRefused)
 	}
 	if !cmd.Flags().Changed("baseline-carry-forward-unchanged") {
 		upBaselineCarryForward = envBoolOr("BINTRAIL_BASELINE_CARRY_FORWARD_UNCHANGED", upBaselineCarryForward)
