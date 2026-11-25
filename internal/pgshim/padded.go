@@ -720,6 +720,16 @@ func (s *session) paddedVeto(text string) string {
 		} else {
 			veto = paddedForNoSource(toks, types)
 		}
+		if veto == "" && s.argsBound && s.screened != "" {
+			// A portal's arguments are written into the text as strings, which
+			// trimmedUse may let through ('ab'), but the statement compares the
+			// column with a parameter: its Describe, written with NULLs, was
+			// vetoed and announced no rows, and the source decides it whatever
+			// the value. Read as the client wrote it, it is vetoed the same.
+			if tmpl, unlexed := lexSQL(s.screened); unlexed == "" {
+				veto = trimmedUse(tmpl, types, s.canFallBack())
+			}
+		}
 	}
 	if veto != "" {
 		if unread {

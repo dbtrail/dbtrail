@@ -223,19 +223,25 @@ func TestIntegrationPGRouterCharPadding_3068(t *testing.T) {
 				t.Errorf("%s: %q, want it refused (0A000) for the char(n) column", stmt, got)
 			}
 		}
-		// A prepared statement, in each of pgx's modes. The port writes the
-		// argument into the text before its screen reads it: 'ab' is a plain
-		// string, and the copy's 2 is PostgreSQL's answer over these rows;
-		// 'ab ' is one PostgreSQL compares without its blank (3 rows) and the
-		// copy with it (none), so it is refused, never answered.
+		// A prepared statement, in each of pgx's modes. The column compared
+		// with a parameter is refused whatever the value: 'ab ' is one
+		// PostgreSQL compares without its blank (3 rows) and the copy with it
+		// (none), and 'ab' is refused too, as its Describe was (written with
+		// NULL), so no rows follow a Describe that announced none. Only the
+		// simple protocol, where pgx writes 'ab' into the text itself, is the
+		// copy's.
 		for _, mode := range []pgx.QueryExecMode{pgx.QueryExecModeCacheStatement, pgx.QueryExecModeCacheDescribe, pgx.QueryExecModeDescribeExec, pgx.QueryExecModeExec, pgx.QueryExecModeSimpleProtocol} {
 			conn := pgxConn(t, ctx, env.portDSN(), mode)
+			wantAB := "error 0A000"
+			if mode == pgx.QueryExecModeSimpleProtocol {
+				wantAB = `[n] ["2"]`
+			}
 			for i := range 2 {
 				if got := pgxAnswer(ctx, conn, "SELECT count(*) AS n FROM "+table+" WHERE code = $1", "ab "); !strings.HasPrefix(got, "error 0A000") {
 					t.Errorf("mode %v, run %d: a prepared count by the char(5) column with 'ab ': %s, want it refused (0A000)", mode, i, got)
 				}
-				if got := pgxAnswer(ctx, conn, "SELECT count(*) AS n FROM "+table+" WHERE code = $1", "ab"); got != `[n] ["2"]` {
-					t.Errorf("mode %v, run %d: a prepared count by the char(5) column with 'ab': %s, want the copy's 2", mode, i, got)
+				if got := pgxAnswer(ctx, conn, "SELECT count(*) AS n FROM "+table+" WHERE code = $1", "ab"); !strings.HasPrefix(got, wantAB) {
+					t.Errorf("mode %v, run %d: a prepared count by the char(5) column with 'ab': %s, want %s", mode, i, got, wantAB)
 				}
 				if got := pgxAnswer(ctx, conn, "SELECT count(*) AS n FROM "+table+" WHERE label = $1", "ab"); got != `[n] ["2"]` {
 					t.Errorf("mode %v, run %d: a prepared count by the text column: %s, want the copy's 2", mode, i, got)
