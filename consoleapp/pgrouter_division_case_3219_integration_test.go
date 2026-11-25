@@ -312,9 +312,10 @@ func TestIntegrationPGRouterDivisionOfACase(t *testing.T) {
 		}
 	}
 
-	// Q8 and Q14 whole, on the CH tables. Q14 is the copy's; Q8 still goes
-	// to the source for its char(n) columns, a rule of its own, and answers
-	// the same whichever side does.
+	// Q8 and Q14 whole, on the CH tables. Q14 is the copy's; Q8 compares its
+	// char(n) names with plain strings, which since #3219 the copy may
+	// answer, and must answer the same, Describe included, whichever side
+	// does.
 	from := strings.NewReplacer(
 		"FROM item, supplier, stock, order_line, orders, customer, nation n1, nation n2, region",
 		"FROM chp_item, chp_supplier, chp_stock, chp_order_line, chp_orders, chp_customer, chp_nation n1, chp_nation n2, chp_region",

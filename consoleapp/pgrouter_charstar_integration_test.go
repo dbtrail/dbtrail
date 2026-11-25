@@ -184,6 +184,22 @@ FROM deciles GROUP BY decile ORDER BY decile`
 SELECT r.w_id, r.d_id, r.rnk, c.c_first, c.c_credit, r.amount
 FROM ranked r JOIN ` + cu + ` c ON c.c_w_id = r.w_id AND c.c_d_id = r.d_id AND c.c_id = r.c_id
 WHERE r.rnk <= 3 ORDER BY r.w_id, r.d_id, r.rnk LIMIT 500`
+	// Q07 writes c_credit out, which the copy holds without its padding
+	// (#3219, a decision of the product): its answer must be PostgreSQL's with
+	// only that column's trailing blanks gone, which is PostgreSQL's answer
+	// to q07 with the column trimmed there.
+	q07Trimmed := strings.Replace(q07, "c.c_credit,", "rtrim(c.c_credit) AS c_credit,", 1)
+	if q07Trimmed == q07 {
+		t.Fatal("Q07 no longer writes c.c_credit out: the test's premise")
+	}
+	// What keeps Q07 from the copy: sorted by the char(n), whose only answer
+	// here would be the copy's order of text, and compared with a string
+	// with a trailing blank, which PostgreSQL compares without it.
+	q07Sorted := strings.Replace(q07, "ORDER BY r.w_id, r.d_id, r.rnk", "ORDER BY r.w_id, r.d_id, c.c_credit, r.rnk", 1)
+	q07Blank := strings.Replace(q07, "WHERE r.rnk <= 3", "WHERE r.rnk <= 3 AND c.c_credit <> 'G '", 1)
+	if q07Sorted == q07 || q07Blank == q07 {
+		t.Fatal("Q07 changed shape: the test's premise")
+	}
 
 	onCopy := []struct{ name, stmt string }{
 		{"Q08", q08},
@@ -196,7 +212,8 @@ WHERE r.rnk <= 3 ORDER BY r.w_id, r.d_id, r.rnk LIMIT 500`
 		{"a star of no char(n)", `WITH y AS (SELECT c_id, c_balance FROM ` + cu + `) SELECT * FROM y ORDER BY c_id, c_balance`},
 	}
 	toSource := []struct{ name, stmt string }{
-		{"Q07, returns a char(n)", q07},
+		{"Q07, sorted by a char(n)", q07Sorted},
+		{"Q07, a char(n) compared with a trailing blank", q07Blank},
 		{"the column compared", `WITH y AS (SELECT * FROM ` + cu + `) SELECT c_id FROM y WHERE c_credit = 'G' ORDER BY 1`},
 		{"the column measured", `WITH y AS (SELECT * FROM ` + cu + `) SELECT length(c_credit) FROM y`},
 		{"the column concatenated", `SELECT s.c_credit || 'x' FROM (SELECT * FROM ` + cu + `) s`},
@@ -253,6 +270,15 @@ WHERE r.rnk <= 3 ORDER BY r.w_id, r.d_id, r.rnk LIMIT 500`
 			}
 			if got := pgStarRead(ctx, port, stmt, extended); got != want {
 				t.Errorf("%s, %s: the copy's answer differs\n got: %s\nwant: %s", how, name, got, want)
+			}
+		}
+		{
+			want := pgStarRead(ctx, source, q07Trimmed, extended)
+			if strings.HasPrefix(want, "error") || !strings.Contains(want, "\n") {
+				t.Fatalf("%s, Q07: PostgreSQL itself: %s", how, want)
+			}
+			if got := pgStarRead(ctx, port, q07, extended); got != want {
+				t.Errorf("%s, Q07, returns a char(n): the copy's answer differs from PostgreSQL's beyond the padding\n got: %s\nwant: %s", how, got, want)
 			}
 		}
 		for _, c := range toSource {
