@@ -1688,8 +1688,8 @@ func screenWith(in []rtToken, types map[string][]string, untyped, sortsLikeSourc
 				}
 				// WITH name (a, b) AS (...): the names of the WITH's columns,
 				// which PostgreSQL and the copy both read (CH-benCHmark Q15).
-				// Without the columns' own types it stays the source's.
-				if !untyped && cteColumnList(toks, i) >= 0 {
+				// What its columns' types make of it is the typed screen's.
+				if cteColumnList(toks, i) >= 0 {
 					break
 				}
 				if t.text == "cast" {
@@ -2252,9 +2252,15 @@ func selectListReads(toks []rtToken, sel int, is func(string) bool) bool {
 // or in a statement beside it. So is every use of a name given to an
 // expression that reads a column the copy does not hold as PostgreSQL does
 // (heldOtherwise): a char(n), trimmed or padded (#3219), a column the copy
-// holds as text, one of a type of the user's. The name hides the column from
-// the rules that know it, which would let a comparison through. Without the
-// columns' own types (untyped), nothing is let through.
+// holds as text, one of a type of the user's, any column that is not a
+// number. The name hides the column from the rules that know it, which would
+// let a comparison through.
+//
+// Without the columns' own types (untyped) every name is a number, and the
+// use is let through: that screen may not veto what the typed one lets
+// through (screenUntyped), and the typed one is asked of every statement
+// before the copy answers it (screenTyped), with a table read the source's
+// when the columns cannot be listed (catalogUnread).
 func aliasUse(toks []rtToken, types map[string][]string, untyped bool) string {
 	names, at := aliases(toks)
 	if why := aliasInOrderKey(toks, names); why != "" {
@@ -2296,7 +2302,7 @@ func aliasUse(toks []rtToken, types map[string][]string, untyped bool) string {
 			}
 			// A name that is also a column's: every rule of a type would read
 			// the column's (WITH c(qty) AS (SELECT amount ...) SELECT qty / 2).
-			if _, column := types[n]; column || untyped {
+			if _, column := types[n]; column && !untyped {
 				return "the column list of the WITH " + t.text + " names " + n + ", a column of a table too"
 			}
 			names[n] = true
@@ -2338,13 +2344,13 @@ func aliasUse(toks []rtToken, types map[string][]string, untyped bool) string {
 		}
 	}
 	columnOfInner := func(name string, readIn int) bool {
-		if untyped || hiddenBehind[name] {
+		if hiddenBehind[name] {
 			return false
 		}
 		// A column of a table of that name too: the rules read the
 		// column's type, not what the name stands for (SELECT * FROM t
 		// WHERE y = ... AND id IN (SELECT k AS y FROM a)).
-		if _, column := types[name]; column {
+		if _, column := types[name]; column && !untyped {
 			return false
 		}
 		for _, s := range givenIn[name] {

@@ -1,6 +1,9 @@
 package pgshim
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 // chCatalog is the tables CH-benCHmark's Q2 and Q15 read, as the live
 // board's snapshot types them: TPROC-C's numbers integer and smallint, its
@@ -128,12 +131,40 @@ func lexOrFail(t *testing.T, q string) []rtToken {
 	return toks
 }
 
-// Without the columns' own types no name is let through: whether one hides
-// a trimmed char(n) is not known.
-func TestAliasScope_untypedVetoed(t *testing.T) {
-	q := "SELECT y FROM (SELECT k AS y FROM a) s WHERE y = 1"
-	if why := aliasUse(lexOrFail(t, q), nil, true); why == "" {
-		t.Errorf("%s\n    left to the copy without types", q)
+// Without the columns' own types the screen may not veto what the typed one
+// lets through (screenUntyped): Q2 and Q15 pass it, and the typed screen,
+// asked before the copy answers, decides.
+func TestAliasScope_untypedLetsThrough(t *testing.T) {
+	for _, q := range []string{chQ2, chQ15,
+		"SELECT y FROM (SELECT k AS y FROM a) s WHERE y = 1",
+		"WITH w (y) AS (SELECT k FROM a) SELECT y FROM w WHERE y = 1",
+	} {
+		toks := lexOrFail(t, q)
+		if why := screenWith(toks, untypedAsInteger(toks), true, false); why != "" {
+			t.Errorf("%s\n    vetoed without types: %s", q, why)
+		}
+	}
+}
+
+// Q2 and Q15 as a session routes them: the copy's, with the screen of their
+// types asked too. The same shapes over a trimmed char(n) or a timestamp are
+// the source's.
+func TestAliasScope_route(t *testing.T) {
+	cat := append(chCatalog(), trimmedCatalog()...)
+	b := &Binding{Schema: "public", Catalog: func(context.Context) ([]CatalogTable, error) { return cat, nil },
+		Forward: &Forward{DSN: "postgres://fwd:pw@127.0.0.1:1/db"}}
+	s := &session{bound: b, logger: discardLogger(), currentDB: "public"}
+	s.initSettings("public", "app")
+	for stmt, want := range map[string]routeDecision{
+		chQ2:  {RouteCopy, ReasonAnswersTheSame},
+		chQ15: {RouteCopy, ReasonAnswersTheSame},
+		"WITH w (y) AS (SELECT ol_delivery_d FROM order_line) SELECT count(*) FROM w WHERE y = '2026-03-02 10:00:00+02'": {RouteSource, ReasonVeto},
+		"SELECT y FROM (SELECT c AS y FROM a) s WHERE y = 'ab  '":                                                       {RouteSource, ReasonVeto},
+		"WITH w(y) AS (SELECT c FROM a) SELECT y FROM w WHERE y = 'ab  '":                                               {RouteSource, ReasonVeto},
+	} {
+		if got := s.screenTyped(stmt, s.route(s.classify(stmt), stmt)); got != want {
+			t.Errorf("%s: %+v, want %+v", stmt, got, want)
+		}
 	}
 }
 
@@ -186,11 +217,6 @@ func TestCTEColumnList(t *testing.T) {
 		if why := CopyScreenFor(q, trimmedCatalog()); why == "" {
 			t.Errorf("%s\n    left to the copy", q)
 		}
-	}
-	// Without the columns' own types a column list stays the source's.
-	toks := lexOrFail(t, "WITH w (y) AS (SELECT k FROM a) SELECT y FROM w WHERE y = 1")
-	if why := screenWith(toks, untypedAsInteger(toks), true, false); why == "" {
-		t.Error("a WITH column list left to the copy without types")
 	}
 }
 
