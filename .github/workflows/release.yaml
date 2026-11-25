@@ -40,6 +40,11 @@ jobs:
       actions: read
       pull-requests: read
     steps:
+      # The script below lives in the repository: without a checkout the
+      # runner has no scripts/ and the job fails at once (v0.141.0).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Wait for the CI that tested this commit
         env:
           GH_TOKEN: ${{ github.token }}
