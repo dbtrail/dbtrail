@@ -999,11 +999,10 @@ var copyFuncs = map[string]bool{
 	// floor(extract(epoch from x) / N), as RewriteForCopy writes it: the
 	// same floor, from the timestamp's whole microseconds.
 	pgFloorEpoch: true,
-	// extract(epoch from x) of a timestamp and to_timestamp(n) of whole
-	// seconds, as RewriteForCopy writes them.
-	pgEpochMacro: true, pgToTimestampMacro: true,
-	// extract of a whole field, cast to PostgreSQL's numeric.
-	pgExtractWhole: true,
+	// extract(epoch from x) of a timestamp, to_timestamp(n) of whole
+	// seconds, and extract of a whole field cast to PostgreSQL's numeric, as
+	// RewriteForCopy writes them.
+	pgEpochMacro: true, pgToTimestampMacro: true, pgExtractWhole: true,
 	"row_number": true, "rank": true, "lag": true,
 	"date_trunc": true, "date_part": true, "extract": true,
 }
