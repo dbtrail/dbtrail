@@ -185,6 +185,18 @@ func TestTrimmedUse_source(t *testing.T) {
 		"SELECT s.x FROM (SELECT v AS x FROM a) s, b WHERE b.c2 = s.x",
 		"SELECT y FROM (SELECT c AS y FROM a) s WHERE y = 'ab'",
 		"SELECT q FROM a AS s(q) WHERE q = 'ab'",
+		// A trimmed char(n) renamed in a table of FROM or in a WITH, then
+		// read by the statement around it where the padding counts: the
+		// copy's 'ab' is not equal to 'ab  ', PostgreSQL's bpchar is. Any
+		// change that lets a statement read the name a table of FROM or a
+		// WITH gives (#3261, #3262) must keep these with the source.
+		"SELECT y FROM (SELECT c AS y FROM a) s WHERE s.y = 'ab  '",
+		"SELECT y FROM (SELECT c AS y FROM a) s WHERE y = 'ab  '",
+		"SELECT s.y FROM (SELECT c AS y FROM a) s, b WHERE s.y = b.v2",
+		"WITH w AS (SELECT c AS y FROM a) SELECT y FROM w WHERE y = 'ab  '",
+		"WITH w(y) AS (SELECT c FROM a) SELECT y FROM w WHERE y = 'ab  '",
+		"WITH w(y) AS (SELECT c FROM a) SELECT w.y FROM w, b WHERE w.y = b.v2",
+		"WITH w(y) AS (SELECT c FROM a) SELECT y FROM w WHERE y LIKE '%b'",
 		// The same name, not trimmed, in a table it reads.
 		"SELECT a.id FROM a JOIN d ON a.id = d.id WHERE c = 'ab'",
 		"SELECT id FROM d WHERE c = 'ab'",
