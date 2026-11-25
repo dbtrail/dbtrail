@@ -929,9 +929,14 @@ jobs:
       # (#2813): this is the only job with a MySQL index AND a PostgreSQL
       # source, and the console's tests that need both run here or nowhere.
       # Step-level because of the matrix — see the note on the `changes` job.
-      # A console PR starts the two servers only on the cells its tests run
-      # on (16 and 18); DATA is what the data-path suite below still waits for.
-      RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' || (needs.changes.outputs.console == 'true' && (matrix.postgres == '16' || matrix.postgres == '18')) }}
+      # A pull request runs on one PostgreSQL version, the newest (18): the
+      # other three cells report green without starting a server. main, the
+      # nightly run and a dispatch run every version, and a release waits
+      # for main's run on its commit. That trades a regression that only
+      # one older version shows, caught on main instead of in the PR, for
+      # 10 to 15 minutes less per PR. DATA is what the data-path suite below
+      # still waits for.
+      RUN: ${{ github.event_name != 'pull_request' || (matrix.postgres == '18' && (needs.changes.outputs.data == 'true' || needs.changes.outputs.console == 'true')) }}
       DATA: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' }}
 
     steps:
@@ -1019,12 +1024,10 @@ jobs:
         if: env.RUN == 'true' && env.DATA == 'true'
         run: |
           set -o pipefail
-          # -timeout: internal/pgcompare runs every measured statement on
-          # PostgreSQL and on the copy, about nine minutes under -race, and
-          # its char(n) battery, whose expensive statements the copy answers
-          # (heavy_on_copy) after asking each one's plan, some five more.
-          go test -tags=integration -race -p 1 -count=1 -v -timeout 35m \
-            ./internal/pgcapture/ ./internal/pgstreamrun/ ./internal/pgbaseline/ ./internal/pgshim/ ./internal/pgverifysource/ ./internal/pgcompare/ ./internal/pgdrill/ 2>&1 | tee /tmp/pg-it.out
+          # internal/pgcompare, the slowest package, runs in its own job
+          # (integration-pgcompare below), at the same time as this one.
+          go test -tags=integration -race -p 1 -count=1 -v -timeout 25m \
+            ./internal/pgcapture/ ./internal/pgstreamrun/ ./internal/pgbaseline/ ./internal/pgshim/ ./internal/pgverifysource/ ./internal/pgdrill/ 2>&1 | tee /tmp/pg-it.out
           grep -q -- '--- PASS: TestOne_EndToEnd_PostgresToIndexToRecovery' /tmp/pg-it.out \
             || { echo "FATAL: PG end-to-end integration test did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationPGVerifyLiveSourceUnderWrites2198' /tmp/pg-it.out \
@@ -1033,8 +1036,6 @@ jobs:
             || { echo "FATAL: pgbaseline integration suite did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '--- PASS: TestPGWire_PostgresSourceRoundTrip' /tmp/pg-it.out \
             || { echo "FATAL: pgwire PostgreSQL-source E2E did not run — false-green tripwire" >&2; exit 1; }
-          grep -q -- '--- PASS: TestIntegrationPGCompare' /tmp/pg-it.out \
-            || { echo "FATAL: the PostgreSQL source-against-copy comparison did not run — false-green tripwire" >&2; exit 1; }
 
       # The forwarding test over TLS needs a PostgreSQL that serves TLS, as its
       # superuser, and one that is not the source above: it makes the
@@ -1106,6 +1107,91 @@ jobs:
             grep -qE -- "--- PASS: TestIntegrationPGRouterCatalog/psql/$major[^0-9]" /tmp/pg-console-it.out \
               || { echo "FATAL: psql $major did not run the catalog test against the PostgreSQL port" >&2; exit 1; }
           done
+
+  integration-pgcompare:
+    # internal/pgcompare on its own runner, at the same time as
+    # integration-postgres-source: it was the slowest package of that job
+    # (about nine minutes under -race for the measured statements, some five
+    # more for the char(n) battery) and ran after all the others. Same
+    # servers and the same version rule as that job: one version (18) on a
+    # pull request, all four on main, nightly and dispatch.
+    needs: changes
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["15", "16", "17", "18"]
+    env:
+      BINTRAIL_TEST_DSN: "root:testroot@tcp(127.0.0.1:13306)"
+      BINTRAIL_TEST_PG_DSN: "postgres://postgres:testpg@127.0.0.1:15432/pgtest?sslmode=disable"
+      BINTRAIL_REQUIRE_POSTGRES: "1"
+      RUN: ${{ github.event_name != 'pull_request' || (matrix.postgres == '18' && needs.changes.outputs.data == 'true') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.RUN == 'true'
+
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        if: env.RUN == 'true'
+        with:
+          go-version-file: go.mod
+
+      - name: Pull the test images
+        if: env.RUN == 'true'
+        run: |
+          bash scripts/pull-test-images.sh \
+            "${TEST_IMAGES}/library/mysql:8.4" \
+            "${TEST_IMAGES}/library/postgres:${{ matrix.postgres }}"
+
+      # The probes are integration-postgres-source's: see the notes there.
+      - name: Start MySQL index (bintrail-test-mysql, 8.4)
+        if: env.RUN == 'true'
+        run: |
+          docker run -d --name bintrail-test-mysql \
+            -e MYSQL_ROOT_PASSWORD=testroot \
+            -p 13306:3306 \
+            "${TEST_IMAGES}/library/mysql:8.4" \
+            --binlog-format=ROW --binlog-row-image=FULL --log-bin=binlog --server-id=1
+          consecutive=0
+          for i in $(seq 1 60); do
+            if docker run --rm --network host "${TEST_IMAGES}/library/mysql:8.4" \
+                 mysql --protocol=TCP -h 127.0.0.1 -P 13306 -u root -ptestroot -e "SELECT 1" >/dev/null 2>&1; then
+              consecutive=$((consecutive + 1))
+              [ "$consecutive" -ge 3 ] && { echo "MySQL index is ready."; exit 0; }
+            else
+              consecutive=0
+            fi
+            sleep 2
+          done
+          echo "MySQL did not become ready in time" >&2
+          docker logs bintrail-test-mysql >&2 || true
+          exit 1
+
+      - name: Start PostgreSQL source (bintrail-test-postgres, ${{ matrix.postgres }})
+        if: env.RUN == 'true'
+        run: |
+          docker run -d --name bintrail-test-postgres \
+            -e POSTGRES_PASSWORD=testpg \
+            -e POSTGRES_DB=pgtest \
+            -p 15432:5432 \
+            "${TEST_IMAGES}/library/postgres:${{ matrix.postgres }}" \
+            -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10 -c track_commit_timestamp=on
+          for i in $(seq 1 60); do
+            if docker exec bintrail-test-postgres pg_isready -h 127.0.0.1 -U postgres -d pgtest --quiet 2>/dev/null; then
+              echo "PostgreSQL source is ready."; exit 0
+            fi
+            sleep 2
+          done
+          echo "PostgreSQL did not become ready in time" >&2
+          docker logs bintrail-test-postgres >&2 || true
+          exit 1
+
+      - name: PostgreSQL source-against-copy comparison
+        if: env.RUN == 'true'
+        run: |
+          set -o pipefail
+          go test -tags=integration -race -p 1 -count=1 -v -timeout 30m ./internal/pgcompare/ 2>&1 | tee /tmp/pgcompare-it.out
+          grep -q -- '--- PASS: TestIntegrationPGCompare' /tmp/pgcompare-it.out \
+            || { echo "FATAL: the PostgreSQL source-against-copy comparison did not run — false-green tripwire" >&2; exit 1; }
 
   integration-postgres-extensions:
     # Extension-type round-trip coverage (#1210): PostGIS geometry/geography
