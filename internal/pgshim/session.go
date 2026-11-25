@@ -99,6 +99,10 @@ type session struct {
 	// source's plan found it expensive, whatever the screen says of how the
 	// copy answers it (heavy.go).
 	heavy bool
+	// fastLane says the statement being answered on the copy was found by
+	// the source's plan to read one table and join nothing (fastlane.go);
+	// set for that statement alone, and read by runOptions.
+	fastLane bool
 	// catalogBusy is the busy reason the copy's list of columns could not
 	// be read for at its last read (catalog), "" when it was read or failed
 	// otherwise.
@@ -225,8 +229,9 @@ func (s *session) handleSimpleQuery(qstr string) error {
 	started := time.Now()
 	var d routeDecision
 	screenBusy := ""
-	s.heavy = false
-	defer func() { s.heavy = false }()
+	s.heavy, s.fastLane = false, false
+	defer func() { s.heavy, s.fastLane = false, false }()
+	oneTable := false
 	if s.abortedRefusal(qstr) == nil {
 		d = s.route(s.classify(qstr), qstr)
 	}
@@ -239,7 +244,7 @@ func (s *session) handleSimpleQuery(qstr string) error {
 		// The screen lets the copy answer it: the source's plan says
 		// whether the copy is worth it (route_cost.go).
 		var stop *pgErr
-		if d, stop = s.routeByCostRemembered(qstr); stop != nil {
+		if d, oneTable, stop = s.routeByCostRemembered(qstr); stop != nil {
 			s.fail(stop)
 			s.routeNote(qstr, d, time.Since(started), true)
 			return s.readyFlush()
@@ -275,7 +280,11 @@ func (s *session) handleSimpleQuery(qstr string) error {
 		return s.readyFlush()
 	}
 	s.fallback, s.busyRefused = "", ""
+	// Only now, for the statement the copy runs: what the screen read of
+	// the copy's columns on the way here was not its run.
+	s.fastLane = oneTable && d.side == RouteCopy
 	cols, types, rows, tag, perr := s.run(qstr)
+	s.fastLane = false
 	if perr != nil {
 		if why := s.takeBusyRefused(); why != "" && d.side == RouteCopy {
 			// The copy was busy (#3109, route.go): refused, not sent to the

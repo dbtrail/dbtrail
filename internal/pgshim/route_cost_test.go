@@ -571,6 +571,9 @@ type costLogin struct {
 	// the snapshot. needTails records what each statement asked.
 	tailsPending atomic.Bool
 	needTails    []bool
+	// fastLane records RunOptions.FastLane of each statement the copy was
+	// given (fastlane.go).
+	fastLane []bool
 	// keep, when set, is the port's pool of connections kept idle between
 	// statements (Forward.Park).
 	keep *keptSources
@@ -630,6 +633,7 @@ func (k *keptSources) parked() int {
 func (l *costLogin) run(_ context.Context, st string, opts RunOptions) (sqlsandbox.Result, error) {
 	l.mu.Lock()
 	l.needTails = append(l.needTails, opts.NeedTails)
+	l.fastLane = append(l.fastLane, opts.FastLane)
 	l.mu.Unlock()
 	if opts.NeedTails && l.tailsPending.Load() {
 		return sqlsandbox.Result{}, &sqlsandbox.MayHaveChangedError{Reason: "fresh mode: the newest captured changes of public.t are not ready yet"}
