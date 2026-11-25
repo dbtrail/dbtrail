@@ -204,6 +204,12 @@ type tailEntry struct {
 	// goes on only over that copy (a prune drops keys an older file still
 	// carries, reconstruct.Tail.WriteDelta).
 	fileCut string
+	// segHigh is, for a PostgreSQL tail only, the highest position and the
+	// rows of each file of segs (pg_tail_chain.go); nil for any other.
+	segHigh map[string]pgSegment
+	// pgPruned is, for a PostgreSQL tail, how many leading files of segs are
+	// from before its last prune: no merge takes them in.
+	pgPruned int
 	// old are the earlier versions, kept while a statement may still read
 	// them.
 	old []tailOldFile
@@ -864,6 +870,10 @@ func (k *tailKeeper) pruneTo(e *tailEntry, t views.BaselineTable, cut string) bo
 	if !ok {
 		return false
 	}
+	// A PostgreSQL source only (pg_tail_chain.go); for any other, no step.
+	if k.pgPruneKeepingChain(e, t, cut, to) {
+		return true
+	}
 	n, err := e.tail.PruneThrough(to.anchor, to.lastEventID)
 	if err != nil {
 		slog.Warn("Engine Routing: a table's tail could not be pruned to its newer snapshot; it is built again", "table", t.Schema+"."+t.Table, "error", err)
@@ -1141,6 +1151,10 @@ func (k *tailKeeper) write(t views.BaselineTable, e *tailEntry) error {
 	}
 	k.written++
 	path := filepath.Join(k.dir, fmt.Sprintf("%d-%s.%s.parquet", k.written, url.PathEscape(t.Schema), url.PathEscape(t.Table)))
+	// A PostgreSQL tail only (pg_tail_chain.go); for any other, no step.
+	if merged, err := k.pgMergeNewest(e, path); merged {
+		return err
+	}
 	if !whole {
 		n, err := e.tail.WriteDelta(path)
 		if err != nil {
@@ -1151,6 +1165,7 @@ func (k *tailKeeper) write(t views.BaselineTable, e *tailEntry) error {
 		e.segs = append(slices.Clip(e.segs), path)
 		e.segRows += n
 		e.dirty = false
+		k.pgNoteSegment(e, path, n)
 		return nil
 	}
 	n, err := e.tail.WriteFile(path)
@@ -1160,6 +1175,7 @@ func (k *tailKeeper) write(t views.BaselineTable, e *tailEntry) error {
 	k.rowsWritten += n
 	k.retire(e)
 	e.segs, e.segRows, e.dirty, e.fileCut = []string{path}, n, false, e.cut
+	k.pgNoteSegment(e, path, n)
 	return nil
 }
 
