@@ -207,13 +207,13 @@ func rewriteRounds(q string, full bool) (string, bool) {
 		case "floor":
 			call = floorCall
 		case "extract":
-			call = epochCall
+			call = extractCall
 		case "to_timestamp":
 			call = toTimestampCall
 		default:
 			continue
 		}
-		if !full && toks[i].text != "round" && toks[i].text != "avg" {
+		if !full && toks[i].text != "round" && toks[i].text != "avg" && toks[i].text != "extract" {
 			continue
 		}
 		end := closingParen(toks, i+1)
@@ -529,6 +529,32 @@ func epochCall(q string, toks []rtToken, spans [][2]int, from, to int, full bool
 	}
 	x, _ := rewriteRounds(q[spans[from+2][0]:spans[to-1][1]], full)
 	return pgEpochMacro + "(" + x + ")", true
+}
+
+// extractWholeFields are the fields extract() gives as whole numbers.
+// PostgreSQL (14 and later) types extract() numeric; the copy's extract of
+// these is a bigint, so a client reading the type, or a binary result, got
+// int8 where PostgreSQL announces numeric (Q8 of CH-benCHmark: extract(YEAR
+// FROM o_entry_d)). Seconds and smaller have fractions and are left alone.
+var extractWholeFields = map[string]bool{
+	"year": true, "month": true, "day": true, "hour": true, "minute": true, "quarter": true, "week": true,
+	"dow": true, "isodow": true, "doy": true, "isoyear": true, "decade": true, "century": true, "millennium": true,
+}
+
+// extractCall is extract(epoch from x) as the epoch macro on a connection
+// that reaches its source, and extract(<whole field> from x) cast to the
+// numeric PostgreSQL announces, on any connection.
+func extractCall(q string, toks []rtToken, spans [][2]int, from, to int, full bool) (string, bool) {
+	if full {
+		if repl, ok := epochCall(q, toks, spans, from, to, full); ok {
+			return repl, true
+		}
+	}
+	if to-from < 3 || toks[from].kind != rtWord || !extractWholeFields[toks[from].text] || toks[from+1].kind != rtWord || toks[from+1].text != "from" {
+		return "", false
+	}
+	x, _ := rewriteRounds(q[spans[from+2][0]:spans[to-1][1]], full)
+	return "CAST(extract(" + toks[from].text + " FROM " + x + ") AS DECIMAL(38,0))", true
 }
 
 // toTimestampCall is the macro call for to_timestamp(<x>) of one argument

@@ -109,6 +109,11 @@ func TestRewriteForCopy_rounds(t *testing.T) {
 		{"SELECT to_timestamp(FLOOR(EXTRACT(EPOCH FROM o.o_entry_d) / 600) * 600) AS period_start",
 			"SELECT _bintrail_pg_to_timestamp(_bintrail_pg_floor_epoch(o.o_entry_d, 600) * 600) AS period_start"},
 		{"SELECT extract(epoch from t)", "SELECT _bintrail_pg_epoch(t)"},
+		// A whole field is PostgreSQL's numeric, not the copy's bigint (Q8).
+		{"SELECT extract(YEAR FROM o_entry_d) AS l_year", "SELECT CAST(extract(year FROM o_entry_d) AS DECIMAL(38,0)) AS l_year"},
+		{"SELECT extract(month from max(t))", "SELECT CAST(extract(month FROM max(t)) AS DECIMAL(38,0))"},
+		// Seconds have fractions: left as written.
+		{"SELECT extract(second from t)", "SELECT extract(second from t)"},
 		// floor(extract(epoch from x) / N), N whole seconds: from the
 		// timestamp's microseconds. N is written as the copy reads it.
 		{"SELECT floor(extract(epoch from t) / 1)", "SELECT _bintrail_pg_floor_epoch(t, 1)"},
