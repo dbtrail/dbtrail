@@ -29,6 +29,11 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Every module with three tries, and a complete cache if this job saves
+      # it: scripts/go-mod-download.sh.
+      - name: Download Go modules
+        run: bash scripts/go-mod-download.sh
+
       - name: Docs links resolve on the site
         env:
           BINTRAIL_CHECK_DOCS_LINKS: "1"

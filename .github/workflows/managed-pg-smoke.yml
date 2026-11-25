@@ -67,6 +67,11 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Every module with three tries, and a complete cache if this job saves
+      # it: scripts/go-mod-download.sh.
+      - name: Download Go modules
+        run: bash scripts/go-mod-download.sh
+
       - name: Build bintrail-pg (CGO)
         run: go build -o ./bintrail-pg ./cmd/bintrail-pg
 
