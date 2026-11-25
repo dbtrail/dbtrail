@@ -230,8 +230,10 @@ func (k *tailKeeper) lockUnlessUpdating(ctx context.Context) bool {
 		if k.mu.TryLock() {
 			return true
 		}
-		// Held by no update (a build installing, the directory checked):
-		// briefly, so the try is made again.
+		// Held and no update said to run: mostly briefly (a build
+		// installing, the directory checked), so the try is made again. It
+		// can also be an update whose running mark a later one, finished
+		// first, cleared; the try then ends with ctx, never past d.
 		if tick == nil {
 			tick = time.NewTicker(5 * time.Millisecond)
 			defer tick.Stop()
