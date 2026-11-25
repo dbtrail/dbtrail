@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.142.0] - 2026-11-25
+
+- **PostgreSQL port: a `char(n)` column is answered by the copy where its padding cannot change the answer** (#3276). The copy holds a `char(n)` without its trailing blanks, so every statement that named one went to the source. Now the copy answers it when the column is shown, grouped, counted, sorted, compared with a plain string with no trailing blank, in `IN` of such strings, in `LIKE 'x%'`, in `IS NULL`, or cut with `substr`; every other use (a string with a trailing blank, a parameter, `length`, `||`, a cast, the column renamed or its row read whole) stays with the source. Sorting by such a column follows the copy's order of text, as for any text column.
+- **PostgreSQL port: `extract` of a whole field (year, month, day and the like) is typed numeric on the copy, as PostgreSQL types it** (#3276). The copy announced bigint, so a client that reads the type or a binary result saw another type than PostgreSQL's.
+- **PostgreSQL port: a WITH's column list is read as PostgreSQL reads it** (#3262). `WITH revenue0 (supplier_no, total_revenue) AS (...)` was taken for a call of a function, so every statement with a WITH column list went to the source, CH-benCHmark's Q15 among them. The copy now answers it, reading each name as the item at its position in the WITH's select list. A list over a `*`, one that names a name twice or a column of a table, and one over a `char(n)`, another column the copy does not hold as PostgreSQL does, or a column that is not a number still go to the source.
+- **PostgreSQL port: a name given inside a table in FROM or a WITH is read by the copy in the WHERE around it** (#3262). The port sent to the source every statement whose WHERE named an alias of any select list, so CH-benCHmark's Q2, which filters on `m_i_id` and `m_s_quantity` of its table `m`, ran on the source. Now only a name read by the same statement that gives it, by a subquery of it or by a statement beside it goes to the source, where PostgreSQL refuses it. A name given to a `char(n)`, to another column the copy does not hold as PostgreSQL does, or to anything not known to be a number (a date, a timestamp, text, NULL, a cast) still goes to the source wherever it is read, as does every such name in a statement with UNION, INTERSECT or EXCEPT, and so does a name a table of the same statement also has as a column. `WHERE id IN (SELECT ...) AND q > 2` is now checked after the subquery too.
+
 ## [0.141.1] - 2026-11-25
 
 v0.141.0 was tagged but never built or published; this release carries its changes, listed under 0.141.0 below.
