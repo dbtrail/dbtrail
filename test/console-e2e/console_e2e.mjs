@@ -3128,8 +3128,10 @@ try {
       const det = page.locator(".bk-detail:not([hidden])").first();
       try { await det.screenshot({ path: `${ART}/snapshot-facts-${width}.png` }); } catch (_) {}
     }
-    // "wait", for the reason written at the capabilities route further down.
-    await page.unrouteAll({ behavior: "wait" });
+    // "ignoreErrors", for the reason written at the capabilities route
+    // further down. The facts are measured above, so a request that goes
+    // through unmodified from here on changes nothing this checks.
+    await page.unrouteAll({ behavior: "ignoreErrors" });
     await page.setViewportSize({ width: 1300, height: 1000 });
     const lines = facts[1280].texts.join("\n");
     (/Reason:/.test(lines) && /Last real read of your database/.test(lines) && /Different points-in-time/.test(lines))
@@ -6782,10 +6784,18 @@ try {
     // so one request can still be inside route.fetch() here. Removing the
     // route then makes Playwright let that request through by itself, and the
     // handler's fulfill fails with "Route is already handled!" from a promise
-    // nobody awaits, which ends the whole run (#2374). "wait" lets a handler
-    // that already started finish before the route goes. It removes every
-    // route on the page; no other one is live at this point.
-    await page.unrouteAll({ behavior: "wait" });
+    // nobody awaits, which ends the whole run (#2374).
+    //
+    // "wait" is not enough when TWO requests are inside the handler (the
+    // Overview strip and the SQL re-ask both ask for the capabilities):
+    // the first one to finish sees the page with no routes left and drops
+    // the interception at once, without waiting for the second, whose
+    // fulfill then fails the same way. "ignoreErrors" makes Playwright
+    // swallow that failure and let the request through unmodified. That is
+    // safe here: hiddenCard is measured above, and the main page is not
+    // read again after the line below. It removes every route on the page;
+    // no other one is live at this point.
+    await page.unrouteAll({ behavior: "ignoreErrors" });
     await page.evaluate((keep) => { capsCache.sql = keep; navigate("overview"); }, keepSql);
     (hiddenCard.hidden && hiddenCard.others === 3)
       ? ok("sql: without the capability the card is not shown and the other three are")
