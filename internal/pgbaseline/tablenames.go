@@ -55,6 +55,8 @@ var snapshotControlFiles = map[string]bool{
 	"_ARCHIVE_CHECKED":             true, // internal/reconstruct, unexported
 	"_PRUNING":                     true, // reconstruct.PruneMarker; not imported here (read layer)
 	"_ARCHIVE_CHECKED.tmp":         true, // the same file while it is written
+	"_PG_RUN_CUT":                  true, // reconstruct.PGRunCutFile; not imported here (read layer)
+	"_PG_RUN_CUT.tmp":              true, // the same file while it is written
 	baseline.SnapshotViewsName:     true,
 }
 

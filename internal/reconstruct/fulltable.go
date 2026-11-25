@@ -1234,6 +1234,11 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 			slog.Warn("could not record how far each table was checked through the archives; the next refresh of this snapshot will read more archives",
 				"snapshot", cfg.snapshotDir, "error", err)
 		}
+		// PostgreSQL only (pgruncut.go); a MySQL run has no pgRun.
+		if err := cfg.pgRun.writeCut(cfg.snapshotDir); err != nil {
+			slog.Warn("could not record where this snapshot update ended; in fresh mode, the tails of the tables it carried forward are built again from the start",
+				"snapshot", cfg.snapshotDir, "error", err)
+		}
 		baseline.SignSnapshot(cfg.snapshotDir, cfg.WriterID)
 		carryViewsSkipped(ctx, cfg.snapshotDir, reports)
 		st, err := manifestWriter(cfg.snapshotDir, manifestPriorDirs(reports))

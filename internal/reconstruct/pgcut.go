@@ -201,6 +201,17 @@ type pgRunEnd struct {
 	// the run's tables start from (pgRunShapes). nil: every table reads its
 	// own, as a run with one table always did.
 	shapes *pgRunShapes
+	// reachID is the id of the newest event the index held when the run took
+	// every change through it (allIn with no change past at): every change
+	// the run holds has an id at or below it, so a reader whose cursor has
+	// passed it has every change the run's snapshot holds (#3084). 0 when the
+	// run does not end there: a change past at was found (the cursor passes
+	// the run's end by position once it reaches that change), or the newest
+	// transaction is left whole to the next fold.
+	reachID uint64
+	// held is the tables this run brought up to its end (pgruncut.go). nil
+	// for a run over an index with no change: it records no run cut.
+	held *pgRunHeld
 }
 
 // pgRunShapes is the stream's recorded shapes, kept for one run. Every table
@@ -279,10 +290,10 @@ const pgRunEndAttempts = 3
 func resolvePGRunEnd(ctx context.Context, db *sql.DB, at time.Time) (pgRunEnd, error) {
 	// First: see pgRunEnd.caughtUpAt. Not read again with the newest event:
 	// an earlier stamp says less, never more.
-	run := pgRunEnd{at: at, caughtUpAt: readPGCaughtUpAt(ctx, db)}
+	run := pgRunEnd{at: at, caughtUpAt: readPGCaughtUpAt(ctx, db), held: &pgRunHeld{}}
 	var cut *query.BinlogPos
+	var newestID uint64
 	for attempt := 1; ; attempt++ {
-		var newestID uint64
 		err := db.QueryRowContext(ctx, `SELECT end_pos, event_timestamp, event_id FROM binlog_events
 			WHERE binlog_file IS NOT NULL AND end_pos IS NOT NULL
 			ORDER BY event_id DESC LIMIT 1`).Scan(&run.newestEnd, &run.newestAt, &newestID)
@@ -339,6 +350,7 @@ func resolvePGRunEnd(ctx context.Context, db *sql.DB, at time.Time) (pgRunEnd, e
 	run.until = run.newestEnd - 1
 	if checkpoint.Valid && uint64(checkpoint.Int64) >= run.newestEnd {
 		run.until, run.allIn = run.newestEnd, true
+		run.reachID = newestID
 	}
 	return run, nil
 }
