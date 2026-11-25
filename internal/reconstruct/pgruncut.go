@@ -101,6 +101,7 @@ func (r *pgRunEnd) writeCut(snapshotDir string) error {
 	}
 	tmp := filepath.Join(snapshotDir, PGRunCutFile+".tmp")
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		os.Remove(tmp)
 		return err
 	}
 	if err := os.Rename(tmp, filepath.Join(snapshotDir, PGRunCutFile)); err != nil {

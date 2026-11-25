@@ -59,15 +59,17 @@ func (m *pgRunCutMemo) of(dir string, warn func(err error)) (reconstruct.PGRunCu
 	if ok {
 		return e.cut, e.ok
 	}
+	// A folder a run failed or is still writing says so: the record is
+	// written before _SUCCESS, and a run that fails after it (its manifest,
+	// say) leaves the folder incomplete with the record in it. Looked at
+	// before the record, and never kept: a run still writing may finish
+	// between the two, and "no record" kept for it would last.
+	if _, err := os.Stat(filepath.Join(dir, baseline.IncompleteMarker)); err == nil {
+		return reconstruct.PGRunCut{}, false
+	}
 	cut, found, err := reconstruct.ReadPGRunCut(dir)
 	if err != nil {
 		warn(err)
-		return reconstruct.PGRunCut{}, false
-	}
-	// A folder a run failed or is still writing says so: the record is
-	// written before _SUCCESS, and a run that fails after it (its manifest,
-	// say) leaves the folder incomplete with the record in it.
-	if _, err := os.Stat(filepath.Join(dir, baseline.IncompleteMarker)); err == nil {
 		return reconstruct.PGRunCut{}, false
 	}
 	m.mu.Lock()
@@ -114,7 +116,7 @@ func (x *pgTailSource) runCutFloor(t views.BaselineTable, c pgCut) tailFloor {
 		return f
 	}
 	run, ok := x.runCuts.of(dir, func(err error) {
-		x.s.copyFaults.warn(dir, "Engine Routing: a snapshot folder's record of where its update ended could not be read; its PostgreSQL tables' tails are built again at each update until it can",
+		x.s.copyFaults.warn(dir, "Engine Routing: a snapshot folder's record of where its update ended could not be read; its PostgreSQL tables' tails are built again at each update until a newer update publishes a readable one",
 			"dir", dir, "error", err)
 	})
 	if !ok || !run.At.Equal(dirAt) || !run.Holds(t.Schema, t.Table) {
