@@ -155,7 +155,7 @@ func (q *SQLOnCopy) CopyTablesStamped(ctx context.Context) ([]CopyTable, string,
 	}
 	out := make([]CopyTable, 0, len(in.Baselines))
 	for _, t := range in.Baselines {
-		out = append(out, CopyTable{Schema: t.Schema, Table: t.Table, Hidden: t.HiddenColumns, Relation: t.PGRelation, Trimmed: baseline.PGPaddedToTrim(t.PGRelation)})
+		out = append(out, CopyTable{Schema: t.Schema, Table: t.Table, Hidden: t.HiddenColumns, Relation: t.PGRelation, Trimmed: pgTrimmedOnCopy(t.PGRelation)})
 	}
 	stamp := pgCopyStamp(in)
 	q.s.pgStampOf(q.id).put(time.Now(), stamp)
@@ -249,4 +249,11 @@ func pgCopyStamp(in views.Input) string {
 		fmt.Fprintf(h, "%d:%s\n", len(r), r)
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// pgTrimmedOnCopy are the char(n) columns of rel the copy's view reads
+// without their padding (baseline.PGPaddedToTrim), the one call the console
+// makes for it.
+func pgTrimmedOnCopy(rel *baseline.PGRelation) map[string]bool {
+	return baseline.PGPaddedToTrim(rel)
 }
