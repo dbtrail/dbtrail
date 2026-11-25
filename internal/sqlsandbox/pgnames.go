@@ -313,7 +313,7 @@ func pgFunctionName(v map[string]any) (string, int, bool) {
 		name = "floor"
 	} else if name == "_bintrail_pg_avg" {
 		name = "avg"
-	} else if name == "_bintrail_pg_epoch" {
+	} else if name == "_bintrail_pg_epoch" || name == "_bintrail_pg_extract_whole" {
 		name = "extract"
 	} else if name == "_bintrail_pg_to_timestamp" {
 		name = "to_timestamp"

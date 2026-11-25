@@ -228,6 +228,9 @@ CREATE OR REPLACE TEMP MACRO _bintrail_pg_epoch(x) AS (
     THEN CAST(epoch_us(x) AS DECIMAL(38,0)) * CAST(0.000001 AS DECIMAL(7,6))
   ELSE error('the copy cannot take extract(epoch) of this as PostgreSQL does: it is not a timestamp') END
 );
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_extract_whole(x) AS (
+  CAST(x AS DECIMAL(38,0))
+);
 CREATE OR REPLACE TEMP MACRO _bintrail_pg_to_timestamp(x) AS (
   CASE WHEN NOT (typeof(x) LIKE 'DECIMAL(%,0)' OR typeof(x) IN ('TINYINT', 'SMALLINT', 'INTEGER', 'BIGINT', 'HUGEINT'))
     THEN error('the copy cannot take to_timestamp() of this as PostgreSQL does: it is not a whole number of seconds')

@@ -110,8 +110,8 @@ func TestRewriteForCopy_rounds(t *testing.T) {
 			"SELECT _bintrail_pg_to_timestamp(_bintrail_pg_floor_epoch(o.o_entry_d, 600) * 600) AS period_start"},
 		{"SELECT extract(epoch from t)", "SELECT _bintrail_pg_epoch(t)"},
 		// A whole field is PostgreSQL's numeric, not the copy's bigint (Q8).
-		{"SELECT extract(YEAR FROM o_entry_d) AS l_year", "SELECT CAST(extract(year FROM o_entry_d) AS DECIMAL(38,0)) AS l_year"},
-		{"SELECT extract(month from max(t))", "SELECT CAST(extract(month FROM max(t)) AS DECIMAL(38,0))"},
+		{"SELECT extract(YEAR FROM o_entry_d) AS l_year", "SELECT _bintrail_pg_extract_whole(extract(year FROM o_entry_d)) AS l_year"},
+		{"SELECT extract(month from max(t))", "SELECT _bintrail_pg_extract_whole(extract(month FROM max(t)))"},
 		// Seconds have fractions: left as written.
 		{"SELECT extract(second from t)", "SELECT extract(second from t)"},
 		// floor(extract(epoch from x) / N), N whole seconds: from the
@@ -129,7 +129,7 @@ func TestRewriteForCopy_rounds(t *testing.T) {
 		{"SELECT floor(extract(epoch from t) / n)", "SELECT _bintrail_pg_floor_div(_bintrail_pg_epoch(t), n)"},
 		{"SELECT floor(2 * extract(epoch from t) / 600)", "SELECT _bintrail_pg_floor_div(2 * _bintrail_pg_epoch(t), 600)"},
 		{"SELECT floor(extract(epoch from t) * 2 / 600)", "SELECT _bintrail_pg_floor_div(_bintrail_pg_epoch(t) * 2, 600)"},
-		{"SELECT floor(extract(hour from t) / 6)", "SELECT _bintrail_pg_floor_div(extract(hour from t), 6)"},
+		{"SELECT floor(extract(hour from t) / 6)", "SELECT _bintrail_pg_floor_div(_bintrail_pg_extract_whole(extract(hour FROM t)), 6)"},
 	} {
 		if got := RewriteForCopy(c.in); got != c.want {
 			t.Errorf("%q\n got %q\nwant %q", c.in, got, c.want)
@@ -190,7 +190,6 @@ func TestRewriteForCopy_leavesOtherShapes(t *testing.T) {
 		"SELECT floor()",
 		"SELECT floor(date_part('day', d) / 7.0)",
 		"SELECT pg_catalog.floor(a / b)",      // qualified
-		"SELECT extract(year from t)",         // the screen reads year, month and day as they are
 		"SELECT extract(epoch)",               // no FROM
 		"SELECT to_timestamp('2026', 'YYYY')", // another function, of text
 		"SELECT to_timestamp()",

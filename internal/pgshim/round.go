@@ -151,6 +151,7 @@ const (
 	pgFloorDiv         = "_bintrail_pg_floor_div"
 	pgFloorEpoch       = "_bintrail_pg_floor_epoch"
 	pgEpochMacro       = "_bintrail_pg_epoch"
+	pgExtractWhole     = "_bintrail_pg_extract_whole"
 	pgToTimestampMacro = "_bintrail_pg_to_timestamp"
 	pgPack             = "_bintrail_pg_pack"
 	pgPackN            = "_bintrail_pg_packn"
@@ -554,7 +555,7 @@ func extractCall(q string, toks []rtToken, spans [][2]int, from, to int, full bo
 		return "", false
 	}
 	x, _ := rewriteRounds(q[spans[from+2][0]:spans[to-1][1]], full)
-	return "CAST(extract(" + toks[from].text + " FROM " + x + ") AS DECIMAL(38,0))", true
+	return pgExtractWhole + "(extract(" + toks[from].text + " FROM " + x + "))", true
 }
 
 // toTimestampCall is the macro call for to_timestamp(<x>) of one argument
