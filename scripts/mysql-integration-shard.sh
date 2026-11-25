@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Runs one shard of the MySQL integration tests (the `integration-shard` job in
-# .github/workflows/ci.yml and the `integration-mysql-shard` job in
-# release.yaml). Run from the repository root.
+# .github/workflows/ci.yml). Run from the repository root.
 #
 #   scripts/mysql-integration-shard.sh count            -> number of shards
 #   scripts/mysql-integration-shard.sh list <shard>     -> that shard's packages
@@ -69,7 +68,7 @@ shard_list() {
 # (about 440 s together): a shard runs one part of the package.
 #
 # Flashback stays in shard 2: two of its tests need the GTID source, which
-# ci.yml and release.yaml start only in shard 2 (with internal/streamrun).
+# ci.yml starts only in shard 2 (with internal/streamrun).
 #
 # Patterns that do not overlap, used both ways, cannot leave a test out or
 # run it twice as long as none has a "/" (with one, -test.run and -test.skip
@@ -102,7 +101,7 @@ check_shard() {
     '' | *[!0-9]*) die "shard must be a number from 1 to $SHARD_COUNT, got '$1'" ;;
   esac
   [ "$1" -ge 1 ] && [ "$1" -le "$SHARD_COUNT" ] \
-    || die "shard must be from 1 to $SHARD_COUNT, got $1 (the ci.yml and release.yaml matrices and SHARD_COUNT must agree)"
+    || die "shard must be from 1 to $SHARD_COUNT, got $1 (the ci.yml matrix and SHARD_COUNT must agree)"
 }
 
 # Import paths of every package with integration-tagged test files.

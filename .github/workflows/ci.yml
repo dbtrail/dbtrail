@@ -508,8 +508,7 @@ jobs:
       # An S3-compatible store for the #1453/#1454 leg: the SDK half uploads
       # through BINTRAIL_S3_ENDPOINT and the DuckDB half reads the object back
       # through the session's endpoint settings. The image, its pin and its
-      # mirror live in .github/actions/s3-test-store (shared with
-      # release.yaml). That action never fails: when the store cannot start
+      # mirror live in .github/actions/s3-test-store. That action never fails: when the store cannot start
       # (the image was withdrawn twice in September 2026, #1884), the S3 tests
       # skip, every other test still runs, and the "S3-compatible leg" step
       # at the end turns this job red.
@@ -683,8 +682,7 @@ jobs:
     # these legs are what prove it for 11.8 and 12.3. 12.3 runs with its
     # default file-based binlog: the opt-in binlog_storage_engine=innodb is
     # not supported (docs/mariadb.md). The minimum is also in
-    # internal/doctor/mariadb_version.go, and release.yaml must list the same
-    # versions (scripts/check-mariadb-matrix-lockstep.sh).
+    # internal/doctor/mariadb_version.go.
     strategy:
       fail-fast: false
       matrix:
@@ -1042,8 +1040,7 @@ jobs:
       # The image carries a self-signed certificate (Debian's "snakeoil"),
       # enough for a test that asks whether the connection is encrypted and
       # that verify-full refuses a certificate nobody signed. Only on the
-      # cells the console's tests run on. Not named "Start PostgreSQL source":
-      # scripts/check-postgres-source-lockstep.sh reads those steps.
+      # cells the console's tests run on.
       - name: Start a PostgreSQL that serves TLS (bintrail-test-postgres-tls, ${{ matrix.postgres }})
         if: env.RUN == 'true' && (matrix.postgres == '16' || matrix.postgres == '18')
         run: |
@@ -1482,26 +1479,21 @@ jobs:
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "$artifact"
 
-  # ci.yml and release.yaml start and check the S3-compatible test store
-  # through shared actions, and the image pin must match what the mirror
-  # workflow copies (#1884). This job fails when either drifts, and when the
-  # two files test different MariaDB versions. No `changes` gate on purpose:
-  # a workflow-only PR is exactly the one that can drift.
+  # ci.yml starts and checks the S3-compatible test store through shared
+  # actions, and the image pin must match what the mirror workflow copies
+  # (#1884). This job fails when either drifts. A release runs no tests of
+  # its own (it waits for main's CI on its commit), so there is no second
+  # copy of the integration jobs to keep in step. No `changes` gate on
+  # purpose: a workflow-only PR is exactly the one that can drift.
   workflow-lockstep:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: S3 test store lockstep (ci.yml, release.yaml, mirror)
+      - name: S3 test store lockstep (ci.yml, mirror)
         run: bash scripts/check-s3-store-lockstep.sh
       - name: The integration job reads each shard's newest attempt
         run: bash scripts/test-mysql-integration-collect.sh
-      - name: MariaDB matrix lockstep (ci.yml, release.yaml)
-        run: bash scripts/check-mariadb-matrix-lockstep.sh
-      - name: MySQL shards lockstep (ci.yml, release.yaml)
-        run: bash scripts/check-mysql-shard-lockstep.sh
-      - name: PostgreSQL source settings lockstep (ci.yml, release.yaml)
-        run: bash scripts/check-postgres-source-lockstep.sh
       - name: The check that no PostgreSQL console test is left out or skipped
         run: bash scripts/pg-console-tests.sh --self-test
-      - name: Test images come from the mirror, not Docker Hub (ci.yml, release.yaml, managed-pg-smoke.yml)
+      - name: Test images come from the mirror, not Docker Hub (ci.yml, managed-pg-smoke.yml)
         run: bash scripts/check-test-image-registry.sh
