@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Downloads every Go module the repository builds and tests with, before a CI
+# Downloads every Go module this platform builds and tests with, before a CI
 # job compiles anything:
 #
 #   scripts/go-mod-download.sh
@@ -33,11 +33,16 @@ for try in $(seq 1 "$TRIES"); do
   else
     proxy="$(go env GOPROXY)"
   fi
-  if GOPROXY="$proxy" go mod download; then
+  # `go list -deps -test` over both build-tag sets fetches exactly the modules
+  # this platform compiles. A bare `go mod download` would also fetch the
+  # DuckDB bindings of every other OS go.mod lists, large archives no Linux
+  # runner uses. go list exits non-zero when a download fails.
+  if GOPROXY="$proxy" go list -deps -test ./... >/dev/null \
+    && GOPROXY="$proxy" go list -deps -test -tags integration ./... >/dev/null; then
     echo "go modules: all downloaded (try $try of $TRIES)"
     exit 0
   fi
-  echo "go mod download failed (try $try of $TRIES, GOPROXY=$proxy)" >&2
+  echo "module download failed (try $try of $TRIES, GOPROXY=$proxy)" >&2
   [ "$try" -eq "$TRIES" ] || sleep "$((try * RETRY_WAIT))"
 done
 echo "::error::could not download the Go modules in $TRIES tries. The reason is above."
