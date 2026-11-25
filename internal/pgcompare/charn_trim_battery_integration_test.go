@@ -1276,6 +1276,16 @@ func cnSameBytes(want, got *pgconn.Result) string {
 // copy right after the ALTER depends on timing, so those are not listed and
 // are known by their group (#3251); nowhere else does cn_alt excuse anything.
 func cnKnown(f cnFailure) string {
+	// The copy sorts a trimmed char(n) as it sorts text, by bytes, which is
+	// the copy's answer to every ORDER BY of text by decision (#3247): the
+	// same rows in another order, or the rows a LIMIT picks after that sort.
+	// Counted and shown with the known ones, not failed.
+	if cnKind(f) == "order" {
+		return "text sorted by bytes (#3247: ORDER BY of text is the copy's)"
+	}
+	if f.group == "rows chosen by a sort" && cnKind(f) == "rows" {
+		return "the rows a LIMIT picks after text sorted by bytes (#3247)"
+	}
 	altered := f.group == "screen against view" && strings.Contains(f.key, "cn_alt")
 	if !cnBaseline[cnHash(f)] && !altered {
 		return ""
