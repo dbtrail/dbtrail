@@ -131,6 +131,8 @@ func TestReconstructTables_PGRunCut_truncateRefusesAndLeavesNone_3084(t *testing
 // An index with no change: nothing was folded, and no run cut is written.
 func TestReconstructTables_PGRunCut_emptyIndexLeavesNone_3084(t *testing.T) {
 	f := newPGFixture(t)
+	// Capture started and saved a position, and holds no change.
+	f.checkpoint(0x500)
 	root := t.TempDir()
 	f.baseline(root, f.at(10*time.Minute), 0x500, f.at(9*time.Minute).Format(time.RFC3339), [2]string{"1", "paid"})
 	at := f.at(20 * time.Minute)
