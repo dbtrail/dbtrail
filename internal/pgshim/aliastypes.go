@@ -30,10 +30,10 @@ func withAliasTypes(toks []rtToken, types map[string][]string, untyped bool) map
 	if types == nil || len(defs) == 0 {
 		return types
 	}
-	if columnList(toks) {
-		// Names given in a column list (AS b(n), WITH c(n) AS) are not
-		// among the definitions read here, so one of them may share a name
-		// with a definition that is: nothing defined is known then.
+	if columnListBesidesWith(toks) {
+		// Names given in a column list other than a WITH's (AS b(n)) are
+		// not among the definitions read here, so one of them may share a
+		// name with a definition that is: nothing defined is known then.
 		return mergeAliasTypes(types, defs, nil, untyped)
 	}
 	notText := map[string]bool{}
@@ -198,32 +198,147 @@ func aliasDefinitions(toks []rtToken) map[string][][]rtToken {
 	}
 	defs := map[string][][]rtToken{}
 	for i := range at {
-		end := i
-		if end > 0 && toks[end-1].kind == rtWord && toks[end-1].text == "as" {
-			end--
-		}
-		start, depth := end, 0
-	back:
-		for j := end - 1; j >= 0; j-- {
-			t := toks[j]
-			switch {
-			case t.kind == rtOp && (t.text == ")" || t.text == "]"):
-				depth++
-			case t.kind == rtOp && (t.text == "(" || t.text == "["):
-				if depth == 0 {
-					break back
-				}
-				depth--
-			case depth == 0 && t.kind == rtOp && t.text == ",":
-				break back
-			case depth == 0 && t.kind == rtWord && definitionStart[t.text]:
-				break back
-			}
-			start = j
-		}
-		defs[toks[i].text] = append(defs[toks[i].text], toks[start:end])
+		defs[toks[i].text] = append(defs[toks[i].text], aliasDefinitionAt(toks, i))
+	}
+	for name, exprs := range cteListDefinitions(toks) {
+		defs[name] = append(defs[name], exprs...)
 	}
 	return defs
+}
+
+// cteListDefinitions are the expressions the names of each WITH's column
+// list stand for: the items of its body's select list, in order (WITH w (a,
+// b) AS (SELECT x, sum(y) ...): a is x, b is sum(y)). A name with no item
+// read here (a * in the list, DISTINCT ON, more names than items) stands
+// for an empty expression, which is never known not to be text.
+func cteListDefinitions(toks []rtToken) map[string][][]rtToken {
+	defs := map[string][][]rtToken{}
+	for i := range toks {
+		open := cteColumnList(toks, i)
+		if open < 0 {
+			continue
+		}
+		items := selectItems(toks, open+1)
+		k := 0
+		for j := i + 2; isOpTok(toks, j-1, "(") || isOpTok(toks, j-1, ","); j += 2 {
+			n := toks[j].text
+			if toks[j].kind == rtQuoted {
+				n = strings.ToLower(n)
+			}
+			var e []rtToken
+			if k < len(items) {
+				e = items[k]
+			}
+			defs[n] = append(defs[n], e)
+			k++
+		}
+	}
+	return defs
+}
+
+// selectItems are the items of the select list of the statement whose
+// SELECT is at sel, each without the name it is given (AS n, or a bare n);
+// nil when the list is not read here.
+func selectItems(toks []rtToken, sel int) [][]rtToken {
+	if sel >= len(toks) || toks[sel].kind != rtWord || toks[sel].text != "select" {
+		return nil
+	}
+	j := sel + 1
+	if j < len(toks) && toks[j].kind == rtWord && toks[j].text == "all" {
+		j++
+	}
+	if j < len(toks) && toks[j].kind == rtWord && toks[j].text == "distinct" {
+		if isOpTok(toks, j+1, "(") || j+1 < len(toks) && toks[j+1].kind == rtWord && toks[j+1].text == "on" {
+			return nil
+		}
+		j++
+	}
+	var items [][]rtToken
+	start, depth := j, 0
+	for ; j <= len(toks); j++ {
+		end := j == len(toks)
+		if !end {
+			t := toks[j]
+			switch {
+			case t.kind == rtOp && (t.text == "(" || t.text == "["):
+				depth++
+				continue
+			case t.kind == rtOp && (t.text == ")" || t.text == "]"):
+				if depth > 0 {
+					depth--
+					continue
+				}
+				end = true
+			case depth == 0 && t.kind == rtWord && definitionStart[t.text] && t.text != "distinct" && t.text != "all":
+				end = true
+			case depth == 0 && t.kind == rtOp && t.text == ",":
+			default:
+				continue
+			}
+		}
+		item := toks[start:j]
+		if n := len(item); n >= 2 && item[n-2].kind == rtWord && item[n-2].text == "as" {
+			item = item[:n-2]
+		} else if n >= 2 && item[n-1].kind == rtWord && !aliasStop[item[n-1].text] &&
+			(item[n-2].kind == rtWord && !aliasStop[item[n-2].text] || item[n-2].kind == rtQuoted || isOpTok(item, n-2, ")")) {
+			item = item[:n-1]
+		}
+		if len(item) == 0 {
+			return nil
+		}
+		items = append(items, item)
+		if end {
+			return items
+		}
+		start = j + 1
+	}
+	return items
+}
+
+// columnListBesidesWith reports whether the statement names columns in a
+// list that is not a WITH's (FROM (...) m (a, b)), whose names this screen
+// does not read.
+func columnListBesidesWith(toks []rtToken) bool {
+	if !columnList(toks) {
+		return false
+	}
+	rest := make([]rtToken, 0, len(toks))
+	for i := 0; i < len(toks); i++ {
+		rest = append(rest, toks[i])
+		if cteColumnList(toks, i) >= 0 {
+			i = closingParen(toks, i+1)
+		}
+	}
+	return columnList(rest)
+}
+
+// aliasDefinitionAt is the expression the name given at i stands for: the
+// select item before `AS name`, or before a bare alias.
+func aliasDefinitionAt(toks []rtToken, i int) []rtToken {
+	end := i
+	if end > 0 && toks[end-1].kind == rtWord && toks[end-1].text == "as" {
+		end--
+	}
+	start, depth := end, 0
+back:
+	for j := end - 1; j >= 0; j-- {
+		t := toks[j]
+		switch {
+		case t.kind == rtOp && (t.text == ")" || t.text == "]"):
+			depth++
+		case t.kind == rtOp && (t.text == "(" || t.text == "["):
+			if depth == 0 {
+				break back
+			}
+			depth--
+		case depth == 0 && t.kind == rtOp && t.text == ",":
+			break back
+		case depth == 0 && t.kind == rtWord && definitionStart[t.text]:
+			break back
+		}
+		start = j
+	}
+	return toks[start:end]
 }
 
 // definitionStart are the words before a select item or a FROM item.

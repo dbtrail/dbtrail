@@ -1139,7 +1139,7 @@ func screenWith(in []rtToken, types map[string][]string, untyped, sortsLikeSourc
 	if why := keywordColumnList(in); why != "" {
 		return why
 	}
-	if why := aliasUse(in); why != "" {
+	if why := aliasUse(in, types, untyped); why != "" {
 		return why
 	}
 	if why := scaleMixRisk(in); why != "" {
@@ -1688,6 +1688,12 @@ func screenWith(in []rtToken, types map[string][]string, untyped, sortsLikeSourc
 				if prev.kind == rtOp && prev.text == "." {
 					return fmt.Sprintf("the function %s.%s", at(i-2).text, t.text)
 				}
+				// WITH name (a, b) AS (...): the names of the WITH's columns,
+				// which PostgreSQL and the copy both read (CH-benCHmark Q15).
+				// What its columns' types make of it is the typed screen's.
+				if cteColumnList(toks, i) >= 0 {
+					break
+				}
 				if t.text == "cast" {
 					a := args(i + 1)
 					if len(a) != 1 || len(a[0]) < 3 {
@@ -1714,7 +1720,7 @@ func screenWith(in []rtToken, types map[string][]string, untyped, sortsLikeSourc
 				a := args(i + 1)
 				switch t.text {
 				case "mod":
-					if why := modVeto(a, func(name string) []string { return types[name] }, untyped, columnList(toks)); why != "" {
+					if why := modVeto(a, func(name string) []string { return types[name] }, untyped, readsListedName(toks, a)); why != "" {
 						return why
 					}
 				case pgAscii:
@@ -2016,7 +2022,7 @@ func aliases(toks []rtToken) (names map[string]bool, at map[int]bool) {
 		if !isAlias && i+1 < len(toks) {
 			next := toks[i+1]
 			ends := next.kind == rtOp && next.text == "," || next.kind == rtWord && next.text == "from"
-			value := prev.kind == rtString || prev.kind == rtNumber || prev.kind == rtParam ||
+			value := prev.kind == rtString || prev.kind == rtNumber || prev.kind == rtParam || prev.kind == rtQuoted ||
 				prev.kind == rtOp && (prev.text == ")" || prev.text == "]") || prev.kind == rtWord && !aliasStop[prev.text]
 			isAlias = ends && value
 		}
@@ -2028,20 +2034,392 @@ func aliases(toks []rtToken) (names map[string]bool, at map[int]bool) {
 	return names, at
 }
 
+// queryScopes gives each token the statement it belongs to: 0 the whole
+// one, and a new number for each parenthesis that opens with SELECT, WITH or
+// VALUES (a table in FROM, a WITH's body, a subquery). A parenthesis that
+// opens with anything else (a call, a list, a parenthesis around a
+// subquery) belongs to the statement around it. parent is each statement's
+// enclosing one, -1 for the whole.
+func queryScopes(toks []rtToken) (scope []int, parent []int) {
+	scope = make([]int, len(toks))
+	parent = []int{-1}
+	var stack []int
+	cur := 0
+	for i, t := range toks {
+		switch {
+		case t.kind == rtOp && t.text == "(":
+			scope[i] = cur
+			stack = append(stack, cur)
+			if i+1 < len(toks) && toks[i+1].kind == rtWord {
+				switch toks[i+1].text {
+				case "select", "with", "values":
+					parent = append(parent, cur)
+					cur = len(parent) - 1
+				}
+			}
+			continue
+		case t.kind == rtOp && t.text == ")":
+			if len(stack) > 0 {
+				cur = stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+			}
+		}
+		scope[i] = cur
+	}
+	return scope, parent
+}
+
+// encloses reports whether statement outer is around statement inner, at
+// any depth, and not inner itself.
+func encloses(parent []int, outer, inner int) bool {
+	for p := parent[inner]; p >= 0; p = parent[p] {
+		if p == outer {
+			return true
+		}
+	}
+	return false
+}
+
+// heldOtherwise reports whether a column named n (lowercased) is one the
+// copy does not hold as PostgreSQL does, for the screen's types: a char(n)
+// the view trims, a padded one, one the copy holds as text and the source
+// as something else, one of a type of the user's, or a table's name that
+// stands for such columns.
+func heldOtherwise(types map[string][]string, n string) bool {
+	if trimmedName(types, n) {
+		return true
+	}
+	for _, t := range types[n] {
+		if paddedType(t) {
+			return true
+		}
+	}
+	for _, k := range []string{onlyCopyTextKey + n, userTypeColKey + n, relKey + n, userTypeRelKey + n} {
+		if _, ok := types[k]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// definitionHides reports whether an expression a name stands for may hide
+// a column from the rules that know it. It is let through only when it is
+// known to be a number: every word in it a column whose every type is a
+// number, a table's name before a dot, or a function or keyword that keeps
+// numbers numbers (count, sum, min, mod, OVER, ...), and no string, no
+// parameter, no || and no cast. Anything else hides: a column the copy does
+// not hold as PostgreSQL does (heldOtherwise), a date, a timestamp, text,
+// NULL, a typed string (timestamp '...'), another name that hides one.
+func definitionHides(e []rtToken, types map[string][]string, hidden map[string]bool) bool {
+	for i, d := range e {
+		switch d.kind {
+		case rtNumber:
+			continue
+		case rtOp:
+			if d.text == "||" || d.text == "::" {
+				return true
+			}
+			continue
+		case rtWord, rtQuoted:
+		default:
+			return true
+		}
+		n := d.text
+		if d.kind == rtQuoted {
+			n = strings.ToLower(n)
+		}
+		if heldOtherwise(types, n) || hidden[n] {
+			return true
+		}
+		if isOpTok(e, i+1, ".") {
+			continue
+		}
+		if ts, column := types[n]; column {
+			if len(ts) == 0 {
+				return true
+			}
+			for _, t := range ts {
+				if !typeIsInteger(t) && !typeIsFloat(t) && !strings.HasPrefix(t, "DECIMAL") {
+					return true
+				}
+			}
+			continue
+		}
+		if d.kind == rtWord && (neverText[n] || asTheirArguments[n] != 0 || numberKeepers[n]) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// numberKeepers are the words besides neverText and asTheirArguments a
+// number's expression may hold and stay a number.
+var numberKeepers = map[string]bool{
+	"mod": true, "distinct": true, "all": true, "over": true, "partition": true, "by": true,
+	"order": true, "asc": true, "desc": true,
+}
+
+// setOperation reports whether the statement joins the rows of two
+// statements (UNION, INTERSECT, EXCEPT): the names of the first are the
+// columns', and the types may come from any of them.
+func setOperation(toks []rtToken) bool {
+	for _, t := range toks {
+		if t.kind == rtWord && (t.text == "union" || t.text == "intersect" || t.text == "except") {
+			return true
+		}
+	}
+	return false
+}
+
+// cteColumnList is, when the word at i names a WITH and a list of its
+// columns follows (WITH name (a, b) AS (...), or after a comma of the same
+// WITH), the index of the "(" that opens the WITH's body; -1 otherwise.
+func cteColumnList(toks []rtToken, i int) int {
+	word := func(j int, w string) bool {
+		return j >= 0 && j < len(toks) && toks[j].kind == rtWord && toks[j].text == w
+	}
+	if i < 1 || toks[i].kind != rtWord && toks[i].kind != rtQuoted || !isOpTok(toks, i+1, "(") {
+		return -1
+	}
+	if !word(i-1, "with") && !word(i-1, "recursive") && !(isOpTok(toks, i-1, ",") && afterWithBody(toks, i-2)) {
+		return -1
+	}
+	end := closingParen(toks, i+1)
+	if end < 0 || end == i+2 {
+		return -1
+	}
+	for j := i + 2; j < end; j++ {
+		if (j-i)%2 == 0 {
+			if toks[j].kind != rtWord && toks[j].kind != rtQuoted {
+				return -1
+			}
+		} else if !isOpTok(toks, j, ",") {
+			return -1
+		}
+	}
+	if !word(end+1, "as") {
+		return -1
+	}
+	open := end + 2
+	if word(open, "not") && word(open+1, "materialized") {
+		open += 2
+	} else if word(open, "materialized") {
+		open++
+	}
+	if !isOpTok(toks, open, "(") {
+		return -1
+	}
+	return open
+}
+
+// readsListedName reports whether the arguments a read a name whose type
+// this screen cannot know: one of a WITH's column list, or any name once the
+// statement holds a list that is not a WITH's (FROM (...) m (a, b)).
+func readsListedName(toks []rtToken, a [][]rtToken) bool {
+	if !columnList(toks) {
+		return false
+	}
+	others := columnListBesidesWith(toks)
+	listed := cteListDefinitions(toks)
+	for _, arg := range a {
+		for _, t := range arg {
+			if t.kind != rtWord && t.kind != rtQuoted {
+				continue
+			}
+			if _, ok := listed[strings.ToLower(t.text)]; ok || others {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// afterWithBody reports whether the ")" at close ends a WITH's body (AS (...),
+// AS MATERIALIZED (...)), so that a comma after it starts the next WITH and
+// not a FROM item (FROM t, f(x) AS (a int)).
+func afterWithBody(toks []rtToken, close int) bool {
+	if !isOpTok(toks, close, ")") {
+		return false
+	}
+	depth := 0
+	for j := close; j >= 0; j-- {
+		switch {
+		case isOpTok(toks, j, ")"):
+			depth++
+		case isOpTok(toks, j, "("):
+			depth--
+			if depth == 0 {
+				p := toks[max(j-1, 0)]
+				return j > 0 && p.kind == rtWord && (p.text == "as" || p.text == "materialized")
+			}
+		}
+	}
+	return false
+}
+
+// selectListReads reports whether the select list of the statement whose
+// SELECT is at sel names a column for which is reports true.
+func selectListReads(toks []rtToken, sel int, is func(string) bool) bool {
+	depth := 0
+	for j := sel + 1; j < len(toks); j++ {
+		t := toks[j]
+		switch {
+		case t.kind == rtOp && t.text == "(":
+			depth++
+		case t.kind == rtOp && t.text == ")":
+			if depth == 0 {
+				return false
+			}
+			depth--
+		case depth == 0 && t.kind == rtWord && (t.text == "from" || t.text == "union" || t.text == "intersect" || t.text == "except"):
+			return false
+		case t.kind == rtWord || t.kind == rtQuoted || depth == 0 && t.kind == rtOp && t.text == "*" && (isOpTok(toks, j-1, ",") || isOpTok(toks, j-1, ".") || j == sel+1 || toks[j-1].kind == rtWord && (toks[j-1].text == "distinct" || toks[j-1].text == "all")):
+			if is(strings.ToLower(t.text)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // aliasUse names an alias of the select list used in WHERE or HAVING, which
 // PostgreSQL refuses and the copy answers, or inside an expression of ORDER
 // BY (aliasInOrderKey). A name followed by a dot is a table's, and one after
 // a dot is a column of what it qualifies.
-func aliasUse(toks []rtToken) string {
+//
+// A name given inside a table in FROM or a WITH is a column of it to every
+// statement around it, whose WHERE reads it on PostgreSQL too (CH-benCHmark
+// Q2's m_i_id, Q15's supplier_no): that use is let through. Any other is
+// the source's: in the statement that gives the name, in a subquery of it,
+// or in a statement beside it. So is every use of a name given to an
+// expression that reads a column the copy does not hold as PostgreSQL does
+// (heldOtherwise): a char(n), trimmed or padded (#3219), a column the copy
+// holds as text, one of a type of the user's, any column that is not a
+// number. The name hides the column from the rules that know it, which would
+// let a comparison through.
+//
+// Without the columns' own types (untyped) every name is a number, and the
+// use is let through: that screen may not veto what the typed one lets
+// through (screenUntyped), and the typed one is asked of every statement
+// before the copy answers it (screenTyped), with a table read the source's
+// when the columns cannot be listed (catalogUnread).
+func aliasUse(toks []rtToken, types map[string][]string, untyped bool) string {
 	names, at := aliases(toks)
 	if why := aliasInOrderKey(toks, names); why != "" {
 		return why
 	}
-	if len(names) == 0 {
-		return ""
+	scope, parent := queryScopes(toks)
+	givenIn := map[string][]int{}
+	for i := range at {
+		givenIn[toks[i].text] = append(givenIn[toks[i].text], scope[i])
 	}
-	clause := ""
+	// The names of a WITH's column list are given by its body. One whose body
+	// selects a column the copy does not hold as PostgreSQL does is the
+	// source's, wherever its names are read: they hide the column.
 	for i, t := range toks {
+		body := cteColumnList(toks, i)
+		if body < 0 || t.kind != rtWord && t.kind != rtQuoted {
+			continue
+		}
+		// A * in the body stands for columns the list names by position, which
+		// this screen does not count; a name given twice is read otherwise.
+		if selectListReads(toks, body+1, func(n string) bool { return n == "*" }) {
+			return "the column list of the WITH " + t.text + ", over a select list with a *"
+		}
+		seen := map[string]bool{}
+		for j := i + 2; isOpTok(toks, j-1, "(") || isOpTok(toks, j-1, ","); j += 2 {
+			n := strings.ToLower(toks[j].text)
+			if seen[n] {
+				return "the column list of the WITH " + t.text + ", which names " + n + " twice"
+			}
+			seen[n] = true
+		}
+		if !untyped && selectListReads(toks, body+1, func(n string) bool { return heldOtherwise(types, n) }) {
+			return "the column list of the WITH " + t.text + ", over a column the copy does not hold as PostgreSQL does"
+		}
+		for j := i + 2; isOpTok(toks, j-1, "(") || isOpTok(toks, j-1, ","); j += 2 {
+			n := toks[j].text
+			if toks[j].kind == rtQuoted {
+				n = strings.ToLower(n)
+			}
+			// A name that is also a column's: every rule of a type would read
+			// the column's (WITH c(qty) AS (SELECT amount ...) SELECT qty / 2).
+			if _, column := types[n]; column && !untyped {
+				return "the column list of the WITH " + t.text + " names " + n + ", a column of a table too"
+			}
+			names[n] = true
+			at[j] = true
+			givenIn[n] = append(givenIn[n], scope[body+1])
+		}
+	}
+	// A column of a statement inside: every statement that gives the name
+	// is inside the one that reads it.
+	// A name stands for a column the copy does not hold as PostgreSQL does
+	// when its expression reads one, or reads a name that does (SELECT y AS
+	// z FROM (SELECT c AS y ...)).
+	//
+	// So does a name whose expression reads a column that is not a number:
+	// the rules of a comparison read the column's type (a timestamp against
+	// a string with a time zone, a loose date, text against a number), and
+	// the name has none of it, so they would let the comparison through.
+	// An expression this cannot read hides as much.
+	hiddenBehind := map[string]bool{}
+	defs := aliasDefinitions(toks)
+	if defs == nil {
+		// No AS anywhere: aliasDefinitions reads nothing, not even the
+		// names of a WITH's column list.
+		defs = cteListDefinitions(toks)
+	}
+	for changed := true; changed; {
+		changed = false
+		for name, exprs := range defs {
+			if hiddenBehind[name] {
+				continue
+			}
+			for _, e := range exprs {
+				if len(e) == 0 || definitionHides(e, types, hiddenBehind) {
+					hiddenBehind[name] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	sets := setOperation(toks)
+	columnOfInner := func(name string, readIn int) bool {
+		if hiddenBehind[name] || sets {
+			return false
+		}
+		// A column of a table of that name too: the rules read the
+		// column's type, not what the name stands for (SELECT * FROM t
+		// WHERE y = ... AND id IN (SELECT k AS y FROM a)).
+		if _, column := types[name]; column && !untyped {
+			return false
+		}
+		for _, s := range givenIn[name] {
+			if !encloses(parent, readIn, s) {
+				return false
+			}
+		}
+		return true
+	}
+	// A parenthesis keeps the clause it opens in (WHERE mod(y, 2)), and the
+	// clause comes back after it (WHERE id IN (SELECT ...) AND y = 1).
+	clause := ""
+	var clauses []string
+	for i, t := range toks {
+		if t.kind == rtOp && t.text == "(" {
+			clauses = append(clauses, clause)
+			continue
+		}
+		if t.kind == rtOp && t.text == ")" {
+			if len(clauses) > 0 {
+				clause = clauses[len(clauses)-1]
+				clauses = clauses[:len(clauses)-1]
+			}
+			continue
+		}
 		if t.kind != rtWord {
 			continue
 		}
@@ -2055,7 +2433,7 @@ func aliasUse(toks []rtToken) string {
 		}
 		// A name after a dot is a column of a table, a WITH or a subquery
 		// (r.rnk), which WHERE reads on PostgreSQL too.
-		if clause != "" && names[t.text] && !at[i] && !(i+1 < len(toks) && toks[i+1].kind == rtOp && toks[i+1].text == ".") && !isOpTok(toks, i-1, ".") {
+		if clause != "" && names[t.text] && !at[i] && !(i+1 < len(toks) && toks[i+1].kind == rtOp && toks[i+1].text == ".") && !isOpTok(toks, i-1, ".") && !columnOfInner(t.text, scope[i]) {
 			return fmt.Sprintf("the name %s, given in the select list, used in %s", t.text, strings.ToUpper(clause))
 		}
 	}

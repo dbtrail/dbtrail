@@ -117,10 +117,14 @@ func TestCopyScreen_namesTheStatementDefines(t *testing.T) {
 		`SELECT max(o.note) FROM pgcmp_orders o`: "max() of text",
 		// A scalar subquery is what it selects, not what its WHERE adds.
 		`SELECT (SELECT name FROM pgcmp_customers c WHERE c.id = o.customer_id + 1) AS x FROM pgcmp_orders o ORDER BY x`: "text sorted",
-		// A name a column list gives (AS b(n)) is not read as a definition:
-		// nothing the statement defines is known then.
-		`WITH d AS (SELECT count(*) AS n FROM pgcmp_orders) SELECT b.n FROM d, (SELECT note FROM pgcmp_orders) AS b(n) ORDER BY b.n`:    "the function b()",
-		`WITH c(n) AS (SELECT note FROM pgcmp_orders), d AS (SELECT count(*) AS n FROM pgcmp_orders) SELECT c.n FROM c, d ORDER BY c.n`: "the function c()",
+		// A name a column list of a table in FROM gives (AS b(n)) is not
+		// read as a definition: nothing the statement defines is known then.
+		`WITH d AS (SELECT count(*) AS n FROM pgcmp_orders) SELECT b.n FROM d, (SELECT note FROM pgcmp_orders) AS b(n) ORDER BY b.n`: "the function b()",
+		// One a WITH's list gives stands for its body's item: c.n is note.
+		`WITH c(n) AS (SELECT note FROM pgcmp_orders), d AS (SELECT count(*) AS n FROM pgcmp_orders) SELECT c.n FROM c, d ORDER BY c.n`: "text sorted",
+		// A name of the list that is also a column's is the source's: every
+		// rule of a type would read the column's.
+		`WITH c(qty) AS (SELECT note FROM pgcmp_orders) SELECT qty FROM c`: "a column of a table too",
 		// Only comparisons read a qualified name as its column.
 		`SELECT id::pg_catalog.date FROM pgcmp_orders`: "a cast with ::",
 		// A name of three parts is its last.
