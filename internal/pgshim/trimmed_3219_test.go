@@ -187,6 +187,12 @@ func TestTrimmedUse_source(t *testing.T) {
 		"SELECT s.x FROM (SELECT v AS x FROM a) s, b WHERE b.c2 = s.x",
 		"SELECT y FROM (SELECT c AS y FROM a) s WHERE y = 'ab'",
 		"SELECT q FROM a AS s(q) WHERE q = 'ab'",
+		// The row of a table of FROM or a WITH that carries one, read whole:
+		// PostgreSQL writes a record with the padding, the copy a struct.
+		"SELECT id, s FROM (SELECT id, c FROM a) s ORDER BY id",
+		"SELECT id, s FROM (SELECT id, c FROM a) AS s ORDER BY id",
+		"SELECT count(DISTINCT s) FROM (SELECT c FROM a) s",
+		"WITH w AS (SELECT id, c FROM a) SELECT w FROM w",
 		// A trimmed char(n) renamed in a table of FROM or in a WITH, then
 		// read by the statement around it where the padding counts: the
 		// copy's 'ab' is not equal to 'ab  ', PostgreSQL's bpchar is. Any

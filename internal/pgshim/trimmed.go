@@ -2,6 +2,7 @@ package pgshim
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -277,6 +278,9 @@ func trimmedUse(toks []rtToken, types map[string][]string, mainOrder bool) strin
 						break
 					}
 					if trimmedSelectList(toks, depth, opens, k) {
+						if n := trimmedRowName(toks, opens(k)); n != "" && trimmedRowRead(toks, n) {
+							return what + ", carried by " + strconv.Quote(n) + ", whose row is read whole: PostgreSQL writes it as a record with the padding, the copy as a struct without it"
+						}
 						continue
 					}
 				case alias:
@@ -381,4 +385,67 @@ func (s *session) trimmedFor(text string) []string {
 	}
 	toks, _ := lexSQL(text)
 	return trimmedNames(toks, types)
+}
+
+// trimmedRowName is the name a table of FROM or a WITH gives the rows of the
+// SELECT whose list opens after the ( at open: the alias after its closing
+// parenthesis, or the WITH's name before AS. "" when it gives none (EXISTS,
+// the main statement), or one this does not read, which the source answers
+// through other rules.
+func trimmedRowName(toks []rtToken, open int) string {
+	if open <= 0 {
+		return ""
+	}
+	low := func(t rtToken) string {
+		if t.kind == rtWord || t.kind == rtQuoted {
+			return strings.ToLower(t.text)
+		}
+		return ""
+	}
+	if p := toks[open-1]; p.kind == rtWord && p.text == "as" {
+		// WITH w AS (...): the name before AS. WITH w(y) AS (...) gives a
+		// list, ")" there, and the WITH's other rules answer it.
+		if open >= 2 {
+			return low(toks[open-2])
+		}
+		return ""
+	}
+	end := closingParen(toks, open)
+	if end < 0 || end+1 >= len(toks) {
+		return ""
+	}
+	j := end + 1
+	if toks[j].kind == rtWord && toks[j].text == "as" {
+		j++
+	}
+	if j >= len(toks) || toks[j].kind == rtWord && aliasStop[toks[j].text] {
+		return ""
+	}
+	return low(toks[j])
+}
+
+// trimmedRowRead reports whether the statement writes n where a value
+// stands: not before a dot (s.c), not where it is given (after ")" or
+// AS), not as a WITH's name (before AS), and not as the table read (after
+// FROM or JOIN).
+func trimmedRowRead(toks []rtToken, n string) bool {
+	for i, t := range toks {
+		if !(t.kind == rtWord || t.kind == rtQuoted) || strings.ToLower(t.text) != n {
+			continue
+		}
+		if isOpTok(toks, i+1, ".") {
+			continue
+		}
+		if i > 0 {
+			p := toks[i-1]
+			if p.kind == rtOp && p.text == ")" || p.kind == rtWord && (p.text == "as" || p.text == "from" || p.text == "join" || p.text == "with" || p.text == "recursive") {
+				continue
+			}
+		}
+		if i+1 < len(toks) && toks[i+1].kind == rtWord && toks[i+1].text == "as" {
+			continue
+		}
+		return true
+	}
+	return false
 }
