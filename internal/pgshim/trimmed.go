@@ -436,13 +436,23 @@ func trimmedRowRead(toks []rtToken, n string) bool {
 		if isOpTok(toks, i+1, ".") {
 			continue
 		}
+		var p, pp rtToken
 		if i > 0 {
-			p := toks[i-1]
-			if p.kind == rtOp && p.text == ")" || p.kind == rtWord && (p.text == "as" || p.text == "from" || p.text == "join" || p.text == "with" || p.text == "recursive") {
-				continue
-			}
+			p = toks[i-1]
 		}
-		if i+1 < len(toks) && toks[i+1].kind == rtWord && toks[i+1].text == "as" {
+		if i > 1 {
+			pp = toks[i-2]
+		}
+		// Where it is given: after the ) of its body or AS, or as a WITH's
+		// name (after WITH, RECURSIVE or the comma between two WITHs, before
+		// AS). Where it is the table read: after the FROM of a query or a
+		// JOIN, not the FROM of IS [NOT] DISTINCT FROM.
+		given := p.kind == rtOp && p.text == ")" || p.kind == rtWord && p.text == "as"
+		withName := (p.kind == rtWord && (p.text == "with" || p.text == "recursive") || p.kind == rtOp && p.text == ",") &&
+			i+2 < len(toks) && toks[i+1].kind == rtWord && toks[i+1].text == "as" &&
+			(isOpTok(toks, i+2, "(") || toks[i+2].kind == rtWord && (toks[i+2].text == "materialized" || toks[i+2].text == "not"))
+		read := p.kind == rtWord && (p.text == "join" || p.text == "from" && !(pp.kind == rtWord && pp.text == "distinct"))
+		if given || withName || read {
 			continue
 		}
 		return true

@@ -1729,12 +1729,12 @@ func cnASCIICases() []cnCase {
 	return out
 }
 
-// cnCharCols are the columns the battery's own tables (cnTables) declare
-// char(n), lowercased.
+// cnCharCols are the columns the battery's own tables declare char(n)
+// (cnSeed, cnHammerSeed), lowercased.
 var cnCharCols = sync.OnceValue(func() map[string]bool {
 	out := map[string]bool{}
 	re := regexp.MustCompile(`(?i)\b([a-z_][a-z_0-9]*) (?:char|character|bpchar)\(\d+\)`)
-	for _, ddl := range cnTables() {
+	for _, ddl := range append(cnSeed(), cnHammerSeed()...) {
 		for _, m := range re.FindAllStringSubmatch(ddl, -1) {
 			out[strings.ToLower(m[1])] = true
 		}
