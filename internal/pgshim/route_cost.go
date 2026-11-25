@@ -447,6 +447,12 @@ func (s *session) routeByCostPlan(text string, generic bool) (d routeDecision, k
 			s.copyWant, s.copyWantAt = lsn, time.Now()
 		}
 	}
+	// The source's column statistics for the copy's join check
+	// (joinstats.go), when the server's are due: on this connection while it
+	// is open, so the check costs no connection of its own.
+	if s.up == up {
+		s.readJoinStats(up)
+	}
 	// Nothing of the client's lives on the source: its slot is given back
 	// now, not when the copy has answered, which can be minutes.
 	s.releaseIdleSource()

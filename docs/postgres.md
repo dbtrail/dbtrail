@@ -2237,6 +2237,32 @@ analytics reports, two cost 177 and 699 on PostgreSQL (a table of 2,000 rows,
 an index range) and stay there, and the other twelve cost 98,367 to
 13,351,258, several with sequential scans of 2.4 to 61 million rows.
 
+**A statement whose joins would not fit on the copy is not run there.** The
+copy's engine picks the order of a statement's joins with no statistics of
+its columns, and for some reports it picks one whose intermediate result is
+far larger than any of its tables: on the CH-benCHmark's Q5 it joined the
+stock table (20 million rows) with the filtered orders (240,000) on the
+warehouse alone, which has 200 values, about 24 billion rows, and ran out of
+memory after three and a half minutes, after which the source answered. In
+the order written, Q5 answers in 5.5 seconds. So, on a connection with a
+forwarding user, the copy reads its own plan of the statement before running
+it (in milliseconds) and estimates each join's output from the source's count
+of distinct values of the joined columns (`pg_stats.n_distinct`). A join
+estimated at more than 100 times its larger input (a cross product: also more
+than 10 billion rows) has the statement planned again in the order written;
+it runs in that order when that plan has no such join, and when it has one
+too, the copy does not run it at all and the source answers it at once
+(`join_too_big` in `/status`). The counts are read from the source on the
+connection already open to ask a statement's plan, once every 10 minutes for
+the server, not for each statement; without them (no forwarding user, the
+capture account, statistics the forwarding user cannot read, a table never
+analyzed) the copy runs every statement as before. What the check cannot
+read it does not count against a statement: a condition that is not one
+column equal to another, a column name two tables share, a join that returns
+at most the rows of one side. On the 22 CH-benCHmark reports it changes
+three: Q5 and Q8 run in the order written, and Q21, which no order fits, goes
+to the source.
+
 What this costs and where it can go wrong:
 
 - **One round trip to the source** for each statement the copy could answer,
@@ -2610,6 +2636,7 @@ The reasons, with the MySQL port's names where they mean the same:
 | source | `copy_columns_differ` | a column the copy writes otherwise (a `numeric` without precision) |
 | source | `copy_behind_source`, `copy_age_unknown` | the server's lag limit |
 | source | `table_not_captured` | a table whose capture lost or dropped changes since its snapshot was read (a table capture skips, a capture ledger that does not say which tables or cannot be read, a lost slot, a snapshot published over a known loss), in fresh and fast mode: the copy holds that table as of its snapshot only. Without a forwarding user, or on a server that hides tables, the copy answers it from that snapshot with a notice that says so |
+| source | `join_too_big` | the copy's plan of it has a join estimated far larger than its inputs (from the source's `n_distinct`), in the copy's own join order and in the order written: the copy did not run it |
 | refused | `read_only` | not a read |
 | refused | `copy_queue_full` | for the copy, whose workers were all taken and the line for one full: refused with `53000`, not sent to the source; run it again |
 | refused | `copy_wait_timeout` | for the copy, it waited for a worker as long as `--max-wait` lets it: refused with `53000`, not sent to the source; run it again |

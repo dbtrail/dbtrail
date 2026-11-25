@@ -196,6 +196,17 @@ type fakeSource struct {
 	emptyGate chan struct{}
 	// conns are the connections it serves now (dropConns).
 	conns map[net.Conn]bool
+	// ndvCell is its answer to the port's read of its column statistics
+	// (joinStatsSQL), an error when it starts with "error "; stats counts
+	// those reads.
+	ndvCell string
+	stats   int
+}
+
+func (f *fakeSource) statsRead() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stats
 }
 
 // sayToConns writes a FATAL to every connection it serves, without closing
@@ -394,6 +405,17 @@ func (f *fakeSource) serve(c net.Conn) {
 				be.Send(&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{{Name: []byte("case"), DataTypeOID: 25, DataTypeSize: -1, TypeModifier: -1}}})
 				be.Send(&pgproto3.DataRow{Values: [][]byte{f.proofCell(q)}})
 				be.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")})
+			case strings.Contains(q, "pg_catalog.pg_stats"):
+				f.mu.Lock()
+				f.stats++
+				f.mu.Unlock()
+				if code, ok := strings.CutPrefix(f.ndvCell, "error "); ok {
+					be.Send(&pgproto3.ErrorResponse{Severity: "ERROR", Code: code, Message: "refused by the fake source"})
+					break
+				}
+				be.Send(&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{{Name: []byte("ndv"), DataTypeOID: 25, DataTypeSize: -1, TypeModifier: -1}}})
+				be.Send(&pgproto3.DataRow{Values: [][]byte{[]byte(f.ndvCell)}})
+				be.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")})
 			case strings.Contains(q, "pg_current_wal_lsn()"):
 				f.mu.Lock()
 				f.positions++
@@ -583,6 +605,16 @@ type costLogin struct {
 	sides *CostSides
 	// notCaptured, when set, is Binding.NotCaptured.
 	notCaptured func(context.Context) ([]TableNotCaptured, error)
+	// joinStats, when set, is the server's Forward.JoinStats; joinNDV
+	// records RunOptions.JoinNDV of each statement the copy was given.
+	joinStats *JoinStats
+	joinNDV   []map[string]float64
+}
+
+func (l *costLogin) joinNDVs() []map[string]float64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]map[string]float64(nil), l.joinNDV...)
 }
 
 // keptSources is a port's pool of connections kept idle by their clients, as
@@ -634,6 +666,7 @@ func (l *costLogin) run(_ context.Context, st string, opts RunOptions) (sqlsandb
 	l.mu.Lock()
 	l.needTails = append(l.needTails, opts.NeedTails)
 	l.fastLane = append(l.fastLane, opts.FastLane)
+	l.joinNDV = append(l.joinNDV, opts.JoinNDV)
 	l.mu.Unlock()
 	if opts.NeedTails && l.tailsPending.Load() {
 		return sqlsandbox.Result{}, &sqlsandbox.MayHaveChangedError{Reason: "fresh mode: the newest captured changes of public.t are not ready yet"}
@@ -660,7 +693,7 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 		l.notes = append(l.notes, n)
 	}}
 	if l.src != nil {
-		b.Forward = &Forward{DSN: l.src.dsn(), Limit: 4, CaptureAccount: l.captureAccount, Cost: l.cost, Barred: l.barred, Sides: l.sides, Acquire: func(ctx context.Context) (func(), bool) {
+		b.Forward = &Forward{DSN: l.src.dsn(), Limit: 4, CaptureAccount: l.captureAccount, Cost: l.cost, Barred: l.barred, Sides: l.sides, JoinStats: l.joinStats, Acquire: func(ctx context.Context) (func(), bool) {
 			if l.refuse {
 				return nil, false
 			}

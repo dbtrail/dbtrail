@@ -41,7 +41,12 @@ import (
 // statistics or one whose name more than one table holds (the plan names
 // columns without their table), a join that never gives more rows than one
 // side (semi, anti, mark, single, as-of), a missing or zero estimate. Each
-// is taken as selective: the check only ever stops what it can show.
+// is taken as selective: the check only ever stops what it can show. In the
+// order written DuckDB estimates less: a bare table function or file read
+// gets 0 (its estimator is part of the optimizer turned off) while the
+// projection over it, which every view of the copy is, keeps its number, and
+// a cross product writes no estimate of its own, so a join over one is not
+// judged.
 //
 // The two bounds were set on the 22 CH-benCHmark reports (testdata): with
 // them the check flags exactly Q5, Q8 and Q21 in DuckDB's order; Q5 and Q8

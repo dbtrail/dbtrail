@@ -1,6 +1,7 @@
 package sqlsandbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -264,12 +265,18 @@ func TestPlanJoinDanger_unreadablePlan(t *testing.T) {
 	}
 }
 
+// explodingCross is a cross product of 1e5 x 1e6 rows whose two sides are
+// projections, as the copy's views are: DuckDB estimates a projection in the
+// order written too, where a bare table function's estimate is 0 (its
+// estimator is part of the join-order optimizer turned off).
+const explodingCross = "SELECT count(*) AS n FROM (SELECT range * 2 AS x FROM range(100000)) a, (SELECT range * 2 AS y FROM range(1000000)) b"
+
 // The check in the worker, through DuckDB's own EXPLAIN: a cross product
 // estimated past both bounds in either order is refused before it runs.
 func TestWorker_joinCheckRefusesWhatExplodesInBothOrders(t *testing.T) {
 	f := newCopyFixture(t)
 	res := runJob(wireJob{
-		CopyDirs: []string{f.archiveRoot}, SQL: "SELECT count(*) AS n FROM range(100000) a, range(1000000) b",
+		CopyDirs: []string{f.archiveRoot}, SQL: explodingCross,
 		Threads: 1, MemoryLimit: "256MB", MaxRows: 10, MaxResultBytes: 1 << 20, JoinNDV: map[string]float64{"range": 1},
 	}, nil, os.Stderr)
 	if res.Error == nil || res.Error.Kind != errJoinTooBig {
@@ -334,6 +341,11 @@ func TestWorker_joinCheckOrders(t *testing.T) {
 		if len(res.Rows) != 1 || res.Rows[0][0] != int64(10) {
 			t.Errorf("rows %v", res.Rows)
 		}
+		// The second plan was taken with the join order off: DuckDB then
+		// estimates the bare table functions at 0, so the two differ.
+		if bytes.Equal((*plans)[0], (*plans)[1]) {
+			t.Errorf("the plan in the order written is the planner's: %s", (*plans)[1])
+		}
 	})
 	t.Run("both orders flagged: refused, both named", func(t *testing.T) {
 		fakeJoinDanger(t, nil, "HASH_JOIN on a = b", "CROSS_PRODUCT of 1 x 2")
@@ -386,7 +398,7 @@ func TestWorker_joinCheckOrders(t *testing.T) {
 func TestRunner_joinTooBigIsTyped(t *testing.T) {
 	f := newCopyFixture(t)
 	r := newTestRunner(t, Limits{})
-	job := f.job("SELECT count(*) AS n FROM range(100000) a, range(1000000) b")
+	job := f.job(explodingCross)
 	job.Session.JoinNDV = map[string]float64{"range": 1}
 	_, err := r.Run(context.Background(), job)
 	var tooBig *JoinTooBigError
