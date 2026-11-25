@@ -42,22 +42,22 @@ func TestPGTailSource_runCutFloor_3084(t *testing.T) {
 	at := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
 	own := tailFloor{anchor: reconstruct.PGTailPos(0x500)}
 	type folder struct {
-		name    string
-		at      time.Time
-		noCut   bool   // no record
-		lsn     uint64 // the run's end plus one
-		reach   uint64
-		tables  []string
-		corrupt bool
+		name       string
+		at         time.Time
+		noCut      bool   // no record
+		lsn        uint64 // the run's end plus one
+		reach      uint64
+		tables     []string
+		corrupt    bool
 		incomplete bool
 	}
 	cases := []struct {
-		name   string
-		f      folder
-		table  string // default orders
-		md     baseline.DumpMetadata
-		link   bool // the table read through a symlink to the folder
-		want   tailFloor
+		name  string
+		f     folder
+		table string // default orders
+		md    baseline.DumpMetadata
+		link  bool // the table read through a symlink to the folder
+		want  tailFloor
 	}{
 		// The first update after this change is installed: its folder has
 		// no record, and the table's floor is its own, as before.
