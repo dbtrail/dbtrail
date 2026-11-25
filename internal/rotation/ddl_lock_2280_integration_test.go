@@ -379,24 +379,36 @@ func TestPerform_rowArrivingWhileTheDropWaitsStopsTheDrop(t *testing.T) {
 // Nothing to drop and the add finds the table busy: counted as deferred and
 // reported, so it cannot repeat unnoticed until rows land in p_future.
 func TestPerform_busyAddIsCountedAndReported(t *testing.T) {
-	db, dbName, _ := rotationTable(t)
 	shortDDLLock(t, 2)
-	end := holdRead(t, db, dbName)
 	opts := Options{AddFuture: 3, Format: "json"}
 
-	res, err := Perform(context.Background(), db, dbName, opts)
-	if err != nil {
-		t.Fatalf("Perform over a busy table: %v, want no error", err)
-	}
-	if res.Added != 0 || res.Deferred != 1 || res.AddSkipped != 3 || res.AddFutureTarget != 3 {
-		t.Errorf("busy cycle = %+v, want 0 added, 1 deferred, 3 skipped with target 3", res)
-	}
-	end()
-	res, err = Perform(context.Background(), db, dbName, opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Added != 3 || res.Deferred != 0 || res.AddSkipped != 0 {
-		t.Errorf("free cycle = %+v, want 3 added and nothing skipped", res)
+	// The table's partitions and Perform's future hours both come from the
+	// clock, read at different instants. Across an hour boundary the counts
+	// below are off by one hour's partition (seen on CI at 13:00:00), so a
+	// run that crossed one is run again, once, on a fresh table.
+	for attempt := 0; ; attempt++ {
+		hour := time.Now().UTC().Truncate(time.Hour)
+		db, dbName, _ := rotationTable(t)
+		end := holdRead(t, db, dbName)
+		busy, err := Perform(context.Background(), db, dbName, opts)
+		end()
+		if err != nil {
+			t.Fatalf("Perform over a busy table: %v, want no error", err)
+		}
+		free, err := Perform(context.Background(), db, dbName, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if attempt == 0 && !time.Now().UTC().Truncate(time.Hour).Equal(hour) {
+			t.Logf("the hour changed during the run; running it again")
+			continue
+		}
+		if busy.Added != 0 || busy.Deferred != 1 || busy.AddSkipped != 3 || busy.AddFutureTarget != 3 {
+			t.Errorf("busy cycle = %+v, want 0 added, 1 deferred, 3 skipped with target 3", busy)
+		}
+		if free.Added != 3 || free.Deferred != 0 || free.AddSkipped != 0 {
+			t.Errorf("free cycle = %+v, want 3 added and nothing skipped", free)
+		}
+		return
 	}
 }
