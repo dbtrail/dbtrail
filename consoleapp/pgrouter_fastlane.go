@@ -15,32 +15,36 @@ import (
 	"github.com/dbtrail/dbtrail/internal/stmtclock"
 )
 
-// The copy's fast lane on the PostgreSQL port. The copy runs --workers
-// statements at once, in one line, first come first served (sqlsandbox's
-// Runner, which the MySQL router shares and this does not change). With
-// reports of many seconds holding every worker, a short statement waited
-// behind them: a sum of one warehouse, a second alone, took 13 to 31 seconds
-// under 30 connections.
+// The copy's fast lane on the PostgreSQL port. The copy runs its statements
+// in one line, first come first served (sqlsandbox's Runner, which the MySQL
+// router shares and this does not change). With reports of many seconds
+// holding every worker, a short statement waited behind them: a sum of one
+// warehouse, a second alone, took 13 to 31 seconds under 30 connections.
 //
-// So one of the workers is kept for short statements: a statement whose plan
-// on the source reads one table and joins nothing (pgshim fastlane.go,
+// So the copy is given one worker more than --workers (pgCopySlots), and that
+// one is kept for short statements: a statement whose plan on the source
+// reads one table and joins nothing (pgshim fastlane.go,
 // RunOptions.FastLane). Every other statement for the copy, a report, a
-// statement with no plan, takes a place here first, and at most workers - 1
-// of them hold one at once: one worker is always left for short statements,
-// which take their worker from the runner directly, any free one. The
-// port's own probes (RunOptions.Probe) and the catalog's reads do not come
-// here either.
+// statement with no plan, takes a place here first, and at most --workers of
+// them (the runner's count less the one kept) hold one at once, as many as
+// ran at once before. Short statements take their worker from the runner
+// directly, any free one: the kept one, or one of --workers no report holds.
+// The port's own probes (RunOptions.Probe) and the catalog's reads do not
+// come here either.
 //
-// The cost, said where the router starts: the long statements run one fewer
-// at a time. With one worker there is nothing to keep, and every statement
-// takes its turn in the runner's line as before.
+// What the extra worker costs, said where the router starts: one statement
+// more at once, with its own --threads and --sql-memory (they are given per
+// statement, not shared among the workers), one more warm worker process
+// kept between statements, and each statement's share of the spill disk
+// (half the free disk, split between the statements that can run at once)
+// a little smaller.
 //
 // The wait here is bounded as the runner's is (--max-wait, its line's
 // length), and refused with the runner's own errors, so the port refuses it
 // with 53000 and does not send it to the source (#3109). A long statement
-// that got its place then takes a worker from the runner: at most workers -
-// 1 long statements hold one, so it waits there only behind short ones.
-// The two waits are each bounded by --max-wait.
+// that got its place then takes a worker from the runner: at most --workers
+// long statements hold one, so it waits there only behind short ones. The
+// two waits are each bounded by --max-wait.
 
 // pgCopyLanes is the place long statements take before the copy's runner.
 // A nil one keeps nothing: every statement goes to the runner directly.
@@ -67,8 +71,8 @@ type pgCopyLanes struct {
 // pgLaneRecheck is pgCopyLanes.recheck in the router.
 const pgLaneRecheck = 250 * time.Millisecond
 
-// newPGCopyLanes keeps a worker of r for short statements; nil for no
-// runner.
+// newPGCopyLanes keeps one of r's workers for short statements, r being
+// sized one over --workers (pgCopySlots); nil for no runner.
 func newPGCopyLanes(r *sqlsandbox.Runner) *pgCopyLanes {
 	if r == nil {
 		return nil
@@ -83,8 +87,10 @@ type pgLaneWaiter struct {
 	got     bool
 }
 
-// limitLocked is how many long statements may hold a place at once; below 1
-// there is no lane, and none waits.
+// limitLocked is how many long statements may hold a place at once: the
+// runner's workers less the one kept, which is --workers. Below 1 (a runner
+// of one worker, which the router never makes) there is no lane, and none
+// waits.
 func (l *pgCopyLanes) limitLocked() int { return l.workers() - 1 }
 
 // enter takes a place for a statement the copy is about to run, waiting for
@@ -273,11 +279,11 @@ func (c *pgConnLane) run(ctx context.Context, opts pgshim.RunOptions, f func(con
 // pgCopyLanesDoc is the lane's numbers in the router's status document
 // (copy_lanes).
 type pgCopyLanesDoc struct {
-	// KeptForShort is how many workers are kept for short statements now:
-	// 1, or 0 with one worker.
+	// KeptForShort is how many workers are kept for short statements, beyond
+	// --workers: 1.
 	KeptForShort int `json:"kept_for_short"`
-	// LongLimit is how many long statements run at once at most; 0 with
-	// one worker, where the lane keeps nothing and does not count.
+	// LongLimit is how many long statements run at once at most: --workers.
+	// The copy runs up to LongLimit + KeptForShort statements at once.
 	LongLimit int `json:"long_limit"`
 	// LongAdmitted are the long statements that hold a place now: running
 	// on the copy, or about to, waiting for a worker behind short

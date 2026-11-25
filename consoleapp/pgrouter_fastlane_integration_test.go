@@ -16,8 +16,9 @@ import (
 )
 
 // The copy's fast lane, against a real PostgreSQL and the router's real
-// pool: two workers, one kept for short statements. With a long report
-// holding the other, a sum of one table is answered by the copy at once,
+// pool: --workers 1, and the one more the router keeps for short
+// statements. With a long report holding the one worker long statements
+// have, a sum of one table is answered by the copy at once,
 // on both protocols, while a statement that joins waits its turn and is
 // refused as busy past --max-wait (53000, not sent to the source). Given
 // back, the joined one is answered again.
@@ -50,7 +51,7 @@ func TestIntegrationPGRouterFastLane(t *testing.T) {
 			e.RouteDSN = withAccount(t, e.SourceDSN, role, pass)
 		},
 		cost:    &pgshim.CostPolicy{ScanRows: 100},
-		workers: 2,
+		workers: 1,
 		maxWait: maxWait,
 	})
 	source := pgClient(t, ctx, env.sourceDSN, nil)
@@ -118,8 +119,8 @@ func TestIntegrationPGRouterFastLane(t *testing.T) {
 		d := env.routes.doc("").CopyLanes
 		return d != nil && d.LongAdmitted == 1 && env.runner.Running() >= 1
 	})
-	if d := env.routes.doc("").CopyLanes; d.KeptForShort != 1 || d.LongLimit != 1 {
-		t.Errorf("copy_lanes %+v, want one kept and one for long statements", d)
+	if d := env.routes.doc("").CopyLanes; d.KeptForShort != 1 || d.LongLimit != 1 || env.runner.MaxInFlight() != 2 {
+		t.Errorf("copy_lanes %+v and %d workers, want --workers 1 for long statements and one more kept", d, env.runner.MaxInFlight())
 	}
 
 	// The sum, by both protocols, is answered by the copy, well within the

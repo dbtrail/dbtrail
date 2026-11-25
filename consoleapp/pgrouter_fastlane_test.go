@@ -16,8 +16,8 @@ import (
 	"github.com/dbtrail/dbtrail/internal/stmtclock"
 )
 
-// testLanes is a lane gate over a pool of workers the test sets, and the
-// runner's wait and line.
+// testLanes is a lane gate over a runner of the workers the test sets (the
+// router's are --workers + 1), and the runner's wait and line.
 type testLanes struct {
 	*pgCopyLanes
 	workers atomic.Int32
@@ -95,8 +95,8 @@ func laneGotIn(t *testing.T, what string, ch chan laneEntered) func() {
 	return nil
 }
 
-// Four workers: three long statements at once, the fourth waits, and a
-// short one or a probe never does.
+// A runner of four workers (--workers 3): three long statements at once,
+// the fourth waits, and a short one or a probe never does.
 func TestPGCopyLanes_oneKeptForShortStatements(t *testing.T) {
 	l := newTestLanes(4, sqlsandbox.NoMaxWait, 16)
 	var held []func()
@@ -151,8 +151,9 @@ func TestPGCopyLanes_firstComeFirstServed(t *testing.T) {
 	}
 }
 
-// One worker: there is no place to keep, and every statement takes its turn
-// as before (the runner's own line).
+// A runner of one worker, which the router never makes (it gives the copy
+// --workers + 1, pgCopySlots): there is no place to keep, and every
+// statement takes its turn in the runner's own line.
 func TestPGCopyLanes_oneWorkerNoLane(t *testing.T) {
 	l := newTestLanes(1, sqlsandbox.NoMaxWait, 16)
 	var held []func()
@@ -478,20 +479,25 @@ func TestPGRouterStatus_copyLanes(t *testing.T) {
 	}
 }
 
-// The start-up line says a worker is kept, and how many long statements run
-// at once; with one worker, that none is.
+// The start-up line says one worker more is kept, the copy's total, and
+// that the others keep --workers; with --workers 1 too.
 func TestPGRouterStartupLines_fastLane(t *testing.T) {
 	st := pgRouterSettings{Listen: "127.0.0.1:5433", Workers: 4, Threads: 2, MaxConns: 16}
-	out := pgRouterStartupLines(st, "2GB", "the default", nil, 1, true)
-	if !strings.Contains(out, "one of those 4 workers is kept for statements whose plan on the source reads one table and joins nothing") || !strings.Contains(out, "the other statements run at most 3 at once") {
-		t.Errorf("four workers:\n%s", out)
+	for _, tc := range []struct {
+		workers int
+		want    string
+	}{
+		{4, "one worker more than --workers is kept for statements whose plan on the source reads one table and joins nothing, so they do not wait behind a report: the copy runs up to 5 statements at once, each with its own threads and memory, and the other statements never more than 4, as many as --workers says."},
+		{2, "one worker more than --workers is kept for statements whose plan on the source reads one table and joins nothing, so they do not wait behind a report: the copy runs up to 3 statements at once, each with its own threads and memory, and the other statements never more than 2, as many as --workers says."},
+		{1, "one worker more than --workers is kept for statements whose plan on the source reads one table and joins nothing, so they do not wait behind a report: the copy runs up to 2 statements at once, each with its own threads and memory, and the other statements never more than 1, as many as --workers says."},
+	} {
+		st.Workers = tc.workers
+		out := pgRouterStartupLines(st, "2GB", "the default", nil, 1, true)
+		if !strings.Contains(out, "PostgreSQL router: "+tc.want+"\n") {
+			t.Errorf("--workers %d:\n%s", tc.workers, out)
+		}
 	}
-	st.Workers = 2
-	if out = pgRouterStartupLines(st, "2GB", "the default", nil, 1, true); !strings.Contains(out, "one of those 2 workers is kept") || !strings.Contains(out, "the other statements run at most 1 at once") {
-		t.Errorf("two workers:\n%s", out)
-	}
-	st.Workers = 1
-	if out = pgRouterStartupLines(st, "2GB", "the default", nil, 1, true); !strings.Contains(out, "with 1 worker on the copy none is kept for short statements") || strings.Contains(out, "is kept for statements") {
-		t.Errorf("one worker:\n%s", out)
+	if pgCopySlots(4) != 5 || pgCopySlots(1) != 2 {
+		t.Errorf("pgCopySlots: %d %d", pgCopySlots(4), pgCopySlots(1))
 	}
 }

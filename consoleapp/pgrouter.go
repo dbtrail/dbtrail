@@ -514,7 +514,9 @@ func runPGRouter(cmd *cobra.Command, _ []string) error {
 	if memory == "" {
 		memory = sqlsandbox.DefaultLimits().MemoryLimit
 	}
-	srv, runner, err := newPGRouterConsole(shared, console.SQLPool{Workers: st.Workers, Threads: st.Threads})
+	// One worker more than --workers, kept for short statements
+	// (pgrouter_fastlane.go): the others run no more than --workers at once.
+	srv, runner, err := newPGRouterConsole(shared, console.SQLPool{Workers: pgCopySlots(st.Workers), Threads: st.Threads})
 	if err != nil {
 		return err
 	}
@@ -760,15 +762,16 @@ func (p *pgRouterPort) serve(ctx context.Context) error {
 	return nil
 }
 
-// pgFastLaneLine says, where the router starts, whether a worker of the copy
-// is kept for short statements (pgrouter_fastlane.go) and what that costs the
-// others.
+// pgFastLaneLine says, where the router starts, that a worker beyond
+// --workers is kept for short statements (pgrouter_fastlane.go), and what
+// that adds.
 func pgFastLaneLine(workers int) string {
-	if workers <= 1 {
-		return "PostgreSQL router: with 1 worker on the copy none is kept for short statements: every statement takes its turn, and a short one can wait behind a report. Give the copy 2 workers or more (--workers) to keep one for them.\n"
-	}
-	return fmt.Sprintf("PostgreSQL router: one of those %d workers is kept for statements whose plan on the source reads one table and joins nothing, so they do not wait behind a report; the other statements run at most %d at once.\n", workers, workers-1)
+	return fmt.Sprintf("PostgreSQL router: one worker more than --workers is kept for statements whose plan on the source reads one table and joins nothing, so they do not wait behind a report: the copy runs up to %d statements at once, each with its own threads and memory, and the other statements never more than %d, as many as --workers says.\n", pgCopySlots(workers), workers)
 }
+
+// pgCopySlots is how many statements the copy runs at once for --workers:
+// one more, kept for short statements.
+func pgCopySlots(workers int) int { return workers + 1 }
 
 // pgRouterQueryTimeout bounds each statement end to end, a wait for a worker
 // included: the same five minutes as the MySQL port's.

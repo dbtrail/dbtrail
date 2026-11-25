@@ -124,8 +124,9 @@ type pgPortFixture struct {
 	// router's --max-wait; negative refuses at once, as a full line).
 	workers int
 	maxWait time.Duration
-	// noFastLane keeps none of the copy's workers for short statements;
-	// otherwise one is kept, as the pg-router does (pgrouter_fastlane.go).
+	// noFastLane gives the copy workers alone, none kept for short
+	// statements; otherwise it has one more, kept for them, as the
+	// pg-router does (pgrouter_fastlane.go, pgCopySlots).
 	noFastLane bool
 }
 
@@ -211,6 +212,11 @@ func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx
 	}
 	if fx.workers > 0 {
 		workers = fx.workers
+	}
+	if !fx.noFastLane {
+		// As the router sizes it: one worker beyond --workers, kept for
+		// short statements (pgCopySlots).
+		workers = pgCopySlots(workers)
 	}
 	srv, runner, err := newRouterConsole(settings, console.SQLPool{Workers: workers, Threads: 2})
 	if err != nil {

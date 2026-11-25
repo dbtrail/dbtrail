@@ -3,8 +3,8 @@ package pgshim
 // The copy's fast lane. The copy runs a few statements at once, and a short
 // statement for it waited behind every report that held its workers: a sum
 // of one warehouse, answered in a second alone, took 13 to 31 seconds under
-// 30 connections with reports running. The host (the pg-router) keeps one of
-// the copy's workers for short statements, and this says which are short,
+// 30 connections with reports running. The host (the pg-router) gives the
+// copy one worker more, kept for short statements, and this says which are short,
 // before they run, from the plan the source already gave to route them
 // (route_cost.go): one that reads one table and joins nothing
 // (RunOptions.FastLane). On the copy, what makes a report long is its joins;
