@@ -162,8 +162,8 @@ func TestAliasScope_route(t *testing.T) {
 		chQ2:  {RouteCopy, ReasonAnswersTheSame},
 		chQ15: {RouteCopy, ReasonAnswersTheSame},
 		"WITH w (y) AS (SELECT placed_at FROM o) SELECT count(*) FROM w WHERE y = '2026-03-02 10:00:00+02'": {RouteSource, ReasonVeto},
-		"SELECT y FROM (SELECT c AS y FROM a) s WHERE y = 'ab  '":                                                        {RouteSource, ReasonVeto},
-		"WITH w(y) AS (SELECT c FROM a) SELECT y FROM w WHERE y = 'ab  '":                                                {RouteSource, ReasonVeto},
+		"SELECT y FROM (SELECT c AS y FROM a) s WHERE y = 'ab  '":                                           {RouteSource, ReasonVeto},
+		"WITH w(y) AS (SELECT c FROM a) SELECT y FROM w WHERE y = 'ab  '":                                   {RouteSource, ReasonVeto},
 	} {
 		if got := s.screenTyped(stmt, s.route(s.classify(stmt), stmt)); got != want {
 			t.Errorf("%s: %+v, want %+v", stmt, got, want)
