@@ -254,13 +254,14 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 	}
 	// The joins in the order written (Session.KeepJoinOrder). The database
 	// is the job's own (serveJob opens a new one per job), so the next
-	// statement plans its joins as always. The only writer of
-	// disabled_optimizers: a SET replaces the whole list, so another
-	// optimizer turned off later must be added to this one, not set apart.
+	// statement plans its joins as always. One of the two writers of
+	// disabled_optimizers, with the join check below (checkJoins), which
+	// sets the same list and does not run when this one did: a SET replaces
+	// the whole list, so another optimizer turned off later must be added to
+	// both, not set apart.
 	if job.KeepJoinOrder {
-		const keep = "SET disabled_optimizers = 'join_order'"
-		if _, err := conn.ExecContext(ctx, keep); err != nil {
-			return sessionErr("%s: %v", keep, err)
+		if _, err := conn.ExecContext(ctx, keepJoinOrderSQL); err != nil {
+			return sessionErr("%s: %v", keepJoinOrderSQL, err)
 		}
 	}
 	// Then the restrictions, then the views, then the lock. The views are
@@ -381,6 +382,21 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 		if _, err := conn.ExecContext(ctx, "SET TimeZone = '"+strings.ReplaceAll(job.TimeZone, "'", "''")+"'"); err != nil {
 			return wireResult{Error: &wireError{Kind: errRefused, Message: fmt.Sprintf(
 				"the session time zone %q (SET time_zone) cannot be applied on the copy: %v", job.TimeZone, firstLine(err.Error()))}}
+		}
+	}
+	// The join check (joinguard.go, Session.JoinNDV): the statement's plan in
+	// this session, its views and settings in place, and before the lock,
+	// because running it in the order written is a SET. Not when the order
+	// written was asked for already.
+	if job.JoinNDV != nil && !job.KeepJoinOrder {
+		check := checkJoins(ctx, conn, job.SQL, job.JoinNDV)
+		switch {
+		case check.refusal != "":
+			return wireResult{Error: &wireError{Kind: errJoinTooBig, Message: check.refusal}}
+		case check.written:
+			res.JoinOrder = joinOrderWritten
+		case check.skipped != "":
+			res.JoinCheckSkipped = check.skipped
 		}
 	}
 	if _, err := conn.ExecContext(ctx, lockLast); err != nil {

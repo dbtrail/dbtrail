@@ -270,6 +270,16 @@ type Session struct {
 	// not fit anywhere (a CH-benCHmark Q5 that filled 351 GB of spill and
 	// answered in 5 s in the written order).
 	KeepJoinOrder bool
+	// JoinNDV turns the join check on (joinguard.go): the source's count of
+	// distinct values of each column, by lowercased name, which the copy
+	// does not have. Before the statement runs, its plan is read; a join
+	// estimated far past its inputs has the statement planned again in the
+	// order written, run in that order when that plan has none, and refused
+	// with a JoinTooBigError, nothing run, when it has one too. Nil: no
+	// check, as before. Only the PostgreSQL port sets it, for a connection
+	// that can send a refused statement to its source; with KeepJoinOrder
+	// set there is nothing to check.
+	JoinNDV map[string]float64
 	// PostgresRules runs the statement by PostgreSQL's rules where the
 	// engine's session decides the answer (#2786), for the copy of a
 	// PostgreSQL source: NULL sorts as the largest value (last ascending,
@@ -455,6 +465,12 @@ type Result struct {
 	Elapsed        time.Duration `json:"elapsed_ns"`
 	// Phases is where the time went, for the measurement #2026 asks for.
 	Phases Phases `json:"phases"`
+	// JoinOrderWritten: the join check (Session.JoinNDV) ran the statement
+	// in the order written. JoinCheckSkipped: why the check could not be
+	// made, when it was asked for and could not; the statement ran as it
+	// would without it.
+	JoinOrderWritten bool   `json:"-"`
+	JoinCheckSkipped string `json:"-"`
 	// Note is a sentence the caller adds for the reader, set by the parent
 	// and never by the worker (#2210: the answer came from an earlier copy).
 	Note string `json:"-"`
@@ -560,6 +576,16 @@ func (e *ColumnsDifferError) Error() string { return e.Reason }
 type MayHaveChangedError struct{ Reason string }
 
 func (e *MayHaveChangedError) Error() string { return e.Reason }
+
+// JoinTooBigError: the statement was not run because the caller asked for
+// the join check (Session.JoinNDV) and the copy's plan of it has a join
+// estimated far past its inputs both in the copy's join order and in the
+// order written (joinguard.go). Reason names the joins. A decision about the
+// statement made before it ran, not a fault of the copy: the PostgreSQL port
+// sends it to the source.
+type JoinTooBigError struct{ Reason string }
+
+func (e *JoinTooBigError) Error() string { return e.Reason }
 
 // BehindSourceError: the statement was not run because its server has a
 // limit on how far behind the source the copy may answer (#2777), and the
@@ -1661,6 +1687,7 @@ func marshalJob(job Job, limits Limits, spill spillSpec, spool string, more bool
 	return json.Marshal(wireJob{
 		CopyDirs: allowedDirs(job.CopyDirs), ViewsSQL: viewsSQL, AskViews: asking, SQL: job.SQL, NoFileReaders: job.NoFileReaders, Schema: job.Schema,
 		TimeZone: job.Session.TimeZone, MySQLClock: job.Session.MySQLClock, SelectLimit: job.Session.SelectLimit, KeepJoinOrder: job.Session.KeepJoinOrder, PostgresRules: job.Session.PostgresRules, PostgresNames: job.Session.PostgresNames,
+		JoinNDV: job.Session.JoinNDV,
 		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
 		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes, More: more,
@@ -1963,6 +1990,8 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 			return Result{}, &QueryError{Message: spillCapMessage(out.Error.Message, spill, noSpill)}
 		case errTooLarge:
 			return Result{}, ErrResultTooLarge
+		case errJoinTooBig:
+			return Result{}, &JoinTooBigError{Reason: out.Error.Message}
 		case errSpool:
 			// The result file could not be written (a full disk, its folder
 			// gone): the server's trouble, not the statement's. Answered as a
@@ -1975,6 +2004,7 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 	}
 	res := Result{Columns: out.Columns, Rows: out.Rows, Truncated: out.Truncated,
 		TruncatedCells: out.TruncatedCells, Elapsed: time.Duration(out.ElapsedNS),
+		JoinOrderWritten: out.JoinOrder == joinOrderWritten, JoinCheckSkipped: out.JoinCheckSkipped,
 		Phases: Phases{
 			Open: time.Duration(out.OpenNS), Lockdown: time.Duration(out.LockdownNS),
 			Views: time.Duration(out.ViewsNS), Query: time.Duration(out.ElapsedNS),
