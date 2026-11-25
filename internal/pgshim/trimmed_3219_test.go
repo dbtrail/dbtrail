@@ -193,6 +193,13 @@ func TestTrimmedUse_source(t *testing.T) {
 		"SELECT id, s FROM (SELECT id, c FROM a) AS s ORDER BY id",
 		"SELECT count(DISTINCT s) FROM (SELECT c FROM a) s",
 		"WITH w AS (SELECT id, c FROM a) SELECT w FROM w",
+		"SELECT id, s AS r FROM (SELECT id, c FROM a) s ORDER BY id",
+		"SELECT s AS r, id FROM (SELECT id, c FROM a) s",
+		"WITH w AS (SELECT id, c FROM a) SELECT w AS r FROM w",
+		"SELECT id FROM (SELECT id, c FROM a) s WHERE ROW(1, 'ab') IS NOT DISTINCT FROM s",
+		// The main list's new name read by its own WHERE: PostgreSQL refuses
+		// it (42703), the copy would answer.
+		"SELECT c AS y FROM a WHERE y = 'ab '",
 		// A trimmed char(n) renamed in a table of FROM or in a WITH, then
 		// read by the statement around it where the padding counts: the
 		// copy's 'ab' is not equal to 'ab  ', PostgreSQL's bpchar is. Any
