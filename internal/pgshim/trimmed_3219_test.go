@@ -35,6 +35,8 @@ func TestTrimmedUse_allowed(t *testing.T) {
 	for _, q := range []string{
 		// Shown, grouped, counted, sorted.
 		"SELECT c FROM a",
+		"SELECT c AS y FROM a",
+		"SELECT c y, id FROM a ORDER BY id",
 		"SELECT a.c, count(*) FROM a GROUP BY a.c",
 		"SELECT DISTINCT c FROM a",
 		"SELECT count(c), count(DISTINCT c) FROM a",

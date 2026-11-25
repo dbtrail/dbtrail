@@ -265,10 +265,17 @@ func trimmedUse(toks []rtToken, types map[string][]string, mainOrder bool) strin
 		// The item ends after the column, or after an alias written with no
 		// AS (with AS, AS itself ends it).
 		if ends(i+1) || isName(after) && ends(i+2) {
-			alias := !ends(i + 1)
+			alias := !ends(i+1) || word(i+1, "as")
 			if k := trimmedClause(toks, depth, start); k >= 0 {
 				switch {
 				case toks[k].text == "select":
+					// Renamed in a table of FROM or a WITH, the column is read
+					// again under the new name, qualified (s.y) or not, where
+					// no rule here sees it: the source's. In the main list a
+					// new name is read only by the main ORDER BY.
+					if alias && depth[k] > 0 {
+						break
+					}
 					if trimmedSelectList(toks, depth, opens, k) {
 						continue
 					}
