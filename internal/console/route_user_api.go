@@ -129,5 +129,9 @@ func (s *Server) saveCaptureAnswer(w http.ResponseWriter, r *http.Request, on bo
 	if forwardChanged(old, saved) {
 		s.dropRoutedConns(id, "the account the port forwards with changed", forwardDSNOf(old), old.SourceSSL())
 	}
-	writeJSON(w, http.StatusOK, s.entryDTO(saved))
+	dto := s.entryDTO(saved)
+	if on {
+		dto.CaptureAccountWarning = s.captureRoleWarning(r.Context(), saved)
+	}
+	writeJSON(w, http.StatusOK, dto)
 }

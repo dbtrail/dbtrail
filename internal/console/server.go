@@ -504,6 +504,9 @@ type BaselineRefreshDefaults struct {
 // gates) lives in a connManager bundle resolved per request from the
 // X-Bintrail-Server header.
 type Server struct {
+	// pgStamps is each server's last stamp of its copy for the PostgreSQL
+	// port, by registry id (*pgStampMemo, PGCopyStamp).
+	pgStamps sync.Map
 	// lagTrend keeps the last coverage reads per server, to tell a capture
 	// gap that keeps widening from one being worked off (#2201).
 	lagTrend lagTrendBook
@@ -628,6 +631,9 @@ type Server struct {
 	baselineRefreshDefaults BaselineRefreshDefaults
 	// localPruneLoop is Config.LocalPruneLoop.
 	localPruneLoop bool
+	// folderUsage measures snapshot folders for the pages that report what
+	// they hold (#2475).
+	folderUsage folderUsageCache
 	// mayCreateFolders is Config.MayCreateFolders.
 	mayCreateFolders bool
 	// version is the running build's version string (Config.Version).

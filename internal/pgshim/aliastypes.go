@@ -1,5 +1,7 @@
 package pgshim
 
+import "strings"
+
 // notTextType is the type the screen gives a name the statement defines
 // (an alias of a select list, a column of a WITH or a subquery) whose every
 // definition is known not to be text: a count, a sum, a number, a numeric
@@ -23,19 +25,19 @@ const notTextType = "DERIVED"
 // A definition may name another (a WITH's column read in the next one), so
 // what is known grows until it stops changing. Types not known (nil) stay
 // not known: every name may be text.
-func withAliasTypes(toks []rtToken, types map[string][]string) map[string][]string {
+func withAliasTypes(toks []rtToken, types map[string][]string, untyped bool) map[string][]string {
 	defs := aliasDefinitions(toks)
 	if types == nil || len(defs) == 0 {
 		return types
 	}
-	if columnList(toks) {
-		// Names given in a column list (AS b(n), WITH c(n) AS) are not
-		// among the definitions read here, so one of them may share a name
-		// with a definition that is: nothing defined is known then.
-		return mergeAliasTypes(types, defs, nil)
+	if columnListBesidesWith(toks) {
+		// Names given in a column list other than a WITH's (AS b(n)) are
+		// not among the definitions read here, so one of them may share a
+		// name with a definition that is: nothing defined is known then.
+		return mergeAliasTypes(types, defs, nil, untyped)
 	}
 	notText := map[string]bool{}
-	cur := mergeAliasTypes(types, defs, notText)
+	cur := mergeAliasTypes(types, defs, notText, untyped)
 	for range len(defs) + 1 {
 		changed := false
 		for name, exprs := range defs {
@@ -43,11 +45,22 @@ func withAliasTypes(toks []rtToken, types map[string][]string) map[string][]stri
 				continue
 			}
 			known := true
+			// Inside its own definition a name is the column of that name
+			// (SELECT amount AS amount), not what the statement makes of it.
+			own, had := cur[name]
+			if column, ok := types[name]; ok {
+				cur[name] = column
+			}
 			for _, e := range exprs {
 				if !exprNotText(e, cur) {
 					known = false
 					break
 				}
+			}
+			if had {
+				cur[name] = own
+			} else {
+				delete(cur, name)
 			}
 			if known {
 				notText[name] = true
@@ -57,12 +70,27 @@ func withAliasTypes(toks []rtToken, types map[string][]string) map[string][]stri
 		if !changed {
 			break
 		}
-		cur = mergeAliasTypes(types, defs, notText)
+		cur = mergeAliasTypes(types, defs, notText, untyped)
 	}
 	return cur
 }
 
-func mergeAliasTypes(types map[string][]string, defs map[string][][]rtToken, notText map[string]bool) map[string][]string {
+// mergeAliasTypes is types with the names the statement defines read as what
+// they stand for. A defined name known not to be text (notText) keeps the
+// types of the columns of that name and gains notTextType. Any other
+// defined name may stand for text: when no column has its name it is of
+// unknown type (absent), as it always was, and so it is when the columns of
+// its name are not text (the rules already take an unknown name for possibly
+// text where that matters) and when none of its definitions reads text (a
+// table's alias). When a text
+// column has its name it keeps that column's types and gains maybeTextType,
+// so that it never loses the text of the column it stands for (SELECT name
+// AS name ... ORDER BY name sorts text, and so does min(name) AS name).
+//
+// untyped: the types are not the columns' own (screenUntyped), every name
+// is a whole number there, and a defined name is of unknown type as before:
+// that screen may not veto what the typed one lets through.
+func mergeAliasTypes(types map[string][]string, defs map[string][][]rtToken, notText map[string]bool, untyped bool) map[string][]string {
 	out := make(map[string][]string, len(types)+len(defs))
 	for k, v := range types {
 		if _, defined := defs[k]; !defined {
@@ -70,11 +98,73 @@ func mergeAliasTypes(types map[string][]string, defs map[string][][]rtToken, not
 		}
 	}
 	for name := range defs {
-		if notText[name] {
-			out[name] = append(append([]string(nil), types[name]...), notTextType)
+		column := types[name]
+		switch {
+		case notText[name]:
+			out[name] = append(append([]string(nil), column...), notTextType)
+		case !untyped && anyTextType(column) && readsText(defs[name], types, defs, notText):
+			out[name] = append(append([]string(nil), column...), maybeTextType)
 		}
 	}
 	return out
+}
+
+// maybeTextType is the type a defined name gains when it shares its name
+// with a text column and is not known to stand for something that is not
+// text. typeIsText must take it for text (TestMaybeTextType pins it), and it
+// is no column's type, so that a rule that asks what a value is, and not
+// only whether it may be text, can tell it (concatOK).
+const maybeTextType = "MAYBE TEXT"
+
+// anyTextType reports whether one of a name's columns is text.
+func anyTextType(types []string) bool {
+	for _, ty := range types {
+		if typeIsText(ty) {
+			return true
+		}
+	}
+	return false
+}
+
+// readsText reports whether one of a name's definitions reads something
+// that is text: a text column, a string, a function that makes text, ||. A
+// table's alias (FROM t AS c, whose definition is the table's name) reads
+// none, and neither does a name given to something the screen knows nothing
+// of; both stay of unknown type.
+//
+// Another name the statement defines counts as text unless it is known not
+// to be (notText): a text column given one name in a subquery and its own
+// name again outside (SELECT u AS name FROM (SELECT name AS u ...)) is read
+// through the name between.
+func readsText(exprs [][]rtToken, types map[string][]string, defs map[string][][]rtToken, notText map[string]bool) bool {
+	named := func(n string) bool {
+		if anyTextType(types[n]) {
+			return true
+		}
+		_, other := defs[n]
+		return other && !notText[n]
+	}
+	for _, e := range exprs {
+		for _, t := range e {
+			switch t.kind {
+			case rtString:
+				return true
+			case rtOp:
+				if t.text == "||" {
+					return true
+				}
+			case rtWord:
+				if textMakers[t.text] || named(t.text) {
+					return true
+				}
+			case rtQuoted:
+				if named(strings.ToLower(t.text)) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // columnList reports whether the statement names columns in a list: a FROM
@@ -108,32 +198,147 @@ func aliasDefinitions(toks []rtToken) map[string][][]rtToken {
 	}
 	defs := map[string][][]rtToken{}
 	for i := range at {
-		end := i
-		if end > 0 && toks[end-1].kind == rtWord && toks[end-1].text == "as" {
-			end--
-		}
-		start, depth := end, 0
-	back:
-		for j := end - 1; j >= 0; j-- {
-			t := toks[j]
-			switch {
-			case t.kind == rtOp && (t.text == ")" || t.text == "]"):
-				depth++
-			case t.kind == rtOp && (t.text == "(" || t.text == "["):
-				if depth == 0 {
-					break back
-				}
-				depth--
-			case depth == 0 && t.kind == rtOp && t.text == ",":
-				break back
-			case depth == 0 && t.kind == rtWord && definitionStart[t.text]:
-				break back
-			}
-			start = j
-		}
-		defs[toks[i].text] = append(defs[toks[i].text], toks[start:end])
+		defs[toks[i].text] = append(defs[toks[i].text], aliasDefinitionAt(toks, i))
+	}
+	for name, exprs := range cteListDefinitions(toks) {
+		defs[name] = append(defs[name], exprs...)
 	}
 	return defs
+}
+
+// cteListDefinitions are the expressions the names of each WITH's column
+// list stand for: the items of its body's select list, in order (WITH w (a,
+// b) AS (SELECT x, sum(y) ...): a is x, b is sum(y)). A name with no item
+// read here (a * in the list, DISTINCT ON, more names than items) stands
+// for an empty expression, which is never known not to be text.
+func cteListDefinitions(toks []rtToken) map[string][][]rtToken {
+	defs := map[string][][]rtToken{}
+	for i := range toks {
+		open := cteColumnList(toks, i)
+		if open < 0 {
+			continue
+		}
+		items := selectItems(toks, open+1)
+		k := 0
+		for j := i + 2; isOpTok(toks, j-1, "(") || isOpTok(toks, j-1, ","); j += 2 {
+			n := toks[j].text
+			if toks[j].kind == rtQuoted {
+				n = strings.ToLower(n)
+			}
+			var e []rtToken
+			if k < len(items) {
+				e = items[k]
+			}
+			defs[n] = append(defs[n], e)
+			k++
+		}
+	}
+	return defs
+}
+
+// selectItems are the items of the select list of the statement whose
+// SELECT is at sel, each without the name it is given (AS n, or a bare n);
+// nil when the list is not read here.
+func selectItems(toks []rtToken, sel int) [][]rtToken {
+	if sel >= len(toks) || toks[sel].kind != rtWord || toks[sel].text != "select" {
+		return nil
+	}
+	j := sel + 1
+	if j < len(toks) && toks[j].kind == rtWord && toks[j].text == "all" {
+		j++
+	}
+	if j < len(toks) && toks[j].kind == rtWord && toks[j].text == "distinct" {
+		if isOpTok(toks, j+1, "(") || j+1 < len(toks) && toks[j+1].kind == rtWord && toks[j+1].text == "on" {
+			return nil
+		}
+		j++
+	}
+	var items [][]rtToken
+	start, depth := j, 0
+	for ; j <= len(toks); j++ {
+		end := j == len(toks)
+		if !end {
+			t := toks[j]
+			switch {
+			case t.kind == rtOp && (t.text == "(" || t.text == "["):
+				depth++
+				continue
+			case t.kind == rtOp && (t.text == ")" || t.text == "]"):
+				if depth > 0 {
+					depth--
+					continue
+				}
+				end = true
+			case depth == 0 && t.kind == rtWord && definitionStart[t.text] && t.text != "distinct" && t.text != "all":
+				end = true
+			case depth == 0 && t.kind == rtOp && t.text == ",":
+			default:
+				continue
+			}
+		}
+		item := toks[start:j]
+		if n := len(item); n >= 2 && item[n-2].kind == rtWord && item[n-2].text == "as" {
+			item = item[:n-2]
+		} else if n >= 2 && item[n-1].kind == rtWord && !aliasStop[item[n-1].text] &&
+			(item[n-2].kind == rtWord && !aliasStop[item[n-2].text] || item[n-2].kind == rtQuoted || isOpTok(item, n-2, ")")) {
+			item = item[:n-1]
+		}
+		if len(item) == 0 {
+			return nil
+		}
+		items = append(items, item)
+		if end {
+			return items
+		}
+		start = j + 1
+	}
+	return items
+}
+
+// columnListBesidesWith reports whether the statement names columns in a
+// list that is not a WITH's (FROM (...) m (a, b)), whose names this screen
+// does not read.
+func columnListBesidesWith(toks []rtToken) bool {
+	if !columnList(toks) {
+		return false
+	}
+	rest := make([]rtToken, 0, len(toks))
+	for i := 0; i < len(toks); i++ {
+		rest = append(rest, toks[i])
+		if cteColumnList(toks, i) >= 0 {
+			i = closingParen(toks, i+1)
+		}
+	}
+	return columnList(rest)
+}
+
+// aliasDefinitionAt is the expression the name given at i stands for: the
+// select item before `AS name`, or before a bare alias.
+func aliasDefinitionAt(toks []rtToken, i int) []rtToken {
+	end := i
+	if end > 0 && toks[end-1].kind == rtWord && toks[end-1].text == "as" {
+		end--
+	}
+	start, depth := end, 0
+back:
+	for j := end - 1; j >= 0; j-- {
+		t := toks[j]
+		switch {
+		case t.kind == rtOp && (t.text == ")" || t.text == "]"):
+			depth++
+		case t.kind == rtOp && (t.text == "(" || t.text == "["):
+			if depth == 0 {
+				break back
+			}
+			depth--
+		case depth == 0 && t.kind == rtOp && t.text == ",":
+			break back
+		case depth == 0 && t.kind == rtWord && definitionStart[t.text]:
+			break back
+		}
+		start = j
+	}
+	return toks[start:end]
 }
 
 // definitionStart are the words before a select item or a FROM item.
@@ -147,13 +352,13 @@ var definitionStart = map[string]bool{
 // are given: counts, sums, averages, ranks, numbers of a date, roundings,
 // booleans of a group.
 var neverText = map[string]bool{
-	"count": true, "sum": true, "avg": true, "row_number": true, "rank": true, "dense_rank": true,
+	"count": true, "sum": true, "avg": true, pgAscii: true, "row_number": true, "rank": true, "dense_rank": true,
 	"ntile": true, "percent_rank": true, "cume_dist": true, "abs": true, "length": true,
 	"char_length": true, "octet_length": true, "position": true, "extract": true, "date_part": true,
 	"round": true, "floor": true, "ceil": true, "ceiling": true, "trunc": true, "stddev": true,
 	"stddev_pop": true, "stddev_samp": true, "variance": true, "var_pop": true, "var_samp": true,
-	"bool_and": true, "bool_or": true, "every": true, pgRoundDiv: true, pgRoundAvg: true, pgRoundK: true, pgRoundNeg: true, pgRoundWhole: true, pgAvg: true, pgFloorDiv: true,
-	pgFloorEpoch: true, pgEpochMacro: true, pgToTimestampMacro: true, "to_timestamp": true,
+	"bool_and": true, "bool_or": true, "every": true, pgRoundDiv: true, pgRoundAvg: true, pgRoundK: true, pgRoundNeg: true, pgRoundWhole: true, pgAvg: true, pgAvgN: true, pgDiv: true, pgFloorDiv: true,
+	pgFloorEpoch: true, pgEpochMacro: true, pgExtractWhole: true, pgToTimestampMacro: true, "to_timestamp": true,
 }
 
 // asTheirArguments are the functions that answer a value of their first

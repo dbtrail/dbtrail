@@ -19,9 +19,84 @@ import (
 // refuses, an error the client sees, never another number.
 func (s *session) copyText(text string) (string, error) {
 	if s.forwarding() {
-		return RewriteForCopy(text), nil
+		out := RewriteForCopy(text)
+		screened := ""
+		if s.screened != "" {
+			screened = RewriteForCopy(s.screened)
+		}
+		if needsTypes(out) || needsTypes(screened) {
+			// A division or an avg: which macro answers it is decided by the
+			// columns' types (retypeForCopy), the ones the screen read a
+			// moment ago (screenTyped). When they cannot be read now, the
+			// text would reach the copy as the screen did not see it, a
+			// numeric column divided by the engine: the source answers.
+			types, unread := s.columnTypes(out)
+			if unread {
+				return "", &Error{Code: "0A000", Message: "the copy does not answer this as PostgreSQL would: a division or an avg(), written for the copy by its columns' types, which could not be read now"}
+			}
+			out, screened = retypeForCopy(out, types), retypeForCopy(screened, types)
+		}
+		if s.screened != "" && !writtenAsScreened(screened, out) {
+			return "", &Error{Code: "0A000", Message: "the copy does not answer this as PostgreSQL would: with this argument the statement is not written for the copy as it was when the port chose the copy for it (an argument inside round(), avg(), floor(), extract() or to_timestamp() or beside a division, or one that leaves the statement's text unread)"}
+		}
+		return out, nil
 	}
 	return RewriteForCopyAlone(text)
+}
+
+// rewrittenNames is the macros RewriteForCopy wrote into text, in order.
+//
+// A prepared statement is screened as the client wrote it, with $1, and run
+// with each argument written in its place (params.go). What is screened must
+// be what runs (RewriteForCopy), and an argument can break that: written as
+// a cast (a NULL of a declared type, a float, a date), it makes a round()
+// around it one RewriteForCopy leaves as written (holdsCast), and the copy
+// would answer that round() its own way, 10.50 for PostgreSQL's 10.5000; a
+// text the port's lexer refuses is left as written whole. So a portal's text
+// must be written with the same macros as its statement's (session.screened),
+// or the source answers it. A connection the copy answers alone refuses the
+// same texts in RewriteForCopyAlone (aloneRefusal).
+//
+// The names are the words of the text as the port reads it: a string that
+// spells a macro's name is not one, and must not stand in for a round() the
+// rewrite left as written. read is false for a text the port does not read,
+// which has no words to tell: it is written as its statement only when the
+// statement has no macro at all (writtenAsScreened).
+func rewrittenNames(text string) (names string, read bool) {
+	toks, why := lexSQL(text)
+	if why != "" {
+		return "", false
+	}
+	var out []string
+	raw := 0
+	for i, t := range toks {
+		if t.kind == rtWord && strings.HasPrefix(t.text, "_bintrail_pg_") {
+			out = append(out, t.text)
+		}
+		if isOpTok(toks, i, "/") {
+			raw++
+		}
+	}
+	if raw > 0 {
+		// The divisions left as written count too: a division is the
+		// macro's or the engine's by how its sides are written
+		// (rewriteDivisions).
+		out = append(out, strconv.Itoa(raw)+" as written")
+	}
+	return strings.Join(out, " "), true
+}
+
+// writtenAsScreened reports whether out, a portal's text as RewriteForCopy
+// wrote it, holds the macros of screened, its statement's text as the screen
+// read it and RewriteForCopy wrote it. A text the port does not read was not
+// rewritten: it is the statement's only when there was nothing to rewrite.
+func writtenAsScreened(screened, out string) bool {
+	want, _ := rewrittenNames(screened)
+	got, read := rewrittenNames(out)
+	if !read {
+		return want == ""
+	}
+	return want == got
 }
 
 // RewriteForCopy writes stmt for the copy of a PostgreSQL source, on a
@@ -30,6 +105,10 @@ func (s *session) copyText(text string) (string, error) {
 // pgRoundMacros), which answers as PostgreSQL does or refuses, and so do
 // floor(a / b), extract(epoch from x) and to_timestamp(n); a CASE or a
 // COALESCE around one of them is checked value by value (packMixedScale).
+// A division on its own becomes the copy's macro for it too
+// (rewriteDivisions, division_3219.go): only here, as floor's, because the
+// macro refuses a divisor of zero, and a refusal needs a source to go to.
+// What a column's type decides is written after it (retypeForCopy).
 // The rest of the text is left as written, byte for byte, and so is a round
 // of any other shape: the screen then sends it to the source (round is not
 // among copyFuncs). Every statement such a connection hands the copy goes
@@ -37,7 +116,7 @@ func (s *session) copyText(text string) (string, error) {
 // screened is what runs.
 func RewriteForCopy(stmt string) string {
 	out, _ := rewriteRounds(quoteCopyWords(stmt), true)
-	return packMixedScale(out)
+	return packMixedScale(rewriteDivisions(out, nil))
 }
 
 // RewriteForCopyAlone is RewriteForCopy for a connection whose statements
@@ -72,6 +151,7 @@ const (
 	pgFloorDiv         = "_bintrail_pg_floor_div"
 	pgFloorEpoch       = "_bintrail_pg_floor_epoch"
 	pgEpochMacro       = "_bintrail_pg_epoch"
+	pgExtractWhole     = "_bintrail_pg_extract_whole"
 	pgToTimestampMacro = "_bintrail_pg_to_timestamp"
 	pgPack             = "_bintrail_pg_pack"
 	pgPackN            = "_bintrail_pg_packn"
@@ -128,13 +208,13 @@ func rewriteRounds(q string, full bool) (string, bool) {
 		case "floor":
 			call = floorCall
 		case "extract":
-			call = epochCall
+			call = extractCall
 		case "to_timestamp":
 			call = toTimestampCall
 		default:
 			continue
 		}
-		if !full && toks[i].text != "round" && toks[i].text != "avg" {
+		if !full && toks[i].text != "round" && toks[i].text != "avg" && toks[i].text != "extract" {
 			continue
 		}
 		end := closingParen(toks, i+1)
@@ -383,6 +463,7 @@ func avgCall(q string, toks []rtToken, spans [][2]int, from, to int, full bool) 
 	x, _ := rewriteRounds(q[spans[from][0]:spans[to-1][1]], full)
 	return pgAvg + "(" + x + ")", true
 }
+
 // floorCall is the macro call for floor(<toks[from:to]>) of a division,
 // false for any other floor: floor(x) of a numeric is already PostgreSQL's
 // on the copy, but floor of a float or a column is not something this
@@ -449,6 +530,32 @@ func epochCall(q string, toks []rtToken, spans [][2]int, from, to int, full bool
 	}
 	x, _ := rewriteRounds(q[spans[from+2][0]:spans[to-1][1]], full)
 	return pgEpochMacro + "(" + x + ")", true
+}
+
+// extractWholeFields are the fields extract() gives as whole numbers.
+// PostgreSQL (14 and later) types extract() numeric; the copy's extract of
+// these is a bigint, so a client reading the type, or a binary result, got
+// int8 where PostgreSQL announces numeric (Q8 of CH-benCHmark: extract(YEAR
+// FROM o_entry_d)). Seconds and smaller have fractions and are left alone.
+var extractWholeFields = map[string]bool{
+	"year": true, "month": true, "day": true, "hour": true, "minute": true, "quarter": true, "week": true,
+	"dow": true, "isodow": true, "doy": true, "isoyear": true, "decade": true, "century": true, "millennium": true,
+}
+
+// extractCall is extract(epoch from x) as the epoch macro on a connection
+// that reaches its source, and extract(<whole field> from x) cast to the
+// numeric PostgreSQL announces, on any connection.
+func extractCall(q string, toks []rtToken, spans [][2]int, from, to int, full bool) (string, bool) {
+	if full {
+		if repl, ok := epochCall(q, toks, spans, from, to, full); ok {
+			return repl, true
+		}
+	}
+	if to-from < 3 || toks[from].kind != rtWord || !extractWholeFields[toks[from].text] || toks[from+1].kind != rtWord || toks[from+1].text != "from" {
+		return "", false
+	}
+	x, _ := rewriteRounds(q[spans[from+2][0]:spans[to-1][1]], full)
+	return pgExtractWhole + "(extract(" + toks[from].text + " FROM " + x + "))", true
 }
 
 // toTimestampCall is the macro call for to_timestamp(<x>) of one argument
@@ -532,7 +639,7 @@ func scaleMacro(t rtToken) bool {
 		return false
 	}
 	switch t.text {
-	case pgAvg, pgToTimestampMacro, pgPack, pgPackN:
+	case pgAvg, pgAvgN, pgDiv, pgToTimestampMacro, pgPack, pgPackN:
 		return false
 	}
 	return true

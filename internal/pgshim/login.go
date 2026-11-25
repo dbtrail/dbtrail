@@ -74,6 +74,11 @@ type Binding struct {
 	// type, and what the source recorded of each. Nil: such statements are
 	// refused.
 	Catalog func(ctx context.Context) ([]CatalogTable, error)
+	// CatalogStamp, when set, names the snapshot the copy reads now, read
+	// without one of the copy's workers: the catalog a connection keeps
+	// (catalogCacheFor) is read again as soon as it changes, not only once
+	// it is ten seconds old. Nil: it is kept the ten seconds.
+	CatalogStamp func(ctx context.Context) (string, error)
 	// CopyTableNames, when set, is the schema and name of each table a
 	// statement on the copy can read, read without one of the copy's workers:
 	// what the capture gate asks of every statement sent to the source, which
@@ -192,15 +197,32 @@ type RunOptions struct {
 	// and the source answers it (#3086). Without it a snapshot alone
 	// answers, as on a connection with nowhere else to send the statement.
 	NeedTails bool
+	// Trimmed are the names (lowercased) of the char(n) columns the screen
+	// took as read without their padding (trimmed.go): the host refuses the
+	// statement before running it, with a *sqlsandbox.MayHaveChangedError,
+	// when a table it reads holds one as a char(n) its view does not trim,
+	// and the source answers it. TrimmedUnknown among them: which ones could
+	// not be read.
+	Trimmed []string
+	// FastLane says the source's plan of the statement reads one table and
+	// joins nothing (fastlane.go): the host may run it on a worker it keeps
+	// for such statements, so it does not wait behind a report. False when
+	// there was no plan, and for a probe.
+	FastLane bool
 }
+
+// TrimmedUnknown, among RunOptions.Trimmed, says which columns a statement
+// takes as trimmed could not be read: any table it reads that holds a
+// trimmed char(n) refuses it (console.PGTrimmedUnknown).
+const TrimmedUnknown = "\x00"
 
 // runOptions are the options the connection's next statement runs in.
 func (s *session) runOptions() RunOptions {
-	return RunOptions{Schema: s.schema(), TimeZone: s.set.zone.duck}
+	return RunOptions{Schema: s.schema(), TimeZone: s.set.zone.duck, FastLane: s.fastLane}
 }
 
 // handleLoginConn runs one connection of a port with a login of its own.
-func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, cancels *cancelRegistry, logger *slog.Logger) {
+func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, cancels *cancelRegistry, logger *slog.Logger, place *connPlace) {
 	// The first defer, so the last to run: one connection's panic is logged
 	// with its stack and ends that connection, not the process the port
 	// shares with every other one.
@@ -252,11 +274,21 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, c
 	if database == "" {
 		database = user
 	}
+	place.spoke.Store(true)
 	password, err := scramExchange(be, encrypted, pt.bindingData())
 	if err != nil {
 		// Debug: psql itself closes here once, to ask for the password and
 		// connect again. A malformed exchange was told why.
 		logger.Debug("pgshim: no password was proved", "err", err, "user", user, "remote", c.RemoteAddr())
+		return
+	}
+	// The client's proof reached the port: it has done its part of the login
+	// and keeps its place from here, while the proof is checked and its
+	// server is opened, however long that takes (prelogin.go). Unless its
+	// place went to a newer connection first: its socket is closed, and its
+	// proof is not checked, so nothing is logged as a wrong password.
+	if !place.loggedIn() {
+		logger.Info("pgshim: "+errLostPlace.Error(), "user", user, "database", database, "remote", c.RemoteAddr())
 		return
 	}
 	bound, refused := cfg.Login(connCtx, user, database, password, func() { _ = c.Close() })
@@ -356,8 +388,10 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	if err == nil {
 		// A char(n) column used where the copy counts its padding (#3068):
 		// the source's, or refused where nothing is sent there.
-		if refusal := s.paddedRefusal(text); refusal != nil {
-			return nil, nil, nil, "", refusal
+		if !s.heavy {
+			if refusal := s.paddedRefusal(text); refusal != nil {
+				return nil, nil, nil, "", refusal
+			}
 		}
 		// A table whose capture dropped its changes (not_captured.go): the
 		// copy holds old rows of it, and the source answers, before the copy
@@ -380,6 +414,7 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		// does not run one it would answer from the snapshot alone (#3086).
 		opts := s.runOptions()
 		opts.NeedTails = s.holdsBackCopy(apart && named > 0)
+		opts.Trimmed = s.trimmedFor(text)
 		res, err = s.bound.Run(ctx, text, opts)
 		var changed *sqlsandbox.MayHaveChangedError
 		if opts.NeedTails && errors.As(err, &changed) {

@@ -106,6 +106,10 @@ type refreshRequest struct {
 	// SourcePublication is a PostgreSQL server's publication, whose tables
 	// are what its source "has" for that check (#2759).
 	SourcePublication string
+	// pgSourceShapes is what a PostgreSQL source says its tables' columns are
+	// now, read by this run's checkNewTables and handed to the fold (#3112).
+	// nil for a restore, and when the source was not asked or did not answer.
+	pgSourceShapes map[reconstruct.PGTableName]reconstruct.PGSourceShape
 	// laneWait, when set, adds up the time the fold waited for the snapshot
 	// lane (#2385). runRefresh takes it off the run's measured time: a wait
 	// behind another server is not what an update costs, and UpdateSeconds
@@ -118,6 +122,13 @@ type refreshRequest struct {
 	// run is recorded, so the record says what is coming. Nil: the
 	// daemon-wide loop, which never takes a full read.
 	PlanNewTables func(all []string) (action, reason string)
+	// Reread, when set, makes this update read those tables from the source
+	// and fold them from that read (#2640, prepareReread). Nil is every
+	// update today: nothing sets it yet.
+	Reread *rereadOrder
+	// baselineOverride is FullTableConfig.BaselineOverride for this run: the
+	// staged files of Reread, once capture has reached them.
+	baselineOverride map[string]string
 }
 
 // TriggerRefresh starts a periodic baseline refresh for a server, sharing the
@@ -268,6 +279,28 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	sweepDiscardedSnapshots(req)
 	sweepCompactStaging(req)
 
+	// A read of some tables (#2640) comes before the mark and the instant
+	// below, so the fold's target is after the read. It is journaled by this
+	// run's job, which therefore starts here. The discard is deferred after
+	// the job's release, so it runs first: a kill before it leaves the folder
+	// in the journal for the next start.
+	var job *jobRun
+	jobBegun := false
+	var rereadErr error
+	var rereadStarted time.Time
+	if req.Reread != nil {
+		rereadStarted = time.Now().UTC()
+		job = s.beginJob(console.BaselineRunRefresh, req.ServerID, req.ServerName, req.Trigger, "", rereadStarted)
+		jobBegun = true
+		defer job.release()
+		// Resolved first: the read is checked against the snapshot the fold
+		// will read, which may be the local copy and not the bucket's.
+		req.FoldSource = resolveFoldSource(s.ctx, req)
+		var discard func()
+		req.baselineOverride, discard, rereadErr = s.prepareReread(req, job)
+		defer discard()
+	}
+
 	// #1689: a cycle with nothing to fold does not start.
 	//
 	// Asked before anything that leaves a trace of THIS cycle: a claimed
@@ -286,7 +319,9 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	s.reportGateBlind("mark", markErr, req,
 		"cannot tell whether anything has been indexed, so every cycle folds; this server is not "+
 			"being skipped and will not be until the index answers")
-	if known && s.refreshCanSkip(s.ctx, req, mark, time.Now().UTC(), interval) {
+	// Never for a read of some tables: the read is done, and a table it cures
+	// may have no new change for the gate to see.
+	if known && req.Reread == nil && s.refreshCanSkip(s.ctx, req, mark, time.Now().UTC(), interval) {
 		// FIRST, before the log line and before anything can return early
 		// around it: until this runs, this server's dump, restore and SQL
 		// export are all refused as well.
@@ -357,6 +392,13 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// branch. See recoverBaselineJob's own note on how far a recover reaches.
 	prevPace := s.takeRefreshPace(req.ServerID)
 	started := time.Now().UTC()
+	// A run with a read of some tables started at the read. Its measured time
+	// below does not: UpdateSeconds is what the #1721 model compares with a
+	// full read, and a read and a wait for capture are not what the events
+	// of this update cost to apply.
+	if !rereadStarted.IsZero() {
+		started = rereadStarted
+	}
 	// Separate capture for the ELAPSED time, and the duplication is not
 	// redundant: t.UTC() strips the monotonic reading, so time.Since(started)
 	// would subtract wall clocks. A daemon whose folds run for minutes to
@@ -373,7 +415,6 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// still leaves no trace, and the snapshot directory only when it was
 	// proven this run's own: a kill must never make somebody else's files
 	// reclaimable.
-	var job *jobRun
 	var unclaimed string
 	var noFolder error
 	if strings.TrimSpace(req.BaselineDir) == "" {
@@ -381,19 +422,23 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 		// TriggerRefresh refuses one without: this is the belt for a caller
 		// that reaches the run another way. Nothing is folded.
 		noFolder = console.NoLocalFolderError()
-		job = s.beginJob(console.BaselineRunRefresh, req.ServerID, req.ServerName, req.Trigger, "", started)
-		defer job.release()
+		if !jobBegun {
+			job = s.beginJob(console.BaselineRunRefresh, req.ServerID, req.ServerName, req.Trigger, "", started)
+			defer job.release()
+		}
 	} else {
 		// Asked BEFORE the fold, and it has to be: the question is whether
 		// the snapshot directory holds anything this run did not write, and
 		// once the fold has run its own files are in there too. See
 		// claimSnapshotDir.
 		unclaimed = claimSnapshotDir(refreshSnapshotDir(req, at))
-		job = s.beginJob(console.BaselineRunRefresh, req.ServerID, req.ServerName, req.Trigger, "", started)
+		if !jobBegun {
+			job = s.beginJob(console.BaselineRunRefresh, req.ServerID, req.ServerName, req.Trigger, "", started)
+			defer job.release()
+		}
 		if unclaimed == "" {
 			job.Created(req.BaselineDir, reconstruct.SnapshotDirName(at))
 		}
-		defer job.release()
 	}
 	req.FoldSource = resolveFoldSource(s.ctx, req)
 	var prev time.Time
@@ -403,6 +448,10 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	var err error
 	if noFolder != nil {
 		err = noFolder
+	} else if rereadErr != nil {
+		// No read to fold from: the tables are NOT folded from the snapshot
+		// that was refused, and nothing is published.
+		err = rereadErr
 	} else {
 		prev, tables, refused, reuse, gap, err = s.executeRefresh(req, at)
 	}
@@ -1900,6 +1949,9 @@ func (s *baselineSupervisor) executeRefresh(req refreshRequest, at time.Time) (p
 	// Before the fold, against the very list the fold is handed: a table
 	// missing from it is a table this snapshot will not hold (#1993).
 	gap = s.checkNewTables(req, tableList)
+	// And the columns the source has now for each of them (#3112): a table
+	// that changed with no write after it refuses in the fold.
+	req.pgSourceShapes = gap.pgShapes
 	req.TableDeltas = s.tableDeltas
 	tables, refused, reuse, err = s.foldSnapshot(req, at, tableList)
 	if err != nil {
@@ -2026,6 +2078,7 @@ func refreshFoldConfig(req refreshRequest, at time.Time, tableList []string) rec
 		MaxChangeBytes:          daemonFoldMaxChangeBytes,
 		RemediationHint:         daemonFoldRemediation,
 		SpaceCheck:              newDiskSpaceCheck(),
+		BaselineOverride:        req.baselineOverride,
 		// AllowGaps stays FALSE. An unattended job must never publish a
 		// knowingly-incomplete baseline: accepting a permanent capture loss is a
 		// decision with consequences for every future reconstruct, and nobody is
@@ -2120,7 +2173,7 @@ func (s *baselineSupervisor) foldSnapshot(req refreshRequest, at time.Time, tabl
 	}
 	reports, failures, runErr := func() ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
 		defer release() // deferred: a panic in the fold must not keep the lane
-		return foldTables(laneCtx(s.ctx, laneSnapshot), refreshFoldConfig(req, at, tableList))
+		return foldTables(reconstruct.WithPGSourceShapes(laneCtx(s.ctx, laneSnapshot), req.pgSourceShapes), refreshFoldConfig(req, at, tableList))
 	}()
 	tables, refused, reuse, err = foldOutcome(tableList, reports, failures, runErr)
 	// Which tables refused, and why, from the rule the command line prints

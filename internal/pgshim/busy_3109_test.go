@@ -343,14 +343,19 @@ func TestBusyCopy_aCatalogTheCopyIsTooBusyToList_3109(t *testing.T) {
 	got, msg = busyExtended(ctx, c, l, "SELECT n FROM t WHERE id = $1", []byte("1"))
 	step("extended, a cheap read", got, msg, busyOutcome{"42", "", RouteSource, ReasonCheapPlan}, true, n, r)
 
-	// What the screen vetoes whatever the columns' types still goes to the
-	// source with the list unread: a function the copy answers otherwise,
-	// a literal with a time zone its type does not hold.
+	// What the screen vetoes whatever the columns' types, when expensive on
+	// the source, is the copy's anyway (heavy.go): with the list unread it is
+	// refused as busy, as any other expensive statement, and not sent to the
+	// source.
 	for _, stmt := range []string{"SELECT now() FROM big", "SELECT count(*) FROM big WHERE n = 1 AND DATE '2026-03-02+02' IS NOT NULL"} {
 		n, r = len(src.ran()), l.runs.Load()
 		got, msg = busySimple(ctx, c, l, stmt)
-		step("a veto, "+stmt, got, msg, busyOutcome{"42", "", RouteSource, ReasonVeto}, true, n, r)
+		step("a veto, "+stmt, got, msg, busyOutcome{"", "53000", RouteRefused, ReasonCopyWaitTimeout}, false, n, r)
 	}
+	// Cheap, the veto stands: the source answers.
+	n, r = len(src.ran()), l.runs.Load()
+	got, msg = busySimple(ctx, c, l, "SELECT now() FROM t WHERE id = 1")
+	step("a cheap veto", got, msg, busyOutcome{"42", "", RouteSource, ReasonVeto}, true, n, r)
 
 	// Listed again: the copy answers the report, prepared or not.
 	cat.set(nil)

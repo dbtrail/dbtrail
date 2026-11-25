@@ -1391,6 +1391,15 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 				viewsRefusal = &sqlRefusal{http.StatusUnprocessableEntity, why}
 				return "", viewsRefusal
 			}
+			// The char(n) columns the PostgreSQL port took as read without
+			// their padding are so in the snapshot this statement reads
+			// (pg_trimmed.go). Before anything heavier: the source answers.
+			if names := pgTrimmed(ctx); len(names) > 0 {
+				if why := pgTrimmedMoved(names, readTables); why != "" {
+					viewsRefusal = &sqlChangedRefusal{why}
+					return "", viewsRefusal
+				}
+			}
 			// Not over a statement whose tables the parse could not tell: it
 			// would build a tail for every table of the copy. Which tables
 			// get a tail is not which views are installed (#3043): see
@@ -1400,6 +1409,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			switch {
 			case tails != nil && tailsKnown:
 				tailsStart := time.Now()
+				tails.waitUpdateOver(ctx, tailTables, s.sqlLimits.Timeout/2, s.freshWaitWillAct(ctx, b, tails, tailTables))
 				waited := func(bool) {}
 				if id, ok := tailsFor(ctx); ok {
 					// Fresh mode's wait for the source (#2645), off unless
@@ -1449,7 +1459,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			// none of the copy's tables (the change log, a probe) is not held
 			// to it.
 			if lim, ok := behindLimitFrom(ctx); ok && len(readTables) > 0 {
-				behind, why := s.statementBehind(ctx, b, lim.id, in, readTables, tailThrough, tailThroughID, allTailed)
+				behind, why := s.statementBehindFor(ctx, b, lim.id, in, readTables, tailThrough, tailThroughID, allTailed)
 				if why != "" || behind > lim.limit {
 					viewsRefusal = &sqlBehindRefusal{behind: behind, limit: lim.limit, unknown: why}
 					if ctx.Err() != nil {
@@ -1566,6 +1576,9 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			// render no view.
 			markReadTableDeadRows(narrowed.Baselines, readTables)
 			dateScales = sqlDateScales(narrowed, refs, sess.StrictStar, sess.MySQLClock)
+			if sess.TrimPadded {
+				narrowed.Baselines = views.WithPaddingTrimmed(narrowed.Baselines)
+			}
 			viewsSQL = views.Generate(narrowed) + sqlUsedSchema(in, narrowed.OnlyViews, schema) + textDecline
 			return viewsSQL, nil
 		},
@@ -1618,6 +1631,9 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 		observe.ObserveSQLStatementPhase(phase, d)
 	}
 	readFrom, readFromOK := copyReadFrom(in, readTables)
+	if !allTailed || tailThrough.IsZero() {
+		s.notePGSnapshotThrough(ctx, b, readTables)
+	}
 	res.DateScales = dateScales
 	return sqlOutcome{Result: res, CopyUpdatedAt: copyUpdatedAt, Phases: parent,
 		ReadFrom: readFrom, ReadFromOK: readFromOK, TailThrough: tailThrough, TailThroughID: tailThroughID, AllTailed: allTailed,

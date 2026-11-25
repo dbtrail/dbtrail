@@ -67,10 +67,13 @@ converts a partition, or discards or imports a tablespace, and a MariaDB
 without writing them to the binary log, and the columns stay the same
 ([#2632](https://github.com/dbtrail/dbtrail/issues/2632),
 [#2640](https://github.com/dbtrail/dbtrail/issues/2640)). An `EXCHANGE
-PARTITION` refuses both tables. The full read that cures it reads the whole
-server, at most once a day, so a table whose partitions are dropped every
-hour brings that server's copy up to date once a day. On the Snapshots page a failed update falls back to a full backup
-at the same slot when the daemon may take one. A run publishes all of its
+PARTITION` refuses both tables. On a server with a schedule on the Snapshots
+page, such a refused table is read again alone from the source, and the next
+snapshot holds every table at one point; when that cannot be done, or does
+not work, the full read that cures it reads the whole server, at most once a
+day ([When DBTrail reads your whole database](full-reads.md#every-case)). A
+failed update falls back to that full read at the same slot when the daemon
+may take one. A run publishes all of its
 tables or none, so a snapshot never mixes two points in time.
 
 ## Querying with DuckDB

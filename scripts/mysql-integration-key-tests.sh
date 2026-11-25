@@ -8,9 +8,7 @@
 #
 # <log> is every shard's test output together (what `collect` in
 # scripts/mysql-integration-shard.sh writes): the tests live in different
-# shards. Run by the `integration` job of ci.yml and the `integration-mysql`
-# job of release.yaml, from this one file. The list used to be written in
-# both workflows, and the release's copy had fallen to 7 of these.
+# shards. Run by the `integration` job of ci.yml.
 set -euo pipefail
 log="${1:?usage: mysql-integration-key-tests.sh <log>}"
 [ -s "$log" ] || { echo "FATAL: the test log $log is missing or empty" >&2; exit 1; }

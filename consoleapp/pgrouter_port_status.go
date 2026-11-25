@@ -124,7 +124,7 @@ func pgPortStatusRows(in pgPortStatusInput) [][2]string {
 // it held every captured change up to and how long before the answer that
 // was, rounded up as in /status, or "unknown" for both with the reason.
 func pgLastAgeRows(a console.CopyRunAge) [][2]string {
-	if a.Tailed {
+	if pgAgeKnown(a) {
 		return [][2]string{
 			{"last_answer_indexed_through", a.Through.UTC().Format(time.RFC3339)},
 			{"last_answer_age_seconds", strconv.FormatInt(*pgAgeSeconds(max(a.Ran.Sub(a.Through), 0)), 10)},

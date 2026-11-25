@@ -64,8 +64,12 @@ func TestPostgresForwardTargetCaptureAnswer(t *testing.T) {
 			want: PGForwardTarget{DSN: "postgres://app_ro:pw@db/shop", Account: "forwarding user app_ro"}},
 		{name: "no answer, an account of its own", source: capPGSource, route: "postgres://app_ro:pw@db/shop",
 			want: PGForwardTarget{DSN: "postgres://app_ro:pw@db/shop", Account: "forwarding user app_ro"}},
-		{name: "yes, the forwarding field holds the capture account by hand: refused as before", source: capPGSource, route: "postgres://repl:x@db/shop", yes: true,
+		{name: "the forwarding field holds the capture account, no answer: refused", source: capPGSource, route: "postgres://repl:x@db/shop",
 			want: PGForwardTarget{Refused: PGRouteRefusedIsCapture}},
+		{name: "yes, the forwarding field holds the capture account: the capture account's route", source: capPGSource, route: "postgres://repl:x@db/shop", yes: true,
+			want: PGForwardTarget{DSN: capPGSource, CaptureAccount: true, Account: PGForwardsWithCapture}},
+		{name: "yes, the forwarding field holds the capture account, a source that asks for replication", source: capPGSource + "?replication=database", route: "postgres://repl:x@db/shop", yes: true,
+			want: PGForwardTarget{Refused: "the server's source URL asks for replication: " + pgCaptureFix}},
 		{name: "yes, the forwarding field unreadable: refused as before", source: capPGSource, route: "u:p@tcp(db:3306)/", yes: true,
 			want: PGForwardTarget{Refused: PGRouteRefusedUnreadable}},
 		{name: "yes, a source that asks for replication", source: capPGSource + "?replication=database", yes: true,
@@ -271,6 +275,8 @@ func TestForwardChanged(t *testing.T) {
 	yes.ForwardWithCaptureAccount, yes.ForwardWithCaptureAccountFor = true, "repl@db:5432"
 	own, ownYes := pg, yes
 	own.RouteDSN, ownYes.RouteDSN = "postgres://app:pw@db/shop", "postgres://app:pw@db/shop"
+	capRoute, capRouteYes := pg, yes
+	capRoute.RouteDSN, capRouteYes.RouteDSN = "postgres://repl:x@db/shop", "postgres://repl:x@db/shop"
 	my := ServerEntry{SourceDSN: "repl:cap@tcp(db:3306)/"}
 	myYes := my
 	myYes.ForwardWithCaptureAccount, myYes.ForwardWithCaptureAccountFor = true, "repl@db:3306"
@@ -285,6 +291,10 @@ func TestForwardChanged(t *testing.T) {
 		{"yes given beside an account of its own", own, ownYes, false},
 		{"an account of its own set over a yes", yes, ownYes, true},
 		{"a MySQL server's yes, no account of its own", my, myYes, true},
+		// The capture account saved as the forwarding user forwards as the
+		// capture account once the answer is yes: the answer decides it.
+		{"yes given beside the capture account saved as the forwarding user", capRoute, capRouteYes, true},
+		{"yes taken back beside the capture account saved as the forwarding user", capRouteYes, capRoute, true},
 	} {
 		if got := forwardChanged(c.old, c.next); got != c.want {
 			t.Errorf("%s: %v, want %v", c.name, got, c.want)

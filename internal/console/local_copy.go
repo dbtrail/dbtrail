@@ -332,27 +332,33 @@ func validLocalKeepNewest(n int) error {
 // still holds the other server's snapshots (heldNow) is never pruned
 // either: the reason above outlives the sharing.
 func LocalKeepTargets(entries []ServerEntry, excluded ...string) map[string]int {
+	return localKeepTargetsWith(canonicalDir, entries, excluded...)
+}
+
+// localKeepTargetsWith is LocalKeepTargets with the way a folder is resolved
+// handed in, so a caller holding resolved paths does not touch the disk.
+func localKeepTargetsWith(canon func(string) string, entries []ServerEntry, excluded ...string) map[string]int {
 	users := map[string]int{}
 	for _, e := range entries {
 		if e.BaselineDir != "" {
-			users[canonicalDir(e.BaselineDir)]++
+			users[canon(e.BaselineDir)]++
 		}
 	}
 	blocked := map[string]bool{}
 	for _, d := range excluded {
 		if d != "" && !isS3Location(d) {
-			blocked[canonicalDir(d)] = true
+			blocked[canon(d)] = true
 		}
 	}
 	out := map[string]int{}
 	for _, e := range entries {
-		if e.BaselineDir == "" || e.LocalKeepNewest <= 0 || heldNow(e) {
+		if e.BaselineDir == "" || e.LocalKeepNewest <= 0 || heldNowWith(canon, e) {
 			continue
 		}
 		if LocalKeepSharedS3(entries, e, excluded...) {
 			continue
 		}
-		dir := canonicalDir(e.BaselineDir)
+		dir := canon(e.BaselineDir)
 		if users[dir] > 1 || blocked[dir] {
 			continue
 		}
@@ -416,12 +422,18 @@ func LocalKeepSharedS3(entries []ServerEntry, e ServerEntry, excluded ...string)
 // a name exists once in the folder and nothing is confirmed for another
 // folder. That is not counted as shared here.
 func AgePruneSharedS3(entries []ServerEntry, dir, s3, globalDir, globalS3 string) bool {
+	return agePruneSharedS3With(canonicalDir, entries, dir, s3, globalDir, globalS3)
+}
+
+// agePruneSharedS3With is AgePruneSharedS3 with the way a folder is resolved
+// handed in.
+func agePruneSharedS3With(canon func(string) string, entries []ServerEntry, dir, s3, globalDir, globalS3 string) bool {
 	mine := strings.TrimSpace(s3)
 	if mine == "" {
 		return false
 	}
 	other := func(d, p string) bool {
-		return sameS3(mine, strings.TrimSpace(p)) && !sameDir(dir, d)
+		return sameS3(mine, strings.TrimSpace(p)) && !sameDirWith(canon, dir, d)
 	}
 	if other(globalDir, globalS3) {
 		return true
@@ -476,6 +488,40 @@ func LocalKeepBlocked(entries []ServerEntry, e ServerEntry, excluded ...string) 
 	return n > 1
 }
 
+// FolderKeepsEverySnapshot reports whether no cleanup reaches dir: neither a
+// count (LocalKeepTargets) nor an age, which needs the folder paired with an
+// S3 destination that is not shared with another writer. ageSet is whether an
+// age retention is in force. It states the plan consoleapp.prunePlan builds,
+// and a test there holds the two together. It decides nothing: the pages use
+// it to say that a folder grows until someone sets a limit (#2475).
+func FolderKeepsEverySnapshot(entries []ServerEntry, dir, globalDir, globalS3 string, ageSet bool) bool {
+	return folderKeepsEveryWith(canonicalDir, entries, dir, globalDir, globalS3, ageSet)
+}
+
+// folderKeepsEveryWith is FolderKeepsEverySnapshot with the way a folder is
+// resolved handed in: the pages pass paths already resolved in the background,
+// because resolving a folder on a disk that stopped answering never returns.
+func folderKeepsEveryWith(canon func(string) string, entries []ServerEntry, dir, globalDir, globalS3 string, ageSet bool) bool {
+	if localKeepTargetsWith(canon, entries, globalDir, globalS3)[canon(dir)] > 0 {
+		return false
+	}
+	if !ageSet {
+		return true
+	}
+	aged := func(d, s3 string) bool {
+		return s3 != "" && sameDirWith(canon, d, dir) && !agePruneSharedS3With(canon, entries, d, s3, globalDir, globalS3)
+	}
+	if aged(globalDir, globalS3) {
+		return false
+	}
+	for _, e := range entries {
+		if aged(e.BaselineDir, e.BaselineS3) {
+			return false
+		}
+	}
+	return true
+}
+
 // markHeldFolders marks, in after, every entry left ALONE in a folder that
 // before had more than one server (#1681): the others' snapshots are still in
 // it, and a snapshot does not say which server wrote it. The registry calls it
@@ -507,8 +553,15 @@ func markHeldFolders(before, after []ServerEntry) {
 
 // heldNow reports whether e's current folder is the one the registry marked
 // held (LocalKeepHeldDir).
-func heldNow(e ServerEntry) bool {
-	return e.BaselineDir != "" && e.LocalKeepHeldDir != "" && canonicalDir(e.BaselineDir) == canonicalDir(e.LocalKeepHeldDir)
+func heldNow(e ServerEntry) bool { return heldNowWith(canonicalDir, e) }
+
+func heldNowWith(canon func(string) string, e ServerEntry) bool {
+	return e.BaselineDir != "" && e.LocalKeepHeldDir != "" && canon(e.BaselineDir) == canon(e.LocalKeepHeldDir)
+}
+
+// sameDirWith is sameDir with the way a folder is resolved handed in.
+func sameDirWith(canon func(string) string, a, b string) bool {
+	return a != "" && b != "" && canon(a) == canon(b)
 }
 
 // CanonicalDir is canonicalDir for the callers outside this package that

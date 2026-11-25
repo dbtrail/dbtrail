@@ -189,6 +189,11 @@ type fakeSource struct {
 	hangDiscard bool
 	// realDSN, when set, is a real PostgreSQL the port forwards to.
 	realDSN string
+	// emptyRows, when set, answers a statement that names "manyempty" with
+	// that many rows of one NULL cell, then waits for emptyGate to close
+	// before it ends the answer.
+	emptyRows int
+	emptyGate chan struct{}
 	// conns are the connections it serves now (dropConns).
 	conns map[net.Conn]bool
 }
@@ -363,10 +368,12 @@ func (f *fakeSource) serve(c net.Conn) {
 				f.explains = append(f.explains, q)
 				f.mu.Unlock()
 				answer := `[{"Plan": {"Node Type": "Result", "Total Cost": 0.01, "Plan Rows": 1}}]`
+				// The longest key the statement holds: the most specific, the
+				// same one every time.
+				best := ""
 				for k, v := range f.plans {
-					if strings.Contains(q, k) {
-						answer = v
-						break
+					if strings.Contains(q, k) && len(k) > len(best) {
+						best, answer = k, v
 					}
 				}
 				if code, ok := strings.CutPrefix(answer, "error "); ok {
@@ -448,6 +455,21 @@ func (f *fakeSource) serve(c net.Conn) {
 					be.Send(rowShape)
 					row()
 					be.Send(&pgproto3.ErrorResponse{Severity: "ERROR", Code: "22012", Message: "division by zero"})
+					break
+				}
+				if strings.Contains(q, "manyempty") && f.emptyRows > 0 {
+					be.Send(rowShape)
+					for range f.emptyRows {
+						be.Send(&pgproto3.DataRow{Values: [][]byte{nil}})
+					}
+					if be.Flush() != nil {
+						return
+					}
+					select {
+					case <-f.emptyGate:
+					case <-time.After(30 * time.Second):
+					}
+					be.Send(&pgproto3.CommandComplete{CommandTag: []byte(fmt.Sprintf("SELECT %d", f.emptyRows))})
 					break
 				}
 				if strings.Contains(q, "nosuch") {
@@ -549,6 +571,9 @@ type costLogin struct {
 	// the snapshot. needTails records what each statement asked.
 	tailsPending atomic.Bool
 	needTails    []bool
+	// fastLane records RunOptions.FastLane of each statement the copy was
+	// given (fastlane.go).
+	fastLane []bool
 	// keep, when set, is the port's pool of connections kept idle between
 	// statements (Forward.Park).
 	keep *keptSources
@@ -608,6 +633,7 @@ func (k *keptSources) parked() int {
 func (l *costLogin) run(_ context.Context, st string, opts RunOptions) (sqlsandbox.Result, error) {
 	l.mu.Lock()
 	l.needTails = append(l.needTails, opts.NeedTails)
+	l.fastLane = append(l.fastLane, opts.FastLane)
 	l.mu.Unlock()
 	if opts.NeedTails && l.tailsPending.Load() {
 		return sqlsandbox.Result{}, &sqlsandbox.MayHaveChangedError{Reason: "fresh mode: the newest captured changes of public.t are not ready yet"}
@@ -763,7 +789,8 @@ func TestRouteByCost_simple(t *testing.T) {
 		{"a plan refused for the moment", "SELECT count(*) FROM locked", costOutcome{"42", "", RouteSource, ReasonExplainFailed}, "EXPLAIN (FORMAT JSON) SELECT count(*) FROM locked"},
 		{"cancelled while its plan was asked for: not run anywhere", "SELECT count(*) FROM canceled", costOutcome{"", "57014", RouteSource, ReasonExplainFailed}, "EXPLAIN (FORMAT JSON) SELECT count(*) FROM canceled"},
 		// Asked of nothing: the screen sends it to the source already.
-		{"a veto", "SELECT now()", costOutcome{"42", "", RouteSource, ReasonVeto}, ""},
+		// Its plan is asked (heavy.go): cheap, the screen's veto stands.
+		{"a veto", "SELECT now()", costOutcome{"42", "", RouteSource, ReasonVeto}, "EXPLAIN (FORMAT JSON) SELECT now()"},
 		// EXPLAIN of the first would run the second on the source.
 		{"two statements", "SELECT sum(n) FROM big; SELECT sum(n) FROM big", costOutcome{"42", "", RouteSource, ReasonExplainFailed}, ""},
 	} {

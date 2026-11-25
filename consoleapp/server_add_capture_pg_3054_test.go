@@ -18,12 +18,15 @@ const pgCapturePrompt = "Let the port forward as dbtrail? (yes/no)"
 
 const pgCaptureYes = `"shop" forwards with the user DBTrail captures with (dbtrail): the PostgreSQL port sends to your PostgreSQL, read-only, a SELECT the copy does not answer, and only when every table it reads is a table of the copy. Anything else is refused and not sent. A server that hides tables or columns sends nothing.` + "\n\n"
 
-const pgCaptureNoAtQuestion = "No: the copy answers alone, and a statement it cannot answer gets an error. Turn it on later:  bintrail-console server forward-user shop --capture-account\n\n"
+const pgCaptureNoAtQuestion = "No: the port does not forward for \"shop\", so the PostgreSQL port does not serve it: a client that connects gets an error that says why and how to serve it. Turn it on later:  bintrail-console server forward-user shop --capture-account\n(or set a forwarding user of its own:  bintrail-console server forward-user shop -u <user> -p)\n\n"
 
-const pgCaptureNoFlag = `The port does not forward for "shop" (--no-capture-account): the copy answers alone, and a statement it cannot answer gets an error. Turn it on later:  bintrail-console server forward-user shop --capture-account` + "\n\n"
+const pgCaptureNoFlag = `The port does not forward for "shop" (--no-capture-account), so the PostgreSQL port does not serve it: a client that connects gets an error that says why and how to serve it. Turn it on later:  bintrail-console server forward-user shop --capture-account
+(or set a forwarding user of its own:  bintrail-console server forward-user shop -u <user> -p)` + "\n\n"
 
-const pgCaptureNotAsked = `Not asked whether the port may forward with dbtrail: nobody is at a terminal to answer, and nothing said yes, so the port does not forward for "shop" and the copy answers alone. Turn it on:  bintrail-console server forward-user shop --capture-account
-(or, when adding, --capture-account, or capture-account=yes under [dbtrail-forward] in the option file)` + "\n\n"
+// pgCaptureNotAsked: nobody could be asked, so no, and the PostgreSQL port
+// does not serve the server until it is turned on (0.140.0).
+const pgCaptureNotAsked = `Not asked whether the port may forward with dbtrail (nobody is at a terminal to answer), and nothing said yes, so the port does not forward for "shop" and the PostgreSQL port does not serve it: a client that connects gets an error that says why and how to serve it. Turn it on:  bintrail-console server forward-user shop --capture-account
+(or, when adding, --capture-account, or capture-account=yes under [dbtrail-forward] in the option file; or set a forwarding user of its own:  bintrail-console server forward-user shop -u <user> -p)` + "\n\n"
 
 func TestServerAddPostgresCaptureAnswerOutputInEveryCase(t *testing.T) {
 	type answer struct {
@@ -52,7 +55,7 @@ func TestServerAddPostgresCaptureAnswerOutputInEveryCase(t *testing.T) {
 			{"--no-capture-account", answer{capture: captureNo, why: "--no-capture-account"}, head + "\n" + pgCaptureNoFlag + pgNextLine, false},
 			{"capture-account=no in the file", answer{capture: captureNo, why: "capture-account=no under [dbtrail-forward] in the option file"},
 				head + "\n" + strings.Replace(pgCaptureNoFlag, "(--no-capture-account)", "(capture-account=no under [dbtrail-forward] in the option file)", 1) + pgNextLine, false},
-			{"no terminal and nothing said", answer{capture: captureNotAsked, why: "nobody is at a terminal to answer"}, head + "\n" + pgCaptureNotAsked + pgNextLine, false},
+			{"no terminal and nothing said: no", answer{capture: captureNotAsked, why: "nobody is at a terminal to answer"}, head + "\n" + pgCaptureNotAsked + pgNextLine, false},
 			{"the option file on stdin, on a terminal", answer{capture: captureNotAsked, why: "standard input carried the option file or the password, so nothing could be asked"},
 				head + "\n" + strings.Replace(pgCaptureNotAsked, "nobody is at a terminal to answer", "standard input carried the option file or the password, so nothing could be asked", 1) + pgNextLine, false},
 			{"--forward-user: set as before, nothing asked", answer{fwdUser: "app_ro"}, head + "\n" + pgForwardsWant("app_ro") + pgNextLine, false},

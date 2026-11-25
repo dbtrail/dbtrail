@@ -94,13 +94,9 @@ func TestCopyScreen(t *testing.T) {
 	}
 	toSource := map[string]string{
 		// Measured by pgcompare as answered otherwise or refused.
-		`SELECT avg(qty) FROM pgcmp_orders`:         "avg",
-		`SELECT id, round(ratio) FROM pgcmp_orders`: "round",
-		`SELECT id, amount / 2 FROM pgcmp_orders`:   "division",
-		`SELECT id, qty / 2.0 FROM pgcmp_orders`:    "division",
-		`SELECT id, qty / 0 FROM pgcmp_orders`:      "division",
-		`SELECT id, amount / qty FROM pgcmp_orders`: "division",
-		`SELECT 7 / 2`: "division",
+		`SELECT id, round(ratio) FROM pgcmp_orders`:                  "round",
+		`SELECT id, qty / 0 FROM pgcmp_orders`:                       "division",
+		`SELECT 7 / 2`:                                               "division",
 		`SELECT sum(qty) / count(*) FROM pgcmp_orders`:               "division",
 		`SELECT id, qty % 3 FROM pgcmp_orders`:                       "%",
 		`SELECT id FROM pgcmp_orders WHERE status ~ '^p'`:            "~",
@@ -208,8 +204,10 @@ func TestCopyScreen(t *testing.T) {
 		`TABLE pgcmp_orders`:         "SELECT",
 		`EXPLAIN SELECT 1`:           "SELECT",
 	}
+	// With the main ORDER BY's text kept from the copy: that one is the copy's
+	// since #3219 (TestCopyScreen_mainOrderOfText).
 	for q, why := range toSource {
-		got := CopyScreen(q, routeTypes)
+		got := CopyScreenSortingLikeSource(q, routeTypes)
 		if got == "" {
 			t.Errorf("%s: left to the copy, want the source (%s)", q, why)
 		}

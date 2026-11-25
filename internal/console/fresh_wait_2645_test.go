@@ -112,6 +112,7 @@ func (f *fakePositions) SourcePosition(ctx context.Context, _ ServerEntry) (Sour
 // index stepped by the test, a fake source and a saved position the test
 // moves.
 type waitRig struct {
+	t       *testing.T
 	s       *Server
 	id      string
 	k       *tailKeeper

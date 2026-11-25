@@ -320,13 +320,15 @@ func probePGRouteAccount(candidate, source string) *routeProbeResult {
 	return &routeProbeResult{User: cfg.user, Skipped: "the web interface cannot log in to PostgreSQL to try this account; the PostgreSQL port (pg-router) logs in with it the first time a client needs the source, and a refusal is shown to that client"}
 }
 
-// Why the PostgreSQL port does not send a statement to a server's source,
-// for the states of its forwarding account that are not an account of its
-// own. Each completes "cannot be sent to the source: ...".
+// Why the PostgreSQL port cannot forward for a server, for the states of its
+// forwarding account that are not an account of its own. Each is a cause,
+// with no way out in it: PGPortNotServed adds both ways to serve the server,
+// since the port serves a server only when it can forward (0.140.0).
 const (
-	PGRouteRefusedNoAccount  = "the server has no forwarding account, and forwarding with the account DBTrail captures with is not turned on for it. Turn that on (`dbtrail server forward-user <server> --capture-account`: read-only, and only statements whose every table is a table of the copy), or on the source create a role that can log in and read what this port should read (CREATE ROLE ... LOGIN, GRANT SELECT) and set it as the server's forwarding user (`dbtrail server forward-user <server> -u <user> -p`, or in the web interface, edit the server); then reconnect"
-	PGRouteRefusedIsCapture  = "the server's saved forwarding account is the account DBTrail captures with, and this port never forwards with that one. Set another forwarding user on the server (`dbtrail server forward-user <server> -u <user> -p`, or in the web interface, edit the server), then reconnect"
-	PGRouteRefusedUnreadable = "the server's saved forwarding account cannot be read. Set the forwarding user and password again (`dbtrail server forward-user <server> -u <user> -p`, or in the web interface, edit the server), then reconnect"
+	PGRouteRefusedNoAccount  = "it has no forwarding user, and forwarding as the account DBTrail captures with is turned off for it"
+	PGRouteRefusedIsCapture  = "its saved forwarding user is the account DBTrail captures with, and forwarding as that account is turned off for it"
+	PGRouteRefusedUnreadable = "its saved forwarding user cannot be read"
+	PGRouteRefusedNoSource   = "it has no source database to forward to"
 )
 
 // PostgresForwardAccount is what the PostgreSQL port forwards with for a

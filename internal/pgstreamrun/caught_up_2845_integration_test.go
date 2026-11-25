@@ -103,8 +103,10 @@ func TestIntegrationPGCaughtUpStampFollowsWhatWasReached_2845(t *testing.T) {
 	}
 	var flushed atomic.Uint64
 	var failing atomic.Bool
+	var failedReads atomic.Int64
 	probe := func(context.Context) (pgcapture.HealthSnapshot, error) {
 		if failing.Load() {
+			failedReads.Add(1)
 			return pgcapture.HealthSnapshot{FlushedLSNErr: errors.New("permission denied")}, nil
 		}
 		// The source's clock, three hours behind this host's.
@@ -178,8 +180,12 @@ func TestIntegrationPGCaughtUpStampFollowsWhatWasReached_2845(t *testing.T) {
 	// be read stamps nothing.
 	// Long enough for a failed reading to replace the last good one, on a
 	// slow machine too.
+	// Two failed readings, not a time: the loop takes the next reading only
+	// after it kept the one before, so the second one asked means the first
+	// failed one replaced the good reading. A fixed sleep was not enough on
+	// a slow CI runner (the stamp moved at 9000).
 	failing.Store(true)
-	time.Sleep(300 * time.Millisecond)
+	waitCaughtUp(t, "two failed readings of the source", 10*time.Second, func() bool { return failedReads.Load() >= 2 })
 	send(sentMarkerAt(9000))
 	time.Sleep(200 * time.Millisecond)
 	if now := caughtUpStamp(t, db); now != held {
