@@ -187,11 +187,15 @@ WHERE r.rnk <= 3 ORDER BY r.w_id, r.d_id, r.rnk LIMIT 500`
 	// Q07 writes c_credit out, which the copy holds without its padding
 	// (#3219, a decision of the product): its answer must be PostgreSQL's with
 	// only that column's trailing blanks gone, which is PostgreSQL's answer
-	// to q07 with the column trimmed there.
+	// to q07 with the column trimmed there. Over these rows Q07 joins no
+	// customer, so the same is asked of the column written out on its own,
+	// over every row: empty, all blanks, NULL.
 	q07Trimmed := strings.Replace(q07, "c.c_credit,", "rtrim(c.c_credit) AS c_credit,", 1)
 	if q07Trimmed == q07 {
 		t.Fatal("Q07 no longer writes c.c_credit out: the test's premise")
 	}
+	credit := `SELECT c_id, c_credit FROM ` + cu + ` ORDER BY c_w_id, c_d_id, c_id`
+	creditTrimmed := `SELECT c_id, rtrim(c_credit) AS c_credit FROM ` + cu + ` ORDER BY c_w_id, c_d_id, c_id`
 	// What keeps Q07 from the copy: sorted by the char(n), whose only answer
 	// here would be the copy's order of text, and compared with a string
 	// with a trailing blank, which PostgreSQL compares without it.
@@ -272,14 +276,20 @@ WHERE r.rnk <= 3 ORDER BY r.w_id, r.d_id, r.rnk LIMIT 500`
 				t.Errorf("%s, %s: the copy's answer differs\n got: %s\nwant: %s", how, name, got, want)
 			}
 		}
-		{
-			want := pgStarRead(ctx, source, q07Trimmed, extended)
-			if strings.HasPrefix(want, "error") || !strings.Contains(want, "\n") {
-				t.Fatalf("%s, Q07: PostgreSQL itself: %s", how, want)
+		for _, c := range []struct{ name, stmt, trimmed string }{
+			{"Q07, returns a char(n)", q07, q07Trimmed},
+			{"a char(n) written out", credit, creditTrimmed},
+		} {
+			want := pgStarRead(ctx, source, c.trimmed, extended)
+			if strings.HasPrefix(want, "error") {
+				t.Fatalf("%s, %s: PostgreSQL itself: %s", how, c.name, want)
 			}
-			if got := pgStarRead(ctx, port, q07, extended); got != want {
-				t.Errorf("%s, Q07, returns a char(n): the copy's answer differs from PostgreSQL's beyond the padding\n got: %s\nwant: %s", how, got, want)
+			if got := pgStarRead(ctx, port, c.stmt, extended); got != want {
+				t.Errorf("%s, %s: the copy's answer differs from PostgreSQL's beyond the padding\n got: %s\nwant: %s", how, c.name, got, want)
 			}
+		}
+		if want := pgStarRead(ctx, source, creditTrimmed, extended); strings.Count(want, "\n") != 30 {
+			t.Fatalf("%s: PostgreSQL itself: %q, want 30 rows: the test's premise", how, want)
 		}
 		for _, c := range toSource {
 			name, stmt := c.name, c.stmt
