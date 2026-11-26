@@ -2241,13 +2241,16 @@ an index range) and stay there, and the other twelve cost 98,367 to
 copy's engine picks the order of a statement's joins with no statistics of
 its columns, and for some reports it picks one whose intermediate result is
 far larger than any of its tables: on the CH-benCHmark's Q5 it joined the
-stock table (20 million rows) with the filtered orders (240,000) on the
-warehouse alone, which has 200 values, about 24 billion rows, and ran out of
-memory after three and a half minutes, after which the source answered. In
-the order written, Q5 answers in 5.5 seconds. So, on a connection with a
-forwarding user, the copy reads its own plan of the statement before running
-it (in milliseconds) and estimates each join's output from the source's count
-of distinct values of the joined columns (`pg_stats.n_distinct`). A join
+stock table (20 million rows) with the filtered orders on the warehouse
+alone, which has 200 values, and gave no answer after three and a half
+minutes, after which the source answered. In the order written, Q5 answers
+in 7.5 seconds. So, on a connection with a forwarding user, the copy reads
+its own plan of the statement before running it (in milliseconds) and
+estimates each join's output from the source's count of distinct values of
+the joined columns (`pg_stats.n_distinct`). The engine's own row estimates
+fall far short over a table read with its recent changes (fresh mode) or
+with rows deleted since its snapshot (stock, 20 million rows, estimated at
+844,417), so the check takes those back to the table's rows first. A join
 estimated at more than 100 times its larger input (a cross product: also more
 than 10 billion rows) has the statement planned again in the order written;
 it runs in that order when that plan has no such join, and when it has one
@@ -2259,9 +2262,20 @@ capture account, statistics the forwarding user cannot read, a table never
 analyzed) the copy runs every statement as before. What the check cannot
 read it does not count against a statement: a condition that is not one
 column equal to another, a column name two tables share, a join that returns
-at most the rows of one side. On the 22 CH-benCHmark reports it changes
-three: Q5 and Q8 run in the order written, and Q21, which no order fits, goes
-to the source.
+at most the rows of one side. On the 22 CH-benCHmark reports, read through
+the copy's views with and without recent changes, it changes two: Q5 runs in
+the order written, and Q21, which runs out of memory in both orders, goes to
+the source. What it does not catch is an order that keeps every join's
+output in proportion but builds a hash table from a side the engine thinks
+small: Q9 over fresh-mode views (order_line joined with stock first) is
+neither flagged nor changed.
+
+**The copy does not cache a subplan a statement reads twice.** On this port
+the engine's `common_subplan` optimizer is off: over a view of the copy it
+wrote the whole view to disk (the CH-benCHmark's Q17, which reads
+order_line twice, wrote about 3.3 GB and took 19.8 seconds; with it off,
+3.4 seconds, with the same answer). The MySQL port and the SQL page are not
+changed.
 
 What this costs and where it can go wrong:
 

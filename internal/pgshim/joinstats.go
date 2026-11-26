@@ -35,6 +35,11 @@ import (
 // negative (-1: unique); neither, or a table never analyzed (reltuples -1),
 // is no count. The plan the copy checks names a column without its table, so
 // a name that two tables hold is left out: the check takes it as selective.
+// That leaves out every column of a partitioned table too (each partition
+// is a table here): such a table gets no check. pg_stats lists only the
+// columns the forwarding account may read, and the counts are the server's,
+// read by whichever connection reads them first: all of them log in as that
+// one account.
 const joinStatsSQL = `SELECT coalesce(json_object_agg(name, ndv), '{}')::text FROM (
   SELECT lower(s.attname) AS name,
          max(CASE WHEN s.n_distinct > 0 THEN s.n_distinct::float8

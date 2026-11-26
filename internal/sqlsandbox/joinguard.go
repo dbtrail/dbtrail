@@ -39,7 +39,8 @@ import (
 //     (JoinTooBigError) when it has one too.
 //
 // What the check cannot read it leaves alone: a condition that is not a
-// plain column = column (an expression, a range), a column with no
+// plain column = column (an expression, a range) is not counted, and a join
+// with no plain equality is not judged; a column with no
 // statistics or one whose name more than one table holds (the plan names
 // columns without their table), a join that never gives more rows than one
 // side (semi, anti, mark, single, as-of), a missing or zero estimate. Each
@@ -50,10 +51,15 @@ import (
 // a cross product writes no estimate of its own, so a join over one is not
 // judged.
 //
-// The two bounds were set on the 22 CH-benCHmark reports (testdata): with
-// them the check flags exactly Q5, Q8 and Q21 in DuckDB's order; Q5 and Q8
-// pass in the order written, and Q21 does not (a cross product of order_line
-// and supplier, 6e11 rows). A cross product needs the floor because a ratio
+// The two bounds were set on the 22 CH-benCHmark reports. Over plain cast
+// views (testdata) the check flags exactly Q5, Q8 and Q21 in DuckDB's order;
+// Q5 and Q8 pass in the order written, and Q21 does not (a cross product of
+// order_line and supplier, 6e11 rows). Over the copy's own views, with and
+// without fresh mode's tails, it flags Q5 and Q21: Q5 gave no answer in 210 s
+// in DuckDB's order and answered in 7.5 s in the order written, and Q21 ran
+// out of memory in both. Not caught: Q9 over fresh-mode views, whose order
+// keeps each join's output in proportion but builds a hash table from a
+// side DuckDB takes for small. A cross product needs the floor because a ratio
 // alone cannot tell Q21's from Q8's in the order written (1e5 x 1e4, which
 // answers): both are 1e4 times their larger input.
 

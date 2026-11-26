@@ -357,6 +357,15 @@ func TestWorker_joinCheckRefusesWhatExplodesInBothOrders(t *testing.T) {
 	if !strings.Contains(res.Error.Message, "CROSS_PRODUCT") {
 		t.Errorf("the refusal does not name the join: %q", res.Error.Message)
 	}
+	// An equality join, the case the check is for, through DuckDB's own
+	// Conditions and estimates: 1e6 x 1e5 rows on a column of two values.
+	res = runJob(wireJob{
+		CopyDirs: []string{f.archiveRoot}, SQL: "SELECT count(*) AS n FROM (SELECT range % 2 AS x FROM range(1000000)) a JOIN (SELECT range % 2 AS y FROM range(100000)) b ON a.x = b.y",
+		Threads: 1, MemoryLimit: "256MB", MaxRows: 10, MaxResultBytes: 1 << 20, JoinNDV: map[string]float64{"x": 2, "y": 2},
+	}, nil, os.Stderr)
+	if res.Error == nil || res.Error.Kind != errJoinTooBig || !strings.Contains(res.Error.Message, "x = y") {
+		t.Fatalf("an equality join: %+v", res.Error)
+	}
 	// Without statistics the same statement runs as it always did.
 	res = runJob(wireJob{
 		CopyDirs: []string{f.archiveRoot}, SQL: "SELECT count(*) AS n FROM range(1000) a, range(1000) b",

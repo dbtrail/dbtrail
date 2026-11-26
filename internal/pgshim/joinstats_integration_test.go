@@ -25,7 +25,8 @@ func TestIntegrationJoinStatistics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer direct.Close(context.Background())
+	// Closed after the schema is dropped: cleanups run last first.
+	t.Cleanup(func() { direct.Close(context.Background()) })
 	exec := func(q string) [][][]byte {
 		t.Helper()
 		res, err := direct.Exec(ctx, q).ReadAll()
@@ -37,7 +38,8 @@ func TestIntegrationJoinStatistics(t *testing.T) {
 		}
 		return res[len(res)-1].Rows
 	}
-	exec("CREATE SCHEMA IF NOT EXISTS jg_stats")
+	exec("DROP SCHEMA IF EXISTS jg_stats CASCADE")
+	exec("CREATE SCHEMA jg_stats")
 	t.Cleanup(func() { _, _ = direct.Exec(context.Background(), "DROP SCHEMA IF EXISTS jg_stats CASCADE").ReadAll() })
 	exec("CREATE TABLE jg_stats.jg_orders (jg_o_id int, jg_o_w_id int, jg_shared int)")
 	exec("CREATE TABLE jg_stats.jg_stock (jg_s_w_id int, jg_shared int)")

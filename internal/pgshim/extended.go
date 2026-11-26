@@ -709,6 +709,7 @@ func (s *session) columnsOf(text string) ([]sqlsandbox.Column, error) {
 	runText, err := s.copyText(text)
 	if err == nil {
 		res, err = s.bound.Run(ctx, runText, s.runOptions())
+		s.noteJoinCheck(res, err)
 	}
 	if s.bound.Answered != nil && ctx.Err() == nil {
 		s.bound.Answered(time.Since(started), err != nil)

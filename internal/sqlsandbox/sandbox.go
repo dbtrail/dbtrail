@@ -284,9 +284,9 @@ type Session struct {
 	// optimizer off. That optimizer materializes a subplan a statement reads
 	// twice; over a view of the copy it wrote the whole view to disk: the
 	// CH-benCHmark's Q17, which reads order_line twice, wrote 59 million rows
-	// (about 3.3 GB) and took 19.8 s, and 3.4 s with it off; Q21 5.7 s and
-	// 0.8 s; the 22 reports gave the same answers, none slower. Only the
-	// PostgreSQL port sets it; the MySQL port and the SQL page keep it on.
+	// (about 3.3 GB) and took 19.8 s, and 3.4 s with it off, with the same
+	// answer. Only the PostgreSQL port sets it; the MySQL port and the SQL
+	// page keep it on.
 	SkipCommonSubplan bool
 	// PostgresRules runs the statement by PostgreSQL's rules where the
 	// engine's session decides the answer (#2786), for the copy of a
