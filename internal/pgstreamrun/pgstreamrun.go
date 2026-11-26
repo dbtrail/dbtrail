@@ -201,7 +201,7 @@ func saveStartedPG(db *sql.DB, serverID uint32, skips *parser.SkipCounters, logg
 // needs. The live cursor (last committed LSN) is tracked in the loop, NOT here — this
 // holds the loaded resume point and the running counters.
 type pgStreamState struct {
-	lsn           uint64 // resume LSN (loaded from the checkpoint; 0 on first run)
+	lsn uint64 // resume LSN (loaded from the checkpoint; 0 on first run)
 	// owner is this run's capture owner token (claimCaptureOwner); every
 	// save names it. Empty only for a loop driven without One (tests).
 	owner         string
