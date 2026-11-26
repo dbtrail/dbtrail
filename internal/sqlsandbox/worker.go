@@ -394,10 +394,16 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 	}
 	// The join check (joinguard.go, Session.JoinNDV): the statement's plan in
 	// this session, its views and settings in place, and before the lock,
-	// because running it in the order written is a SET. Not when the order
-	// written was asked for already.
-	if job.JoinNDV != nil && !job.KeepJoinOrder {
-		check := checkJoins(ctx, conn, job.SQL, job.JoinNDV, job.SkipCommonSubplan)
+	// because running it in the order written is a SET. When the order
+	// written was asked for already, only that order is checked
+	// (checkJoinsWritten): there is no other to move to.
+	if job.JoinNDV != nil {
+		var check joinCheck
+		if job.KeepJoinOrder {
+			check = checkJoinsWritten(ctx, conn, job.SQL, job.JoinNDV)
+		} else {
+			check = checkJoins(ctx, conn, job.SQL, job.JoinNDV, job.SkipCommonSubplan)
+		}
 		switch {
 		case check.refusal != "":
 			return wireResult{Error: &wireError{Kind: errJoinTooBig, Message: check.refusal}}

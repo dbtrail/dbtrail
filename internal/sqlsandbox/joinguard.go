@@ -373,6 +373,27 @@ func checkJoins(ctx context.Context, conn *sql.Conn, statement string, ndv map[s
 	return joinCheck{written: true}
 }
 
+// checkJoinsWritten is checkJoins for a statement that runs in the order
+// written already (Session.KeepJoinOrder, whose SET is in place): its plan in
+// that order alone, refused when a join there is estimated far past its
+// inputs. Nothing is planned in the copy's own order, and the statement is
+// never moved to another: a pass runs it as it was going to run.
+func checkJoinsWritten(ctx context.Context, conn *sql.Conn, statement string, ndv map[string]float64) joinCheck {
+	plan, err := explainJSON(ctx, conn, statement)
+	if err != nil {
+		return joinCheck{skipped: "the copy's plan could not be had: " + firstLine(err.Error())}
+	}
+	danger, err := joinDanger(plan, ndv)
+	switch {
+	case err != nil:
+		return joinCheck{skipped: err.Error()}
+	case danger == "":
+		return joinCheck{}
+	}
+	return joinCheck{refusal: "a join of the statement on the copy is estimated far past its inputs in the order written (" + danger +
+		"), which the statement runs in, so it was not run there"}
+}
+
 // disabledOptimizersSQL is the session's one SET of DuckDB's
 // disabled_optimizers, "" when it turns none off: join_order for the joins
 // in the order written (Session.KeepJoinOrder, or the join check), and

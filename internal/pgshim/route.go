@@ -102,6 +102,10 @@ type RouteNote struct {
 	// statement's run there, whichever side then answered it
 	// (sqlsandbox.WrittenOrderRetry* names), "" when it did nothing.
 	OOMRetry string
+	// WrittenOrder is what the memory of shapes that needed the order
+	// written did with the statement's run (WrittenOrderRemembered,
+	// WrittenOrderForgotten, writtenorder.go), "" when it did nothing.
+	WrittenOrder string
 }
 
 // routeDecision is which side answers a statement, and why.
@@ -1861,13 +1865,15 @@ func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, fa
 	s.joinCheck = ""
 	oomRetry := s.oomRetry
 	s.oomRetry = ""
+	writtenOrder := s.writtenOrder
+	s.writtenOrder = ""
 	if s.bound == nil || s.bound.Routed == nil || d.side == "" {
 		return
 	}
 	if d.side != RouteCopy {
 		joinCheck = ""
 	}
-	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed, JoinCheck: joinCheck, OOMRetry: oomRetry})
+	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed, JoinCheck: joinCheck, OOMRetry: oomRetry, WrittenOrder: writtenOrder})
 }
 
 // fieldName reports whether the token at j is the field a date_trunc or a

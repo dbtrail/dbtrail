@@ -2317,6 +2317,52 @@ of each run. A prepared statement's Describe is not counted (it runs the
 statement under `LIMIT 0`). The MySQL port and the SQL page are not changed:
 there an out-of-memory error is the answer, as before.
 
+**The port remembers a statement shape that needed the order written.**
+When the second run answers, the port remembers the statement's shape for
+that server, and the next statements of that shape run on the copy with their
+joins in the order written from the start, with no first run in the engine's
+order. Q9 then takes one run of about 6 seconds instead of a failed one of 22
+to 34 seconds followed by the retry. A shape is the statement with every value
+replaced by `?` (so the same report with other dates or ids is the same
+shape), together with the schema and `search_path`; it is the same key the
+port uses to remember a statement's side by its plan. A statement the port
+could only read in part is not remembered. Only a second run that answered
+teaches the port anything: a second run that failed, a statement not run
+again, a cancel, a time-out or any other error leaves the memory as it was.
+The answer does not change, only the plan: the order written turns off the
+engine's join order optimizer and nothing else. A remembered statement keeps
+the join check, for the order written alone: one shape covers every value of
+it, and a value can make it far larger than the one it was learned with, so
+a join estimated far past its inputs in the order written sends it to the
+source as `join_too_big` before it runs, and the shape stays remembered. A
+remembered statement gets at most half of what is left of the client's
+`statement_timeout` on the copy, as the second run does, so the source still
+has the other half. When it runs out of memory or of time in the order
+written (the copy's own limit, or that half), the shape is forgotten and the
+statement goes to the source as `copy_refused_after_written_order`, without a
+third run, as when the second run fails. Where there is no source to send it
+to, the client gets the error: the out of memory one, or `57014` for time.
+The client's own `statement_timeout` ending it forgets the shape too, and is
+answered as always. Any other error is answered as that error, and the shape
+stays remembered. Each shape is
+remembered for 24 hours from when it was learned, however often it is used,
+so the engine's own order is tried again once a day: as the data changes it
+may fit again, and it is usually the faster one when it does. A new snapshot
+of the copy does not reset it, because what makes the engine pick the bad
+order is that it has no statistics of the copy's columns, which a new
+snapshot does not give it. A server remembers at most 4,096 shapes, after
+which it forgets them all and learns them again. The memory is per server,
+shared by all its connections, kept in memory only: a restart of the port
+forgets it (opening the port again after a password change does not).
+`/status` counts it under `join_checks`, on either side:
+`written_order_remembered` for each statement run in the order written from
+the start, and `written_order_forgotten` for those of them that ran out of
+memory or time there. The second is part of the first, not beside it: a
+statement that was forgotten adds one to both, so the two are not added up as
+separate runs. A remembered statement whose join check passed adds nothing to
+`planned`. The log has one `INFO` line when a shape is learned and one
+when it is forgotten, not one per statement.
+
 **The copy does not cache a subplan a statement reads twice.** On this port
 the engine's `common_subplan` optimizer is off: over a view of the copy it
 wrote the whole view to disk (the CH-benCHmark's Q17, which reads
@@ -2694,7 +2740,7 @@ The reasons, with the MySQL port's names where they mean the same:
 | source | `catalog_not_on_copy` | a catalog statement the copy does not answer |
 | source | `table_not_on_copy` | a table the copy does not hold |
 | source | `copy_refused` | the copy could not run it |
-| source | `copy_refused_after_written_order` | the copy ran out of memory for it in its own join order, and again when it ran it once more with its joins in the order written |
+| source | `copy_refused_after_written_order` | the copy ran out of memory for it in its own join order, and again when it ran it once more with its joins in the order written; or, for a statement shape the port remembered as needing the order written, in that order (the shape is then forgotten) |
 | source | `copy_columns_differ` | a column the copy writes otherwise (a `numeric` without precision) |
 | source | `copy_behind_source`, `copy_age_unknown` | the server's lag limit |
 | source | `table_not_captured` | a table whose capture lost or dropped changes since its snapshot was read (a table capture skips, a capture ledger that does not say which tables or cannot be read, a lost slot, a snapshot published over a known loss), in fresh and fast mode: the copy holds that table as of its snapshot only. Without a forwarding user, or on a server that hides tables, the copy answers it from that snapshot with a notice that says so |

@@ -277,8 +277,9 @@ type Session struct {
 	// order written, run in that order when that plan has none, and refused
 	// with a JoinTooBigError, nothing run, when it has one too. Nil: no
 	// check, as before. Only the PostgreSQL port sets it, for a connection
-	// that can send a refused statement to its source; with KeepJoinOrder
-	// set there is nothing to check.
+	// that can send a refused statement to its source. With KeepJoinOrder
+	// set, only the order written is planned: a join estimated far past its
+	// inputs there refuses the statement, and nothing else changes.
 	//
 	// A pointer, so Session stays comparable (its callers compare sessions
 	// with ==): two sessions are the same only with the same counts.

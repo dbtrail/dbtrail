@@ -110,7 +110,7 @@ var reasonMeans = map[string]string{
 	ReasonSourceUnreachable: "the source could not be asked for the statement's plan, so the copy answered as it does without one",
 	ReasonJoinTooBig:        "the copy's plan of the statement has a join estimated far larger than its inputs, in the copy's join order and in the order written, so it was not run there",
 
-	ReasonCopyRefusedAfterWrittenOrder: "the copy ran out of memory for the statement in its own join order, and again when it ran the statement with its joins in the order written",
+	ReasonCopyRefusedAfterWrittenOrder: "the copy ran out of memory for the statement in its own join order, and again when it ran the statement with its joins in the order written; or, for a statement shape the port remembered as needing the order written, in that order, after which the shape is forgotten",
 }
 
 // noteLast keeps a statement's decision as the connection's last answer. A

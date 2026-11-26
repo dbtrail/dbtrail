@@ -110,6 +110,9 @@ type session struct {
 	// oomRetry is what the copy's retry in the order written did with the
 	// statement's run (runFree), for its RouteNote; "" when nothing.
 	oomRetry string
+	// writtenOrder is what a remembered shape did with the statement's run
+	// (settleWrittenOrder), for its RouteNote; "" when none.
+	writtenOrder string
 	// catalogBusy is the busy reason the copy's list of columns could not
 	// be read for at its last read (catalog), "" when it was read or failed
 	// otherwise.
