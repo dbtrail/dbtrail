@@ -296,3 +296,15 @@ func TestHideHostPathsInError_keepsTheJoinOrder(t *testing.T) {
 		t.Fatalf("%+v", qe)
 	}
 }
+
+// The parent reads the order a worker's engine error ran in.
+func TestEngineError_carriesTheJoinOrder(t *testing.T) {
+	out := wireResult{Error: &wireError{Kind: errQuery, Message: "Out of Memory Error: x"}, JoinOrder: joinOrderWritten}
+	if qe := engineError(out, spillSpec{}, nil); !qe.ranWrittenOrder || qe.Message != "Out of Memory Error: x" {
+		t.Errorf("%+v", qe)
+	}
+	out.JoinOrder = ""
+	if qe := engineError(out, spillSpec{}, nil); qe.ranWrittenOrder {
+		t.Errorf("%+v", qe)
+	}
+}

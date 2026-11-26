@@ -659,6 +659,13 @@ type QueryError struct {
 
 func (e *QueryError) Error() string { return e.Message }
 
+// engineError is the QueryError of a worker's answer whose error is the
+// engine's (errQuery): its text, and the join order it ran in, which the
+// retry in the order written reads (oomretry.go).
+func engineError(out wireResult, spill spillSpec, noSpill error) *QueryError {
+	return &QueryError{Message: spillCapMessage(out.Error.Message, spill, noSpill), ranWrittenOrder: out.JoinOrder == joinOrderWritten}
+}
+
 // TimeoutError: the worker ran past Limits.Timeout and was killed.
 type TimeoutError struct {
 	Limit time.Duration
@@ -2043,7 +2050,7 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 		case errRefused:
 			return Result{}, &RefusedError{Reason: out.Error.Message}
 		case errQuery:
-			return Result{}, &QueryError{Message: spillCapMessage(out.Error.Message, spill, noSpill), ranWrittenOrder: out.JoinOrder == joinOrderWritten}
+			return Result{}, engineError(out, spill, noSpill)
 		case errTooLarge:
 			return Result{}, ErrResultTooLarge
 		case errJoinTooBig:
