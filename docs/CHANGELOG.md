@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.143.0] - 2026-11-26
+
+- **PostgreSQL fresh mode writes recent changes to disk far fewer times** (#3204). A table's recent changes were written again in full after every snapshot update and every eight files. A snapshot update now keeps the files already written, and at eight files only the newest small ones are merged. In a synthetic load with about 700,000 recently changed rows in one table, rows written per captured change went from 23.5 to 5.6, the time spent keeping them up to date from 142 s to 51 s, and the longest single update from 3.7 s to 1.6 s. A statement reads about 50 % more small files in exchange, which took its read from 33 ms to 39 ms in that load. MySQL and MariaDB sources are not affected.
+- **PostgreSQL fresh mode keeps the recent changes of quiet tables across snapshot updates** (#3278, #3084). A table with no change since the last snapshot update lost its recent changes at every update and had to read them all again from the index, and so did every table when the source had been quiet since the update. A statement that joined such a table was answered from the snapshot alone meanwhile. A snapshot update now records in its folder where it ended and which tables it brought there, and fresh mode starts those tables from that point. Snapshots written before this version are read as before until the next update. MySQL and MariaDB sources are not affected.
+- **Snapshot updates no longer rewrite every table in the first hours of a new install** (#3279, #3083). While the index was younger than its retention, a snapshot update wrote a table in full once its file was older than four fifths of the index's own age, so with the default 48 hours of retention the large tables were rewritten a few hours after the first snapshot and again and again until the index reached that age. While the index is younger than its retention, a table's file is now kept as long as it would be on an index that has reached its retention, and it is still replaced before the index drops the changes after it. Indexes as old as their retention, and indexes whose retention cannot be read, behave as before. MySQL, MariaDB and PostgreSQL sources are all covered.
+- **The Snapshots page marks a snapshot as aging only when the next update will replace it** (#3279, #3083). The web interface now grades "aging" on the same rule the snapshot update uses to decide which files to write again, so a new install no longer shows its first snapshot as aging within hours, and a snapshot the update is about to replace still shows as aging. A server no update of this daemon refreshes (one whose snapshots are only in S3, or whose folder another server also writes) is graded as before, since nothing is going to replace its snapshot. `bintrail status` does not know the daemon's update schedule and grades as before. Webhooks still send only "broken", which has not changed.
+- **PostgreSQL snapshot updates find a large table's changed rows much faster** (#3280, #3085). A snapshot update used to read the key columns of a table's whole file to find the rows that changed, which on tables of tens of millions of rows could take longer than the update had. A PostgreSQL table file now has a key index beside it (`<table>.pg.keyidx`). The index is written with the snapshot, kept with the file when the file is carried into the next snapshot by a hard link, and built at the first update that needs it when the file has none (a snapshot from an earlier version, a build skipped at the time).
+
+  On a 10-million-row table, finding 1,000 changed rows went from 1.8 s to 0.3 s. Reading their values for large columns PostgreSQL did not resend went from 2.3 s to 0.6 s, because the rows are now read once and not twice.
+
+  Every row the index finds is checked against the file before it is used. The index is not used, and the file is read as before, when it is:
+  - damaged;
+  - built on other key columns;
+  - left from another version of the file;
+  - holding a row that does not match its key.
+
+  An index that is there and unusable is reported once, with its cause, and rebuilt. An index is removed only when the file proves it wrong. A read that fails for another reason (memory, a full temporary folder, a read error) leaves the index in place and reads the file as before. An index that cannot be read is reported once per version of the file, not at every update or statement.
+
+  A file whose own rows rule out an index (a NULL or duplicate key) is not tried again until the file is rewritten or the daemon restarts. A build that fails for a reason that may pass (memory, a folder short on disk, a read error) is tried again 5 minutes later, then after twice as long at each failure, up to 6 hours. A folder short on disk skips the build with a warning and never fails the snapshot. A file copied into the next snapshot rather than linked gets no index.
+
+  The cost of an index is disk space: it holds every key uncompressed, so it can be larger than the compressed table file. The 10-million-row table above has a 66 MB index beside an 18 MB file, built in about 8 s. The build's time is on the table's update line as `lookup_index_built_ms=`, only on the update that paid for it.
+
+  `BINTRAIL_KEY_INDEX=0` turns the index off, as it does for MySQL. MySQL and MariaDB sources are not affected.
+- **PostgreSQL port: a statement whose joins would not fit on the copy is run in the order written, or sent to the source, before it runs** (#3281). The copy's engine picks the order of joins without statistics of its columns, and on some reports picks one whose intermediate result does not fit: the CH-benCHmark's Q5 gave no answer after minutes, and answers in 7.5 s in the order written. On a connection with a forwarding user the copy now reads its own plan first and estimates each join from the source's `pg_stats.n_distinct` (read at most every 10 minutes per server, on the connection already open for the source's plan). A join estimated at more than 100 times its larger input is planned again in the order written and runs that way when that plan passes; when it does not, the source answers the statement at once, counted as `join_too_big` on `/status`. Without statistics nothing changes. The port also turns the engine's `common_subplan` optimizer off, which wrote a whole view to disk for a statement that reads it twice (Q17: 19.8 s to 3.4 s). The MySQL port is not changed.
+- **MySQL and MariaDB fresh mode: tables keyed by a UUID, a date or a decimal get their recent changes** (#3283, #3159). Before, fresh mode laid recent changes only over a table whose primary key was made of integers. Any other table was read from its last snapshot, and so was any statement that joined it with other tables. A key can now also be `DECIMAL`, `DATE`, `DATETIME`, `BINARY` (a UUID stored as `BINARY(16)`, for example) or `VARBINARY`, alone or combined with integers.
+
+  These keys still have none:
+  - text, whatever its collation, `_bin` included: the copy compares text without MySQL's collation, so a key could match another row;
+  - `TIMESTAMP`: the snapshot does not record the time zone its dump was read in;
+  - `DECIMAL ... ZEROFILL`: a dump prints it padded with zeros.
+
+  A few key values turn off the table's recent changes until a snapshot newer than the change, and the table is read from its snapshot as before:
+  - a `BINARY(n)` value that ends in 0x00 bytes (about 1 random UUID in 256);
+  - an empty binary value, or one whose text starts with `0x` or `0X`;
+  - a zero date;
+  - a `DECIMAL` minus zero, or one with another number of decimals than the column's;
+  - a change whose row does not spell its key the way capture stored it.
+
+  An empty binary value written into the copy by a snapshot update is now stored as empty, as a dump has it. Before, it was stored as the two characters `0x`.
+
 ## [0.142.0] - 2026-11-25
 
 - **PostgreSQL port: a `char(n)` column is answered by the copy where its padding cannot change the answer** (#3276). The copy holds a `char(n)` without its trailing blanks, so every statement that named one went to the source. Now the copy answers it when the column is shown, grouped, counted, sorted, compared with a plain string with no trailing blank, in `IN` of such strings, in `LIKE 'x%'`, in `IS NULL`, or cut with `substr`; every other use (a string with a trailing blank, a parameter, `length`, `||`, a cast, the column renamed or its row read whole) stays with the source. Sorting by such a column follows the copy's order of text, as for any text column.
