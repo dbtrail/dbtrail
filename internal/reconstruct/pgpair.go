@@ -57,7 +57,7 @@ var pgTableDeltaSwitch = sync.OnceValue(func() bool {
 	}
 	if on {
 		slog.Info("PostgreSQL table deltas on: a snapshot update publishes a changed table as its previous file and a chain of small delta files beside it, "+
-			"one pair per update holding that update's changes, instead of writing the whole table again; the chain is written into a new table file when it is a day old or its files pass half of the table file's; "+
+			"one pair per update holding that update's changes, instead of writing the whole table again; the chain is written into a new table file when it has 12 pairs, is a day old or its files pass half of the table file's; "+
 			PGTableDeltaEnv+"=0 turns them off",
 			"env", PGTableDeltaEnv)
 	} else {
@@ -87,12 +87,25 @@ var pgTableDeltas = func() bool { return pgTableDeltaSwitch() }
 //
 // The retention rule (a chain is ended before the index drops the changes
 // its file starts from) is cfg.ChainStartFloor, which the daemon draws for
-// PostgreSQL and MySQL alike. MySQL bounds the number of pairs only by its
-// sequence, and so does this. Variables so a test can reach them.
+// PostgreSQL and MySQL alike.
+//
+// One rule MySQL does not have: pgChainMaxPairs, a chain of 12 pairs (an
+// hour of updates five minutes apart) gets no further pair. MySQL bounds the
+// number of pairs only by its sequence because every statement on its copy
+// reads a chain through one merged pair (#2231); a PostgreSQL statement reads
+// the table file and every pair, so its cost grows with each update. Measured
+// on a live CH-benCHmark board (warehouses 100, a refresh every 5 minutes, a
+// 6h retention, so chains ended every 4 to 5 hours at about 51 pairs): the
+// reports ran 2 to 4 times slower just before a chain ended than just after.
+// Ending the chain from the file and its pairs took 80 s for customer, 246 s
+// for stock and 225 s for order_line, on the same refresh, at a load average
+// of 5.3 on 8 vCPUs; at 12 pairs that cost is paid every hour on a shorter
+// chain. Variables so a test can reach them.
 var (
 	pgChainMaxAge                = 24 * time.Hour
 	pgChainMaxFraction           = 0.5
 	pgChainMinCompactBytes int64 = 1 << 20
+	pgChainMaxPairs              = 12
 )
 
 // pgPairMetaKeyRows is, on both files of a pair, how many rows the table
@@ -137,6 +150,8 @@ func pgChainOver(lastSeq int, chainBytes, baseBytes int64, age time.Duration) st
 	switch {
 	case lastSeq >= pgdelta.MaxSeq:
 		return fmt.Sprintf("the delta beside the previous file reached pair %d, the last a chain can have", lastSeq)
+	case lastSeq+1 >= pgChainMaxPairs:
+		return fmt.Sprintf("the delta beside the previous file has %d pairs, the most a chain is given", lastSeq+1)
 	case age > pgChainMaxAge:
 		return fmt.Sprintf("the delta beside the previous file is %s old", age.Round(time.Minute))
 	case chainBytes >= pgChainMinCompactBytes && float64(chainBytes) > pgChainMaxFraction*float64(baseBytes):
