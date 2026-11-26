@@ -127,15 +127,23 @@ func TestKeyIndexSortsKeysAsBytes(t *testing.T) {
 	}
 	writeBase(t, base, []string{"id", "val"}, rows...)
 	buildIndex(t, base, []string{"id"})
+	// A key is asked for as the index of events names it, escaped.
+	asked := make([]string, len(keys))
+	for i, k := range keys {
+		asked[i] = KeyOf([]string{k})
+	}
 	var got map[string]int64
 	var err error
-	if n := lookupsOf(func() { got, err = BasePositionsOf(ctx, db, base, []string{"id"}, keys) }); n != 1 || err != nil {
+	if n := lookupsOf(func() { got, err = BasePositionsOf(ctx, db, base, []string{"id"}, asked) }); n != 1 || err != nil {
 		t.Fatalf("answered from the index %d times: %v", n, err)
 	}
-	for i, k := range keys {
+	for i, k := range asked {
 		if at, ok := got[k]; !ok || at != int64(i) {
 			t.Errorf("key %q: row %d, %v; want %d", k, at, ok, i)
 		}
+	}
+	if len(got) != len(keys) {
+		t.Errorf("%d keys found, %d asked", len(got), len(keys))
 	}
 	// The records really are in byte order, one block after another.
 	ix, err := openKeyIndex(base)
@@ -431,8 +439,10 @@ func TestKeyIndexReadsOnlyTheBlocksAskedFor(t *testing.T) {
 	if !reflect.DeepEqual(got, map[string]int64{"k0005": 5, "k0007": 7, "k0500": 500, "k0999": 999}) {
 		t.Fatalf("found %v", got)
 	}
-	if ix.blocksRead != 4 {
-		t.Fatalf("%d blocks read for keys in 4 blocks (and three in none)", ix.blocksRead)
+	// k0005 and k0007 are in the first block, k0500 and k05005 in the one
+	// that starts at k0500, k0999 and z in the last; a is before the first.
+	if ix.blocksRead != 3 {
+		t.Fatalf("%d blocks read for keys in 3 blocks", ix.blocksRead)
 	}
 }
 
