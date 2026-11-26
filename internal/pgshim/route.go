@@ -55,10 +55,6 @@ const (
 	ReasonSessionDiffers    = "session_differs"     // a session setting the copy is not known to reproduce (TimeZone)
 	ReasonNotASelect        = "not_a_select"        // EXPLAIN, a cursor, a savepoint, VALUES
 	ReasonCopyRefused       = "copy_refused"        // the copy could not run it
-	// ReasonCopyRefusedAfterWrittenOrder: it ran out of memory on the copy
-	// in the copy's join order and again in the order written
-	// (sqlsandbox.Session.RetryOutOfMemoryInWrittenOrder).
-	ReasonCopyRefusedAfterWrittenOrder = "copy_refused_after_written_order"
 	ReasonTableNotOnCopy    = "table_not_on_copy"   // it reads a table the copy does not hold
 	ReasonCopyBehindSource  = "copy_behind_source"  // past the server's limit on the copy's lag
 	ReasonCopyAgeUnknown    = "copy_age_unknown"    // the copy's lag cannot be told, and the server has a limit
@@ -77,6 +73,11 @@ const (
 	ReasonCopyQueueFull   = "copy_queue_full"   // for the copy, whose workers were all taken and the line for one full (#3109)
 	ReasonCopyWaitTimeout = "copy_wait_timeout" // for the copy, it waited for a worker as long as it may (#3109)
 )
+
+// ReasonCopyRefusedAfterWrittenOrder: the source answered a statement that
+// ran out of memory on the copy in the copy's join order and again when run
+// in the order written (sqlsandbox.Session.RetryOutOfMemoryInWrittenOrder).
+const ReasonCopyRefusedAfterWrittenOrder = "copy_refused_after_written_order"
 
 // ReasonCaptureGate: the server forwards with the account DBTrail captures
 // with (#3054), and the statement did not pass that account's gate

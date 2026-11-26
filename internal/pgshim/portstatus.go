@@ -92,7 +92,6 @@ var reasonMeans = map[string]string{
 	ReasonSessionDiffers:    "a session setting the copy is not known to reproduce (TimeZone)",
 	ReasonNotASelect:        "not a SELECT (EXPLAIN, a cursor, a savepoint, VALUES)",
 	ReasonCopyRefused:       "the copy could not run the statement",
-	ReasonCopyRefusedAfterWrittenOrder: "the copy ran out of memory for the statement in its own join order, and again when it ran the statement with its joins in the order written",
 	ReasonTableNotOnCopy:    "the statement reads a table the copy does not hold",
 	ReasonCopyBehindSource:  "the copy was further behind the source than the server's limit",
 	ReasonCopyAgeUnknown:    "how far behind the copy was could not be told, and the server has a limit",
@@ -110,6 +109,8 @@ var reasonMeans = map[string]string{
 	ReasonTableNotCaptured:  "the statement reads a table whose capture lost or dropped changes since its snapshot, so the copy holds old rows of it",
 	ReasonSourceUnreachable: "the source could not be asked for the statement's plan, so the copy answered as it does without one",
 	ReasonJoinTooBig:        "the copy's plan of the statement has a join estimated far larger than its inputs, in the copy's join order and in the order written, so it was not run there",
+
+	ReasonCopyRefusedAfterWrittenOrder: "the copy ran out of memory for the statement in its own join order, and again when it ran the statement with its joins in the order written",
 }
 
 // noteLast keeps a statement's decision as the connection's last answer. A
