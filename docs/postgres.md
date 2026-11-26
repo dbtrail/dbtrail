@@ -1115,9 +1115,13 @@ What to know:
   long the index keeps its changes, and rewrites. A changed table keeps its
   file too, with small files of its changes beside it
   (`<table>.000000.pgdead` and `.pgnew`), unless `BINTRAIL_PG_TABLE_DELTAS=0`
-  (`pg-table-deltas = off`) turns that off; it is written in full when its
-  changes pass a quarter of its rows, when its file grows too old for the
-  index to reach back, or when the delta cannot be written. Everything that
+  (`pg-table-deltas = off`) turns that off. Each update adds one pair of
+  those files, and the table is written in full again when it has 12 pairs
+  (an hour of updates five minutes apart: every statement on the copy reads
+  the file and all its pairs, so a long chain makes the reports slower), when
+  the chain is a day old or its files pass half of the table file's, when its
+  file grows too old for the index to reach back, or when the delta cannot be
+  written. Everything that
   reads the copy reads them with the file; a views file that follows later
   snapshots (`bintrail views` without `--pin-snapshot`) refuses such a table
   and says to pin it. `--table-deltas` is the MySQL setting.

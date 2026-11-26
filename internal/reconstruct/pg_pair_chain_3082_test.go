@@ -38,12 +38,22 @@ func TestPGChainOver(t *testing.T) {
 		{"past half of the file", 3, 50<<20 + 1, 100 << 20, time.Hour, true},
 		{"past half of a small file, under 1 MiB", 3, 1<<20 - 1, 1 << 10, time.Hour, false},
 		{"past half of a small file, at 1 MiB", 3, 1 << 20, 1 << 10, time.Hour, true},
-		// No rule on the number of pairs, as for MySQL: 288 is a day at
-		// five minutes.
-		{"288 pairs, small", 287, 2 << 20, 100 << 20, 23 * time.Hour, false},
+		// The number of pairs, which MySQL does not count: 12 is an hour at
+		// five minutes, young and small as the chain is.
+		{"11 pairs", 10, 2 << 20, 100 << 20, 50 * time.Minute, false},
+		{"12 pairs", 11, 2 << 20, 100 << 20, 55 * time.Minute, true},
+		{"12 pairs of a tiny table", 11, 1 << 10, 1 << 10, 55 * time.Minute, true},
+		{"288 pairs, small", 287, 2 << 20, 100 << 20, 23 * time.Hour, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			// The sequence's own edge, which the pair count reaches long
+			// before: lifted out of its way.
+			if c.lastSeq >= pgdelta.MaxSeq-1 {
+				prev := pgChainMaxPairs
+				pgChainMaxPairs = pgdelta.MaxSeq + 2
+				defer func() { pgChainMaxPairs = prev }()
+			}
 			why := pgChainOver(c.lastSeq, c.chainBytes, c.baseBytes, c.age)
 			if (why != "") != c.over {
 				t.Fatalf("pgChainOver = %q, want over %v", why, c.over)
@@ -55,7 +65,9 @@ func TestPGChainOver(t *testing.T) {
 // The PostgreSQL chain ends by the MySQL chain's rules, with its own
 // variables: the values are the same, and so is what each rule does with
 // the same inputs at its edges (pgChainOver and pgPairEligible against
-// chainCompactReason). And the age of a PostgreSQL chain is counted from
+// chainCompactReason), save the one rule MySQL does not have: a PostgreSQL
+// chain of pgChainMaxPairs pairs is over too (see pgChainMaxPairs for why
+// and what it was measured on). And the age of a PostgreSQL chain is counted from
 // where the MySQL one's is, its start: pgRowsStart, the earlier of the
 // file's time and its bound.
 func TestPGChainRulesAreTheMySQLChains(t *testing.T) {
@@ -77,6 +89,8 @@ func TestPGChainRulesAreTheMySQLChains(t *testing.T) {
 		at, floor time.Time
 	}{
 		{"young and small", 3, 2 << 20, base, start.Add(time.Hour), time.Time{}},
+		{"11 pairs", 10, 2 << 20, base, start.Add(time.Hour), time.Time{}},
+		{"12 pairs", 11, 2 << 20, base, start.Add(time.Hour), time.Time{}},
 		{"exactly a day old", 3, 2 << 20, base, start.Add(24 * time.Hour), time.Time{}},
 		{"a day and a second old", 3, 2 << 20, base, start.Add(24*time.Hour + time.Second), time.Time{}},
 		{"exactly half of the file", 3, base / 2, base, start.Add(time.Hour), time.Time{}},
@@ -111,8 +125,12 @@ func TestPGChainRulesAreTheMySQLChains(t *testing.T) {
 					&foldResult{Changes: map[string]*query.ResultRow{"1": {}}}, nil)
 			}()
 			pg := pgChainOver(c.seq, c.chain, c.base, c.at.Sub(from)) != "" || !eligible
-			if pg != mysql {
-				t.Fatalf("the PostgreSQL chain ends %v, the MySQL chain %v", pg, mysql)
+			byPairs := c.seq+1 >= pgChainMaxPairs
+			if pg != (mysql || byPairs) {
+				t.Fatalf("the PostgreSQL chain ends %v, the MySQL chain %v, at %d pairs", pg, mysql, c.seq+1)
+			}
+			if c.seq == 11 && (mysql || !pg) {
+				t.Fatalf("12 young, small pairs: MySQL ends %v, PostgreSQL %v; want only PostgreSQL", mysql, pg)
 			}
 		})
 	}
