@@ -134,7 +134,14 @@ type coverageRule struct {
 //
 //   - the product's aging band over the LIVE floor, exactly the verdict
 //     status.BaselineStalenessFor gives (see snapshotStillCovered for why the
-//     live floor and not the archive-extended one);
+//     live floor and not the archive-extended one). Not while rotation is
+//     known to be out of reach of the floor (floorHolds): on an index younger
+//     than its retention the span is the install's age, and this band
+//     rewrote every table in the first hours of every install (#3083). There
+//     the band is drawn over the window the index drops on (dropsOn, which is
+//     floorHolds' own window whenever it holds), never under the oldest hour.
+//     That is safe because the oldest hour is still there at the next cycle,
+//     and that cycle draws the line again;
 //   - the same band over the retention the operator CONFIGURED. The observed
 //     floor is an observation of that policy and the policy can change under
 //     it in a step: the rotation panel saves a new retain and the next
@@ -159,12 +166,27 @@ func (r coverageRule) reanchorBy(liveFloor, now time.Time) (time.Time, bool) {
 	if liveFloor.IsZero() {
 		return time.Time{}, false
 	}
+	holds := r.floorHolds(liveFloor, now)
 	// status.BaselineStalenessFor: aging once now-start >= 0.8 of now-floor,
 	// broken before the floor, and never aging over a floor not behind now.
 	// Rounded up so a start exactly on the band's edge falls on the line.
 	line := liveFloor.Add(-time.Nanosecond)
 	if span := now.Sub(liveFloor); span > 0 {
-		line = now.Add(-time.Duration(math.Ceil(status.BaselineAgingFraction * float64(span))))
+		if holds {
+			// A young index (#3083): now-floor is the install's age, not how
+			// long the index keeps events, and its band ended every chain
+			// within hours of the first snapshot. The band is drawn over the
+			// window the index drops on instead, and the line never sits
+			// under the oldest hour, so a start on or before it is still
+			// replaced: rotation leaves that hour alone until the next cycle,
+			// and every later start is newer than it.
+			line = now.Add(-agingBand(r.dropsOn()))
+			if liveFloor.After(line) {
+				line = liveFloor
+			}
+		} else {
+			line = now.Add(-agingBand(span))
+		}
 	}
 	floor := liveFloor
 	if r.retain > 0 {
@@ -175,10 +197,16 @@ func (r coverageRule) reanchorBy(liveFloor, now time.Time) (time.Time, bool) {
 			floor = p
 		}
 	}
-	if m := floor.Add(cycleMargin(r.interval)); m.After(line) && !r.floorHolds(liveFloor, now) {
+	if m := floor.Add(cycleMargin(r.interval)); m.After(line) && !holds {
 		line = m
 	}
 	return line, true
+}
+
+// agingBand is the product's aging band over a span (status.BaselineAgingFraction),
+// rounded up so a start exactly on the band's edge falls on the line.
+func agingBand(span time.Duration) time.Duration {
+	return time.Duration(math.Ceil(status.BaselineAgingFraction * float64(span)))
 }
 
 // cycleMargin is how far above the index's floor a start has to be for the
@@ -361,7 +389,9 @@ func readLiveFloorFromDB(ctx context.Context, dsn string) (time.Time, error) {
 // The threshold itself is still the product's own (status.BaselineStalenessFor,
 // baselineAgingFraction): anything it would already describe as aging or worse
 // counts as not covered, and coverageRule.reanchorBy adds the configured
-// retention and a cycle's margin to it.
+// retention and a cycle's margin to it. On an index younger than its retention
+// the band is drawn over the retention instead of over the install's age
+// (#3083), so there a snapshot status grades "aging" can still be covered.
 //
 // What is graded is readsFrom, where a reader of the snapshot starts its event
 // fetch (#1904): with table deltas, the start of its oldest chain, up to a day

@@ -36,7 +36,10 @@ const (
 // first baseline. That is why "aging" stays an informational verdict on
 // status/console and is deliberately NOT wired to the webhook channel — an
 // alert that fires on every fresh install would be cried-wolf into a mute
-// before it ever mattered.
+// before it ever mattered. The snapshot refresh line does not inherit the
+// artifact: while the index is younger than its retention it draws the band
+// over the retention, not over the install's age (#3083, consoleapp
+// coverageRule.reanchorBy).
 const baselineAgingFraction = 0.8
 
 // BaselineAgingFraction is the same band, exported for a caller that has to
