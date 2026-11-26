@@ -246,9 +246,10 @@ const (
 const bootContinuityName = "cli index"
 
 // BaselineStale reports one server's staleness verdict (#1193). Only broken
-// notifies — aging stays visible in status/console (pre-saturation aging is a
-// bootstrap artifact; alerting on it would cry wolf — see
-// status.baselineAgingFraction's comment); the channel carries the transition
+// notifies — aging stays visible in status/console (it says the next snapshot
+// update rewrites the file, on the console graded on the update's own line,
+// #3083; nothing to alert on — see status.baselineAgingFraction's comment);
+// the channel carries the transition
 // that means "full-table restore is impossible NOW". edgeKey identifies the
 // (index DSN, baseline source) PAIR — never the display name (it can collide
 // with the reserved boot label), and never the DSN alone: staleness is a

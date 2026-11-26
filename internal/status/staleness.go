@@ -31,12 +31,16 @@ const (
 // baselineAgingFraction: a baseline older than this fraction of the delta
 // coverage span is "aging" — the restore window is shrinking.
 //
-// Known bootstrap artifact: until rotation saturates retention, the span is
-// the install's age, so a young install reads "aging" within hours of its
-// first baseline. That is why "aging" stays an informational verdict on
-// status/console and is deliberately NOT wired to the webhook channel — an
-// alert that fires on every fresh install would be cried-wolf into a mute
-// before it ever mattered.
+// Until rotation saturates retention, the span is the install's age, so
+// graded on the span alone a young install reads "aging" within hours of its
+// first baseline. Where the snapshot update's rule is known (DeltaFloor.Refresh,
+// the console's Snapshots page), aging is graded on the update's own line
+// instead (#3083, RefreshRule.Line), which on a young index draws the band over
+// the retention: a new install is not "aging" while the update keeps its files.
+// Where it is not known (`bintrail status`, which does not see the daemon's
+// schedule), the span alone still decides. Either way "aging" stays an
+// informational verdict and is deliberately NOT wired to the webhook channel,
+// which carries "broken" only.
 const baselineAgingFraction = 0.8
 
 // BaselineAgingFraction is the same band, exported for a caller that has to
@@ -82,6 +86,15 @@ type DeltaFloor struct {
 	// reporting "broken" on an unattributable snapshot is a false alarm, and
 	// a false alarm is worse than no check at all.
 	BelowIsUnknown bool
+	// Live is the oldest hour the LIVE partitions hold, before archives extend
+	// Hour backwards (#3083). Zero when it was not read.
+	Live time.Time
+	// Refresh is the rule the daemon's snapshot update draws its line with
+	// (RefreshRule.Line), for a caller that knows it; nil otherwise. With it,
+	// a snapshot that is neither broken nor unknown grades aging exactly when
+	// its start is at or before that line over Live: what the update is going
+	// to rewrite, and nothing it keeps. Broken and unknown are not affected.
+	Refresh *RefreshRule
 }
 
 // Grade returns the staleness verdict of one snapshot against this floor. It
@@ -99,6 +112,17 @@ func (f DeltaFloor) Grade(snapshotTime, now time.Time) BaselineStalenessVerdict 
 	v := BaselineStalenessFor(snapshotTime, f.Hour, now)
 	if v == BaselineBroken && f.BelowIsUnknown {
 		return BaselineUnknown
+	}
+	if (v == BaselineOK || v == BaselineAging) && f.Refresh != nil {
+		// The update's own line over the live floor (#3083). A start under
+		// the live floor that archives still cover is on or before the line,
+		// so it grades aging: the update rewrites that file.
+		if line, ok := f.Refresh.Line(f.Live, now); ok {
+			if snapshotTime.After(line) {
+				return BaselineOK
+			}
+			return BaselineAging
+		}
 	}
 	return v
 }
@@ -217,7 +241,8 @@ func OldestDeltaFromDB(ctx context.Context, db *sql.DB, dbName string) (DeltaFlo
 	if err := rows.Err(); err != nil {
 		return DeltaFloor{}, err
 	}
-	floor := DeltaFloor{Hour: OldestLivePartitionHour(parts)}
+	live := OldestLivePartitionHour(parts)
+	floor := DeltaFloor{Hour: live, Live: live}
 
 	// COUNT(DISTINCT bintrail_id) rides the query that was already here — no
 	// extra round trip. Every writer stamps a non-empty id (CLI rotate via

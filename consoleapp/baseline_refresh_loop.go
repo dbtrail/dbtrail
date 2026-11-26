@@ -1143,16 +1143,8 @@ func (s *baselineSupervisor) retainPolicy() time.Duration {
 // rule's full margin, which is safe and is also #2121's symptom on a new
 // index, so it is said (reportGateBlind) rather than left to a Debug line.
 func (s *baselineSupervisor) coverageRuleFor(ctx context.Context, req refreshRequest, interval time.Duration) coverageRule {
-	rule := coverageRule{retain: s.retainPolicy(), interval: interval}
-	if s.rotationInForce == nil {
-		return rule
-	}
-	asked, unreadable := false, false
-	var readErr error
-	rule.dropsAfter, _ = rotation.DropWindow(s.rotationInForce(), func() rotation.Effective {
-		e := readIndexRetention(ctx, req.IndexDSN)
-		asked, unreadable, readErr = true, e.Source == rotation.RetainUnreadable, e.Err
-		return e
+	rule, asked, unreadable, readErr := s.buildCoverageRule(interval, func() rotation.Effective {
+		return readIndexRetention(ctx, req.IndexDSN)
 	})
 	if asked {
 		why := "cannot read the retention this index was created under, so a snapshot that reads from within " +
@@ -1170,6 +1162,23 @@ func (s *baselineSupervisor) coverageRuleFor(ctx context.Context, req refreshReq
 		s.reportGateBlind("retention", cause, req, why)
 	}
 	return rule
+}
+
+// buildCoverageRule is coverageRuleFor without the report: the rule, and
+// whether the index's own retention had to be asked (readRetention, called
+// only then) and could not be read. The Snapshots page builds its rule with
+// it too (refreshLineSource), on the page's own index connection.
+func (s *baselineSupervisor) buildCoverageRule(interval time.Duration, readRetention func() rotation.Effective) (rule coverageRule, asked, unreadable bool, readErr error) {
+	rule = coverageRule{retain: s.retainPolicy(), interval: interval}
+	if s.rotationInForce == nil {
+		return rule, false, false, nil
+	}
+	rule.dropsAfter, _ = rotation.DropWindow(s.rotationInForce(), func() rotation.Effective {
+		e := readRetention()
+		asked, unreadable, readErr = true, e.Source == rotation.RetainUnreadable, e.Err
+		return e
+	})
+	return rule, asked, unreadable, readErr
 }
 
 // followRotation points the supervisor at the settings the rotation loop
