@@ -42,6 +42,9 @@ func TestPGConnAges_countOOMRetry(t *testing.T) {
 
 	c.stashOOMRetry(pgOOMRetryOK)
 	routed(pgshim.RouteNote{Side: pgshim.RouteCopy, Reason: pgshim.ReasonAnswersTheSame, JoinCheck: pgshim.JoinCheckPlanned})
+	// A statement with no run of the copy (the port's own answer): the last
+	// outcome was taken already.
+	routed(pgshim.RouteNote{Side: pgshim.RouteCopy, Reason: pgshim.ReasonCopyCommand})
 	c.stashOOMRetry(pgOOMRetryFailed)
 	routed(pgshim.RouteNote{Side: pgshim.RouteSource, Reason: pgshim.ReasonCopyRefusedAfterWrittenOrder})
 	c.stashOOMRetry("")
@@ -53,7 +56,7 @@ func TestPGConnAges_countOOMRetry(t *testing.T) {
 	if !maps.Equal(n.JoinChecks, want) {
 		t.Errorf("join_checks %v, want %v", n.JoinChecks, want)
 	}
-	if n.Reasons[pgshim.ReasonCopyRefusedAfterWrittenOrder] != 1 || n.Reasons[pgshim.ReasonCopyRefused] != 1 {
+	if n.Reasons[pgshim.ReasonCopyRefusedAfterWrittenOrder] != 1 || n.Copy != 3 || n.Reasons[pgshim.ReasonCopyRefused] != 1 {
 		t.Errorf("reasons %v", n.Reasons)
 	}
 
