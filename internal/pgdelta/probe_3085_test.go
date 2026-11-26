@@ -174,6 +174,23 @@ func TestProbeKeyPasses3085(t *testing.T) {
 			t.Fatal(err, len(found))
 		}
 	}))
+	// BaseValuesOf of one column for the same keys: through the index, one
+	// read of the rows (the check and the values); without it, the join and
+	// then the read of the values.
+	report("BaseValuesOf, 1,000 scattered keys, one column, through the key index (one read of the rows)", timed(3, func() {
+		before := rowReads.Load()
+		if got, err := BaseValuesOf(ctx, db, base, []string{"id"}, keys, []string{"note"}, 0); err != nil || len(got) != len(keys) || rowReads.Load() != before+1 {
+			t.Fatal(err, len(got), "not one read of the rows")
+		}
+	}))
+	off := keyIndexOn
+	keyIndexOn = func() bool { return false }
+	report("BaseValuesOf, 1,000 scattered keys, one column, without the key index (the join, then the values)", timed(3, func() {
+		if got, err := BaseValuesOf(ctx, db, base, []string{"id"}, keys, []string{"note"}, 0); err != nil || len(got) != len(keys) {
+			t.Fatal(err, len(got))
+		}
+	}))
+	keyIndexOn = off
 	report("the check of the rows found against the file", timed(3, func() {
 		if got, err := baseValuesAt(ctx, db, base, found, []string{"id"}, -1, nil); err != nil || len(got) != len(keys) {
 			t.Fatal(err, len(got))
