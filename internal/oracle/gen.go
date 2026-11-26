@@ -160,8 +160,8 @@ func Tables() []Table {
 // Their keys are ones a tail takes: no BINARY(16) value ends in 0x00 and no
 // binary value's text starts with 0x (reconstruct refuses both, and the
 // oracle over tails takes a refusal for a finding). The TIMESTAMP keys are
-// written with a UTC offset of -05:00, so the server turns a wall clock in
-// another zone into the instant it stores.
+// wall clocks at -05:00, so the server turns a wall clock in another zone
+// into the instant it stores.
 func KeyTypeTables() []Table {
 	return []Table{
 		{
@@ -200,7 +200,11 @@ func KeyTypeTables() []Table {
 			Name: "t_ts",
 			DDL:  "CREATE TABLE `t_ts` (`at` TIMESTAMP(6) NOT NULL, `v` INT NOT NULL, PRIMARY KEY (`at`)) ENGINE=InnoDB",
 			PK:   []string{"at"}, Cols: []string{"at", "v"}, Render: map[string]Render{"at": RenderTimestampUTC},
-			key: func(k int) []string { return []string{"'" + microsKey(k) + "-05:00'"} },
+			// A wall clock at -05:00 turned into the session's zone by the
+			// server. Not a '...-05:00' literal: MySQL applies its offset
+			// where it stores a value, not in a WHERE comparison, so a
+			// DELETE by it would match nothing.
+			key: func(k int) []string { return []string{"CONVERT_TZ('" + microsKey(k) + "', '-05:00', @@session.time_zone)"} },
 		},
 		{
 			Name: "t_dec",
