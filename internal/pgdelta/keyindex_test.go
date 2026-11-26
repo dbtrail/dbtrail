@@ -766,7 +766,9 @@ func TestBaseValuesOfReadsTheRowsOnce(t *testing.T) {
 	var got map[string]map[string]*string
 	var err error
 	reads := rowReadsOf(func() {
-		if n := lookupsOf(func() { got, err = BaseValuesOf(ctx, db, base, []string{"id"}, []string{long, "c", "z"}, []string{"val", "note"}, 3) }); n != 1 {
+		if n := lookupsOf(func() {
+			got, err = BaseValuesOf(ctx, db, base, []string{"id"}, []string{long, "c", "z"}, []string{"val", "note"}, 3)
+		}); n != 1 {
 			t.Errorf("answered from the index %d times", n)
 		}
 	})

@@ -580,8 +580,8 @@ type pgPairSteps struct {
 	// index, on the update that built it; zero on every other.
 	indexBuilt time.Duration
 	pairWrite  time.Duration
-	carry     time.Duration
-	foldPair  time.Duration
+	carry      time.Duration
+	foldPair   time.Duration
 }
 
 // attrs is the steps as a log line's fields, in milliseconds, and total_ms
