@@ -283,6 +283,26 @@ func TestStartInWrittenOrder(t *testing.T) {
 	}
 }
 
+// A remembered shape's join check that passed is not counted as planned;
+// the check's other outcomes are counted as they are.
+func TestRememberedJoinCheck(t *testing.T) {
+	for _, tc := range []struct {
+		remembered bool
+		in, want   string
+	}{
+		{true, JoinCheckPlanned, ""},
+		{true, JoinCheckCouldNotRun, JoinCheckCouldNotRun},
+		{true, JoinCheckNoStatistics, JoinCheckNoStatistics},
+		{true, "", ""},
+		{false, JoinCheckPlanned, JoinCheckPlanned},
+		{false, JoinCheckWrittenOrder, JoinCheckWrittenOrder},
+	} {
+		if got := rememberedJoinCheck(tc.remembered, tc.in); got != tc.want {
+			t.Errorf("remembered %v, %q: %q, want %q", tc.remembered, tc.in, got, tc.want)
+		}
+	}
+}
+
 // rememberLogin is a port whose copy behaves as the sandbox does with a
 // statement whose shape runs out of memory in the copy's join order: in that
 // order it answers after its own retry (WrittenOrderRetryOK), and run in the

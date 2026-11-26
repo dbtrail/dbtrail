@@ -456,12 +456,7 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		if opts.NeedTails && errors.As(err, &changed) {
 			s.logger.Debug("pgshim: the copy's recent changes for a statement were not ready; it did not run there, and the source answers it", "why", changed.Reason)
 		}
-		s.joinCheck = s.noteJoinCheck(res, err, opts.JoinNDV != nil, want)
-		if remembered && s.joinCheck == JoinCheckPlanned {
-			// Checked in the order written and passed: counted as
-			// written_order_remembered, not as a run in the copy's order.
-			s.joinCheck = ""
-		}
+		s.joinCheck = rememberedJoinCheck(remembered, s.noteJoinCheck(res, err, opts.JoinNDV != nil, want))
 		s.oomRetry = sqlsandbox.WrittenOrderRetryOf(res, err)
 		err = s.settleWrittenOrder(ctx, run, qstr, shape, remembered, res, err)
 	}

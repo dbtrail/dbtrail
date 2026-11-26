@@ -178,6 +178,17 @@ func startInWrittenOrder(opts *RunOptions) {
 	opts.KeepJoinOrder = true
 }
 
+// rememberedJoinCheck is the join check's outcome to count for a run,
+// remembered whether its shape ran in the order written from the start: a
+// check of that order that passed is counted as written_order_remembered,
+// not as planned, which says the copy's own order ran.
+func rememberedJoinCheck(remembered bool, outcome string) string {
+	if remembered && outcome == JoinCheckPlanned {
+		return ""
+	}
+	return outcome
+}
+
 // writtenOrderContext is the context a remembered shape runs on the copy
 // in: on a connection that can send it to its source, at most half of what
 // is left of the client's statement_timeout, as the retry in the order
