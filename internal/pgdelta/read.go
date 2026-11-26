@@ -36,8 +36,7 @@ func KeyOf(parts []string) string {
 // stays, and the new one is added beside it. A key the file does not hold
 // is absent from the answer: it is a row the window inserted.
 //
-// It reads the key columns of every row of the file: PostgreSQL values are
-// stored as text, so there is no index of keys to ask.
+// It reads the key columns of every row of the file, and asks no key index.
 //
 // A key column that is NULL, or a wanted key the file holds twice, is a file
 // no pair can be written against, and an error.
@@ -101,11 +100,17 @@ func BasePositions(ctx context.Context, db *sql.DB, basePath string, keyColumns 
 // and so is a row of the file with a NULL in a key column, wanted or not.
 // keys need not be sorted; one named twice is asked once.
 //
-// Two passes over the file's key columns: one for a NULL, one for the join.
-// The first is skipped for a file this process already found to hold no
-// NULL in those columns (nullmemo.go says how a file is told from another,
-// and what is never remembered).
+// A file with a key index beside it (keyindex.go), bound to it and built on
+// these key columns, is answered from the index: the blocks the keys fall
+// in, and the rows found read back to check they hold their keys. Without
+// one, or with one that does not hold up, two passes over the file's key
+// columns: one for a NULL, one for the join. The first is skipped for a file
+// this process already found to hold no NULL in those columns (nullmemo.go
+// says how a file is told from another, and what is never remembered).
 func BasePositionsOf(ctx context.Context, db *sql.DB, basePath string, keyColumns []string, keys []string) (map[string]int64, error) {
+	if found, ok := positionsByKeyIndex(ctx, db, basePath, keyColumns, keys); ok {
+		return found, nil
+	}
 	found, moved, err := basePositionsOf(ctx, db, basePath, keyColumns, keys, true)
 	if moved {
 		// The file changed under a call that took it for one with no NULL:
@@ -128,12 +133,9 @@ func basePositionsOf(ctx context.Context, db *sql.DB, basePath string, keyColumn
 		return found, false, nil
 	}
 	quoted := make([]string, len(keyColumns))
-	parts := make([]string, len(keyColumns))
 	nulls := make([]string, len(keyColumns))
 	for i, c := range keyColumns {
 		quoted[i] = `"` + strings.ReplaceAll(c, `"`, `""`) + `"`
-		// event.EscapePKValue, in the same order: the backslash first.
-		parts[i] = `replace(replace(` + quoted[i] + `, '\', '\\'), '|', '\|')`
 		nulls[i] = quoted[i] + " IS NULL"
 	}
 	src := "read_parquet(" + file(basePath) + ", file_row_number=true" + noHive + ")"
@@ -177,7 +179,7 @@ func basePositionsOf(ctx context.Context, db *sql.DB, basePath string, keyColumn
 	// under a session collation that sets case or accents aside, two keys
 	// that differ only there are still two.
 	rows, err := db.QueryContext(ctx, "SELECT bintrail_b.file_row_number, bintrail_w.bintrail_k"+
-		" FROM (SELECT file_row_number, encode("+strings.Join(parts, " || '|' || ")+") AS bintrail_k FROM "+src+") AS bintrail_b"+
+		" FROM (SELECT file_row_number, encode("+keyTextSQL(quoted)+") AS bintrail_k FROM "+src+") AS bintrail_b"+
 		" JOIN (SELECT DISTINCT encode("+KeyColumn+") AS bintrail_k FROM read_parquet("+file(wanted)+noHive+")) AS bintrail_w"+
 		" ON bintrail_b.bintrail_k = bintrail_w.bintrail_k")
 	if err != nil {
@@ -213,6 +215,19 @@ func basePositionsOf(ctx context.Context, db *sql.DB, basePath string, keyColumn
 		}
 	}
 	return found, false, nil
+}
+
+// keyTextSQL is the SQL of a row's key built from its key columns (quoted,
+// in the key's order) as KeyOf builds it: each part escaped as
+// event.EscapePKValue escapes it, the backslash first, joined by a pipe.
+// NULL when a key column is NULL. The join and the key index's build share
+// it, so the two cannot spell a key differently.
+func keyTextSQL(quoted []string) string {
+	parts := make([]string, len(quoted))
+	for i, q := range quoted {
+		parts[i] = `replace(replace(` + q + `, '\', '\\'), '|', '\|')`
+	}
+	return strings.Join(parts, " || '|' || ")
 }
 
 // afterKeyJoin runs when BasePositionsOf's join has read the file, before

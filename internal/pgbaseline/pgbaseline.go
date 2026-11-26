@@ -62,8 +62,10 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
+	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/pgcapture"
+	"github.com/dbtrail/dbtrail/internal/pgdelta"
 )
 
 // Config holds all parameters for a PostgreSQL baseline run.
@@ -469,7 +471,41 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	if err := baseline.CompleteSnapshot(snapDir); err != nil {
 		return stats, publishError(err)
 	}
+	// The key index beside each table's file (#3085), for the snapshot
+	// updates that find changed rows in it. After the snapshot is published
+	// and the source's transaction is closed: a build is a sort of every key,
+	// and the source must not hold its snapshot open for it. Nothing here
+	// fails the run; a table without an index is read as before.
+	_, _ = conn.Exec(context.Background(), "ROLLBACK")
+	conn.Close(context.Background())
+	for _, t := range tables {
+		key := keyInTableOrder(t)
+		if len(key) == 0 || ctx.Err() != nil {
+			continue
+		}
+		pgdelta.WriteKeyIndexBeside(ctx, t.Schema, t.Table, filepath.Join(snapDir, t.Schema, t.Table+".parquet"), key, duckdbutil.DefaultTuningFor(ctx))
+	}
 	return stats, nil
+}
+
+// keyInTableOrder is t's primary key in the order of its columns, the order
+// a key is joined in (pgdelta.BasePositions); nil when it has none, or names
+// a column the file does not hold.
+func keyInTableOrder(t tableInfo) []string {
+	in := make(map[string]bool, len(t.PrimaryKey))
+	for _, c := range t.PrimaryKey {
+		in[c] = true
+	}
+	var key []string
+	for _, c := range t.Columns {
+		if in[c] {
+			key = append(key, c)
+		}
+	}
+	if len(key) != len(in) || len(in) != len(t.PrimaryKey) {
+		return nil
+	}
+	return key
 }
 
 // checkSlotAtEnd asks pgcapture.CheckSlotStillAnchors on a connection of its

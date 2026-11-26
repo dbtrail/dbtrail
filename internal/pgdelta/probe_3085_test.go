@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 )
 
 // A measurement, not a test of behavior (#3085): run only with
@@ -30,6 +31,12 @@ import (
 //     control: if those read one row group and the scattered ones the whole
 //     file, it prunes and scattered keys cannot benefit; if both read the
 //     whole file, it does not prune).
+// duckdbutilTuning1x512 is the probe's budget for the key index's build: the
+// same one thread and 512 MiB as its session.
+func duckdbutilTuning1x512() duckdbutil.Tuning {
+	return duckdbutil.Tuning{Threads: 1, MemoryLimit: "512MiB"}
+}
+
 func TestProbeKeyPasses3085(t *testing.T) {
 	if os.Getenv("BINTRAIL_PG_KEY_PROBE") != "1" {
 		t.Skip("a measurement: set BINTRAIL_PG_KEY_PROBE=1 to run it")
@@ -138,6 +145,43 @@ func TestProbeKeyPasses3085(t *testing.T) {
 	}
 	report("BasePositionsOf, 1,000 scattered keys, both passes (before this change, every call)", both)
 	report("BasePositionsOf, 1,000 scattered keys, the join alone (a file remembered)", joinOnly)
+
+	// The key index beside the file: its build, its size, and the lookup
+	// through it, whole and in its two parts (the blocks read, and the rows
+	// found read back from the file to check them).
+	freshNoNullMemo(t)
+	res, err := BuildKeyIndex(ctx, base, []string{"id"}, duckdbutilTuning1x512())
+	if err != nil || res.Skipped != "" {
+		t.Fatal(err, res.Skipped)
+	}
+	t.Logf("key index: %d records, %d MB, built in %s", res.Records, res.Bytes>>20, res.Build.Round(time.Millisecond))
+	indexed := timed(3, func() {
+		before := KeyIndexLookups()
+		if got, err := BasePositionsOf(ctx, db, base, []string{"id"}, keys); err != nil || len(got) != len(keys) || KeyIndexLookups() != before+1 {
+			t.Fatal(err, len(got), "not answered from the key index")
+		}
+	})
+	report("BasePositionsOf, 1,000 scattered keys, through the key index", indexed)
+	var found map[string]int64
+	sortedKeys := slices.Clone(keys)
+	slices.Sort(sortedKeys)
+	report("the key index alone: open and read the blocks", timed(3, func() {
+		ix, err := openKeyIndex(base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found, err = ix.find(sortedKeys)
+		t.Logf("blocks read: %d of %d", ix.blocksRead, len(ix.blocks))
+		ix.Close()
+		if err != nil || len(found) != len(keys) {
+			t.Fatal(err, len(found))
+		}
+	}))
+	report("the check of the rows found against the file", timed(3, func() {
+		if got, err := baseValuesAt(ctx, db, base, found, []string{"id"}, -1); err != nil || len(got) != len(keys) {
+			t.Fatal(err, len(got))
+		}
+	}))
 
 	for _, c := range []struct {
 		name string

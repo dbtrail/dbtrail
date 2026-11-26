@@ -20,6 +20,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/dbtrail/dbtrail/internal/event"
+	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/pgdelta"
 )
 
@@ -290,10 +291,7 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		return full("the delta beside the previous file was written for another file", nil)
 	}
 
-	keyCols := make([]string, len(in.PKCols))
-	for i, c := range in.PKCols {
-		keyCols[i] = c.Name
-	}
+	keyCols := pgKeyNames(in.PKCols)
 	keys := make([]string, 0, len(fold.Changes))
 	for k := range fold.Changes {
 		keys = append(keys, k)
@@ -455,6 +453,8 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		if ferr == nil {
 			if ferr = os.Rename(folded, dst); ferr != nil {
 				os.Remove(folded)
+			} else {
+				pgdelta.WriteKeyIndexBeside(ctx, in.Schema, in.Table, dst, keyCols, in.DuckDBTuning)
 			}
 		}
 		if ferr != nil {
@@ -511,6 +511,7 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 	if err != nil {
 		return failed(fmt.Errorf("carry %s.%s forward beside its delta: %w", in.Schema, in.Table, err))
 	}
+	pgdelta.CarryKeyIndex(src, dst, linked, in.Schema, in.Table)
 	made = append(made, dst)
 	// Read back as a whole chain that ends at this pair: a pair before that
 	// did not arrive would publish the table as it was before it.
@@ -538,6 +539,17 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 			"file_rows", baseRows, "rows", rowsAfter, "changed_keys", len(keys), "dead_rows", deadRows,
 			"pair", seq, "pairs", seq + 1}, steps.attrs(false)...)...)
 	return true, nil
+}
+
+// pgKeyNames is the names of a PostgreSQL table's key columns, in the
+// order its key is joined in (the table's): what BasePositionsOf asks the
+// key index for, and what the index is built on.
+func pgKeyNames(pk []metadata.ColumnMeta) []string {
+	names := make([]string, len(pk))
+	for i, c := range pk {
+		names[i] = c.Name
+	}
+	return names
 }
 
 // pgPairSteps is how long each step of writePGPair took, for its lines: the
@@ -1058,5 +1070,6 @@ func pgCarryForward(ctx context.Context, srcPath, snapshotDir, schema, table str
 		undo()
 		return false, nil, err
 	}
+	pgdelta.CarryKeyIndex(srcPath, filepath.Join(snapshotDir, schema, table+".parquet"), linked, schema, table)
 	return linked, delta, nil
 }
