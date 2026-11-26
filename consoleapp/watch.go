@@ -681,6 +681,9 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	// not exist.
 	var backupSched *backupScheduler
 	cfg.BackupSchedules, backupSched = newBackupScheduleReporter(baselineSup, registry, upConsoleBaselineTrigger, upBaselineCarryForward)
+	// The Snapshots page grades "aging" on the line the updates of each server
+	// draw (#3083): the updates this daemon actually runs for it.
+	cfg.RefreshLine = newRefreshLineSource(baselineSup, backupSched, registry, upIndexDSN, upConsoleBaselineDir, refreshEveryOrZero(upBaselineRefreshEvery))
 	notifier, err := newWatchNotifierFromFlags(ctx)
 	if err != nil {
 		return err
@@ -1029,6 +1032,9 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	// not exist.
 	var backupSched *backupScheduler
 	cfg.BackupSchedules, backupSched = newBackupScheduleReporter(baselineSup, registry, upConsoleBaselineTrigger, upBaselineCarryForward)
+	// The Snapshots page grades "aging" on the line the updates of each server
+	// draw (#3083): the updates this daemon actually runs for it.
+	cfg.RefreshLine = newRefreshLineSource(baselineSup, backupSched, registry, upIndexDSN, upConsoleBaselineDir, refreshEveryOrZero(upBaselineRefreshEvery))
 	notifier, err := newWatchNotifierFromFlags(ctx)
 	if err != nil {
 		return err

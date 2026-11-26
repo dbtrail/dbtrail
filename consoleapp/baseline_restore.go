@@ -340,5 +340,4 @@ func wireBaselineExtras(cfg *console.Config, sup *baselineSupervisor, serversPat
 	cfg.BaselineHistory = history
 	cfg.BaselineRestore = sup
 	cfg.SQLExport = sup
-	cfg.RefreshLine = sup
 }

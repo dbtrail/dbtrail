@@ -2,6 +2,7 @@ package console
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"testing"
 	"time"
@@ -13,16 +14,18 @@ import (
 
 // stubRefreshLine is a RefreshLineSource that records what it was asked.
 type stubRefreshLine struct {
-	rule  status.RefreshRule
-	dsn   string
-	every time.Duration
-	calls int
+	rule     status.RefreshRule
+	none     bool // no update of this daemon refreshes the server
+	serverID string
+	db       *sql.DB
+	dbName   string
+	calls    int
 }
 
-func (s *stubRefreshLine) RefreshRule(_ context.Context, dsn string, every time.Duration) (status.RefreshRule, bool) {
+func (s *stubRefreshLine) RefreshRule(_ context.Context, serverID string, db *sql.DB, dbName string) (status.RefreshRule, bool) {
 	s.calls++
-	s.dsn, s.every = dsn, every
-	return s.rule, true
+	s.serverID, s.db, s.dbName = serverID, db, dbName
+	return s.rule, !s.none
 }
 
 // #3083: on a young index the Snapshots page grades a file on the snapshot
@@ -47,9 +50,7 @@ func TestBaselinesAPI_aYoungIndexIsNotAging_3083(t *testing.T) {
 		srv := newBaselineServer(t, dir, true)
 		srv.cm.boot.db = db
 		srv.cm.boot.dbName = "binlog_index"
-		srv.cm.boot.dsn = "index-dsn"
 		srv.refreshLine = line
-		srv.baselineRefreshDefaults = BaselineRefreshDefaults{Scheduled: true, RefreshEvery: 5 * time.Minute}
 		rec, body := doServersReq(t, srv, "GET", "/api/baselines", "")
 		if rec.Code != 200 {
 			t.Fatalf("code = %d, body = %s", rec.Code, body)
@@ -62,6 +63,9 @@ func TestBaselinesAPI_aYoungIndexIsNotAging_3083(t *testing.T) {
 			t.Fatalf("snapshots %+v, headline %q", got.Snapshots, got.Staleness)
 		}
 		stub, _ := line.(*stubRefreshLine)
+		if stub != nil && (stub.calls != 1 || stub.serverID != bootServerID || stub.db != db || stub.dbName != "binlog_index") {
+			t.Errorf("asked %d time(s) for server %q on %q; want once, for the selected server, on the page's own connection", stub.calls, stub.serverID, stub.dbName)
+		}
 		return got.Staleness, stub
 	}
 
@@ -71,12 +75,13 @@ func TestBaselinesAPI_aYoungIndexIsNotAging_3083(t *testing.T) {
 		}
 	})
 	t.Run("the update keeps the file: ok", func(t *testing.T) {
-		got, stub := staleness(t, &stubRefreshLine{rule: status.RefreshRule{Retain: 48 * time.Hour, Interval: 5 * time.Minute, DropsAfter: 48 * time.Hour}})
-		if got != "ok" {
+		if got, _ := staleness(t, &stubRefreshLine{rule: status.RefreshRule{Retain: 48 * time.Hour, Interval: 5 * time.Minute, DropsAfter: 48 * time.Hour}}); got != "ok" {
 			t.Errorf("staleness %q, want ok", got)
 		}
-		if stub.calls != 1 || stub.dsn != "index-dsn" || stub.every != 5*time.Minute {
-			t.Errorf("asked %d time(s) for %q every %s; want once, for the index's DSN, every 5m", stub.calls, stub.dsn, stub.every)
+	})
+	t.Run("no update refreshes the server: graded on the span", func(t *testing.T) {
+		if got, _ := staleness(t, &stubRefreshLine{none: true, rule: status.RefreshRule{Retain: 48 * time.Hour, Interval: 5 * time.Minute, DropsAfter: 48 * time.Hour}}); got != "aging" {
+			t.Errorf("staleness %q, want aging: nothing is going to rewrite this copy", got)
 		}
 	})
 	t.Run("the update rewrites the file: aging", func(t *testing.T) {
