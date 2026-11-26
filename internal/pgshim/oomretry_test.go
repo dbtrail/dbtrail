@@ -182,6 +182,8 @@ func TestRoute_outOfMemoryAfterTheOrderWrittenGoesToTheSource(t *testing.T) {
 			if _, err := c.Prepare(ctx, "described", "SELECT n FROM retried AS r", nil); err != nil {
 				t.Fatalf("Prepare: %v", err)
 			}
+			// Its run on the copy is not the next statement's.
+			result(nil)
 			check("a plain read after a Describe of a retried one", simple("SELECT n FROM t"), outcome{"", RouteCopy, ReasonAnswersTheSame, "", 1})
 		} else {
 			// Nowhere else to send it: the copy's error, which says it was
