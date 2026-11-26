@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"testing"
@@ -280,6 +281,45 @@ func TestStartInWrittenOrder(t *testing.T) {
 	startInWrittenOrder(&opts)
 	if !opts.KeepJoinOrder || opts.JoinNDV == nil || opts.Schema != "public" {
 		t.Errorf("%+v", opts)
+	}
+}
+
+// With the source's counts: a remembered shape keeps its join check, the
+// counts given to the copy with the order written, and a check that passed
+// is not counted as planned.
+func TestRoute_rememberedShapeKeepsTheJoinCheck(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	src := startFakeSource(t, joinPlans)
+	l := &costLogin{src: src, cost: &CostPolicy{}, joinStats: &JoinStats{Read: (&fakeReads{answers: []fakeRead{{tables: bigStats}}}).read, spawn: func(f func()) { f() }},
+		orders: &WrittenOrders{}, retried: true}
+	l.joinStats.current()
+	c := costPortConn(t, ctx, l)
+	costSimple(ctx, c, l, bigJoin)
+	if n := l.last(); n.OOMRetry != sqlsandbox.WrittenOrderRetryOK || n.JoinCheck != JoinCheckPlanned || n.WrittenOrder != "" {
+		t.Fatalf("first: %+v", n)
+	}
+	costSimple(ctx, c, l, bigJoin)
+	runs := l.joinRuns()
+	if len(runs) != 2 || !runs[1].keepOrder || !maps.Equal(runs[1].ndv, map[string]float64{"n": 5}) {
+		t.Fatalf("runs %+v", runs)
+	}
+	if n := l.last(); n.WrittenOrder != WrittenOrderRemembered || n.JoinCheck != "" || n.OOMRetry != "" {
+		t.Errorf("remembered: %+v", n)
+	}
+	// A value that makes the order written explode: refused before it runs,
+	// to the source, and the shape is kept.
+	l.copyErr = func(string) error { return &sqlsandbox.JoinTooBigError{Reason: "estimated far past its inputs in the order written"} }
+	if got := costSimple(ctx, c, l, bigJoin); got.side != RouteSource || got.reason != ReasonJoinTooBig {
+		t.Errorf("join too big: %+v", got)
+	}
+	if n := l.last(); n.WrittenOrder != WrittenOrderRemembered {
+		t.Errorf("join too big: %+v", n)
+	}
+	l.copyErr = nil
+	costSimple(ctx, c, l, bigJoin)
+	if runs := l.joinRuns(); !runs[len(runs)-1].keepOrder {
+		t.Error("forgotten after a join too big")
 	}
 }
 

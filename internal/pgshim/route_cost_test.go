@@ -587,12 +587,19 @@ type costLogin struct {
 	// records RunOptions.JoinNDV of each statement the copy was given.
 	joinStats *JoinStats
 	joinRun   []joinRun
+	// orders, when set, is Binding.WrittenOrders; with retried the copy
+	// answers every statement it runs in its own join order after its retry
+	// in the order written (sqlsandbox.WrittenOrderRetryOK).
+	orders  *WrittenOrders
+	retried bool
 }
 
-// joinRun is one statement the copy was given, and its RunOptions.JoinNDV.
+// joinRun is one statement the copy was given, its RunOptions.JoinNDV and
+// KeepJoinOrder.
 type joinRun struct {
 	statement string
 	ndv       map[string]float64
+	keepOrder bool
 }
 
 func (l *costLogin) joinRuns() []joinRun {
@@ -650,7 +657,7 @@ func (l *costLogin) run(_ context.Context, st string, opts RunOptions) (sqlsandb
 	l.mu.Lock()
 	l.needTails = append(l.needTails, opts.NeedTails)
 	l.fastLane = append(l.fastLane, opts.FastLane)
-	l.joinRun = append(l.joinRun, joinRun{st, opts.JoinNDV})
+	l.joinRun = append(l.joinRun, joinRun{st, opts.JoinNDV, opts.KeepJoinOrder})
 	l.mu.Unlock()
 	if opts.NeedTails && l.tailsPending.Load() {
 		return sqlsandbox.Result{}, &sqlsandbox.MayHaveChangedError{Reason: "fresh mode: the newest captured changes of public.t are not ready yet"}
@@ -664,14 +671,18 @@ func (l *costLogin) run(_ context.Context, st string, opts RunOptions) (sqlsandb
 	l.mu.Lock()
 	l.heldAtCopy = append(l.heldAtCopy, l.held.Load())
 	l.mu.Unlock()
-	return sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "n", Type: "INTEGER"}}, Rows: [][]any{{int32(7)}}}, nil
+	res := sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "n", Type: "INTEGER"}}, Rows: [][]any{{int32(7)}}}
+	if l.retried && !opts.KeepJoinOrder {
+		res.WrittenOrderRetry = sqlsandbox.WrittenOrderRetryOK
+	}
+	return res, nil
 }
 
 func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ func()) (*Binding, *Error) {
 	if !password.Matches([]string{portPassword}) {
 		return nil, &Error{Code: "28P01", Message: "no"}
 	}
-	b := &Binding{Run: l.run, Actor: "server:orders", Schema: "public", Routed: func(n RouteNote) {
+	b := &Binding{Run: l.run, Actor: "server:orders", Schema: "public", WrittenOrders: l.orders, Routed: func(n RouteNote) {
 		l.mu.Lock()
 		defer l.mu.Unlock()
 		l.notes = append(l.notes, n)
