@@ -15,10 +15,13 @@
 package oracle
 
 import (
+	"encoding/hex"
 	"fmt"
 	"math/rand/v2"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Kind is what an op does.
@@ -74,8 +77,38 @@ type Table struct {
 	PK        []string
 	Cols      []string
 	Datetimes []string
-	key       func(k int) []string
+	// Render reads a column as text by an expression of its own on each
+	// side, where the default cast would print one value two ways (binary
+	// bytes, fractional seconds, a TIMESTAMP in the session's zone). Nil
+	// for the default.
+	Render map[string]Render
+	key    func(k int) []string
 }
+
+// Render is one column's read as text: Source is a MySQL expression and View
+// a DuckDB one, each with %[1]s for the quoted column. Source is also what
+// a snapshot writes (SnapshotStep stores the source's text), so it must be
+// text the copy's writer reads back as the value: a binary value as 0x and
+// its hex, a TIMESTAMP in UTC, as a dump writes them.
+type Render struct {
+	Source, View string
+}
+
+// Renders of the key types of #3159.
+var (
+	// RenderBinary: 0x and the hex of the bytes, the empty value as ''
+	// ("0x" alone is not read back as hex).
+	RenderBinary = Render{
+		Source: "IF(LENGTH(%[1]s) = 0, '', CONCAT('0x', HEX(%[1]s)))",
+		View:   "CASE WHEN octet_length(%[1]s) = 0 THEN '' ELSE '0x' || hex(%[1]s) END",
+	}
+	// RenderMicros: a DATETIME(6) with its six digits of fraction. The view's microseconds since the epoch are
+	// the same whether it reads the column as a wall clock or an instant.
+	RenderMicros = Render{
+		Source: "CAST(%[1]s AS CHAR)",
+		View:   "strftime(make_timestamp(epoch_us(%[1]s)), '%%Y-%%m-%%d %%H:%%M:%%S.%%f')",
+	}
+)
 
 // Tables returns the five tables, fresh copies.
 func Tables() []Table {
@@ -113,10 +146,168 @@ func Tables() []Table {
 	}
 }
 
-// TableByName returns the table called name; it panics on an unknown name,
-// which only a test can spell.
+// KeyTypeTables returns the tables keyed by the types a tail takes besides
+// integers (#3159), fresh copies: BINARY(16) (a UUID), VARBINARY, DATE,
+// DATETIME, DATETIME(6), DECIMAL and a composite of an integer, a VARBINARY
+// and a DATE. Not in Tables: a seed draws its table by index, so
+// a table added there would change every seed's draws.
+//
+// Their keys are ones a tail takes: no BINARY(16) value ends in 0x00, no
+// binary value is empty or has text that starts with 0x (reconstruct
+// refuses those, and the oracle over tails takes a refusal for a finding).
+func KeyTypeTables() []Table {
+	return []Table{
+		{
+			Name: "t_uuid",
+			DDL:  "CREATE TABLE `t_uuid` (`id` BINARY(16) NOT NULL, `v` INT NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB",
+			PK:   []string{"id"}, Cols: []string{"id", "v"}, Render: map[string]Render{"id": RenderBinary},
+			key: func(k int) []string { return []string{binaryLiteral(uuidKey(k))} },
+		},
+		{
+			Name: "t_vbin",
+			DDL:  "CREATE TABLE `t_vbin` (`id` VARBINARY(20) NOT NULL, `v` INT NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB",
+			PK:   []string{"id"}, Cols: []string{"id", "v"}, Render: map[string]Render{"id": RenderBinary},
+			key: func(k int) []string { return []string{binaryLiteral(varbinaryKey(k))} },
+		},
+		{
+			Name: "t_date",
+			DDL:  "CREATE TABLE `t_date` (`d` DATE NOT NULL, `v` INT NOT NULL, PRIMARY KEY (`d`)) ENGINE=InnoDB",
+			PK:   []string{"d"}, Cols: []string{"d", "v"},
+			key: func(k int) []string { return []string{"'" + dateKey(k) + "'"} },
+		},
+		{
+			Name: "t_dt0",
+			DDL:  "CREATE TABLE `t_dt0` (`at` DATETIME NOT NULL, `v` INT NOT NULL, PRIMARY KEY (`at`)) ENGINE=InnoDB",
+			PK:   []string{"at"}, Cols: []string{"at", "v"}, Datetimes: []string{"at"},
+			key: func(k int) []string {
+				return []string{"'" + time.Date(1969, 12, 31, 23, 59, 0, 0, time.UTC).Add(time.Duration(k*7)*time.Second).Format("2006-01-02 15:04:05") + "'"}
+			},
+		},
+		{
+			Name: "t_dt6",
+			DDL:  "CREATE TABLE `t_dt6` (`at` DATETIME(6) NOT NULL, `v` INT NOT NULL, PRIMARY KEY (`at`)) ENGINE=InnoDB",
+			PK:   []string{"at"}, Cols: []string{"at", "v"}, Render: map[string]Render{"at": RenderMicros},
+			key: func(k int) []string { return []string{"'" + microsKey(k) + "'"} },
+		},
+		{
+			Name: "t_dec",
+			DDL:  "CREATE TABLE `t_dec` (`x` DECIMAL(10,2) NOT NULL, `v` INT NOT NULL, PRIMARY KEY (`x`)) ENGINE=InnoDB",
+			PK:   []string{"x"}, Cols: []string{"x", "v"},
+			key: func(k int) []string { return []string{decimalKey(k)} },
+		},
+		{
+			Name: "t_kmix",
+			DDL:  "CREATE TABLE `t_kmix` (`a` INT NOT NULL, `b` VARBINARY(8) NOT NULL, `d` DATE NOT NULL, `v` INT NOT NULL, PRIMARY KEY (`a`, `b`, `d`)) ENGINE=InnoDB",
+			PK:   []string{"a", "b", "d"}, Cols: []string{"a", "b", "d", "v"}, Render: map[string]Render{"b": RenderBinary},
+			key: func(k int) []string {
+				return []string{fmt.Sprint(k%3 - 1), binaryLiteral(varbinaryKey(k / 3)), "'" + dateKey(k%2) + "'"}
+			},
+		},
+	}
+}
+
+// uuidKey is key k of t_uuid: 16 bytes, a 0x00 inside every other one, the
+// last byte never 0x00, and one in seven made of text (UTF-8, spelled as
+// itself in pk_values, with a '|' and a '\' pk_values escapes).
+func uuidKey(k int) []byte {
+	if k%7 == 0 {
+		return []byte(fmt.Sprintf(`u|\%013d`, k))
+	}
+	b := make([]byte, 16)
+	for i := range b {
+		b[i] = byte(0x80 + (k*37+i*11)%0x7f)
+	}
+	if k%2 == 0 {
+		b[3] = 0
+	}
+	b[15] = byte(k + 1)
+	return b
+}
+
+// varbinaryKey is key k of t_vbin: a value of one byte 0x7f, values ending in 0x00
+// beside the same bytes without it, bytes that are not UTF-8, and text with
+// '|' and '\' in it.
+func varbinaryKey(k int) []byte {
+	switch {
+	case k == 0:
+		return []byte{0x7f} // not the empty value, which has no tail
+	case k%5 == 1:
+		return []byte{byte(k), 0}
+	case k%5 == 2:
+		return []byte{byte(k - 1)} // key k-1 without its trailing 0x00
+	case k%5 == 3:
+		return []byte{0xff, byte(k)}
+	case k%5 == 4:
+		return []byte{0xfe, byte(k), 0, 0}
+	default:
+		return []byte(fmt.Sprintf(`v|\%d`, k))
+	}
+}
+
+func binaryLiteral(b []byte) string { return "X'" + hex.EncodeToString(b) + "'" }
+
+// dateKey is key k of t_date: every 13th day from 1969-12-01, across the
+// epoch and the leap day of 1972.
+func dateKey(k int) string {
+	return time.Date(1969, 12, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, k*13).Format("2006-01-02")
+}
+
+// microsKey is key k of t_dt6: a second apart, every third with no
+// fraction (written without one, so the server pads it to .000000).
+func microsKey(k int) string {
+	at := time.Date(2024, 3, 10, 1, 0, 0, 0, time.UTC).Add(time.Duration(k) * time.Second)
+	if k%3 == 0 {
+		return at.Format("2006-01-02 15:04:05")
+	}
+	return at.Add(time.Duration((k*123457)%1000000) * time.Microsecond).Format("2006-01-02 15:04:05.000000")
+}
+
+// decimalKey is key k of t_dec: -0.00 for key 0, which the server stores as
+// zero, and for the others k*1.25 with every other sign, written as short as
+// it goes (2.5, 5), so the server's scale is what pads it.
+func decimalKey(k int) string {
+	if k == 0 {
+		return "-0.00"
+	}
+	v := float64(k) * 1.25
+	if k%2 == 1 {
+		v = -v
+	}
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+// RefusedKeyTables returns tables a tail must refuse (#3159): t_deczf, a
+// DECIMAL with ZEROFILL, which a dump prints padded ("0001.25") and the
+// binary log does not; and t_vbin0x, a VARBINARY whose every key is text
+// that starts with 0X (upper case), which a dump without --hex-blob prints
+// as that text and the copy's writer decodes as hex. The oracle over tails
+// checks that no read lays a tail over them, and that their reads still
+// equal the source.
+func RefusedKeyTables() []Table {
+	return []Table{
+		{
+			Name: "t_deczf",
+			DDL:  "CREATE TABLE `t_deczf` (`x` DECIMAL(6,2) UNSIGNED ZEROFILL NOT NULL, `v` INT NOT NULL, PRIMARY KEY (`x`)) ENGINE=InnoDB",
+			PK:   []string{"x"}, Cols: []string{"x", "v"},
+			// The source prints the zeros; the view reads the number. Both
+			// as the number: CAST(x + 0) is MySQL's, without the padding.
+			Render: map[string]Render{"x": {Source: "CAST(%[1]s + 0 AS CHAR)", View: "CAST(%[1]s AS VARCHAR)"}},
+			key:    func(k int) []string { return []string{strconv.FormatFloat(float64(k)*1.25+0.5, 'f', -1, 64)} },
+		},
+		{
+			Name: "t_vbin0x",
+			DDL:  "CREATE TABLE `t_vbin0x` (`id` VARBINARY(12) NOT NULL, `v` INT NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB",
+			PK:   []string{"id"}, Cols: []string{"id", "v"}, Render: map[string]Render{"id": RenderBinary},
+			key: func(k int) []string { return []string{binaryLiteral([]byte(fmt.Sprintf("0XAB%02d", k)))} },
+		},
+	}
+}
+
+// TableByName returns the table called name, of Tables, KeyTypeTables or
+// RefusedKeyTables; it
+// panics on an unknown name, which only a test can spell.
 func TableByName(name string) Table {
-	for _, t := range Tables() {
+	for _, t := range slices.Concat(Tables(), KeyTypeTables(), RefusedKeyTables()) {
 		if t.Name == name {
 			return t
 		}

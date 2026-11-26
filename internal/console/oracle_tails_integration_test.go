@@ -37,9 +37,8 @@ import (
 //
 // A table the port answers as of the published cut (no tail) is compared
 // with the rows read at that cut, AND the step asserts why there is no
-// tail: a key the tail does not support (only integer keys have one, the
-// product's own rule: t_text's VARCHAR key), or no change to the table since
-// the cut. Any other reason fails the run naming it: that is the detector
+// tail: a key the tail does not support (the product's own rule: t_text's
+// VARCHAR key), or no change to the table since the cut. Any other reason fails the run naming it: that is the detector
 // for tails silently off.
 
 func TestOracleTails(t *testing.T) {
@@ -82,6 +81,46 @@ func TestOracleTails(t *testing.T) {
 		}
 		t.Logf("chain: %d steps, applied %v, longest chain %d files, merged", res.Steps, res.Applied, chains.longest)
 	})
+}
+
+// TestOracleTailKeyTypes is the mixed scenario over the tables keyed by the
+// types a tail takes besides integers (#3159: BINARY(16), VARBINARY, DATE,
+// DATETIME, DATETIME(6), DECIMAL, and a composite of an integer, a VARBINARY
+// and a DATE), beside t_text, whose VARCHAR key under the default collation
+// must stay without one, and t_deczf, a DECIMAL ZEROFILL key that must too:
+// every read must equal the source, and every other table must have a tail
+// whenever ops changed it since the cut (whyNoTail).
+func TestOracleTailKeyTypes(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	if os.Getenv("BINTRAIL_ORACLE_REQUIRE") == "" && os.Getenv("BINTRAIL_ORACLE_SEEDS") == "" {
+		t.Skip("the tails oracle runs on request: BINTRAIL_ORACLE_SEEDS=N or BINTRAIL_ORACLE_REQUIRE=1")
+	}
+	seeds := oracleEnvInt(t, "BINTRAIL_ORACLE_SEEDS", 2)
+	steps := oracleEnvInt(t, "BINTRAIL_ORACLE_STEPS", 12)
+	first := uint64(oracleEnvInt(t, "BINTRAIL_ORACLE_SEED", 1))
+	refused := append(oracle.RefusedKeyTables(), oracle.TableByName("t_text"))
+	tables := append(oracle.KeyTypeTables(), refused...)
+	for seed := first; seed < first+uint64(seeds); seed++ {
+		t.Run("seed="+strconv.FormatUint(seed, 10), func(t *testing.T) {
+			res, chains := runTailSeed(t, seed, steps, tables, 1, 3, 4)
+			if res.Applied["tail"] == 0 {
+				t.Fatalf("no tail step applied in %d steps: %v", steps, res.Applied)
+			}
+			// Not only "no read went wrong": a read laid a tail over every
+			// table of the new key types, so each was compared WITH one.
+			for _, tb := range oracle.KeyTypeTables() {
+				if _, ok := chains.last[tb.Name]; !ok {
+					t.Errorf("%s: no read laid a tail over it in %d steps (applied %v)", tb.Name, res.Steps, res.Applied)
+				}
+			}
+			for _, tb := range refused {
+				if _, ok := chains.last[tb.Name]; ok {
+					t.Errorf("%s, keyed by a type a tail does not take, was read with a tail", tb.Name)
+				}
+			}
+			t.Logf("seed %d: %d steps, %d ops, applied %v, chains up to %d files, tails over %d tables, in %s", seed, res.Steps, res.Ops, res.Applied, chains.longest, len(chains.last), res.Wall.Round(time.Millisecond))
+		})
+	}
 }
 
 func oracleEnvInt(t *testing.T, name string, def int) int {
@@ -229,6 +268,10 @@ func (s *tailStep) whyNoTail(tb views.BaselineTable, cut *oracle.Cut) string {
 		return ""
 	case refused != "" && refused == s.keyRefusal(tb):
 		return ""
+	case refused != "" && valueRefusals[tb.Table] != "" && strings.Contains(refused, valueRefusals[tb.Table]):
+		// A table the run made so that every key value is one the
+		// product refuses (oracle.RefusedKeyTables), for that reason only.
+		return ""
 	case refused != "":
 		// Before the untouched case on purpose: a refusal for a reason the
 		// generator did not cause is a finding even over a table no op
@@ -242,6 +285,10 @@ func (s *tailStep) whyNoTail(tb views.BaselineTable, cut *oracle.Cut) string {
 		return fmt.Sprintf("no tail laid over the table (the keeper holds %d keys), and ops since the published cut changed it", keys)
 	}
 }
+
+// valueRefusals are the tables whose every key value the product refuses,
+// by table, with the words of that refusal: no other refusal passes.
+var valueRefusals = map[string]string{"t_vbin0x": "starts with the text 0x or 0X"}
 
 // keyRefusal is what the product refuses tb's tail with for its key, or ""
 // when its key supports a tail.

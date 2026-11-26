@@ -1438,8 +1438,9 @@ func WithDeltaSeq(md map[string]string, seq int) map[string]string {
 // The published rows of every key the tail touched are dropped, by key, and
 // the tail's live rows are added: a tombstone ('d') drops its key and adds
 // nothing. The tail carries the key's typed values on every row, a
-// tombstone's included, so the anti-join compares typed columns. Only
-// integer keys have a tail (reconstruct.NewTail): an integer compares the
+// tombstone's included, so the anti-join compares typed columns. Only keys
+// stored without a collation have a tail (reconstruct.NewTail: integers,
+// DECIMAL's text of digits, days, microseconds, bytes): they compare the
 // same under any collation, where text under the sandbox's nocase one
 // would not.
 func TableTailStateSQL(state, tail string, pk []string, replace string) string {
