@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dbtrail/dbtrail/internal/baseline"
 )
 
 // The catalog queries tools send to list what a server holds (#2769): psql's
@@ -56,6 +58,12 @@ type CatalogTable struct {
 	// PrimaryKey names the primary key's columns in key order, empty when
 	// there is none or it was not recorded.
 	PrimaryKey []string
+	// Recorded is the table's shape as its snapshot recorded it on the
+	// source (its OID and every column it stores, the ones the server hides
+	// included), nil when the snapshot records none: what the source's shape
+	// now is compared with before the copy answers a statement that reads
+	// the table (shape_3251.go).
+	Recorded *baseline.PGRelation
 }
 
 // CatalogColumn is one column of a CatalogTable.

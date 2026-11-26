@@ -85,7 +85,10 @@ type session struct {
 	// the one the screen read. copyText holds the portal's text to it.
 	screened string
 	// busyRefused is the busy reason the statement the copy just failed
-	// was refused for instead (copyFailed, #3109), "" when it was not.
+	// was refused for instead (copyFailed, #3109), "" when it was not. It is
+	// also the reason of a statement refused before the copy ran it because
+	// its tables' columns could not be compared with the source's, or
+	// differ from them where nothing goes to the source (shape_3251.go).
 	busyRefused string
 	// screenBusy is why the statement route just decided was not screened
 	// (routeFree): the copy was too busy to list its columns.

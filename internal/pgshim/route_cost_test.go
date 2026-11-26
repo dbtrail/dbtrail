@@ -593,6 +593,8 @@ type costLogin struct {
 	sides *CostSides
 	// notCaptured, when set, is Binding.NotCaptured.
 	notCaptured func(context.Context) ([]TableNotCaptured, error)
+	// shapes, when set, is Binding.SourceShapes (#3251).
+	shapes func(context.Context, [][2]string) (map[[2]string]SourceShape, error)
 	// joinStats, when set, is the server's Forward.JoinStats; joinNDV
 	// records RunOptions.JoinNDV of each statement the copy was given.
 	joinStats *JoinStats
@@ -752,6 +754,7 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 		b.CopyWait = l.wait
 	}
 	b.NotCaptured = l.notCaptured
+	b.SourceShapes = l.shapes
 	b.OlderKind = l.olderKind
 	return b, nil
 }

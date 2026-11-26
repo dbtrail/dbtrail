@@ -544,6 +544,27 @@ func (s *session) describeStatement(st *preparedStatement) (cols []string, types
 // error would name another statement than the client's. described returns
 // false then.
 func (s *session) describeFree(st *preparedStatement) (cols []string, types []colType, described bool, perr *pgErr) {
+	// A table whose columns on the source are not its snapshot's
+	// (shape_3251.go): the copy would describe the old ones. The source
+	// describes it, and the statement stays there, held to the columns the
+	// source described, as PostgreSQL holds a prepared statement to its
+	// shape. Where nothing goes to the source, or the columns could not be
+	// compared, the Describe is refused.
+	ctx, done := s.statementContext()
+	why, perr := s.copyShapeDiffers(ctx, RewriteForCopy(st.query))
+	done()
+	if perr != nil {
+		return nil, nil, false, perr
+	}
+	if why != "" {
+		if s.canFallBack() && isSelectLike(st.query) {
+			s.logger.Debug("pgshim: a statement reads a table changed on the source since its snapshot; the source describes it", "why", why)
+			st.fallback = ReasonCopyShapeDiffers
+			return nil, nil, false, nil
+		}
+		s.busyRefused = ReasonCopyShapeDiffers
+		return nil, nil, false, shapeCopyOnlyError(why)
+	}
 	got, perr, err := s.describeWith(st, "")
 	if perr != nil {
 		return nil, nil, false, perr

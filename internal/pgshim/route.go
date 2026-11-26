@@ -65,6 +65,7 @@ const (
 	ReasonExplainFailed     = "explain_failed"      // the source's plan could not be had: EXPLAIN did not run, or was not asked
 	ReasonCopyTooOld        = "copy_too_old"        // the copy's answer was older than one the source already gave this connection
 	ReasonTableNotCaptured  = "table_not_captured"  // it reads a table whose capture lost or dropped changes since its snapshot (not_captured.go)
+	ReasonCopyShapeDiffers  = "copy_shape_differs"  // it reads a table whose columns on the source are not its snapshot's: an ALTER TABLE since (shape_3251.go)
 	ReasonResultOverRowCap  = "result_over_row_cap" // an expensive plan whose result is estimated over the copy's row cap: not tried on the copy (route_cost.go)
 	ReasonHeavyOnCopy       = "heavy_on_copy"       // expensive on the source, so the copy answers it, though it may answer otherwise than PostgreSQL (heavy.go)
 	ReasonJoinTooBig        = "join_too_big"        // the copy's plan of it has a join estimated far past its inputs in its own join order and in the order written: not run there (joinstats.go)
@@ -73,6 +74,9 @@ const (
 	ReasonReadOnly        = "read_only"         // not a read, and the port is read-only toward the source
 	ReasonCopyQueueFull   = "copy_queue_full"   // for the copy, whose workers were all taken and the line for one full (#3109)
 	ReasonCopyWaitTimeout = "copy_wait_timeout" // for the copy, it waited for a worker as long as it may (#3109)
+	// For the copy, whose tables' columns on the source could not be read to
+	// compare with its snapshot's (shape_3251.go).
+	ReasonCopyShapeUnchecked = "copy_shape_unchecked"
 )
 
 // ReasonCopyRefusedAfterWrittenOrder: the source answered a statement that
@@ -780,6 +784,10 @@ func transientFallback(reason string) bool {
 		return true
 	case ReasonTableNotCaptured:
 		// The table's next snapshot read after its last drop heals it.
+		return true
+	case ReasonCopyShapeDiffers:
+		// The table's next snapshot, which records the source's columns,
+		// heals it.
 		return true
 	}
 	return false

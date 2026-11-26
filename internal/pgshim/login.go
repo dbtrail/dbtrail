@@ -144,6 +144,16 @@ type Binding struct {
 	// Where nothing can go to the source the copy answers, with a NOTICE that
 	// names the table. nil: nothing is asked.
 	NotCaptured func(ctx context.Context) ([]TableNotCaptured, error)
+	// SourceShapes, when set, says what the source's catalog says of each
+	// table named (schema and name, as the copy's catalog writes them) now:
+	// its OID and the columns a snapshot would store. A table the source
+	// does not have is absent from the answer. Asked before a statement runs
+	// on the copy, for the tables it reads (shape_3251.go): one whose shape
+	// is not its snapshot's is answered by the source
+	// (ReasonCopyShapeDiffers), or refused where nothing can go there; an
+	// error refuses the statement (ReasonCopyShapeUnchecked). nil: nothing
+	// is asked.
+	SourceShapes func(ctx context.Context, tables [][2]string) (map[[2]string]SourceShape, error)
 	// Status, when set, answers SHOW dbtrail.router_status on this
 	// connection (portstatus.go): name and value pairs, in the order to
 	// show them. last is the connection's last answer, whose rows
@@ -421,6 +431,13 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	waited, apart, named := false, false, 0
 	text, err := s.copyText(qstr)
 	if err == nil {
+		// A table whose columns on the source are not its snapshot's (an
+		// ALTER TABLE since, shape_3251.go): the source answers, before the
+		// copy does any work, heavy or not. First: what follows reads the
+		// snapshot's types.
+		if refusal := s.shapeRefusal(ctx, text); refusal != nil {
+			return nil, nil, nil, "", refusal
+		}
 		// A char(n) column used where the copy counts its padding (#3068):
 		// the source's, or refused where nothing is sent there.
 		if !s.heavy {

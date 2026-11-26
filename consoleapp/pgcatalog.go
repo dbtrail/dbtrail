@@ -85,6 +85,10 @@ func pgCopyCatalog(ctx context.Context, copySQL pgCatalogSource, run func(contex
 			continue
 		}
 		t.OID = rec.Relation.OID
+		// The shape as the snapshot recorded it, whole (#3251): what the
+		// source's shape is compared with before the copy answers.
+		recorded := *rec.Relation
+		t.Recorded = &recorded
 		have := map[string]bool{}
 		for _, c := range t.Columns {
 			have[strings.ToLower(c.Name)] = true
