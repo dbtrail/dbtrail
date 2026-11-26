@@ -283,6 +283,30 @@ func TestStartInWrittenOrder(t *testing.T) {
 	}
 }
 
+// A remembered shape gets half of what is left of the client's limit where
+// the source can have the rest; with no source, or no limit, all of it.
+func TestWrittenOrderContext(t *testing.T) {
+	at := time.Now().Add(10 * time.Second)
+	ctx := sqlsandbox.WithClientDeadline(context.Background(), at)
+	run, cancel := routeSession(true).writtenOrderContext(ctx)
+	defer cancel()
+	dl, ok := run.Deadline()
+	if left := time.Until(dl); !ok || left > 5*time.Second || left < 4*time.Second {
+		t.Errorf("with a source: deadline in %v (%v), want about 5 s", left, ok)
+	}
+	for what, c := range map[string]context.Context{"without a source": ctx, "without a limit": context.Background()} {
+		s := routeSession(true)
+		if what == "without a source" {
+			s = routeSession(false)
+		}
+		run, cancel := s.writtenOrderContext(c)
+		defer cancel()
+		if _, ok := run.Deadline(); ok || run != c {
+			t.Errorf("%s: a context of its own", what)
+		}
+	}
+}
+
 // A remembered shape's join check that passed is not counted as planned;
 // the check's other outcomes are counted as they are.
 func TestRememberedJoinCheck(t *testing.T) {
