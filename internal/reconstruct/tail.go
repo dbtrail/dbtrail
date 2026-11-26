@@ -1,7 +1,6 @@
 package reconstruct
 
 import (
-	"bytes"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
@@ -270,11 +269,17 @@ func checkKeyValue(k keyCol, v any) string {
 			// said the column is binary when the event was captured.
 			return fmt.Sprintf("its binary key %s was not decoded to its bytes", k.name)
 		}
-		if utf8.Valid(b) && bytes.HasPrefix(b, []byte(hexPKPrefix)) {
+		if hexLooking(b) {
 			// pk_values spells a value that is not UTF-8 as 0x and its hex,
 			// so a value whose own text starts 0x can share a key with
-			// another value: the fold would keep one of the two rows.
-			return fmt.Sprintf("its binary key %s holds a value that starts with the text %s", k.name, hexPKPrefix)
+			// another value: the fold would keep one of the two rows. In
+			// either case of the x: a dump without --hex-blob (the one the
+			// product takes) prints the bytes as text, and the copy's
+			// writer reads a text 0x… or 0X… of hex digits back as the
+			// bytes it spells (decodeBinaryLiteral), so the copy would hold
+			// other bytes than the tail. Refused whatever follows, hex or
+			// not: one rule, no case to get wrong.
+			return fmt.Sprintf("its binary key %s holds a value that starts with the text 0x or 0X", k.name)
 		}
 		if len(b) == 0 {
 			// A version before this one wrote an empty value into the copy
@@ -290,7 +295,14 @@ func checkKeyValue(k keyCol, v any) string {
 }
 
 // hexPKPrefix is event.formatPKValue's mark of a component spelled in hex.
+// It writes it in lower case only; the copy's writer reads either case.
 const hexPKPrefix = "0x"
+
+// hexLooking: b starts with 0x or 0X, the prefix the copy's writer
+// (baseline's decodeBinaryLiteral) decodes in either case.
+func hexLooking(b []byte) bool {
+	return len(b) >= 2 && b[0] == '0' && b[1]|0x20 == 'x'
+}
 
 // decimalText: an optional '-', digits, and an optional '.' and digits, as
 // MySQL prints a DECIMAL.

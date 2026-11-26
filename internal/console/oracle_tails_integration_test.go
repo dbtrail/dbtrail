@@ -268,6 +268,10 @@ func (s *tailStep) whyNoTail(tb views.BaselineTable, cut *oracle.Cut) string {
 		return ""
 	case refused != "" && refused == s.keyRefusal(tb):
 		return ""
+	case refused != "" && valueRefusals[tb.Table] != "" && strings.Contains(refused, valueRefusals[tb.Table]):
+		// A table the run made so that every key value is one the
+		// product refuses (oracle.RefusedKeyTables), for that reason only.
+		return ""
 	case refused != "":
 		// Before the untouched case on purpose: a refusal for a reason the
 		// generator did not cause is a finding even over a table no op
@@ -281,6 +285,10 @@ func (s *tailStep) whyNoTail(tb views.BaselineTable, cut *oracle.Cut) string {
 		return fmt.Sprintf("no tail laid over the table (the keeper holds %d keys), and ops since the published cut changed it", keys)
 	}
 }
+
+// valueRefusals are the tables whose every key value the product refuses,
+// by table, with the words of that refusal: no other refusal passes.
+var valueRefusals = map[string]string{"t_vbin0x": "starts with the text 0x or 0X"}
 
 // keyRefusal is what the product refuses tb's tail with for its key, or ""
 // when its key supports a tail.

@@ -240,7 +240,7 @@ func TestTailKey_binaryAmbiguousOrUndecodedRefuses(t *testing.T) {
 		pk:  []metadata.ColumnMeta{{Name: "id", IsPK: true, DataType: "varbinary"}},
 	}
 	_, _, err := c.fold(t, nil, []query.ResultRow{c.event(1, event.EventInsert, nil, img("id", []byte("0xFF"), "v", num("1")))})
-	wantRefusal(t, err, "starts with the text 0x")
+	wantRefusal(t, err, "starts with the text 0x or 0X")
 	_, _, err = c.fold(t, nil, []query.ResultRow{c.event(1, event.EventInsert, nil, img("id", "AQI=", "v", num("1")))})
 	wantRefusal(t, err, "was not decoded")
 	// The empty value, inserted or deleted: an earlier version wrote it into
@@ -255,10 +255,32 @@ func TestTailKey_binaryAmbiguousOrUndecodedRefuses(t *testing.T) {
 		wantRefusal(t, err, "the empty value")
 	}
 	_, _, err = c.fold(t, nil, []query.ResultRow{c.event(1, event.EventInsert, nil, img("id", []byte("0x"), "v", num("1")))})
-	wantRefusal(t, err, "starts with the text 0x")
-	// The text "0X…" is not formatPKValue's mark (lower case x): kept.
-	if _, _, err = c.fold(t, nil, []query.ResultRow{c.event(1, event.EventInsert, nil, img("id", []byte("0XFF"), "v", num("1")))}); err != nil {
-		t.Fatal(err)
+	wantRefusal(t, err, "starts with the text 0x or 0X")
+	// Upper case too: the copy's writer decodes 0XAB to the one byte AB,
+	// where the tail would hold the four bytes of the text. 0x41 is the
+	// text of a byte that is UTF-8 itself. 0XZZ is not hex, so the writer
+	// keeps it as text and the two sides would agree; it is refused all the
+	// same, one rule for every value that starts with the prefix.
+	for _, v := range []string{"0XAB", "0x41", "0XZZ", "0xZZ", "0X"} {
+		for _, ev := range []query.ResultRow{
+			c.event(1, event.EventInsert, nil, img("id", []byte(v), "v", num("1"))),
+			c.event(1, event.EventDelete, img("id", []byte(v), "v", num("1")), nil),
+		} {
+			_, _, err = c.fold(t, nil, []query.ResultRow{ev})
+			wantRefusal(t, err, "starts with the text 0x or 0X")
+		}
+	}
+	// Which the copy's writer proves: it decodes 0XAB and keeps 0XZZ.
+	for in, want := range map[string]string{"0XAB": "ab", "0x41": "41", "0XZZ": hex.EncodeToString([]byte("0XZZ"))} {
+		got := readKeyState(t, "SELECT * FROM read_parquet("+lit(writeTailBase(t, t.TempDir(), "t.parquet", c.ddl, map[string]string{"id": in, "v": "1"}))+")", "lower(hex(id))")
+		if len(got) != 1 || got[0] != want {
+			t.Errorf("the copy's writer stores %q as %v, want %s", in, got, want)
+		}
+	}
+	// And the tombstone's split: a part 0XAB of pk_values is text (the
+	// parser writes its hex mark in lower case), refused the same way.
+	if _, err := tailKeyValues("0XAB", []keyCol{{name: "id", kind: keyBinary}}); err == nil {
+		t.Error("the key 0XAB was split into a value")
 	}
 }
 

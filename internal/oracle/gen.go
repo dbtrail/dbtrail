@@ -276,9 +276,11 @@ func decimalKey(k int) string {
 	return strconv.FormatFloat(v, 'f', -1, 64)
 }
 
-// RefusedKeyTables returns tables keyed by a type that looks like one a tail
-// takes and is not: a DECIMAL with ZEROFILL, which a dump prints padded
-// ("0001.25") and the binary log does not (#3159). The oracle over tails
+// RefusedKeyTables returns tables a tail must refuse (#3159): t_deczf, a
+// DECIMAL with ZEROFILL, which a dump prints padded ("0001.25") and the
+// binary log does not; and t_vbin0x, a VARBINARY whose every key is text
+// that starts with 0X (upper case), which a dump without --hex-blob prints
+// as that text and the copy's writer decodes as hex. The oracle over tails
 // checks that no read lays a tail over them, and that their reads still
 // equal the source.
 func RefusedKeyTables() []Table {
@@ -291,6 +293,12 @@ func RefusedKeyTables() []Table {
 			// as the number: CAST(x + 0) is MySQL's, without the padding.
 			Render: map[string]Render{"x": {Source: "CAST(%[1]s + 0 AS CHAR)", View: "CAST(%[1]s AS VARCHAR)"}},
 			key:    func(k int) []string { return []string{strconv.FormatFloat(float64(k)*1.25+0.5, 'f', -1, 64)} },
+		},
+		{
+			Name: "t_vbin0x",
+			DDL:  "CREATE TABLE `t_vbin0x` (`id` VARBINARY(12) NOT NULL, `v` INT NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB",
+			PK:   []string{"id"}, Cols: []string{"id", "v"}, Render: map[string]Render{"id": RenderBinary},
+			key: func(k int) []string { return []string{binaryLiteral([]byte(fmt.Sprintf("0XAB%02d", k)))} },
 		},
 	}
 }

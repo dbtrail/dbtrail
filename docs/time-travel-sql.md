@@ -1433,9 +1433,9 @@ cannot have a tail when:
   way, until a snapshot newer than that change: a `BINARY(n)` value that
   ends in 0x00 bytes (MySQL pads it, the binary log does not carry the
   padding), an empty binary value, a binary value whose text starts with
-  `0x`, a zero date, a `DECIMAL` minus zero or one with another number of
-  decimals than the column's, or a key its row does not spell the way
-  capture stored it;
+  `0x` or `0X`, a zero date, a `DECIMAL` minus zero or one with another
+  number of decimals than the column's, or a key its row does not spell the
+  way capture stored it;
 - its definition changed since its snapshot, capture lost events since, or
   the source server changed;
 - capture does not record it, `bintrail index` also wrote the index, or the
