@@ -24,7 +24,9 @@ import (
 //
 //  1. EXPLAIN (FORMAT JSON) in the statement's own session and views.
 //  2. Each join of two inputs is given an estimate of its output: left x
-//     right over the product of min(ndv(a), ndv(b)) for each a = b of its
+//     right (DuckDB's estimates of its inputs, raised where the copy's views
+//     make them fall short: correctRows) over the product of
+//     min(ndv(a), ndv(b)) for each a = b of its
 //     conditions, that product capped at the larger input. ndv is the
 //     source's own count of distinct values of the column (PostgreSQL's
 //     pg_stats.n_distinct), which the copy does not have.
@@ -77,6 +79,60 @@ type planNode struct {
 	Name      string         `json:"name"`
 	ExtraInfo map[string]any `json:"extra_info"`
 	Children  []planNode     `json:"children"`
+	// rows is the node's estimate as the check takes it (correctRows).
+	rows float64
+}
+
+// correctRows sets the rows of n and of every node under it: DuckDB's own
+// estimate, raised where DuckDB's is known to fall far short over the copy's
+// views. A view read with its recent changes (fresh mode), and a snapshot
+// with rows deleted since it was written, is a table's file anti-joined with
+// what replaced or deleted its rows, in a UNION with the newer ones, and
+// DuckDB takes each anti join to keep a fifth of its input: over the
+// CH-benCHmark's tails it estimated stock, 20 million rows, at 844,417, and
+// order_line, 60 million, at 2.5 million, which hides a join of the two from
+// the check. So here an anti join keeps the larger of its inputs (it never
+// keeps more), a UNION is the sum of its inputs (DuckDB writes none of its
+// own), and any other node keeps DuckDB's estimate times the most any of its
+// inputs was raised, so a filter's selectivity stands; a node over an input
+// that has no estimate of DuckDB's (a UNION) is raised to that input's.
+// Without anti joins nothing changes.
+func correctRows(n *planNode) float64 {
+	own := estimatedRows(n)
+	if len(n.Children) == 0 {
+		n.rows = own
+		return own
+	}
+	in := make([]float64, len(n.Children))
+	for i := range n.Children {
+		in[i] = correctRows(&n.Children[i])
+	}
+	t, _ := n.ExtraInfo["Join Type"].(string)
+	switch t = strings.ToUpper(t); {
+	case (t == "ANTI" || t == "RIGHT_ANTI") && len(in) == 2:
+		n.rows = math.Max(in[0], in[1])
+	case n.Name == "UNION":
+		n.rows = 0
+		for _, r := range in {
+			n.rows += r
+		}
+	default:
+		raise := 0.0
+		for i := range n.Children {
+			switch theirs := estimatedRows(&n.Children[i]); {
+			case in[i] <= 0:
+			case theirs > 0:
+				raise = math.Max(raise, in[i]/theirs)
+			case own > 0:
+				raise = math.Max(raise, in[i]/own)
+			}
+		}
+		n.rows = own
+		if own > 0 && raise > 0 {
+			n.rows = own * raise
+		}
+	}
+	return n.rows
 }
 
 // planJoinDanger says which join of plan, the JSON array EXPLAIN (FORMAT
@@ -93,6 +149,7 @@ func planJoinDanger(plan []byte, ndv map[string]float64) (string, error) {
 	}
 	worst := dangerJoin{}
 	for i := range roots {
+		correctRows(&roots[i])
 		worst = worstJoin(&roots[i], ndv, worst)
 	}
 	return worst.why, nil
@@ -135,7 +192,7 @@ func judgeJoin(n *planNode, ndv map[string]float64) dangerJoin {
 	if t, _ := n.ExtraInfo["Join Type"].(string); joinTypesBounded[strings.ToUpper(t)] {
 		return dangerJoin{}
 	}
-	left, right := estimatedRows(&n.Children[0]), estimatedRows(&n.Children[1])
+	left, right := n.Children[0].rows, n.Children[1].rows
 	if left <= 0 || right <= 0 {
 		return dangerJoin{}
 	}
@@ -257,7 +314,9 @@ type joinCheck struct {
 
 // checkJoins runs the check on conn, the statement's session with its views
 // and settings in place and not yet locked (the order written is a SET).
-func checkJoins(ctx context.Context, conn *sql.Conn, statement string, ndv map[string]float64) joinCheck {
+// skipCommonSubplan is the session's own (Session.SkipCommonSubplan), kept in
+// the list the order written replaces.
+func checkJoins(ctx context.Context, conn *sql.Conn, statement string, ndv map[string]float64, skipCommonSubplan bool) joinCheck {
 	plan, err := explainJSON(ctx, conn, statement)
 	if err != nil {
 		return joinCheck{skipped: "the copy's plan could not be had: " + firstLine(err.Error())}
@@ -275,7 +334,7 @@ func checkJoins(ctx context.Context, conn *sql.Conn, statement string, ndv map[s
 		return joinCheck{refusal: "a join of the statement on the copy is estimated far past its inputs in the copy's join order (" + first +
 			") and in the order written (" + written + "), so it was not run there"}
 	}
-	if _, err := conn.ExecContext(ctx, keepJoinOrderSQL); err != nil {
+	if _, err := conn.ExecContext(ctx, disabledOptimizersSQL(true, skipCommonSubplan)); err != nil {
 		return refuse("it could not be planned: " + firstLine(err.Error()))
 	}
 	plan, err = explainJSON(ctx, conn, statement)
@@ -292,9 +351,24 @@ func checkJoins(ctx context.Context, conn *sql.Conn, statement string, ndv map[s
 	return joinCheck{written: true}
 }
 
-// keepJoinOrderSQL turns DuckDB's join reordering off for the session: the
-// joins are made in the order written.
-const keepJoinOrderSQL = "SET disabled_optimizers = 'join_order'"
+// disabledOptimizersSQL is the session's one SET of DuckDB's
+// disabled_optimizers, "" when it turns none off: join_order for the joins
+// in the order written (Session.KeepJoinOrder, or the join check), and
+// common_subplan for the PostgreSQL port (Session.SkipCommonSubplan). A SET
+// replaces the whole list, so every writer of it goes through here.
+func disabledOptimizersSQL(keepJoinOrder, skipCommonSubplan bool) string {
+	var off []string
+	if keepJoinOrder {
+		off = append(off, "join_order")
+	}
+	if skipCommonSubplan {
+		off = append(off, "common_subplan")
+	}
+	if len(off) == 0 {
+		return ""
+	}
+	return "SET disabled_optimizers = '" + strings.Join(off, ",") + "'"
+}
 
 // explainJSON is DuckDB's plan of statement as EXPLAIN (FORMAT JSON) writes
 // it: the value of its one row.

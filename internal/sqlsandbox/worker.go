@@ -254,14 +254,14 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 	}
 	// The joins in the order written (Session.KeepJoinOrder). The database
 	// is the job's own (serveJob opens a new one per job), so the next
-	// statement plans its joins as always. One of the two writers of
-	// disabled_optimizers, with the join check below (checkJoins), which
-	// sets the same list and does not run when this one did: a SET replaces
-	// the whole list, so another optimizer turned off later must be added to
-	// both, not set apart.
-	if job.KeepJoinOrder {
-		if _, err := conn.ExecContext(ctx, keepJoinOrderSQL); err != nil {
-			return sessionErr("%s: %v", keepJoinOrderSQL, err)
+	// statement plans its joins as always. With the common_subplan
+	// optimizer off for the PostgreSQL port (Session.SkipCommonSubplan) in
+	// the same list: a SET replaces the whole list, so both are written by
+	// disabledOptimizersSQL, here and in the join check below (checkJoins),
+	// and another optimizer turned off later is added there.
+	if stmt := disabledOptimizersSQL(job.KeepJoinOrder, job.SkipCommonSubplan); stmt != "" {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			return sessionErr("%s: %v", stmt, err)
 		}
 	}
 	// Then the restrictions, then the views, then the lock. The views are
@@ -389,7 +389,7 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 	// because running it in the order written is a SET. Not when the order
 	// written was asked for already.
 	if job.JoinNDV != nil && !job.KeepJoinOrder {
-		check := checkJoins(ctx, conn, job.SQL, job.JoinNDV)
+		check := checkJoins(ctx, conn, job.SQL, job.JoinNDV, job.SkipCommonSubplan)
 		switch {
 		case check.refusal != "":
 			return wireResult{Error: &wireError{Kind: errJoinTooBig, Message: check.refusal}}

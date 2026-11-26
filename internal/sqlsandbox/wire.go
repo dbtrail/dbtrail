@@ -43,6 +43,8 @@ type wireJob struct {
 	PostgresRules bool `json:"postgres_rules,omitempty"`
 	// PostgresNames: see Session.PostgresNames.
 	PostgresNames bool `json:"postgres_names,omitempty"`
+	// SkipCommonSubplan: see Session.SkipCommonSubplan.
+	SkipCommonSubplan bool `json:"skip_common_subplan,omitempty"`
 	// JoinNDV: see Session.JoinNDV. Nil: no join check.
 	JoinNDV map[string]float64 `json:"join_ndv,omitempty"`
 	// The worker's caps.

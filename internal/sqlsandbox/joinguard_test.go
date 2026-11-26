@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -247,6 +248,77 @@ func TestPlanJoinDanger_nestedChildren(t *testing.T) {
 	}
 }
 
+// tailView is a view of the copy as fresh mode reads it, shaped as DuckDB
+// plans one: the table's file anti-joined with its dead rows, in a UNION with
+// the newer rows, anti-joined with the tail, in a UNION with the tail's own
+// files. DuckDB takes each anti join to keep a fifth of its input, so its
+// estimate at the top (duckTop) is far below base, the file's rows.
+func tailView(base float64, duckTop string) map[string]any {
+	est := func(n float64) string { return strconv.FormatFloat(n, 'f', 0, 64) }
+	node := func(name, joinType, est string, children ...any) map[string]any {
+		extra := map[string]any{}
+		if joinType != "" {
+			extra["Join Type"] = joinType
+		}
+		if est != "" {
+			extra["Estimated Cardinality"] = est
+		}
+		if children == nil {
+			children = []any{}
+		}
+		return map[string]any{"name": name, "extra_info": extra, "children": children}
+	}
+	deadRows := node("HASH_JOIN", "ANTI", est(base/5), node("READ_PARQUET", "", est(base)), node("FILTER", "", est(base/50), node("READ_PARQUET", "", "0")))
+	snapshot := node("UNION", "", "", deadRows, node("PROJECTION", "", est(base/200), node("READ_PARQUET", "", est(base/200))))
+	tail := node("HASH_JOIN", "ANTI", est(base/25), snapshot, node("READ_PARQUET", "", est(base/20)))
+	newest := node("HASH_JOIN", "RIGHT_ANTI", "50", node("READ_PARQUET", "", "200"), node("READ_PARQUET", "", "40"))
+	return node("PROJECTION", "", duckTop, node("UNION", "", "", tail, newest, node("READ_PARQUET", "", "10")))
+}
+
+// Over views with their recent changes, DuckDB's estimates fall to a
+// twenty-fifth of the tables (stock, 20 million rows, at 844,417 in the
+// CH-benCHmark's Q5 with tails): the join of two such views is only seen
+// with the estimates raised back to the tables'.
+func TestPlanJoinDanger_tailViewsAreTakenAtTheirTablesRows(t *testing.T) {
+	ndv := map[string]float64{"s_w_id": 200, "c_w_id": 200, "s_d_id": 10, "c_d_id": 10}
+	stock, customer := tailView(20000000, "800000"), tailView(6000000, "150000")
+	join := map[string]any{"name": "HASH_JOIN", "extra_info": map[string]any{"Join Type": "INNER", "Conditions": []any{"s_w_id = c_w_id", "s_d_id = c_d_id"}},
+		"children": []any{stock, customer}}
+	got, err := planJoinDanger(planOf(t, join), ndv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// By DuckDB's own estimates 800,000 x 150,000 over 2,000 values is under
+	// 100 times 800,000; by the tables' about 6e10, far past 100 times 20
+	// million.
+	if got == "" || !strings.Contains(got, "20100210 x 6030210") {
+		t.Fatalf("not flagged: %q", got)
+	}
+	var roots []planNode
+	if err := json.Unmarshal(planOf(t, stock), &roots); err != nil {
+		t.Fatal(err)
+	}
+	if rows := correctRows(&roots[0]); rows < 20000000 || rows > 20200000 {
+		t.Errorf("the stock view: %.0f rows, want about its table's 20 million", rows)
+	}
+	// A filter over such a view keeps its selectivity.
+	filtered := map[string]any{"name": "FILTER", "extra_info": map[string]any{"Estimated Cardinality": "80000"}, "children": []any{stock}}
+	if err := json.Unmarshal(planOf(t, filtered), &roots); err != nil {
+		t.Fatal(err)
+	}
+	if rows := correctRows(&roots[0]); rows < 2000000 || rows > 2020000 {
+		t.Errorf("a tenth of the stock view: %.0f rows", rows)
+	}
+	// Without anti joins nothing is raised.
+	plain := planOf(t, map[string]any{"name": "PROJECTION", "extra_info": map[string]any{"Estimated Cardinality": "5"}, "children": []any{scanNode("5")}})
+	if err := json.Unmarshal(plain, &roots); err != nil {
+		t.Fatal(err)
+	}
+	if rows := correctRows(&roots[0]); rows != 5 {
+		t.Errorf("a plain projection: %.0f", rows)
+	}
+}
+
 // Nothing to compare against: no statistics, no check.
 func TestPlanJoinDanger_noStatistics(t *testing.T) {
 	plan := planOf(t, joinNode("CROSS_PRODUCT", "", nil, "60162442", "10000"))
@@ -391,6 +463,59 @@ func TestWorker_joinCheckOrders(t *testing.T) {
 			t.Fatalf("%+v, %d plans %q", res.Error, len(*plans), res.JoinOrder)
 		}
 	})
+}
+
+// The one SET of disabled_optimizers: a SET replaces the whole list, so the
+// order written and the PostgreSQL port's common_subplan go in one.
+func TestDisabledOptimizersSQL(t *testing.T) {
+	for _, tc := range []struct {
+		keep, skip bool
+		want       string
+	}{
+		{false, false, ""},
+		{true, false, "SET disabled_optimizers = 'join_order'"},
+		{false, true, "SET disabled_optimizers = 'common_subplan'"},
+		{true, true, "SET disabled_optimizers = 'join_order,common_subplan'"},
+	} {
+		if got := disabledOptimizersSQL(tc.keep, tc.skip); got != tc.want {
+			t.Errorf("keep %v skip %v: %q, want %q", tc.keep, tc.skip, got, tc.want)
+		}
+	}
+}
+
+// What the session's list holds when the statement runs, read through the
+// statement itself (current_setting is the copy's own setting read).
+func TestWorker_disabledOptimizersAsTheStatementRuns(t *testing.T) {
+	f := newCopyFixture(t)
+	read := func(j wireJob) string {
+		t.Helper()
+		j.CopyDirs, j.Threads, j.MemoryLimit, j.MaxRows, j.MaxResultBytes = []string{f.archiveRoot}, 1, "256MB", 10, 1<<20
+		res := runJob(j, nil, os.Stderr)
+		if res.Error != nil {
+			t.Fatalf("%+v", res.Error)
+		}
+		s, _ := res.Rows[0][0].(string)
+		return s
+	}
+	const q = "SELECT current_setting('disabled_optimizers') AS d FROM range(1)"
+	// The MySQL port and the SQL page: nothing turned off, or join_order
+	// alone for a STRAIGHT_JOIN, as before.
+	if got := read(wireJob{SQL: q}); got != "" {
+		t.Errorf("MySQL: %q", got)
+	}
+	if got := read(wireJob{SQL: q, KeepJoinOrder: true}); got != "join_order" {
+		t.Errorf("MySQL STRAIGHT_JOIN: %q", got)
+	}
+	// The PostgreSQL port.
+	if got := read(wireJob{SQL: q, SkipCommonSubplan: true}); got != "common_subplan" {
+		t.Errorf("PostgreSQL: %q", got)
+	}
+	// The join check moving the statement to the order written keeps
+	// common_subplan off.
+	fakeJoinDanger(t, nil, "HASH_JOIN on a = b", "")
+	if got := read(wireJob{SQL: q, SkipCommonSubplan: true, JoinNDV: map[string]float64{"a": 1}}); got != "join_order,common_subplan" {
+		t.Errorf("PostgreSQL in the order written: %q", got)
+	}
 }
 
 // Through the real worker process: the statistics travel to it, and its

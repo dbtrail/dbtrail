@@ -280,6 +280,14 @@ type Session struct {
 	// that can send a refused statement to its source; with KeepJoinOrder
 	// set there is nothing to check.
 	JoinNDV map[string]float64
+	// SkipCommonSubplan runs the statement with DuckDB's common_subplan
+	// optimizer off. That optimizer materializes a subplan a statement reads
+	// twice; over a view of the copy it wrote the whole view to disk: the
+	// CH-benCHmark's Q17, which reads order_line twice, wrote 59 million rows
+	// (about 3.3 GB) and took 19.8 s, and 3.4 s with it off; Q21 5.7 s and
+	// 0.8 s; the 22 reports gave the same answers, none slower. Only the
+	// PostgreSQL port sets it; the MySQL port and the SQL page keep it on.
+	SkipCommonSubplan bool
 	// PostgresRules runs the statement by PostgreSQL's rules where the
 	// engine's session decides the answer (#2786), for the copy of a
 	// PostgreSQL source: NULL sorts as the largest value (last ascending,
@@ -1687,7 +1695,7 @@ func marshalJob(job Job, limits Limits, spill spillSpec, spool string, more bool
 	return json.Marshal(wireJob{
 		CopyDirs: allowedDirs(job.CopyDirs), ViewsSQL: viewsSQL, AskViews: asking, SQL: job.SQL, NoFileReaders: job.NoFileReaders, Schema: job.Schema,
 		TimeZone: job.Session.TimeZone, MySQLClock: job.Session.MySQLClock, SelectLimit: job.Session.SelectLimit, KeepJoinOrder: job.Session.KeepJoinOrder, PostgresRules: job.Session.PostgresRules, PostgresNames: job.Session.PostgresNames,
-		JoinNDV: job.Session.JoinNDV,
+		JoinNDV: job.Session.JoinNDV, SkipCommonSubplan: job.Session.SkipCommonSubplan,
 		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
 		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes, More: more,
