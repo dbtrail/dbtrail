@@ -24,3 +24,6 @@ func SetBeforeWriteForTest(fn func(step string)) (restore func()) {
 	beforeWrite = fn
 	return func() { beforeWrite = prev }
 }
+
+// ErrCaptureOwnerChangedForTest is errCaptureOwnerChanged.
+var ErrCaptureOwnerChangedForTest = errCaptureOwnerChanged

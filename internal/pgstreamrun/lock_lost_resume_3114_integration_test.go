@@ -228,3 +228,40 @@ func TestIntegrationPGFirstRunRecordsATruncateOnce_3114(t *testing.T) {
 		t.Errorf("the index holds %q, want %q", got, once(2, 3))
 	}
 }
+
+// #3114 over real replication: another run claims the capture while this one
+// runs, as a run that started after it would. This one's next save is refused,
+// so it stops with that error, the position stays where it was, the slot is not
+// confirmed past it, and the run after indexes every row once.
+func TestIntegrationPGCaptureTakenOverSavesNothing_3114(t *testing.T) {
+	r := newResumeRig(t, "takeover", 1000)
+	_, ended := r.startRun()
+	r.insert(1)
+	at := r.waitSavedAt(1)
+	if _, err := r.index.Exec(`UPDATE pg_capture_owner SET owner = REPEAT('f', 32) WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	r.insert(2)
+	select {
+	case err := <-ended:
+		if !errors.Is(err, pgstreamrun.ErrCaptureOwnerChangedForTest) {
+			t.Errorf("One returned %v, want the owner error", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("One kept running after another run claimed the capture")
+	}
+	waitFor(t, 15*time.Second, func() bool { return !r.slotActive() }, "replication slot inactive")
+	if got := r.saved(); got != at {
+		t.Errorf("the saved position moved to %X after another run claimed the capture, want %X", got, at)
+	}
+	if got := r.confirmedFlush(); uint64(got) > at {
+		t.Errorf("the slot was confirmed through %s, past the saved position %s", got, pglogrepl.LSN(at))
+	}
+	stop := r.start()
+	r.insert(3)
+	r.waitSavedAt(3)
+	stop()
+	if got := r.copies(); got != once(1, 2, 3) {
+		t.Errorf("after resuming the index holds %q, want %q", got, once(1, 2, 3))
+	}
+}

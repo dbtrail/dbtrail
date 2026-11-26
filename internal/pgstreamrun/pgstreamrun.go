@@ -202,6 +202,9 @@ func saveStartedPG(db *sql.DB, serverID uint32, skips *parser.SkipCounters, logg
 // holds the loaded resume point and the running counters.
 type pgStreamState struct {
 	lsn           uint64 // resume LSN (loaded from the checkpoint; 0 on first run)
+	// owner is this run's capture owner token (claimCaptureOwner); every
+	// save names it. Empty only for a loop driven without One (tests).
+	owner         string
 	eventsIndexed int64
 	lastEventTime sql.NullTime
 	serverID      uint32
@@ -333,13 +336,26 @@ func One(ctx context.Context, cfg Config) error {
 		return config.Connect(cfg.IndexDSN)
 	}, logger, nil)
 
+	// Claimed before the saved position is read: a save an earlier run sent
+	// and that lands after this changes nothing, so what is read next stays
+	// the position until this run saves (capture_owner.go). Not by a run that
+	// already lost its lock, which would take the capture from the run that
+	// holds it.
+	if lostCaptureLock(ctx) {
+		return streamrun.ErrStopWithoutFlush
+	}
+	owner, err := claimCaptureOwner(ctx, indexDB)
+	if err != nil {
+		return err
+	}
+
 	saved, err := loadStreamStatePG(indexDB)
 	if err != nil {
 		return err
 	}
 	startLSN := resolveStartLSN(saved, cfg.StartLSN, logger)
 
-	state := &pgStreamState{lsn: startLSN, serverID: cfg.ServerID, metrics: metrics}
+	state := &pgStreamState{lsn: startLSN, serverID: cfg.ServerID, metrics: metrics, owner: owner}
 	if saved != nil {
 		state.eventsIndexed = saved.eventsIndexed
 		// Kept so a checkpoint saved before this run's first commit (#2746:
@@ -441,6 +457,7 @@ func One(ctx context.Context, cfg Config) error {
 	// Run returns nil on ctx-cancel; only a real capture error matters.
 	capErr := <-captureErr
 	if loopErr != nil {
+		reportCaptureFailure(logger, loopErr, capErr)
 		return loopErr
 	}
 	if capErr != nil && !errors.Is(capErr, context.Canceled) {
@@ -456,6 +473,17 @@ func One(ctx context.Context, cfg Config) error {
 	logger.Info("pgstreamrun: stopped", "events_indexed", state.eventsIndexed,
 		"last_lsn", pglogrepl.LSN(state.lsn))
 	return nil
+}
+
+// reportCaptureFailure logs a failure of the capture itself when the loop
+// ended with an error of its own, which is what One returns: a slot lost just
+// as the lock went would otherwise be written nowhere. The key is the MySQL
+// stream's (stream_error, consoleapp.runMainStreamHoldingLock).
+func reportCaptureFailure(logger *slog.Logger, loopErr, capErr error) {
+	if capErr == nil || errors.Is(capErr, context.Canceled) || errors.Is(capErr, streamrun.ErrStopWithoutFlush) {
+		return
+	}
+	logger.Error("pgstreamrun: the capture failed on its own while the stream was stopping", "error", loopErr, "stream_error", capErr)
 }
 
 // lostCaptureLock reports whether ctx was cancelled because this process lost
@@ -947,6 +975,7 @@ func streamLoopPG(
 	resendHeld := map[string]bool{}
 	// firstRun recognizes what an earlier run indexed before its first save.
 	var firstRun firstRunResend
+	defer firstRun.report()
 	// loadFirstRun reads where that can be, once, when a change first arrives:
 	// by then the capturer knows where it started.
 	loadFirstRun := func() {
@@ -1104,10 +1133,11 @@ func streamLoopPG(
 	}
 
 	// finish ends the loop through stop. A failed last save is a warning, as
-	// the position is only older on restart; a lost lock is the run's result.
+	// the position is only older on restart; a lost lock, or a capture another
+	// run took over (errCaptureOwnerChanged), is the run's result.
 	finish := func(failed string) error {
 		err := stop()
-		if errors.Is(err, streamrun.ErrStopWithoutFlush) {
+		if errors.Is(err, streamrun.ErrStopWithoutFlush) || errors.Is(err, errCaptureOwnerChanged) {
 			return err
 		}
 		if err != nil {
@@ -1595,39 +1625,32 @@ func newestEventThrough(db *sql.DB, lsn uint64) (uint64, error) {
 	return id, nil
 }
 
-// checkpointUpdate is the update arm of saveCheckpointPG. The saved position
-// never moves back: a save that was delayed past a newer owner's would make the
-// next start remove what lies between the two (deleteEventsPastCheckpointPG),
-// and PostgreSQL no longer sends it (#3114). Such a save changes nothing at all,
-// so the row never pairs one save's position with another's columns. Only
-// `bintrail-pg reset` lowers the position, with a statement of its own.
-//
-// binlog_position is assigned last: MySQL evaluates the assignments in order,
-// and every condition must compare with the value the row had.
-var checkpointUpdate = func() string {
-	const moved = "VALUES(binlog_position) >= binlog_position"
-	var b strings.Builder
-	for _, c := range [][2]string{
-		{"binlog_file", "VALUES(binlog_file)"},
-		{"gtid_set", "VALUES(gtid_set)"},
-		{"flavor", "VALUES(flavor)"},
-		{"events_indexed", "VALUES(events_indexed)"},
-		{"last_event_time", "VALUES(last_event_time)"},
-		{"last_checkpoint", "UTC_TIMESTAMP()"},
-		{"server_id", "VALUES(server_id)"},
-		{"pg_sent_through_lsn", "VALUES(pg_sent_through_lsn)"},
-		{"pg_sent_through_at", "UTC_TIMESTAMP()"},
-		{"caught_up_at", "COALESCE(VALUES(caught_up_at), caught_up_at)"},
-		{"pg_caught_up_source_at", "COALESCE(VALUES(pg_caught_up_source_at), pg_caught_up_source_at)"},
-		{"pg_capture_from_lsn", "IF(?, pg_capture_from_lsn, VALUES(pg_capture_from_lsn))"},
-		{"pg_checkpoint_event_id", "IF(?, VALUES(pg_checkpoint_event_id), pg_checkpoint_event_id)"},
-		{"capture_skips", "COALESCE(VALUES(capture_skips), capture_skips)"},
-	} {
-		b.WriteString(c[0] + " = IF(" + moved + ", " + c[1] + ", " + c[0] + "),\n")
-	}
-	b.WriteString("binlog_position = GREATEST(VALUES(binlog_position), binlog_position)")
-	return b.String()
-}()
+// checkpointColumns and checkpointValues are the row saveCheckpointPG writes,
+// and checkpointUpdate its update arm.
+const checkpointColumns = `(id, mode, binlog_file, binlog_position, gtid_set, flavor,
+			 events_indexed, last_event_time, last_checkpoint, server_id,
+			 pg_sent_through_lsn, pg_sent_through_at, caught_up_at, pg_capture_from_lsn,
+			 pg_caught_up_source_at, pg_checkpoint_event_id, capture_skips)`
+
+const checkpointValues = `1, 'gtid', ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, UTC_TIMESTAMP(),
+			UTC_TIMESTAMP(6) - INTERVAL ? MICROSECOND, ?, ?, ?, ?`
+
+const checkpointUpdate = `
+			binlog_file     = VALUES(binlog_file),
+			binlog_position = VALUES(binlog_position),
+			gtid_set        = VALUES(gtid_set),
+			flavor          = VALUES(flavor),
+			events_indexed  = VALUES(events_indexed),
+			last_event_time = VALUES(last_event_time),
+			last_checkpoint = UTC_TIMESTAMP(),
+			server_id       = VALUES(server_id),
+			pg_sent_through_lsn = VALUES(pg_sent_through_lsn),
+			pg_sent_through_at = UTC_TIMESTAMP(),
+			caught_up_at = COALESCE(VALUES(caught_up_at), caught_up_at),
+			pg_caught_up_source_at = COALESCE(VALUES(pg_caught_up_source_at), pg_caught_up_source_at),
+			pg_capture_from_lsn = IF(?, pg_capture_from_lsn, VALUES(pg_capture_from_lsn)),
+			pg_checkpoint_event_id = IF(?, VALUES(pg_checkpoint_event_id), pg_checkpoint_event_id),
+			capture_skips = COALESCE(VALUES(capture_skips), capture_skips)`
 
 // saveCheckpointPG persists the durable cursor (commitLSN — the last complete
 // transaction) and the running counters. mode='gtid'/flavor='postgres': the LSN
@@ -1691,20 +1714,27 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 	// (one statement, one value). Verify trusts pg_sent_through_lsn only while
 	// the two are equal, so a save by any writer that does not set it (an
 	// older capture, bintrail-pg reset) leaves the position untrusted.
-	_, err := db.ExecContext(ctx, `
-		INSERT INTO stream_state
-			(id, mode, binlog_file, binlog_position, gtid_set, flavor,
-			 events_indexed, last_event_time, last_checkpoint, server_id,
-			 pg_sent_through_lsn, pg_sent_through_at, caught_up_at, pg_capture_from_lsn,
-			 pg_caught_up_source_at, pg_checkpoint_event_id, capture_skips)
-		VALUES (1, 'gtid', ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, UTC_TIMESTAMP(),
-			UTC_TIMESTAMP(6) - INTERVAL ? MICROSECOND, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE `+checkpointUpdate,
-		lsnStr, commitLSN, lsnStr, pgFlavor, state.eventsIndexed, lastEventTime, state.serverID,
-		state.sentThrough, caughtUpAgo, captureFrom, caughtUpSourceAt, checkpointEvent, captureSkips,
-		state.resumed, state.stampEvent)
-	if err != nil {
+	args := []any{lsnStr, commitLSN, lsnStr, pgFlavor, state.eventsIndexed, lastEventTime, state.serverID,
+		state.sentThrough, caughtUpAgo, captureFrom, caughtUpSourceAt, checkpointEvent, captureSkips}
+	// A run of One saves only while it owns the capture (capture_owner.go):
+	// the row comes out of a SELECT of the owner table that matches its token,
+	// so a save that names another token inserts nothing and updates nothing,
+	// on a first run as on a resumed one. A state with no owner (tests that
+	// drive the loop without One) saves as before.
+	stmt := `INSERT INTO stream_state ` + checkpointColumns + ` VALUES (` + checkpointValues + `)`
+	if state.owner != "" {
+		stmt = `INSERT INTO stream_state ` + checkpointColumns + ` SELECT ` + checkpointValues + `
+		FROM pg_capture_owner WHERE id = 1 AND owner = ?`
+		args = append(args, state.owner)
+	}
+	args = append(args, state.resumed, state.stampEvent)
+	if _, err := db.ExecContext(ctx, stmt+` ON DUPLICATE KEY UPDATE`+checkpointUpdate, args...); err != nil {
 		return fmt.Errorf("pgstreamrun: save checkpoint at %s: %w", lsnStr, err)
+	}
+	if state.owner != "" {
+		if err := stillCaptureOwner(db, state.owner); err != nil {
+			return err
+		}
 	}
 	state.caughtUpAt, state.caughtUpSourceAt = time.Time{}, time.Time{}
 	state.stampEvent = false

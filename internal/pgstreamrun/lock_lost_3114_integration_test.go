@@ -3,10 +3,12 @@
 package pgstreamrun
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -539,41 +541,122 @@ func TestIntegrationPGLockLostResumeCleanupRemovesNothing_3114(t *testing.T) {
 	}
 }
 
-// A delayed save from an older owner changes nothing: not the position, and
-// not the columns that go with it. A newer or equal one saves as always, and a
-// position cleared by a reset can start again from any value.
-func TestIntegrationPGSavedPositionNeverMovesBack_3114(t *testing.T) {
+// The exact case a "never lower the position" rule got wrong: run A sent a
+// save before run B started, and it reached the index after. B claimed the
+// capture, read the older position, and indexes from there. A's late save
+// changes nothing; B's saves apply, lower than A's included, so B's last save
+// is where the next run resumes, and nothing between is skipped.
+func TestIntegrationPGLateSaveFromAnEarlierRunChangesNothing_3114(t *testing.T) {
 	db := lockIndex(t)
-	save := func(lsn uint64, indexed int64) {
+	ctx := context.Background()
+	read := func() (pos uint64, indexed int64) {
 		t.Helper()
-		if err := saveCheckpointPG(db, &pgStreamState{serverID: 91, eventsIndexed: indexed}, lsn); err != nil {
-			t.Fatal(err)
-		}
-	}
-	read := func() (pos uint64, file string, indexed int64) {
-		t.Helper()
-		if err := db.QueryRow(`SELECT binlog_position, binlog_file, events_indexed FROM stream_state WHERE id = 1`).Scan(&pos, &file, &indexed); err != nil {
+		if err := db.QueryRow(`SELECT binlog_position, events_indexed FROM stream_state WHERE id = 1`).Scan(&pos, &indexed); err != nil {
 			t.Fatal(err)
 		}
 		return
 	}
-	save(9000, 9)
-	save(5000, 5)
-	if pos, file, indexed := read(); pos != 9000 || file != "0/2328" || indexed != 9 {
-		t.Errorf("after a delayed older save: position %d, file %s, events %d; want 9000, 0/2328, 9", pos, file, indexed)
+	claim := func() string {
+		t.Helper()
+		token, err := claimCaptureOwner(ctx, db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return token
 	}
-	save(9000, 10)
-	if pos, _, indexed := read(); pos != 9000 || indexed != 10 {
-		t.Errorf("a save at the same position: position %d, events %d; want 9000 and 10", pos, indexed)
+	save := func(owner string, lsn uint64, indexed int64) error {
+		t.Helper()
+		return saveCheckpointPG(db, &pgStreamState{serverID: 91, owner: owner, eventsIndexed: indexed}, lsn)
 	}
-	save(9500, 11)
-	if pos, file, indexed := read(); pos != 9500 || file != "0/251C" || indexed != 11 {
-		t.Errorf("a newer save: position %d, file %s, events %d; want 9500, 0/251C, 11", pos, file, indexed)
+
+	a := claim()
+	if err := save(a, 5000, 5); err != nil {
+		t.Fatal(err)
+	}
+	b := claim()
+	saved, err := loadStreamStatePG(db)
+	if err != nil || saved == nil || saved.lsn != 5000 {
+		t.Fatalf("B read %+v, %v; want position 5000", saved, err)
+	}
+	if err := save(a, 9000, 9); !errors.Is(err, errCaptureOwnerChanged) {
+		t.Errorf("A's late save returned %v, want errCaptureOwnerChanged", err)
+	}
+	if pos, indexed := read(); pos != 5000 || indexed != 5 {
+		t.Errorf("after A's late save: position %d, events %d; want 5000 and 5", pos, indexed)
+	}
+	for i, lsn := range []uint64{6000, 6000, 7000} { // the same save twice changes no column
+		if err := save(b, lsn, int64(6+i)); err != nil {
+			t.Fatalf("B's save at %d: %v", lsn, err)
+		}
+	}
+	if pos, indexed := read(); pos != 7000 || indexed != 8 {
+		t.Errorf("after B's saves: position %d, events %d; want 7000 and 8", pos, indexed)
 	}
 	testutil.MustExec(t, db, `UPDATE stream_state SET binlog_position = 0 WHERE id = 1`) // what reset does
-	save(100, 1)
-	if pos, _, _ := read(); pos != 100 {
+	if err := save(b, 100, 1); err != nil {
+		t.Fatal(err)
+	}
+	if pos, _ := read(); pos != 100 {
 		t.Errorf("after a reset the position is %d, want 100", pos)
+	}
+}
+
+// The same on a first run, before any row: A's late save must not insert one,
+// or B's next start would resume from a position nobody indexed up to.
+func TestIntegrationPGLateFirstSaveFromAnEarlierRunInsertsNothing_3114(t *testing.T) {
+	db := lockIndex(t)
+	a, err := claimCaptureOwner(context.Background(), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := claimCaptureOwner(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveCheckpointPG(db, &pgStreamState{serverID: 91, owner: a}, 9000); !errors.Is(err, errCaptureOwnerChanged) {
+		t.Errorf("A's late first save returned %v, want errCaptureOwnerChanged", err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM stream_state`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("A's late first save wrote a stream_state row")
+	}
+}
+
+// A save the owner check refuses ends the loop with that error, through the
+// final save too, and nothing is acknowledged to the slot.
+func TestIntegrationPGRefusedSaveEndsTheLoop_3114(t *testing.T) {
+	db := lockIndex(t)
+	prevWithin, prevAck := commitWithin, ackCheckpoint
+	t.Cleanup(func() { commitWithin, ackCheckpoint = prevWithin, prevAck })
+	commitWithin = func() time.Duration { return time.Hour }
+	acked := false
+	ackCheckpoint = func(*pgcapture.Capturer, uint64) { acked = true }
+	a, err := claimCaptureOwner(context.Background(), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := claimCaptureOwner(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	events := make(chan event.Event, 2)
+	events <- event.Event{BinlogFile: "0/500", StartPos: 0x500, EndPos: 0x500, Timestamp: time.Date(2026, 2, 19, 14, 0, 0, 0, time.UTC),
+		Schema: "public", Table: "orders", EventType: event.EventInsert, PKValues: "1", RowAfter: map[string]any{"id": int64(1)}}
+	events <- event.Event{EventType: event.EventCommit, EndPos: 0x500}
+	close(events)
+	defer cancel()
+	err = streamLoopPG(ctx, events, indexer.New(db, 1000), db, pgcapture.New(pgcapture.Config{}), time.Hour, nil, time.Hour,
+		&pgStreamState{serverID: 91, owner: a}, slog.New(slog.DiscardHandler), nil)
+	if !errors.Is(err, errCaptureOwnerChanged) {
+		t.Errorf("streamLoopPG returned %v, want errCaptureOwnerChanged", err)
+	}
+	if acked {
+		t.Error("a refused save was acknowledged to the slot")
+	}
+	if lsn := savedPosition(t, db); lsn != 0 {
+		t.Errorf("position %X saved by a run that no longer owns the capture", lsn)
 	}
 }
 
@@ -620,7 +703,8 @@ func TestIntegrationPGFirstRunCheckFailsTowardsKeeping_3114(t *testing.T) {
 	leftAt(t, db, 0x500, 1)
 	ev := event.Event{StartPos: 0x500, EndPos: 0x500, Timestamp: time.Date(2026, 2, 19, 14, 0, 0, 0, time.UTC),
 		Schema: "public", Table: "orders", EventType: event.EventInsert, PKValues: "1"}
-	logger := slog.New(slog.DiscardHandler)
+	var logged bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logged, nil))
 
 	var f firstRunResend
 	f.load(context.Background(), db, 0x100, logger)
@@ -650,6 +734,14 @@ func TestIntegrationPGFirstRunCheckFailsTowardsKeeping_3114(t *testing.T) {
 	if f.inWindow(0x500) {
 		t.Error("the window stayed open past the newest row")
 	}
+	// What was not indexed again is said once, when the window closes.
+	if n := strings.Count(logged.String(), "changes_not_indexed_again="); n != 1 || !strings.Contains(logged.String(), "changes_not_indexed_again=2") {
+		t.Errorf("want one line counting the row and the TRUNCATE not indexed again, got:\n%s", logged.String())
+	}
+	f.report()
+	if n := strings.Count(logged.String(), "changes_not_indexed_again="); n != 1 {
+		t.Errorf("the count was said %d times", n)
+	}
 
 	// Another transaction changing the same key in the same second, inside the
 	// window, is a different change even with a copy of the key in the index.
@@ -666,12 +758,39 @@ func TestIntegrationPGFirstRunCheckFailsTowardsKeeping_3114(t *testing.T) {
 	if failing.heldRow(context.Background(), broken, ev, logger) {
 		t.Error("a check that could not read the index dropped the change")
 	}
+	// And it asks no more: a hung index delays capture once, not per key.
+	if failing.inWindow(0x500) {
+		t.Error("the window stayed open after a check that could not answer")
+	}
 
 	// A new slot: everything in the index is before it, so nothing matches.
 	var fresh firstRunResend
 	fresh.load(context.Background(), db, 0x600, logger)
 	if fresh.inWindow(0x500) || fresh.through != 0 {
 		t.Errorf("a slot past the index opened a window [%X, %X]", fresh.from, fresh.through)
+	}
+}
+
+// A transaction that only truncated left no row, so the window reaches the
+// newest TRUNCATE too; other schema records do not stretch it.
+func TestIntegrationPGFirstRunWindowReachesATruncateOnlyTransaction_3114(t *testing.T) {
+	db := lockIndex(t)
+	at := time.Date(2026, 2, 19, 14, 0, 0, 0, time.UTC)
+	leftAt(t, db, 0x500, 1)
+	for _, m := range []event.Event{
+		{BinlogFile: "0/600", StartPos: 0x600, EndPos: 0x600, Schema: "public", Table: "orders", EventType: event.EventDDL,
+			DDLType: event.DDLTruncateTable, DDLQuery: "TRUNCATE public.orders", Timestamp: at},
+		{BinlogFile: "0/900", StartPos: 0x900, EndPos: 0x900, Schema: "public", Table: "orders", EventType: event.EventDDL,
+			DDLType: event.DDLAlterTable, DDLQuery: "ALTER TABLE public.orders ADD COLUMN x int", Timestamp: at},
+	} {
+		if err := indexer.InsertSchemaChange(db, m, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var f firstRunResend
+	f.load(context.Background(), db, 0x100, slog.New(slog.DiscardHandler))
+	if f.from != 0x100 || f.through != 0x600 {
+		t.Errorf("window [%X, %X], want [100, 600]", f.from, f.through)
 	}
 }
 
