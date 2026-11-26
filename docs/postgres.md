@@ -2237,6 +2237,59 @@ analytics reports, two cost 177 and 699 on PostgreSQL (a table of 2,000 rows,
 an index range) and stay there, and the other twelve cost 98,367 to
 13,351,258, several with sequential scans of 2.4 to 61 million rows.
 
+**A statement whose joins would not fit on the copy is not run there.** The
+copy's engine picks the order of a statement's joins with no statistics of
+its columns, and for some reports it picks one whose intermediate result is
+far larger than any of its tables: on the CH-benCHmark's Q5 it joined the
+stock table (20 million rows) with the filtered orders on the warehouse
+alone, which has 200 values, and gave no answer after three and a half
+minutes, after which the source answered. In the order written, Q5 answers
+in 7.5 seconds. So, on a connection with a forwarding user, the copy reads
+its own plan of the statement before running it (in milliseconds) and
+estimates each join's output from the source's count of distinct values of
+the joined columns (`pg_stats.n_distinct`). The engine's own row estimates
+fall far short over a table read with its recent changes (fresh mode) or
+with rows deleted since its snapshot (stock, 20 million rows, estimated at
+844,417), so the check takes those back to the table's rows first. A join
+estimated at more than 100 times its larger input (a cross product: also more
+than 10 billion rows) has the statement planned again in the order written;
+it runs in that order when that plan has no such join, and when it has one
+too, the copy does not run it at all and the source answers it at once
+(`join_too_big` in `/status`). The counts are read from the source as the
+forwarding user, on a connection of the port's own and in the background,
+never inside a client's statement: once every 10 minutes for the server,
+not for each statement, whether or not routing by plan is on. A read that
+fails or finds none is said once in the log (a `WARNING` per server and
+cause) and tried again after 1 minute, then 2, 4, 8 and every 10; counts
+are used for up to an hour after the last good read. Only the counts of the
+tables a statement reads are given to the copy, and a statement that reads
+one table once, or that the source's plan reads one table with, is not
+checked: it cannot join two inputs. Without counts (no forwarding user, the
+capture account, statistics the forwarding user cannot read, a table never
+analyzed, a partitioned table, whose partitions hold the counts) the copy
+runs every statement as before. `/status` counts what the check did with
+each statement the copy answered under `join_checks`: `planned` (checked,
+the copy's own order), `written_order`, `no_statistics` and
+`could_not_run` (the copy's plan could not be had or read, also said once
+in the log). A prepared statement is checked at each execution, with its
+values, not when it is described. What the check cannot
+read it does not count against a statement: a condition that is not one
+column equal to another, a column name two tables share, a join that returns
+at most the rows of one side. On the 22 CH-benCHmark reports, read through
+the copy's views with and without recent changes, it changes two: Q5 runs in
+the order written, and Q21, which runs out of memory in both orders, goes to
+the source. What it does not catch is an order that keeps every join's
+output in proportion but builds a hash table from a side the engine thinks
+small: Q9 over fresh-mode views (order_line joined with stock first) is
+neither flagged nor changed.
+
+**The copy does not cache a subplan a statement reads twice.** On this port
+the engine's `common_subplan` optimizer is off: over a view of the copy it
+wrote the whole view to disk (the CH-benCHmark's Q17, which reads
+order_line twice, wrote about 3.3 GB and took 19.8 seconds; with it off,
+3.4 seconds, with the same answer). The MySQL port and the SQL page are not
+changed.
+
 What this costs and where it can go wrong:
 
 - **One round trip to the source** for each statement the copy could answer,
@@ -2610,6 +2663,7 @@ The reasons, with the MySQL port's names where they mean the same:
 | source | `copy_columns_differ` | a column the copy writes otherwise (a `numeric` without precision) |
 | source | `copy_behind_source`, `copy_age_unknown` | the server's lag limit |
 | source | `table_not_captured` | a table whose capture lost or dropped changes since its snapshot was read (a table capture skips, a capture ledger that does not say which tables or cannot be read, a lost slot, a snapshot published over a known loss), in fresh and fast mode: the copy holds that table as of its snapshot only. Without a forwarding user, or on a server that hides tables, the copy answers it from that snapshot with a notice that says so |
+| source | `join_too_big` | the copy's plan of it has a join estimated far larger than its inputs (from the source's `n_distinct`), in the copy's own join order and in the order written: the copy did not run it |
 | refused | `read_only` | not a read |
 | refused | `copy_queue_full` | for the copy, whose workers were all taken and the line for one full: refused with `53000`, not sent to the source; run it again |
 | refused | `copy_wait_timeout` | for the copy, it waited for a worker as long as `--max-wait` lets it: refused with `53000`, not sent to the source; run it again |

@@ -66,6 +66,7 @@ const (
 	ReasonTableNotCaptured  = "table_not_captured"  // it reads a table whose capture lost or dropped changes since its snapshot (not_captured.go)
 	ReasonResultOverRowCap  = "result_over_row_cap" // an expensive plan whose result is estimated over the copy's row cap: not tried on the copy (route_cost.go)
 	ReasonHeavyOnCopy       = "heavy_on_copy"       // expensive on the source, so the copy answers it, though it may answer otherwise than PostgreSQL (heavy.go)
+	ReasonJoinTooBig        = "join_too_big"        // the copy's plan of it has a join estimated far past its inputs in its own join order and in the order written: not run there (joinstats.go)
 
 	// Nobody ran it.
 	ReasonReadOnly        = "read_only"         // not a read, and the port is read-only toward the source
@@ -89,6 +90,9 @@ type RouteNote struct {
 	// error.
 	Took   time.Duration
 	Failed bool
+	// JoinCheck is what the copy's join check did with a statement the copy
+	// answered (JoinCheck* names), "" when there was nothing to count.
+	JoinCheck string
 }
 
 // routeDecision is which side answers a statement, and why.
@@ -332,10 +336,15 @@ func (s *session) copyFallback(err error, perr *pgErr) string {
 	}
 	var behind *sqlsandbox.BehindSourceError
 	var changed *sqlsandbox.MayHaveChangedError
+	var tooBig *sqlsandbox.JoinTooBigError
 	var stopped *stoppedErr
 	switch {
 	case errors.As(err, &stopped), errors.Is(err, errCanceledByUser), errors.Is(err, errStatementTimeout):
 		return ""
+	case errors.As(err, &tooBig):
+		// Refused by the copy's join check before it ran (joinstats.go): the
+		// statement's, not the moment's.
+		return ReasonJoinTooBig
 	case errors.As(err, &behind):
 		if behind.Unknown {
 			return ReasonCopyAgeUnknown
@@ -1832,10 +1841,15 @@ func (s *session) noteIfFailed(st *preparedStatement) {
 func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, failed bool) {
 	s.noteLast(d, failed)
 	s.settleCostSide(stmt, d, failed)
+	joinCheck := s.joinCheck
+	s.joinCheck = ""
 	if s.bound == nil || s.bound.Routed == nil || d.side == "" {
 		return
 	}
-	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed})
+	if d.side != RouteCopy {
+		joinCheck = ""
+	}
+	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed, JoinCheck: joinCheck})
 }
 
 // fieldName reports whether the token at j is the field a date_trunc or a

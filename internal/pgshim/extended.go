@@ -708,6 +708,11 @@ func (s *session) columnsOf(text string) ([]sqlsandbox.Column, error) {
 	var res sqlsandbox.Result
 	runText, err := s.copyText(text)
 	if err == nil {
+		// Without the join check (RunOptions.JoinNDV unset): a Describe runs
+		// the statement with NULL for every argument under LIMIT 0, whose
+		// plan is not the one its executions get, and must neither fail nor
+		// keep the statement on the source for it. Each Execute is checked
+		// with its own values (runFree).
 		res, err = s.bound.Run(ctx, runText, s.runOptions())
 	}
 	if s.bound.Answered != nil && ctx.Err() == nil {

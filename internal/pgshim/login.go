@@ -209,6 +209,15 @@ type RunOptions struct {
 	// for such statements, so it does not wait behind a report. False when
 	// there was no plan, and for a probe.
 	FastLane bool
+	// JoinNDV is the source's count of distinct values of each column, by
+	// lowercased name, for the copy's join check (sqlsandbox.Session.JoinNDV,
+	// joinstats.go): the host refuses the statement before running it, with
+	// a *sqlsandbox.JoinTooBigError, when its joins would explode in the
+	// copy's order and in the order written, and the source answers it. Set
+	// only on a connection that can send a statement to its source, for the
+	// tables the statement reads, and only for one that can join two inputs.
+	// Nil: no check.
+	JoinNDV map[string]float64
 }
 
 // TrimmedUnknown, among RunOptions.Trimmed, says which columns a statement
@@ -357,6 +366,7 @@ var loginTimeout = 30 * time.Second
 // runFree answers a statement that is not time travel on the copy.
 func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][][]byte, tag string, perr *pgErr) {
 	started := time.Now()
+	s.joinCheck = ""
 	// A session time zone the copy could not be asked about when it was set
 	// is asked about now (settings.go), before the statement's own context:
 	// the question has its own, and the statement's must stay the one a
@@ -415,11 +425,16 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		opts := s.runOptions()
 		opts.NeedTails = s.holdsBackCopy(apart && named > 0)
 		opts.Trimmed = s.trimmedFor(text)
+		// The join check's counts (joinstats.go), for this statement's
+		// tables only.
+		var want string
+		opts.JoinNDV, want = s.joinNDVFor(text)
 		res, err = s.bound.Run(ctx, text, opts)
 		var changed *sqlsandbox.MayHaveChangedError
 		if opts.NeedTails && errors.As(err, &changed) {
 			s.logger.Debug("pgshim: the copy's recent changes for a statement were not ready; it did not run there, and the source answers it", "why", changed.Reason)
 		}
+		s.joinCheck = s.noteJoinCheck(res, err, opts.JoinNDV != nil, want)
 	}
 	if res.Spool != nil {
 		// Only a bug gets here: this port asks for no result in a file.
@@ -566,10 +581,14 @@ func freeError(err error, logger *slog.Logger) *pgErr {
 	var unavailable *sqlsandbox.UnavailableError
 	var differ *sqlsandbox.ColumnsDifferError
 	var changed *sqlsandbox.MayHaveChangedError
+	var tooBig *sqlsandbox.JoinTooBigError
 	var stopped *stoppedErr
 	switch {
 	case errors.As(err, &stopped):
 		return stopped.perr
+	case errors.As(err, &tooBig):
+		// program_limit_exceeded: the statement, not a fault of the copy.
+		return &pgErr{"54000", tooBig.Reason}
 	case errors.As(err, &own):
 		return &pgErr{own.Code, own.Message}
 	case errors.As(err, &refused):

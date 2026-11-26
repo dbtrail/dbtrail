@@ -94,6 +94,11 @@ type Forward struct {
 	// threshold keeps the shape there (route_cost.go, #3045). Nil: the plan
 	// alone decides, against the threshold.
 	Sides *CostSides
+	// JoinStats, when set, is the server's column statistics for the copy's
+	// join check, read from the source with JoinStats.Read and shared by its
+	// connections (joinstats.go). Nil: the copy runs statements without the
+	// check. Not used with the capture account.
+	JoinStats *JoinStats
 }
 
 // barred is why nothing may be sent to the source now, "" when it may.

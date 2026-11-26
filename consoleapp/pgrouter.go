@@ -1005,6 +1005,9 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 	// The side each statement shape of a server was last sent to by its
 	// plan, for all the port's connections to it (#3045).
 	sides := &pgCostSides{}
+	// Each server's column statistics for the copy's join check, read from
+	// its source and shared by the port's connections to it.
+	joinStats := &pgJoinStats{}
 	// The refusal last logged per server, so a client that retries is not a
 	// line per attempt.
 	notServedSaid := &sync.Map{}
@@ -1160,6 +1163,9 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			closers = append(closers, untrack)
 			bound.Forward = &pgshim.Forward{DSN: fwd.DSN, CaptureAccount: fwd.CaptureAccount, Acquire: sources.acquire, Park: sources.park, Limit: sources.limit(), Timeout: timeout,
 				Barred: pgForwardBarred(tgt.ID, tgt.TimeTravelRefusal, routes, logger), Cost: cost, Sides: sides.of(tgt.ID)}
+			if !fwd.CaptureAccount {
+				bound.Forward.JoinStats = joinStats.of(tgt.ID, fwd.DSN, logger)
+			}
 		}
 		if tgt.SQL == nil {
 			// The connection is made and every statement says why it cannot
@@ -1232,7 +1238,15 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			if schema == "" {
 				schema = pgPortSchema
 			}
-			sess := sqlsandbox.Session{PostgresRules: true, TrimPadded: true, PostgresNames: true, TimeZone: opts.TimeZone}
+			// The source's distinct counts turn the copy's join check on
+			// (pgshim joinstats.go): only where a refused statement can go to
+			// the source, which pgshim decides.
+			// And common_subplan off for every statement of the port
+			// (sqlsandbox.Session.SkipCommonSubplan).
+			sess := sqlsandbox.Session{PostgresRules: true, TrimPadded: true, PostgresNames: true, TimeZone: opts.TimeZone, SkipCommonSubplan: true}
+			if opts.JoinNDV != nil {
+				sess.JoinNDV = &sqlsandbox.JoinCounts{NDV: opts.JoinNDV}
+			}
 			// How far the snapshot files it reads reach (#3125), for an
 			// answer that reads a table without its recent changes.
 			snapshot := pgSnapshotAgeFor(opts)
@@ -1281,7 +1295,7 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 				// Not held to the server's lag limit (#3125): it lists
 				// columns, and the screen cannot send a statement to the
 				// copy, or say why not, without it.
-				return copySQL.Run(console.WithPGCatalogRead(ctx), statement, pgPortSchema, sqlsandbox.Session{PostgresRules: true, TrimPadded: true, PostgresNames: true})
+				return copySQL.Run(console.WithPGCatalogRead(ctx), statement, pgPortSchema, sqlsandbox.Session{PostgresRules: true, TrimPadded: true, PostgresNames: true, SkipCommonSubplan: true})
 			}, collations)
 		}
 		return bound, nil

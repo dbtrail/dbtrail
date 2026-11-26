@@ -108,6 +108,7 @@ var reasonMeans = map[string]string{
 	ReasonCopyTooOld:        "the copy could not show it had caught up with what the source already answered this connection about a table the statement reads",
 	ReasonTableNotCaptured:  "the statement reads a table whose capture lost or dropped changes since its snapshot, so the copy holds old rows of it",
 	ReasonSourceUnreachable: "the source could not be asked for the statement's plan, so the copy answered as it does without one",
+	ReasonJoinTooBig:        "the copy's plan of the statement has a join estimated far larger than its inputs, in the copy's join order and in the order written, so it was not run there",
 }
 
 // noteLast keeps a statement's decision as the connection's last answer. A

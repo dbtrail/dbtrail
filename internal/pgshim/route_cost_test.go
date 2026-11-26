@@ -583,6 +583,22 @@ type costLogin struct {
 	sides *CostSides
 	// notCaptured, when set, is Binding.NotCaptured.
 	notCaptured func(context.Context) ([]TableNotCaptured, error)
+	// joinStats, when set, is the server's Forward.JoinStats; joinNDV
+	// records RunOptions.JoinNDV of each statement the copy was given.
+	joinStats *JoinStats
+	joinRun   []joinRun
+}
+
+// joinRun is one statement the copy was given, and its RunOptions.JoinNDV.
+type joinRun struct {
+	statement string
+	ndv       map[string]float64
+}
+
+func (l *costLogin) joinRuns() []joinRun {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]joinRun(nil), l.joinRun...)
 }
 
 // keptSources is a port's pool of connections kept idle by their clients, as
@@ -634,6 +650,7 @@ func (l *costLogin) run(_ context.Context, st string, opts RunOptions) (sqlsandb
 	l.mu.Lock()
 	l.needTails = append(l.needTails, opts.NeedTails)
 	l.fastLane = append(l.fastLane, opts.FastLane)
+	l.joinRun = append(l.joinRun, joinRun{st, opts.JoinNDV})
 	l.mu.Unlock()
 	if opts.NeedTails && l.tailsPending.Load() {
 		return sqlsandbox.Result{}, &sqlsandbox.MayHaveChangedError{Reason: "fresh mode: the newest captured changes of public.t are not ready yet"}
@@ -660,7 +677,7 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 		l.notes = append(l.notes, n)
 	}}
 	if l.src != nil {
-		b.Forward = &Forward{DSN: l.src.dsn(), Limit: 4, CaptureAccount: l.captureAccount, Cost: l.cost, Barred: l.barred, Sides: l.sides, Acquire: func(ctx context.Context) (func(), bool) {
+		b.Forward = &Forward{DSN: l.src.dsn(), Limit: 4, CaptureAccount: l.captureAccount, Cost: l.cost, Barred: l.barred, Sides: l.sides, JoinStats: l.joinStats, Acquire: func(ctx context.Context) (func(), bool) {
 			if l.refuse {
 				return nil, false
 			}

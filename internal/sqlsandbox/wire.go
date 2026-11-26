@@ -42,10 +42,15 @@ type wireJob struct {
 	// PostgresRules: see Session.PostgresRules.
 	PostgresRules bool `json:"postgres_rules,omitempty"`
 	// PostgresNames: see Session.PostgresNames.
-	PostgresNames bool   `json:"postgres_names,omitempty"`
-	Threads       int    `json:"threads"`
-	MemoryLimit   string `json:"memory_limit"`
-	MaxRows       int    `json:"max_rows"`
+	PostgresNames bool `json:"postgres_names,omitempty"`
+	// SkipCommonSubplan: see Session.SkipCommonSubplan.
+	SkipCommonSubplan bool `json:"skip_common_subplan,omitempty"`
+	// JoinNDV: see Session.JoinNDV. Nil: no join check.
+	JoinNDV map[string]float64 `json:"join_ndv,omitempty"`
+	// The worker's caps.
+	Threads     int    `json:"threads"`
+	MemoryLimit string `json:"memory_limit"`
+	MaxRows     int    `json:"max_rows"`
 	// MaxResultBytes is counted by the worker as it collects rows, so it
 	// stops before building a result the parent would refuse anyway.
 	MaxResultBytes int64 `json:"max_result_bytes"`
@@ -98,6 +103,11 @@ type wireResult struct {
 	LockdownNS int64      `json:"lockdown_ns,omitempty"`
 	ViewsNS    int64      `json:"views_ns,omitempty"`
 	Error      *wireError `json:"error,omitempty"`
+	// JoinOrder is joinOrderWritten when the join check ran the statement
+	// in the order written, "" otherwise; JoinCheckSkipped why the check
+	// could not be made, when it could not (joinguard.go).
+	JoinOrder        string `json:"join_order,omitempty"`
+	JoinCheckSkipped string `json:"join_check_skipped,omitempty"`
 	// ResidentBytes is the memory the worker holds after the statement, its
 	// DuckDB closed; 0 where the platform does not say. Sent by a worker that
 	// stays for another job (wireJob.More).
@@ -116,4 +126,7 @@ const (
 	errSession  = "session"   // the worker could not prepare its locked session
 	errTooLarge = "too_large" // the result passed MaxResultBytes while collecting
 	errSpool    = "spool"     // the result file could not be written
+	// errJoinTooBig: the join check refused the statement before it ran
+	// (joinguard.go); nothing ran.
+	errJoinTooBig = "join_too_big"
 )
