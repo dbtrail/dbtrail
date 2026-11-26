@@ -330,7 +330,7 @@ func TestRoute_joinCheckOnAPreparedStatement(t *testing.T) {
 			t.Fatalf("execute %d: %v %v", i, res.Err, res.Rows)
 		}
 		if l.runs.Load() == before {
-			t.Errorf("execute %d: not tried on the copy", i)
+			t.Errorf("execute %d: not tried on the copy: %+v, plans asked %q", i, l.last(), src.explained())
 		}
 	}
 	for _, r := range l.joinRuns() {

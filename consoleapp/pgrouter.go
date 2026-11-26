@@ -1328,7 +1328,6 @@ func (p *pgCostSides) of(id string) *pgshim.CostSides {
 	return v.(*pgshim.CostSides)
 }
 
-
 // pgHiddenBarred is why nothing is sent to the source of a server that hides
 // tables or columns (#2770): the rules are applied by the copy's views, and a
 // statement run on the source reads past them. A check of the forwarding
