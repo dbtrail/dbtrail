@@ -1616,7 +1616,10 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			}
 		}
 		if in.Hidden != nil && qerr != nil && sqlHiddenNameMissing.MatchString(qerr.Message) {
-			return sqlOutcome{}, &sqlsandbox.QueryError{Message: qerr.Message + sqlHiddenHint}
+			// A copy, so what the sandbox says beside the text is kept.
+			hinted := *qerr
+			hinted.Message = qerr.Message + sqlHiddenHint
+			return sqlOutcome{}, &hinted
 		}
 		return sqlOutcome{}, sqlWithMemoryHint(err, memory)
 	}

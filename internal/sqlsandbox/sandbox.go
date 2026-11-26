@@ -645,16 +645,17 @@ func (e *BehindSourceError) Error() string { return e.Reason }
 // an unknown column.
 type QueryError struct {
 	Message string
-	// WrittenOrderRetry is WrittenOrderRetryFailed when the statement ran out
-	// of memory in the copy's join order and again when run in the order
-	// written (Session.RetryOutOfMemoryInWrittenOrder): Message is the first
-	// attempt's, with a sentence that says so. "" otherwise.
+	// WrittenOrderRetry is what the retry in the order written
+	// (Session.RetryOutOfMemoryInWrittenOrder) did with an out-of-memory
+	// error: WrittenOrderRetryFailed when the second run ran out of memory
+	// or time too (Message is the first run's, with a sentence that says
+	// so), or one of the WrittenOrderRetrySkipped* names when it was not run
+	// again. "" otherwise.
 	WrittenOrderRetry string
 	// ranWrittenOrder: the join check ran the statement in the order
-	// written; orderUnknown: no answer of the worker said which order it ran
-	// in (the kernel stopped it). For writtenOrderRetryWanted.
+	// written, as the worker's answer said, or its stderr when the kernel
+	// stopped it. For writtenOrderRetryWanted.
 	ranWrittenOrder bool
-	orderUnknown    bool
 }
 
 func (e *QueryError) Error() string { return e.Message }
@@ -2036,7 +2037,9 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 		if w.oomKilled {
 			// The kernel stopped the worker at its own ceiling (#2226): the
 			// statement ran out of memory, the worker did not fail.
-			return Result{}, &QueryError{Message: oomFenceMessage, orderUnknown: true}
+			// The worker said on stderr whether the join check had it run
+			// in the order written (joinOrderWrittenLine).
+			return Result{}, &QueryError{Message: oomFenceMessage, ranWrittenOrder: strings.Contains(w.stderr.text(), joinOrderWrittenLine)}
 		}
 		if waitErr != nil {
 			err = fmt.Errorf("%w (no result: %v)", waitErr, err)

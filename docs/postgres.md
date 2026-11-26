@@ -2290,22 +2290,31 @@ copy with its joins in the order written, before it sends it anywhere else.
 Q9 over fresh-mode views ran out of a 2 GB worker after 21 to 59 seconds in
 the engine's order, and the source then took 42 seconds more; in the order
 written the copy answers it in 5.5 to 7.9 seconds. The second run takes the
-same worker slot as the first, so it adds no load beside it, and its time
-comes out of the statement's own: what is left of the copy's time limit and
-of the port's, and none at all when less than a second is left, in which case
-the statement goes to the source as before (`copy_refused`). It is not run
-again when the first run already used the order written (the join check
-chose it), when the error is any other than running out of memory, or when
-the client cancelled, hit its `statement_timeout` or left. Nothing of the
-copy's answer is sent to the client before the copy has the whole of it, so
-there are never rows or a row description already sent when it is run again.
-When the second run fails too, the statement goes to the source under its own
-reason, `copy_refused_after_written_order`; on a connection without a
-forwarding user the client gets the first run's error, which then says it was
-run again. `/status` counts both outcomes under `join_checks`, on either side:
-`oom_retry_written_order_ok` (the copy answered in the order written) and
-`oom_retry_written_order_failed`. Each retry is one `INFO` line in the log
-with the time of each run. The MySQL port and the SQL page are not changed:
+same worker slot as the first, so it adds no load beside it, and it reads the
+same views, so it does not wait for the recent changes again. Its time comes
+out of the statement's own: what is left of the copy's time limit and of the
+port's, and at most half of what is left of the client's `statement_timeout`,
+so the source still has the other half if the second run fails too. With less
+than a second for it, the statement goes to the source as before
+(`copy_refused`). It is not run again when the first run already used the
+order written (the statement asked for it, or the join check chose it, which
+the port also knows when the kernel stopped the worker), when the error is any
+other than running out of memory, or when the client cancelled or left.
+Nothing of the copy's answer is sent to the client before the copy has the
+whole of it, so there are never rows or a row description already sent when
+it is run again. When the second run runs out of memory or time too, the
+statement goes to the source under its own reason,
+`copy_refused_after_written_order`; on a connection without a forwarding user
+the client gets the first run's error, which then says it was run again. When
+the second run fails with another error, that error is the answer, as if the
+copy had given it the first time: a result too large is refused as such and
+not sent to the source. `/status` counts each outcome under `join_checks`, on
+either side: `oom_retry_written_order_ok` (the copy answered in the order
+written), `_failed`, `_other_error`, and, for a statement not run again,
+`_skipped_forced_order`, `_skipped_check_chose_written_order` and
+`_skipped_no_time`. Each outcome is one `INFO` line in the log with the time
+of each run. A prepared statement's Describe is not counted (it runs the
+statement under `LIMIT 0`). The MySQL port and the SQL page are not changed:
 there an out-of-memory error is the answer, as before.
 
 **The copy does not cache a subplan a statement reads twice.** On this port

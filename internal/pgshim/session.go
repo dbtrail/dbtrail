@@ -107,6 +107,9 @@ type session struct {
 	// last ran (RouteNote.JoinCheck), "" for nothing to count; taken by
 	// routeNote.
 	joinCheck string
+	// oomRetry is what the copy's retry in the order written did with the
+	// statement's run (runFree), for its RouteNote; "" when nothing.
+	oomRetry string
 	// catalogBusy is the busy reason the copy's list of columns could not
 	// be read for at its last read (catalog), "" when it was read or failed
 	// otherwise.

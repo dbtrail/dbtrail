@@ -1265,11 +1265,6 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 				// the port says the client got it (bound.Routed).
 				ages.stash(snapshot.Place(copySQL.LastRunAge()))
 			}
-			if !opts.Probe {
-				// Whether it was run again in the order written, counted
-				// once the port says which side answered it.
-				ages.stashOOMRetry(pgOOMRetryOutcome(res, err))
-			}
 			return res, err
 		}
 		// The system catalog's statements are answered from the copy's own

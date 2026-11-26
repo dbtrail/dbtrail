@@ -366,7 +366,7 @@ var loginTimeout = 30 * time.Second
 // runFree answers a statement that is not time travel on the copy.
 func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][][]byte, tag string, perr *pgErr) {
 	started := time.Now()
-	s.joinCheck = ""
+	s.joinCheck, s.oomRetry = "", ""
 	// A session time zone the copy could not be asked about when it was set
 	// is asked about now (settings.go), before the statement's own context:
 	// the question has its own, and the statement's must stay the one a
@@ -435,6 +435,7 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 			s.logger.Debug("pgshim: the copy's recent changes for a statement were not ready; it did not run there, and the source answers it", "why", changed.Reason)
 		}
 		s.joinCheck = s.noteJoinCheck(res, err, opts.JoinNDV != nil, want)
+		s.oomRetry = sqlsandbox.WrittenOrderRetryOf(res, err)
 	}
 	if res.Spool != nil {
 		// Only a bug gets here: this port asks for no result in a file.

@@ -404,6 +404,10 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 		case check.written:
 			res.JoinOrder = joinOrderWritten
 			ranWritten = true
+			// Said on stderr too, before the statement runs: a worker the
+			// kernel stops leaves no answer, and the parent reads this line
+			// to know which order it ran in (oomretry.go).
+			fmt.Fprintln(stderr, joinOrderWrittenLine)
 		case check.skipped != "":
 			res.JoinCheckSkipped = check.skipped
 		}

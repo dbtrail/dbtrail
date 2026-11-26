@@ -8,27 +8,23 @@ import (
 	"testing"
 )
 
-// A worker the kernel stopped at its ceiling leaves no answer that says which
-// join order it ran in: with the join check on it may have been the order
-// written already, so it is not run again; without the check it was the
-// copy's own, and it is.
+// A worker the kernel stopped at its ceiling leaves no answer: the line it
+// wrote on stderr before running says whether the join check had it run in
+// the order written. Without that line it ran in the copy's own order and is
+// run again (and stopped again here); with it, it is not, and says why.
 func TestRunner_writtenOrderRetryAfterTheKernelStoppedTheWorker(t *testing.T) {
 	fakeFence(t, "max 12\noom 1\noom_kill 1\n")
 	f := newCopyFixture(t)
-	r := New(Config{Exe: "/bin/sh", Args: []string{"-c", "kill -9 $$"}, Limits: testLimits()})
 	for _, tc := range []struct {
-		name  string
-		check bool
-		want  string
+		name, script, want string
 	}{
-		{"no join check: run again, and stopped again", false, WrittenOrderRetryFailed},
-		{"the join check on: not run again", true, ""},
+		{"no line: run again, and stopped again", "kill -9 $$", WrittenOrderRetryFailed},
+		{"the check chose the order written", "echo '" + joinOrderWrittenLine + "' >&2; kill -9 $$", WrittenOrderRetrySkippedCheckWritten},
 	} {
+		r := New(Config{Exe: "/bin/sh", Args: []string{"-c", tc.script}, Limits: testLimits()})
 		job := f.job("SELECT 1")
 		job.Session.RetryOutOfMemoryInWrittenOrder = true
-		if tc.check {
-			job.Session.JoinNDV = &JoinCounts{NDV: map[string]float64{"a": 1}}
-		}
+		job.Session.JoinNDV = &JoinCounts{NDV: map[string]float64{"a": 1}}
 		_, err := r.Run(context.Background(), job)
 		var qe *QueryError
 		if !errors.As(err, &qe) || qe.WrittenOrderRetry != tc.want {

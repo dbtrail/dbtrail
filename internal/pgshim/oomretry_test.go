@@ -29,11 +29,21 @@ func TestCopyFallback_outOfMemoryAfterTheOrderWritten(t *testing.T) {
 		{fmt.Errorf("wrapped: %w", &sqlsandbox.QueryError{Message: oom, WrittenOrderRetry: sqlsandbox.WrittenOrderRetryFailed}), ReasonCopyRefusedAfterWrittenOrder},
 		{&sqlsandbox.QueryError{Message: oom}, ReasonCopyRefused},
 		{&sqlsandbox.QueryError{Message: "Binder Error: x"}, ReasonCopyRefused},
+		// Not run again for want of time: copy_refused, as before.
+		{&sqlsandbox.QueryError{Message: oom, WrittenOrderRetry: sqlsandbox.WrittenOrderRetrySkippedNoTime}, ReasonCopyRefused},
+		// The second run's own error is that error: a result too large is
+		// not sent to the source, as for one the first run gave.
+		{&sqlsandbox.WrittenOrderRetryError{Outcome: sqlsandbox.WrittenOrderRetryOtherError, Err: sqlsandbox.ErrResultTooLarge}, ""},
+		{&sqlsandbox.WrittenOrderRetryError{Outcome: sqlsandbox.WrittenOrderRetryOtherError, Err: &sqlsandbox.QueryError{Message: "Binder Error: x"}}, ReasonCopyRefused},
 	} {
 		perr := freeError(tc.err, s.logger)
 		if got := s.copyFallback(tc.err, perr); got != tc.want {
 			t.Errorf("%v: %q, want %q", tc.err, got, tc.want)
 		}
+	}
+	tooLarge := &sqlsandbox.WrittenOrderRetryError{Outcome: sqlsandbox.WrittenOrderRetryOtherError, Err: sqlsandbox.ErrResultTooLarge}
+	if perr := freeError(tooLarge, s.logger); perr.code != freeError(sqlsandbox.ErrResultTooLarge, s.logger).code {
+		t.Errorf("a result too large after the retry: %+v", perr)
 	}
 	// A cancel or statement_timeout during the retry is not sent anywhere.
 	stopped := &stoppedErr{&pgErr{"57014", "cancelled"}}
@@ -75,8 +85,12 @@ func (l *oomLogin) run(_ context.Context, st string, _ RunOptions) (sqlsandbox.R
 	case strings.Contains(st, "notretried"):
 		return sqlsandbox.Result{}, &sqlsandbox.QueryError{Message: "Out of Memory Error: x"}
 	}
-	// Answered, in the order written or not: the port sees an answer.
-	return sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "n", Type: "INTEGER"}}, Rows: [][]any{{int32(7)}}, WrittenOrderRetry: sqlsandbox.WrittenOrderRetryOK}, nil
+	res := sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "n", Type: "INTEGER"}}, Rows: [][]any{{int32(7)}}}
+	if strings.Contains(st, "retried") {
+		// Answered in the order written.
+		res.WrittenOrderRetry = sqlsandbox.WrittenOrderRetryOK
+	}
+	return res, nil
 }
 
 func (l *oomLogin) login(_ context.Context, _, _ string, password *Password, _ func()) (*Binding, *Error) {
@@ -119,8 +133,8 @@ func TestRoute_outOfMemoryAfterTheOrderWrittenGoesToTheSource(t *testing.T) {
 		}
 		defer c.Close(context.Background())
 		type outcome struct {
-			code, side, reason string
-			runs               int
+			code, side, reason, retry string
+			runs                      int
 		}
 		code := func(err error) string {
 			var pe *pgconn.PgError
@@ -135,7 +149,7 @@ func TestRoute_outOfMemoryAfterTheOrderWrittenGoesToTheSource(t *testing.T) {
 		var before int
 		result := func(err error) outcome {
 			n, runs := l.last()
-			o := outcome{code(err), n.Side, n.Reason, runs - before}
+			o := outcome{code(err), n.Side, n.Reason, n.OOMRetry, runs - before}
 			before = runs
 			return o
 		}
@@ -157,12 +171,18 @@ func TestRoute_outOfMemoryAfterTheOrderWrittenGoesToTheSource(t *testing.T) {
 			}
 		}
 		if forward {
-			check("answered after the retry", simple("SELECT n FROM retried"), outcome{"", RouteCopy, ReasonAnswersTheSame, 1})
-			check("out of memory in both orders", simple("SELECT n FROM bothorders"), outcome{"08001", RouteSource, ReasonCopyRefusedAfterWrittenOrder, 1})
-			check("out of memory, not run again", simple("SELECT n FROM notretried"), outcome{"08001", RouteSource, ReasonCopyRefused, 1})
-			check("extended: answered after the retry", extended("SELECT n FROM retried"), outcome{"", RouteCopy, ReasonAnswersTheSame, 0})
-			check("extended: out of memory in both orders", extended("SELECT n FROM bothorders"), outcome{"08001", RouteSource, ReasonCopyRefusedAfterWrittenOrder, 0})
-			check("extended: out of memory, not run again", extended("SELECT n FROM notretried"), outcome{"08001", RouteSource, ReasonCopyRefused, 0})
+			check("answered after the retry", simple("SELECT n FROM retried"), outcome{"", RouteCopy, ReasonAnswersTheSame, sqlsandbox.WrittenOrderRetryOK, 1})
+			check("out of memory in both orders", simple("SELECT n FROM bothorders"), outcome{"08001", RouteSource, ReasonCopyRefusedAfterWrittenOrder, sqlsandbox.WrittenOrderRetryFailed, 1})
+			check("out of memory, not run again", simple("SELECT n FROM notretried"), outcome{"08001", RouteSource, ReasonCopyRefused, "", 1})
+			check("extended: answered after the retry", extended("SELECT n FROM retried"), outcome{"", RouteCopy, ReasonAnswersTheSame, sqlsandbox.WrittenOrderRetryOK, 0})
+			check("extended: out of memory in both orders", extended("SELECT n FROM bothorders"), outcome{"08001", RouteSource, ReasonCopyRefusedAfterWrittenOrder, sqlsandbox.WrittenOrderRetryFailed, 0})
+			check("extended: out of memory, not run again", extended("SELECT n FROM notretried"), outcome{"08001", RouteSource, ReasonCopyRefused, "", 0})
+			// A Describe without an Execute runs on the copy and is noted by
+			// no statement: the next statement does not take its retry.
+			if _, err := c.Prepare(ctx, "described", "SELECT n FROM retried WHERE n > $1", nil); err != nil {
+				t.Fatalf("Prepare: %v", err)
+			}
+			check("a plain read after a Describe of a retried one", simple("SELECT n FROM t"), outcome{"", RouteCopy, ReasonAnswersTheSame, "", 1})
 		} else {
 			// Nowhere else to send it: the copy's error, which says it was
 			// run again.
@@ -172,7 +192,30 @@ func TestRoute_outOfMemoryAfterTheOrderWrittenGoesToTheSource(t *testing.T) {
 			if !errors.As(err, &pe) || pe.Code != "XX000" || !strings.Contains(pe.Message, "order written") {
 				t.Errorf("without a forwarding account: %v", err)
 			}
-			check("answered after the retry", simple("SELECT n FROM retried"), outcome{"", RouteCopy, ReasonNoForwardAccount, 1})
+			check("answered after the retry", simple("SELECT n FROM retried"), outcome{"", RouteCopy, ReasonNoForwardAccount, sqlsandbox.WrittenOrderRetryOK, 1})
 		}
+	}
+}
+
+// statement_timeout is a cancel of the statement, not its context's
+// deadline: the statement's context says when it ends, for the copy's retry
+// in the order written.
+func TestStatementContext_carriesTheClientsLimit(t *testing.T) {
+	s := routeSession(true)
+	s.set.stmtTimeout = time.Minute
+	ctx, done := s.statementContext()
+	defer done()
+	if _, ok := ctx.Deadline(); ok {
+		t.Error("statement_timeout became a deadline: what stops it would change")
+	}
+	at, _ := sqlsandbox.ClientDeadlineOf(ctx)
+	if left := time.Until(at); left < 59*time.Second || left > time.Minute {
+		t.Errorf("client deadline in %v, want about a minute", left)
+	}
+	s.set.stmtTimeout = 0
+	ctx2, done2 := s.statementContext()
+	defer done2()
+	if _, ok := sqlsandbox.ClientDeadlineOf(ctx2); ok {
+		t.Error("a client deadline without statement_timeout")
 	}
 }

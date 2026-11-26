@@ -98,6 +98,10 @@ type RouteNote struct {
 	// JoinCheck is what the copy's join check did with a statement the copy
 	// answered (JoinCheck* names), "" when there was nothing to count.
 	JoinCheck string
+	// OOMRetry is what the copy's retry in the order written did with the
+	// statement's run there, whichever side then answered it
+	// (sqlsandbox.WrittenOrderRetry* names), "" when it did nothing.
+	OOMRetry string
 }
 
 // routeDecision is which side answers a statement, and why.
@@ -1855,13 +1859,15 @@ func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, fa
 	s.settleCostSide(stmt, d, failed)
 	joinCheck := s.joinCheck
 	s.joinCheck = ""
+	oomRetry := s.oomRetry
+	s.oomRetry = ""
 	if s.bound == nil || s.bound.Routed == nil || d.side == "" {
 		return
 	}
 	if d.side != RouteCopy {
 		joinCheck = ""
 	}
-	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed, JoinCheck: joinCheck})
+	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed, JoinCheck: joinCheck, OOMRetry: oomRetry})
 }
 
 // fieldName reports whether the token at j is the field a date_trunc or a

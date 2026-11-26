@@ -48,8 +48,8 @@ func TestIntegrationPGRouterOOMRetryInWrittenOrder(t *testing.T) {
 			t.Errorf("both orders: %q", got)
 		}
 		n := env.routes.doc("").Servers[env.serverID]
-		if n.JoinChecks[pgOOMRetryOK] < 2 || n.JoinChecks[pgOOMRetryFailed] != 1 {
-			t.Errorf("join_checks %v, want %s at least 2 (a Describe may run it too) and %s 1", n.JoinChecks, pgOOMRetryOK, pgOOMRetryFailed)
+		if n.JoinChecks[pgOOMRetryPrefix+"ok"] != 2 || n.JoinChecks[pgOOMRetryPrefix+"failed"] != 1 {
+			t.Errorf("join_checks %v, want ok 2 (one per protocol) and failed 1", n.JoinChecks)
 		}
 	})
 
@@ -68,7 +68,7 @@ func TestIntegrationPGRouterOOMRetryInWrittenOrder(t *testing.T) {
 		if n.Reasons[pgshim.ReasonCopyRefusedAfterWrittenOrder] != 1 || n.Reasons[pgshim.ReasonCopyRefused] != 0 {
 			t.Errorf("reasons %v", n.Reasons)
 		}
-		if n.JoinChecks[pgOOMRetryFailed] != 1 {
+		if n.JoinChecks[pgOOMRetryPrefix+"failed"] != 1 {
 			t.Errorf("join_checks %v", n.JoinChecks)
 		}
 	})
