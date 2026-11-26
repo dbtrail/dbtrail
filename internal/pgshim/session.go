@@ -99,6 +99,11 @@ type session struct {
 	// source's plan found it expensive, whatever the screen says of how the
 	// copy answers it (heavy.go).
 	heavy bool
+	// portalHeavy is heavy for the portal of the extended protocol being
+	// run: the source's plan sent its statement to the copy for its cost
+	// (runPortal). Only fresh mode's refusals read it (freshRefusals): the
+	// rest of heavy.go is not relaxed on the extended protocol.
+	portalHeavy bool
 	// fastLane says the statement being answered on the copy was found by
 	// the source's plan to read one table and join nothing (fastlane.go);
 	// set for that statement alone, and read by runOptions.

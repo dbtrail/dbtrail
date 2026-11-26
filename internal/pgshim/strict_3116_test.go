@@ -3,6 +3,7 @@ package pgshim
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"testing"
@@ -82,72 +83,142 @@ func strictRun(ctx context.Context, c *pgconn.PgConn, l *costLogin, how, stmt st
 
 var strictProtocols = []string{"simple", "extended", "prepared"}
 
+// strictPorts are the two kinds of statement the copy runs on a connection
+// that can reach its source: a heavy one, whose plan the cost routing found
+// expensive (the default policy, a sum over big), and a light one, which the
+// copy runs with routing by plan off (a light statement with routing on goes
+// to the source by its plan and never reaches the copy).
+func strictPorts(t *testing.T) []struct {
+	name  string
+	heavy bool
+	p     *tablesPort
+} {
+	heavy := newTablesPort(t)
+	light := newTablesPort(t)
+	light.l.cost = &CostPolicy{}
+	return []struct {
+		name  string
+		heavy bool
+		p     *tablesPort
+	}{{"heavy", true, heavy}, {"light", false, light}}
+}
+
 // #3116, case 1: the recent changes a statement would read are older than
-// an earlier answer of the copy on this connection. On a connection that can
-// send it to its source, the copy refuses it before it runs and the source
-// answers it under copy_too_old, as the MySQL router sends it to MySQL; over
-// every protocol. Once the copy is not behind any more, it answers again: the
-// refusal is the moment's, and a prepared statement is not kept on the
-// source for it.
-func TestStrict_3116_olderThanAnEarlierAnswerGoesToTheSource(t *testing.T) {
+// an earlier answer of the copy on this connection. A light statement is
+// refused before the copy runs it and the source answers it under
+// copy_too_old, as the MySQL router sends it to MySQL. A heavy one stays on
+// the copy (product decision, 2026-11-24), answered with the copy's notice.
+// Over every protocol. Once the copy is not behind any more, the light one
+// is answered by the copy again: the refusal is the moment's, and a
+// prepared statement is not kept on the source for it.
+func TestStrict_3116_olderThanAnEarlierAnswer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	p := newTablesPort(t)
-	p.knob.at(time.Now().Add(time.Hour))
-	for _, how := range strictProtocols {
-		t.Run(how, func(t *testing.T) {
-			c, notices := strictConn(t, ctx, p.l)
-			p.l.olderThanSeen.Store(true)
-			runs := p.l.runs.Load()
-			if got := strictRun(ctx, c, p.l, how, "SELECT sum(n) FROM big"); got != tablesTooOld {
-				t.Errorf("behind an earlier answer: %+v, want %+v", got, tablesTooOld)
-			}
-			if !p.l.lastNeedTails() {
-				t.Error("the copy was not told the statement must have its recent changes")
-			}
-			// Over the extended protocol the copy also describes the
-			// statement first, which counts as a run: only the simple one
-			// counts the statement's own.
-			if d := p.l.runs.Load() - runs; how == "simple" && d != 0 {
-				t.Errorf("the copy ran %d statements, want none", d)
-			}
-			if n := notices(); len(n) != 0 {
-				t.Errorf("notices %q with the source's answer", n)
-			}
-			p.l.olderThanSeen.Store(false)
-			if got := strictRun(ctx, c, p.l, how, "SELECT sum(n) FROM big"); got != tablesOnCopy {
-				t.Errorf("no longer behind: %+v, want %+v", got, tablesOnCopy)
-			}
-		})
+	for _, port := range strictPorts(t) {
+		p := port.p
+		p.knob.at(time.Now().Add(time.Hour))
+		for _, how := range strictProtocols {
+			t.Run(port.name+"/"+how, func(t *testing.T) {
+				c, notices := strictConn(t, ctx, p.l)
+				p.l.olderThanSeen.Store(true)
+				runs := p.l.runs.Load()
+				got := strictRun(ctx, c, p.l, how, "SELECT sum(n) FROM big")
+				p.l.olderThanSeen.Store(false)
+				if p.l.lastNoOlderTails() == port.heavy {
+					t.Errorf("the copy was asked NoOlderTails=%v", !port.heavy)
+				}
+				n := notices()
+				if port.heavy {
+					if got != tablesOnCopy {
+						t.Errorf("%+v, want the copy's %+v", got, tablesOnCopy)
+					}
+					if len(n) != 1 || !strings.Contains(n[0], "older than an earlier answer of the copy on this connection") {
+						t.Errorf("notices %q, want the copy's note", n)
+					}
+					return
+				}
+				if got != tablesTooOld {
+					t.Errorf("%+v, want %+v", got, tablesTooOld)
+				}
+				// Over the extended protocol the copy also describes the
+				// statement first, which counts as a run: only the simple
+				// one counts the statement's own.
+				if d := p.l.runs.Load() - runs; how == "simple" && d != 0 {
+					t.Errorf("the copy ran %d statements, want none", d)
+				}
+				if len(n) != 0 {
+					t.Errorf("notices %q with the source's answer", n)
+				}
+				if got := strictRun(ctx, c, p.l, how, "SELECT sum(n) FROM big"); got != tablesOnCopy {
+					t.Errorf("no longer behind: %+v, want %+v", got, tablesOnCopy)
+				}
+			})
+		}
 	}
 }
 
 // #3116, case 2: a statement whose tables' recent changes are not ready
-// after fresh mode's wait, on a connection the source never answered. It
-// used to be answered from the snapshot alone with only a notice; the source
-// answers it now, over every protocol, as the MySQL router does.
-func TestStrict_3116_snapshotAloneGoesToTheSource(t *testing.T) {
+// after fresh mode's wait, on a connection the source never answered. A
+// light one used to be answered from the snapshot alone with only a notice;
+// the source answers it now, as the MySQL router does. A heavy one stays on
+// the copy, as before #3116. Over every protocol.
+func TestStrict_3116_snapshotAlone(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	p := newTablesPort(t)
-	p.l.tailsPending.Store(true)
-	for _, how := range strictProtocols {
-		t.Run(how, func(t *testing.T) {
-			c, _ := strictConn(t, ctx, p.l)
-			runs := p.l.runs.Load()
-			if got := strictRun(ctx, c, p.l, how, "SELECT sum(n) FROM big"); got != tablesTooOld {
-				t.Errorf("%+v, want %+v", got, tablesTooOld)
-			}
-			if !p.l.lastNeedTails() {
-				t.Error("the copy was not told the statement must have its recent changes")
-			}
-			// Over the extended protocol the copy also describes the
-			// statement first, which counts as a run: only the simple one
-			// counts the statement's own.
-			if d := p.l.runs.Load() - runs; how == "simple" && d != 0 {
-				t.Errorf("the copy ran %d statements, want none", d)
-			}
-		})
+	for _, port := range strictPorts(t) {
+		p := port.p
+		p.l.tailsPending.Store(true)
+		for _, how := range strictProtocols {
+			t.Run(port.name+"/"+how, func(t *testing.T) {
+				c, _ := strictConn(t, ctx, p.l)
+				runs := p.l.runs.Load()
+				got := strictRun(ctx, c, p.l, how, "SELECT sum(n) FROM big")
+				if p.l.lastNeedTails() == port.heavy {
+					t.Errorf("the copy was asked NeedTails=%v", !port.heavy)
+				}
+				want := tablesTooOld
+				if port.heavy {
+					want = tablesOnCopy
+				}
+				if got != want {
+					t.Errorf("%+v, want %+v", got, want)
+				}
+				if d := p.l.runs.Load() - runs; how == "simple" && !port.heavy && d != 0 {
+					t.Errorf("the copy ran %d statements, want none", d)
+				}
+			})
+		}
+	}
+}
+
+// A shape the cost routing holds on the copy within the band (CostSides,
+// #3045) is heavy too: its plan just under the threshold, after one over it
+// sent the shape to the copy, still answers there with older data. The
+// verdicts a connection remembers (costVerdictKey) are only ever the
+// source's, so they never send a statement to the copy at all.
+func TestStrict_3116_aShapeHeldOnTheCopyIsHeavy(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	plans := maps.Clone(costPlans)
+	for _, c := range []int{48000, 52000} {
+		plans[fmt.Sprintf("k = %d", c)] = plan(fmt.Sprintf(`{"Node Type": "Index Scan", "Total Cost": %d, "Plan Rows": 10}`, c))
+	}
+	at := func(c int) string { return fmt.Sprintf("SELECT n FROM t WHERE k = %d", c) }
+	l := &costLogin{src: startFakeSource(t, plans), sides: &CostSides{}}
+	c, notices := strictConn(t, ctx, l)
+	if got := costSimple(ctx, c, l, at(52000)); got.side != RouteCopy {
+		t.Fatalf("over the threshold: %+v", got)
+	}
+	l.olderThanSeen.Store(true)
+	got := costSimple(ctx, c, l, at(48000))
+	if got.side != RouteCopy || got.answer != "7" {
+		t.Errorf("held on the copy within the band, behind an earlier answer: %+v, want the copy's 7", got)
+	}
+	if l.lastNoOlderTails() {
+		t.Error("a shape held on the copy was asked not to read older changes")
+	}
+	if n := notices(); len(n) != 1 {
+		t.Errorf("notices %q, want the copy's note", n)
 	}
 }
 
@@ -165,8 +236,8 @@ func TestStrict_3116_theCopysOwnCommandsAreNotMarked(t *testing.T) {
 		if got.side != RouteCopy || got.code != "" || got.answer != "7" {
 			t.Errorf("%s: %+v, want the copy's 7", stmt, got)
 		}
-		if p.l.lastNeedTails() {
-			t.Errorf("%s: the copy was told it must have its recent changes", stmt)
+		if p.l.lastNeedTails() || p.l.lastNoOlderTails() {
+			t.Errorf("%s: the copy was told to refuse it for its recent changes", stmt)
 		}
 	}
 }

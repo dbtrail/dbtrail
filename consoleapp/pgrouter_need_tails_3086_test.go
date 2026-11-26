@@ -22,4 +22,13 @@ func TestPGRunContext_3086(t *testing.T) {
 	if got.Value(key{}) != "kept" {
 		t.Error("the statement's own context was lost")
 	}
+	if console.PGNoOlderTails(got) {
+		t.Error("a statement marked only for the snapshot alone is marked for older changes too")
+	}
+	// #3116: the two refusals are marked apart, so a heavy statement can be
+	// held to the first and not to the second.
+	older := pgRunContext(base, pgshim.RunOptions{NoOlderTails: true})
+	if !console.PGNoOlderTails(older) || console.PGNeedsTails(older) {
+		t.Errorf("NoOlderTails alone: marked older=%v snapshot=%v, want true and false", console.PGNoOlderTails(older), console.PGNeedsTails(older))
+	}
 }

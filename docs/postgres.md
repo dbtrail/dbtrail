@@ -1240,28 +1240,34 @@ listener, its own workers, its own memory.
     open read the snapshot from their next statement on: an answer older
     than the one before it on the same connection, which is told once by a
     NOTICE.
-  When a table's recent changes are not ready, the copy does not answer
-  from the snapshot alone: the statement goes to the source, which answers
-  it (`copy_too_old` in `/status`), as the MySQL router sends it to MySQL.
-  The same happens when the recent changes a statement would read are
-  older than what an earlier answer of the copy on the same connection
-  read, so a value the connection was shown does not go back. Both are
-  decided before the copy runs anything, over the simple and the extended
-  protocol alike, and what a connection was shown is kept per connection
-  until it closes. Only on a connection with nowhere else to send the
-  statement (a server that hides tables or columns sends nothing to its
-  source) does the copy answer anyway, and the client is told only by a
-  NOTICE that comes with the answer (drivers that drop notices, or
-  `client_min_messages` above `notice`, hide it). The recent changes can
-  be missing in these cases:
+  When a table's recent changes are not ready, a light statement is not
+  answered from the snapshot alone: it goes to the source, which answers it
+  (`copy_too_old` in `/status`), as the MySQL router sends it to MySQL. The
+  same happens when the recent changes it would read are older than what an
+  earlier answer of the copy on the same connection read, so a value the
+  connection was shown does not go back. Both are decided before the copy
+  runs anything, over the simple and the extended protocol alike, and what
+  a connection was shown is kept per connection until it closes.
+  **Heavy statements prefer the copy even with older data.** A statement
+  whose plan on your PostgreSQL is over the port's cost thresholds (the
+  same verdict that sends it to the copy, see
+  [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port))
+  stays on the copy in both cases: it is answered from the snapshot alone,
+  or with the older changes, and the client is told by a NOTICE. The one
+  exception is the rule below for a table the source already answered the
+  connection about. On a connection with nowhere else to send the statement
+  (a server that hides tables or columns sends nothing to its source) the
+  copy answers every statement that way. A NOTICE comes with the answer;
+  drivers that drop notices, or `client_min_messages` above `notice`, hide
+  it. The recent changes can be missing in these cases:
   - **Right after a snapshot update**, each table's recent changes are
     gathered again from the new snapshot on, which takes a few seconds; until
-    then statements on that table go to the source.
+    then light statements on that table go to the source.
   - **The first statement on a table** after the router starts, or after the
     server turns to fresh mode, starts gathering that table's changes: it,
-    and any statement in the next moments, may still go to the source. This
-    moves load to the source for a few seconds after each start, as on the
-    MySQL router.
+    and any light statement in the next moments, may still go to the source.
+    This moves light reads to the source for a few seconds after each start,
+    as on the MySQL router; heavy ones stay on the copy.
   - **A table with no write since capture started** has no recent changes to
     lay over it, which is the right answer for that table alone. But a
     statement answers fresh only when every table it reads does, so a join

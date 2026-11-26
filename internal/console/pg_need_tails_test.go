@@ -19,6 +19,13 @@ func TestPGNeedTails(t *testing.T) {
 	if !pgNeedTails(child) {
 		t.Error("a context derived from a marked one does not")
 	}
+	if pgNoOlderTails(ctx) {
+		t.Error("marked for the snapshot alone, it is marked for older changes too")
+	}
+	older := WithPGNoOlderTails(context.Background())
+	if !pgNoOlderTails(older) || pgNeedTails(older) || !PGNoOlderTails(older) {
+		t.Error("WithPGNoOlderTails does not mark older changes alone")
+	}
 }
 
 // #3116: what an earlier answer of the copy read is kept per connection

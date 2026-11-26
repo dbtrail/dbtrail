@@ -1328,10 +1328,10 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 }
 
 // pgRunContext is the context a statement of the port runs on the copy
-// under: one the source can answer instead (opts.NeedTails) is refused
-// before it runs, in fresh mode, when its tables' recent changes are not
-// ready or are older than an earlier answer of the copy on the connection
-// (console.WithPGNeedTails, #3086, #3116).
+// under: in fresh mode it is refused before it runs when its tables' recent
+// changes are not ready (opts.NeedTails, console.WithPGNeedTails, #3086), or
+// are older than an earlier answer of the copy on the connection read
+// (opts.NoOlderTails, console.WithPGNoOlderTails, #3116).
 func pgSnapshotAgeFor(opts pgshim.RunOptions) *console.PGSnapshotAge {
 	if opts.Probe {
 		return nil
@@ -1342,6 +1342,9 @@ func pgSnapshotAgeFor(opts pgshim.RunOptions) *console.PGSnapshotAge {
 func pgRunContext(ctx context.Context, opts pgshim.RunOptions) context.Context {
 	if opts.NeedTails {
 		ctx = console.WithPGNeedTails(ctx)
+	}
+	if opts.NoOlderTails {
+		ctx = console.WithPGNoOlderTails(ctx)
 	}
 	// The char(n) columns the screen took as read without their padding,
 	// checked against the snapshot the statement reads (#3219).

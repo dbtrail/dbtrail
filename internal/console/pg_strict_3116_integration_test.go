@@ -18,9 +18,10 @@ import (
 // #3116, case 1: the recent changes a statement reads are older than what an
 // earlier answer of the copy on the same connection read. A routed MySQL
 // statement (StrictStar) is refused before it runs; so is a PostgreSQL
-// statement marked WithPGNeedTails (its source can answer it). A MySQL
-// connection that does not route, and a PostgreSQL statement with nowhere
-// else to go, are answered with the note that says so. The memory is the
+// statement marked WithPGNoOlderTails (a light one its source can answer).
+// A MySQL connection that does not route, a heavy PostgreSQL statement
+// (marked at most WithPGNeedTails), and one with nowhere else to go, are
+// answered with the note that says so. The memory is the
 // connection's (one SQLOnCopy each): a new one starts clean. The two MySQL
 // rows pin that the shared line (sql_api.go) changes nothing for MySQL.
 func TestIntegrationOlderThanAnEarlierAnswer_3116(t *testing.T) {
@@ -52,7 +53,8 @@ func TestIntegrationOlderThanAnEarlierAnswer_3116(t *testing.T) {
 	}{
 		{"a MySQL connection that does not route: answered, said", plain, sqlsandbox.Session{}, false},
 		{"a routed MySQL connection: refused", plain, sqlsandbox.Session{StrictStar: true}, true},
-		{"a PostgreSQL statement its source can answer: refused", WithPGNeedTails, pg, true},
+		{"a light PostgreSQL statement its source can answer: refused", func(c context.Context) context.Context { return WithPGNoOlderTails(WithPGNeedTails(c)) }, pg, true},
+		{"a heavy PostgreSQL statement, held to the snapshot rule only: answered, said", WithPGNeedTails, pg, false},
 		{"a PostgreSQL statement with nowhere else to go: answered, said", plain, pg, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

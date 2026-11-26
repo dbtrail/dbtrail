@@ -573,10 +573,12 @@ type costLogin struct {
 	needTails    []bool
 	// olderThanSeen is a copy whose recent changes are older than an
 	// earlier answer of the copy on the connection (#3116): a statement
-	// asked to have them (RunOptions.NeedTails) is refused before it runs,
-	// as the host's copy refuses it; any other is answered with the host's
-	// note that says so.
+	// asked not to read older ones (RunOptions.NoOlderTails) is refused
+	// before it runs, as the host's copy refuses it; any other is answered
+	// with the host's note that says so. noOlderTails records what each
+	// statement asked.
 	olderThanSeen atomic.Bool
+	noOlderTails  []bool
 	// fastLane records RunOptions.FastLane of each statement the copy was
 	// given (fastlane.go).
 	fastLane []bool
@@ -662,13 +664,14 @@ func (k *keptSources) parked() int {
 func (l *costLogin) run(_ context.Context, st string, opts RunOptions) (sqlsandbox.Result, error) {
 	l.mu.Lock()
 	l.needTails = append(l.needTails, opts.NeedTails)
+	l.noOlderTails = append(l.noOlderTails, opts.NoOlderTails)
 	l.fastLane = append(l.fastLane, opts.FastLane)
 	l.joinRun = append(l.joinRun, joinRun{st, opts.JoinNDV, opts.KeepJoinOrder})
 	l.mu.Unlock()
 	if opts.NeedTails && l.tailsPending.Load() {
 		return sqlsandbox.Result{}, &sqlsandbox.MayHaveChangedError{Reason: "fresh mode: the newest captured changes of public.t are not ready yet"}
 	}
-	if opts.NeedTails && l.olderThanSeen.Load() {
+	if opts.NoOlderTails && l.olderThanSeen.Load() {
 		return sqlsandbox.Result{}, &sqlsandbox.MayHaveChangedError{Reason: "fresh mode: " + olderThanSeenReason}
 	}
 	l.runs.Add(1)
@@ -755,6 +758,14 @@ func (l *costLogin) lastNeedTails() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return len(l.needTails) > 0 && l.needTails[len(l.needTails)-1]
+}
+
+// lastNoOlderTails is whether the copy's last statement asked not to read
+// recent changes older than an earlier answer on its connection.
+func (l *costLogin) lastNoOlderTails() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.noOlderTails) > 0 && l.noOlderTails[len(l.noOlderTails)-1]
 }
 
 func (l *costLogin) last() RouteNote {

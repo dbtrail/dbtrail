@@ -548,29 +548,48 @@ func (s *session) copyOlderThanSource(waited, apart bool) string {
 
 // holdsBackCopy reports whether copyOlderThanSource decides on the copy's
 // answer to a statement (apart as it is given there): only then is an
-// answer read from a snapshot alone held back after it ran. A SELECT it
-// holds back that reads no catalog was also told before it ran that it must have the recent
-// changes (needsTails, which asks it of more statements than this), so the
-// copy does not run one whose answer it would throw away for want of them.
+// answer read from a snapshot alone held back after it ran. Every statement
+// it holds back was also told before it ran that it must have the recent
+// changes (freshRefusals, which asks it of more statements than this), so
+// the copy does not run one whose answer it would throw away for want of
+// them.
 func (s *session) holdsBackCopy(apart bool) bool {
 	return !apart && s.src.any() && s.bound != nil && s.bound.RunAge != nil && s.canFallBack()
 }
 
-// needsTails reports whether the copy is told that qstr, about to run there,
-// must have its tables' recent changes (RunOptions.NeedTails, #3116): on a
-// connection that can send it to the source, whether or not the source has
-// answered this connection yet. It is the MySQL router's rule
-// (sqlsandbox.Session.StrictStar is set on every routing connection): in
-// fresh mode the copy never answers there from the snapshot alone, nor with
-// recent changes older than an earlier answer of the copy on the
-// connection; the source answers.
+// freshRefusals says which of fresh mode's two refusals before running the
+// copy is held to for qstr, about to run there (RunOptions.NeedTails and
+// NoOlderTails, #3116): the snapshot alone, and recent changes older than an
+// earlier answer of the copy on this connection.
 //
-// Not for the copy's own commands (SHOW TABLES, DESCRIBE t) nor a read of
-// the copy's catalog, as waitForCopy: refused, they would go to a source
-// that does not take them, or answers with its own catalog.
-func (s *session) needsTails(qstr string) bool {
-	return s.canFallBack() && isSelectLike(qstr) && !readsCatalog(qstr)
+// A light statement on a connection that can send it to the source is held
+// to both, which is the MySQL router's rule (sqlsandbox.Session.StrictStar
+// is set on every routing connection): the source answers it instead.
+//
+// A statement the source's plan found expensive (costHeavy: the cost
+// routing's own verdict, a side a shape is held on within the band
+// included) stays on the copy (product decision, 2026-11-24, heavy.go): it
+// is answered with what the copy holds, and the copy's notice says how old
+// that is. It is held only to what held it before #3116: the snapshot alone
+// on a connection the source answered about one of its tables
+// (holdsBackCopy, #3086), whose answer copyOlderThanSource would throw away.
+//
+// The light rule is not for the copy's own commands (SHOW TABLES, DESCRIBE
+// t) nor a read of the copy's catalog, as waitForCopy: refused, they would
+// go to a source that does not take them, or answers with its own catalog.
+func (s *session) freshRefusals(qstr string, apart bool) (needTails, noOlderTails bool) {
+	held := s.holdsBackCopy(apart)
+	if s.costHeavy() {
+		return held, false
+	}
+	light := s.canFallBack() && isSelectLike(qstr) && !readsCatalog(qstr)
+	return light || held, light
 }
+
+// costHeavy reports whether the statement being run goes to the copy
+// because the source's plan found it expensive (expensive): s.heavy on the
+// simple protocol, s.portalHeavy for a portal of the extended one.
+func (s *session) costHeavy() bool { return s.heavy || s.portalHeavy }
 
 // positionWarnEvery is how often a connection that cannot learn the source's
 // position says so at warn level.
