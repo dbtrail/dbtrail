@@ -56,3 +56,22 @@ func TestPGPairStepsAttrs(t *testing.T) {
 		}
 	}
 }
+
+// The key index's build is on the table's line only on the update that
+// paid for it (#3085), as on the MySQL line.
+func TestPGPairStepsSayTheKeyIndexBuildOnce(t *testing.T) {
+	has := func(a []any) bool {
+		for i := 0; i < len(a); i += 2 {
+			if a[i] == "lookup_index_built_ms" {
+				return true
+			}
+		}
+		return false
+	}
+	if has(pgPairSteps{start: time.Now()}.attrs(false)) {
+		t.Error("lookup_index_built_ms on an update that built no index")
+	}
+	if !has(pgPairSteps{start: time.Now(), indexBuilt: 7 * time.Millisecond}.attrs(true)) {
+		t.Error("no lookup_index_built_ms on the update that built the index")
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
@@ -36,8 +37,7 @@ func KeyOf(parts []string) string {
 // stays, and the new one is added beside it. A key the file does not hold
 // is absent from the answer: it is a row the window inserted.
 //
-// It reads the key columns of every row of the file: PostgreSQL values are
-// stored as text, so there is no index of keys to ask.
+// It reads the key columns of every row of the file, and asks no key index.
 //
 // A key column that is NULL, or a wanted key the file holds twice, is a file
 // no pair can be written against, and an error.
@@ -101,11 +101,23 @@ func BasePositions(ctx context.Context, db *sql.DB, basePath string, keyColumns 
 // and so is a row of the file with a NULL in a key column, wanted or not.
 // keys need not be sorted; one named twice is asked once.
 //
-// Two passes over the file's key columns: one for a NULL, one for the join.
-// The first is skipped for a file this process already found to hold no
-// NULL in those columns (nullmemo.go says how a file is told from another,
-// and what is never remembered).
+// A file with a key index beside it (keyindex.go), bound to it and built on
+// these key columns, is answered from the index: the blocks the keys fall
+// in, and the rows found read back to check they hold their keys. Without
+// one, or with one that does not hold up, two passes over the file's key
+// columns: one for a NULL, one for the join. The first is skipped for a file
+// this process already found to hold no NULL in those columns (nullmemo.go
+// says how a file is told from another, and what is never remembered).
 func BasePositionsOf(ctx context.Context, db *sql.DB, basePath string, keyColumns []string, keys []string) (map[string]int64, error) {
+	if found, _, ok := lookupByKeyIndex(ctx, db, basePath, keyColumns, keys, nil, -1); ok {
+		return found, nil
+	}
+	return basePositionsByJoin(ctx, db, basePath, keyColumns, keys)
+}
+
+// basePositionsByJoin is BasePositionsOf without the key index: the file's
+// key columns read by the engine.
+func basePositionsByJoin(ctx context.Context, db *sql.DB, basePath string, keyColumns []string, keys []string) (map[string]int64, error) {
 	found, moved, err := basePositionsOf(ctx, db, basePath, keyColumns, keys, true)
 	if moved {
 		// The file changed under a call that took it for one with no NULL:
@@ -128,12 +140,9 @@ func basePositionsOf(ctx context.Context, db *sql.DB, basePath string, keyColumn
 		return found, false, nil
 	}
 	quoted := make([]string, len(keyColumns))
-	parts := make([]string, len(keyColumns))
 	nulls := make([]string, len(keyColumns))
 	for i, c := range keyColumns {
 		quoted[i] = `"` + strings.ReplaceAll(c, `"`, `""`) + `"`
-		// event.EscapePKValue, in the same order: the backslash first.
-		parts[i] = `replace(replace(` + quoted[i] + `, '\', '\\'), '|', '\|')`
 		nulls[i] = quoted[i] + " IS NULL"
 	}
 	src := "read_parquet(" + file(basePath) + ", file_row_number=true" + noHive + ")"
@@ -177,7 +186,7 @@ func basePositionsOf(ctx context.Context, db *sql.DB, basePath string, keyColumn
 	// under a session collation that sets case or accents aside, two keys
 	// that differ only there are still two.
 	rows, err := db.QueryContext(ctx, "SELECT bintrail_b.file_row_number, bintrail_w.bintrail_k"+
-		" FROM (SELECT file_row_number, encode("+strings.Join(parts, " || '|' || ")+") AS bintrail_k FROM "+src+") AS bintrail_b"+
+		" FROM (SELECT file_row_number, encode("+keyTextSQL(quoted)+") AS bintrail_k FROM "+src+") AS bintrail_b"+
 		" JOIN (SELECT DISTINCT encode("+KeyColumn+") AS bintrail_k FROM read_parquet("+file(wanted)+noHive+")) AS bintrail_w"+
 		" ON bintrail_b.bintrail_k = bintrail_w.bintrail_k")
 	if err != nil {
@@ -215,6 +224,19 @@ func basePositionsOf(ctx context.Context, db *sql.DB, basePath string, keyColumn
 	return found, false, nil
 }
 
+// keyTextSQL is the SQL of a row's key built from its key columns (quoted,
+// in the key's order) as KeyOf builds it: each part escaped as
+// event.EscapePKValue escapes it, the backslash first, joined by a pipe.
+// NULL when a key column is NULL. The join and the key index's build share
+// it, so the two cannot spell a key differently.
+func keyTextSQL(quoted []string) string {
+	parts := make([]string, len(quoted))
+	for i, q := range quoted {
+		parts[i] = `replace(replace(` + q + `, '\', '\\'), '|', '\|')`
+	}
+	return strings.Join(parts, " || '|' || ")
+}
+
 // afterKeyJoin runs when BasePositionsOf's join has read the file, before
 // the file is looked at again; a test puts another file in its place there.
 var afterKeyJoin = func(basePath string) {}
@@ -231,8 +253,10 @@ var ErrBaseValuesTooLarge = errors.New("the values to read from the table file a
 // file's own bytes: a PostgreSQL table's file holds PostgreSQL's text for
 // every column.
 //
-// Two reads: the key columns, for the rows, then the named columns of those
-// rows by their number, so no other column and no key is spelled twice.
+// Without a key index, two reads: the key columns, for the rows, then the
+// named columns of those rows by their number, so no other column and no key
+// is spelled twice. With one, one read of the rows it names, which checks
+// their keys and gives the values.
 // maxBytes (0: no limit) is how much text the answer may hold; past it the
 // answer is ErrBaseValuesTooLarge.
 func BaseValuesOf(ctx context.Context, db *sql.DB, basePath string, keyColumns, keys, columns []string, maxBytes int64) (map[string]map[string]*string, error) {
@@ -252,11 +276,16 @@ func BaseValuesOf(ctx context.Context, db *sql.DB, basePath string, keyColumns, 
 			return nil, fmt.Errorf("%s has no column %s", basePath, c)
 		}
 	}
-	positions, err := BasePositionsOf(ctx, db, basePath, keyColumns, keys)
+	// Through the key index: its rows read once, the keys checked in the
+	// same read that gives the values.
+	if _, vals, ok := lookupByKeyIndex(ctx, db, basePath, keyColumns, keys, columns, textLimit(maxBytes, 0)); ok {
+		return vals, nil
+	}
+	positions, err := basePositionsByJoin(ctx, db, basePath, keyColumns, keys)
 	if err != nil {
 		return nil, err
 	}
-	return baseValuesAt(ctx, db, basePath, positions, columns, textLimit(maxBytes, 0))
+	return baseValuesAt(ctx, db, basePath, positions, columns, textLimit(maxBytes, 0), nil)
 }
 
 // baseColumnsOf is the columns a table file has, as a set.
@@ -286,15 +315,25 @@ func textLimit(maxBytes, held int64) int64 {
 	return max(maxBytes-held, 0)
 }
 
+// errRowsNotAsked is a read of rows by number that did not hand back the
+// rows asked for, each once: the numbers were wrong for the file.
+var errRowsNotAsked = errors.New("the file did not hold the rows asked for")
+
+// rowReads counts baseValuesAt's reads of rows by their number, for the
+// tests that hold a call to one read.
+var rowReads atomic.Uint64
+
 // baseValuesAt is the second read of BaseValuesOf: the text of columns in
 // the rows of the base file at positions (key by row number). The columns
 // must be the file's. limit is how much text the answer may hold (textLimit:
-// below 0 for no limit).
-func baseValuesAt(ctx context.Context, db *sql.DB, basePath string, positions map[string]int64, columns []string, limit int64) (map[string]map[string]*string, error) {
+// below 0 for no limit), counted over every column but those in free (nil:
+// every one counts).
+func baseValuesAt(ctx context.Context, db *sql.DB, basePath string, positions map[string]int64, columns []string, limit int64, free map[string]bool) (map[string]map[string]*string, error) {
 	found := map[string]map[string]*string{}
 	if len(positions) == 0 {
 		return found, nil
 	}
+	rowReads.Add(1)
 	src := "read_parquet(" + file(basePath) + ", file_row_number=true" + noHive + ")"
 	sel := make([]string, len(columns))
 	for i, c := range columns {
@@ -333,17 +372,19 @@ func baseValuesAt(ctx context.Context, db *sql.DB, basePath string, positions ma
 		}
 		key, ok := keyAt[pos]
 		if !ok {
-			return nil, fmt.Errorf("%s: row %d was not asked for", basePath, pos)
+			return nil, fmt.Errorf("%w: %s: row %d was not asked for", errRowsNotAsked, basePath, pos)
 		}
 		if _, twice := found[key]; twice {
-			return nil, fmt.Errorf("%s: row %d was read twice", basePath, pos)
+			return nil, fmt.Errorf("%w: %s: row %d was read twice", errRowsNotAsked, basePath, pos)
 		}
 		row := make(map[string]*string, len(columns))
 		for i, c := range columns {
 			if vals[i] != nil {
 				text := string(vals[i])
 				row[c] = &text
-				held += int64(len(text))
+				if !free[c] {
+					held += int64(len(text))
+				}
 			} else {
 				row[c] = nil
 			}
@@ -357,7 +398,7 @@ func baseValuesAt(ctx context.Context, db *sql.DB, basePath string, positions ma
 		return nil, fmt.Errorf("read the rows of the changed keys in %s: %w", basePath, err)
 	}
 	if len(found) != len(positions) {
-		return nil, fmt.Errorf("%s: %d of the %d rows asked for were read", basePath, len(found), len(positions))
+		return nil, fmt.Errorf("%w: %s: %d of the %d rows asked for were read", errRowsNotAsked, basePath, len(found), len(positions))
 	}
 	return found, nil
 }
