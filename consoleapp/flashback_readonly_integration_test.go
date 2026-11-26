@@ -148,6 +148,69 @@ func TestIntegrationFlashbackReadOnly(t *testing.T) {
 		rows.Close()
 	}
 
+	// #3093: a write the screen cannot see, because it is inside a stored
+	// function a SELECT calls. The port forwards the SELECT, and the SOURCE
+	// refuses the write: the session is read-only there.
+	if _, err := srcDB.Exec("CREATE FUNCTION writes_a_row() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN INSERT INTO orders SELECT max(id) + 100, 'by function' FROM orders; RETURN 1; END"); err != nil {
+		t.Fatalf("create the function: %v", err)
+	}
+	for _, q := range []string{"SELECT writes_a_row()", "SELECT id, writes_a_row() FROM orders WHERE id = 1"} {
+		rows, err := ro.Query(q)
+		if err == nil {
+			for rows.Next() {
+			}
+			err = rows.Err()
+			rows.Close()
+		}
+		var me *drivermysql.MySQLError
+		if !errors.As(err, &me) || me.Number != 1792 {
+			t.Errorf("%q on the read-only port: got %v, want the source's own error 1792", q, err)
+		}
+		if after := sourceState(); after != before {
+			t.Fatalf("%q wrote to the source through the read-only port: %s, was %s", q, after, before)
+		}
+	}
+	// The client cannot take the mark back, and is not refused for trying
+	// the way drivers and pools do: the sequence a Java driver sends around
+	// a read-only transaction and when a connection is given back to its
+	// pool gets no error, and a write after it is refused as before.
+	for _, q := range []string{
+		"SET SESSION TRANSACTION READ ONLY", "SELECT 1",
+		"SET SESSION TRANSACTION READ WRITE", "SELECT 1",
+		"set session transaction read write",
+		"SET TRANSACTION READ WRITE",
+		"SET SESSION transaction_read_only = 0",
+		"SET @@transaction_read_only = OFF",
+		"SET autocommit = 1, transaction_read_only = 0",
+	} {
+		if _, err := ro.Exec(q); err != nil {
+			t.Errorf("%q on the read-only port: %v, want no error", q, err)
+		}
+		if _, err := ro.Exec("INSERT INTO orders VALUES (4,'written')"); err == nil {
+			t.Fatalf("after %q a write went through the read-only port", q)
+		}
+		var n int
+		err := ro.QueryRow("SELECT writes_a_row()").Scan(&n)
+		var me *drivermysql.MySQLError
+		if !errors.As(err, &me) || me.Number != 1792 {
+			t.Errorf("after %q, a function that writes: got %v, want the source's error 1792", q, err)
+		}
+		if after := sourceState(); after != before {
+			t.Fatalf("after %q the source was written to through the read-only port: %s, was %s", q, after, before)
+		}
+	}
+	// As a server with read_only=ON answers an account without SUPER.
+	{
+		_, err := ro.Exec("START TRANSACTION READ WRITE")
+		var me *drivermysql.MySQLError
+		if !errors.As(err, &me) || me.Number != 1290 {
+			t.Errorf("START TRANSACTION READ WRITE on the read-only port: got %v, want error 1290", err)
+		}
+	}
+	if got := scanStrings(t, ro, "SELECT @@session.transaction_read_only"); len(got) != 1 || got[0] != "1" {
+		t.Errorf("the source session's transaction_read_only = %v, want 1", got)
+	}
+
 	// The control: on a read-write port the same kind of statement lands.
 	rw := openFlashback(t, serve(flashbackConfig{RouteMaxCopyAge: time.Hour, RoutePolicy: policy}), ent.ID, "tok", srcName)
 	defer rw.Close()
@@ -156,5 +219,12 @@ func TestIntegrationFlashbackReadOnly(t *testing.T) {
 	}
 	if after := sourceState(); after == before {
 		t.Fatal("the read-write port did not change the source: the read-only checks above prove nothing")
+	}
+	wrote := sourceState()
+	if got := scanStrings(t, rw, "SELECT writes_a_row()"); len(got) != 1 || got[0] != "1" {
+		t.Fatalf("SELECT writes_a_row() on the read-write port = %v", got)
+	}
+	if sourceState() == wrote {
+		t.Fatal("the function did not write through the read-write port: the check of it above proves nothing")
 	}
 }

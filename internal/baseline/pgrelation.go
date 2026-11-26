@@ -39,6 +39,10 @@ type PGRelation struct {
 	// Generated are the STORED generated columns, which the file does not
 	// hold (PostgreSQL computes them again on load).
 	Generated []PGGeneratedColumn `json:"generated,omitempty"`
+	// Collations says the snapshot read each column's collation, so that a
+	// column's Nondeterministic is known (#3111). Absent on snapshots taken
+	// before it was recorded: then no column's collation is known.
+	Collations bool `json:"collations,omitempty"`
 }
 
 // PGGeneratedColumn is one STORED generated column: its type as format_type
@@ -79,6 +83,11 @@ type PGColumn struct {
 	// Seq is the options of Sequence (pg_sequence); zero when the column
 	// owns none or they were not recorded.
 	Seq PGSequence `json:"seq,omitzero"`
+	// Nondeterministic says the column's collation is nondeterministic
+	// (pg_collation.collisdeterministic false): PostgreSQL finds equal text
+	// the copy, comparing bytes, does not (#3111). Read only when the
+	// relation's Collations is set.
+	Nondeterministic bool `json:"nondeterministic,omitempty"`
 }
 
 // PGSequence is a sequence's options as pg_sequence holds them: its type as

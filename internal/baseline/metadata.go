@@ -831,6 +831,62 @@ func BinaryColumnsStoredAsText(path string, cols []Column) ([]string, error) {
 	return out, nil
 }
 
+// ColumnsStoredOtherwise names the columns of names (matched to cols by name,
+// ignoring case) whose leaf in the Parquet file at path is not of the type
+// this build's writer gives the column (Column.ParquetType): the physical
+// kind and the logical type both. A column the file does not hold is named
+// too. A reader that compares the file's values with ones this build writes
+// (a tail's key, #3159) needs both stored the same way: a DATE stored as
+// text, or a DECIMAL as an integer, by another producer would compare
+// unequal to every value written here.
+func ColumnsStoredOtherwise(path string, cols []Column, names []string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open baseline file: %w", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat baseline file: %w", err)
+	}
+	pf, err := parquet.OpenFile(f, info.Size())
+	if err != nil {
+		return nil, fmt.Errorf("open parquet file: %w", err)
+	}
+	leaves := map[string]parquet.Type{}
+	for _, fld := range pf.Schema().Fields() {
+		if fld.Leaf() {
+			leaves[strings.ToLower(fld.Name())] = fld.Type()
+		}
+	}
+	byName := make(map[string]Column, len(cols))
+	for _, c := range cols {
+		byName[strings.ToLower(c.Name)] = c
+	}
+	var out []string
+	for _, n := range names {
+		c, ok := byName[strings.ToLower(n)]
+		got, held := leaves[strings.ToLower(n)]
+		if !ok || !held || c.ParquetType == nil || !sameLeafType(got, c.ParquetType.Type()) {
+			out = append(out, n)
+		}
+	}
+	return out, nil
+}
+
+// sameLeafType: one physical kind and one logical type (none on both sides
+// counts as one).
+func sameLeafType(a, b parquet.Type) bool {
+	if a.Kind() != b.Kind() {
+		return false
+	}
+	la, lb := a.LogicalType(), b.LogicalType()
+	if la == nil || lb == nil {
+		return la == nil && lb == nil
+	}
+	return la.String() == lb.String()
+}
+
 // parsePGAnchorLSN reads MetaKeyPGAnchorLSN. A value that is not a number is
 // said and read as absent: the anchor only ever makes a reader wait, so a
 // file without one is read as files were before it was recorded.

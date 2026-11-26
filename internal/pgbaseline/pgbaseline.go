@@ -62,8 +62,10 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
+	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/pgcapture"
+	"github.com/dbtrail/dbtrail/internal/pgdelta"
 )
 
 // Config holds all parameters for a PostgreSQL baseline run.
@@ -151,6 +153,9 @@ type Stats struct {
 	// SlotWaited is how long the run waited for a slot that was still being
 	// created to have its position; zero when it had one at once.
 	SlotWaited time.Duration
+	// TablesLeftOut are the published tables this snapshot does not hold
+	// because a schema or table name cannot be a file path in it (#3113).
+	TablesLeftOut []baseline.LeftOutTable
 }
 
 // Run takes a consistent baseline snapshot of every table the publication
@@ -190,6 +195,10 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	// with nothing created (#3022).
 	if err := refuseUnreadable(ctx, conn, cfg.Publication, cfg.Filters, logger); err != nil {
 		return Stats{}, err
+	}
+	// Nor is a slot made for a run with no table it can store (#3113).
+	if left, err := refuseAllUnstorable(ctx, conn, cfg.Publication, cfg.Filters, logger); err != nil {
+		return Stats{TablesLeftOut: left}, err
 	}
 
 	// The slot exists AND has its position BEFORE the snapshot transaction
@@ -279,6 +288,12 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		// Time-travel silently reconstructing from an older snapshot.
 		return Stats{}, fmt.Errorf("pgbaseline: publication %q streams no tables matching the filters — the baseline would be empty; check the publication's table list and the --schemas/--tables filters", cfg.Publication)
 	}
+	// Before anything is read or created: a name that is not one path
+	// component never reaches a file path (#3113).
+	tables, leftOut := splitStorable(tables, logger)
+	if len(tables) == 0 {
+		return Stats{TablesLeftOut: leftOut}, allLeftOutError(leftOut)
+	}
 	// The catalog's expressions and type names are read with an empty
 	// search_path, so every name in them comes back schema-qualified (as
 	// pg_dump reads them): a CREATE TABLE made from them binds to the same
@@ -356,7 +371,7 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		return Stats{}, fmt.Errorf("pgbaseline: could not write incomplete-snapshot marker in %s (refusing to copy without the crash-safety marker): %w", snapDir, err)
 	}
 
-	stats := Stats{AnchorLSN: uint64(anchorLSN), DeltaStartLSN: uint64(deltaStartLSN), SnapshotTime: snapshotTime, SlotCreated: created, SlotWaited: slotAnchor.Waited}
+	stats := Stats{AnchorLSN: uint64(anchorLSN), DeltaStartLSN: uint64(deltaStartLSN), SnapshotTime: snapshotTime, SlotCreated: created, SlotWaited: slotAnchor.Waited, TablesLeftOut: leftOut}
 
 	var (
 		mu   sync.Mutex
@@ -456,7 +471,43 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	if err := baseline.CompleteSnapshot(snapDir); err != nil {
 		return stats, publishError(err)
 	}
+	// The key index beside each table's file (#3085), for the snapshot
+	// updates that find changed rows in it. After the snapshot is published
+	// and the source's transaction is closed: a build is a sort of every key,
+	// and the source must not hold its snapshot open for it. Nothing here
+	// fails the run; a table without an index is read as before.
+	// Ended here, not at return: the deferred ROLLBACK and Close then find
+	// the connection closed and do nothing, which is what they are for.
+	_, _ = conn.Exec(context.Background(), "ROLLBACK")
+	conn.Close(context.Background())
+	for _, t := range tables {
+		key := keyInTableOrder(t)
+		if len(key) == 0 || ctx.Err() != nil {
+			continue
+		}
+		pgdelta.WriteKeyIndexBeside(ctx, t.Schema, t.Table, filepath.Join(snapDir, t.Schema, t.Table+".parquet"), key, duckdbutil.DefaultTuningFor(ctx))
+	}
 	return stats, nil
+}
+
+// keyInTableOrder is t's primary key in the order of its columns, the order
+// a key is joined in (pgdelta.BasePositions); nil when it has none, or names
+// a column the file does not hold.
+func keyInTableOrder(t tableInfo) []string {
+	in := make(map[string]bool, len(t.PrimaryKey))
+	for _, c := range t.PrimaryKey {
+		in[c] = true
+	}
+	var key []string
+	for _, c := range t.Columns {
+		if in[c] {
+			key = append(key, c)
+		}
+	}
+	if len(key) != len(in) || len(in) != len(t.PrimaryKey) {
+		return nil
+	}
+	return key
 }
 
 // checkSlotAtEnd asks pgcapture.CheckSlotStillAnchors on a connection of its
@@ -577,7 +628,7 @@ func tableFooter(t tableInfo, tsStr string, deltaStartLSN, anchorLSN uint64) (ma
 	// The table's OID and typed column list (#1596 slice 1). Written only if
 	// it reads back: a shape the readers would reject is a bug here, and a
 	// baseline without its shape must not be published as if it had one.
-	shape, err := baseline.PGRelation{OID: t.OID, Columns: t.Shape, Generated: t.Generated, PrimaryKey: t.PrimaryKey}.Encode()
+	shape, err := baseline.PGRelation{OID: t.OID, Columns: t.Shape, Generated: t.Generated, PrimaryKey: t.PrimaryKey, Collations: true}.Encode()
 	if err != nil {
 		return nil, err
 	}

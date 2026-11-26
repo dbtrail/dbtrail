@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Keeps ci.yml, release.yaml and the image mirror from drifting apart on the
+# Keeps ci.yml and the image mirror from drifting apart on the
 # S3-compatible test store (#1884). Run from the repository root, or pass the
 # root as the first argument. Exits 1 and says what diverged.
 #
-# 1. ci.yml and release.yaml each start the store through
-#    ./.github/actions/s3-test-store, check it through
-#    ./.github/actions/s3-test-store-check, and hand the store's endpoint to
-#    the tests. What the release runs is what CI proves.
+# 1. ci.yml starts the store through ./.github/actions/s3-test-store, checks
+#    it through ./.github/actions/s3-test-store-check, and hands the store's
+#    endpoint to the tests. (A release runs no tests of its own: it waits for
+#    main's CI, scripts/release-wait-for-ci.sh.)
 # 2. No workflow names the image itself: the action is the one place, and
 #    the mirror workflow is the one exception.
 # 3. The tag and digest the action pulls are the tag and digest the mirror
@@ -28,7 +28,7 @@ count() { # count <fixed string> <file>
   grep -cF -- "$1" "$2" || true
 }
 
-for wf in ci.yml release.yaml; do
+for wf in ci.yml; do
   f="$root/.github/workflows/$wf"
   [ -f "$f" ] || { fail "$wf is missing"; continue; }
   n="$(grep -cE '^[[:space:]]*uses: \./\.github/actions/s3-test-store[[:space:]]*$' "$f" || true)"

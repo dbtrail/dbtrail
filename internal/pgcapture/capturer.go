@@ -30,11 +30,19 @@ const defaultStandbyInterval = 10 * time.Second
 // and ctx-cancel — forever. See sendStandby.
 const standbyWriteTimeout = 10 * time.Second
 
-// startupTimeout bounds the one-shot catalog/slot work in Run (publication + slot
-// checks, consistent-point creation, wal_sender_timeout read) so a hung catalog
-// can't wedge Run before streaming begins. StartReplication and the receive loop
-// deliberately use the full run ctx — they are long-lived.
-const startupTimeout = 30 * time.Second
+// startupTimeout bounds the one-shot catalog work in Run (publication + slot
+// checks, wal_sender_timeout read) so a hung catalog can't wedge Run before
+// streaming begins. StartReplication and the receive loop deliberately use the
+// full run ctx: they are long-lived. So does the creation of the slot, which
+// lasts until the write transactions open on the source have ended (#3178).
+// A variable so a test need not hold a transaction open for half a minute.
+var startupTimeout = 30 * time.Second
+
+// sourceConnectTimeout bounds opening one connection to the source, so an
+// address that accepts and never answers ends the attempt and is retried. Long
+// enough for the kernel to give up on a dead address and try the next one. A
+// variable so a test need not wait for it.
+var sourceConnectTimeout = 5 * time.Minute
 
 // beforeStartReplication, when set, runs right before Run starts
 // replication, after it read the slot's position: a test makes the slot's
@@ -73,6 +81,13 @@ type Config struct {
 	// OnStarted, when set, is called once replication has started on the
 	// slot: both source connections are open and the stream is attached.
 	OnStarted func()
+	// OnPhase and OnPhaseDetail, when set, say what a long startup step is
+	// doing: OnPhase(PhaseCreatingSlot) when the creation of the slot starts
+	// and OnPhase("") when it ends; OnPhaseDetail names the oldest write
+	// transaction it is waiting for. The detail comes from a goroutine of its
+	// own, which has ended before the phase is cleared.
+	OnPhase       func(string)
+	OnPhaseDetail func(string)
 	// LoadKnownShapes and LastChange turn on DDL inference (#2441): what the
 	// index holds of each table's shapes for a resend starting at fromLSN
 	// (the slot's confirmed position, read at start), and the newest indexed
@@ -160,8 +175,13 @@ func (c *Capturer) AckCommitted(lsn uint64) {
 // Run opens the replication + query connections, validates the publication, ensures
 // the slot, starts replication, and emits event.Event on out until ctx is cancelled.
 // It returns nil on graceful ctx-cancel and does NOT close out (the caller owns the
-// channel, mirroring streamrun).
+// channel, mirroring streamrun). An error that means the source could not be
+// reached is a *SourceUnreachableError (IsSourceUnreachable).
 func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
+	return markSourceUnreachable(c.run(ctx, out), c.cfg.ExpectExistingSlot)
+}
+
+func (c *Capturer) run(ctx context.Context, out chan<- event.Event) error {
 	if c.cfg.ReplDSN == "" || c.cfg.QueryDSN == "" || c.cfg.SlotName == "" || c.cfg.Publication == "" {
 		return fmt.Errorf("pgcapture: Run requires ReplDSN, QueryDSN, SlotName, and Publication")
 	}
@@ -169,13 +189,17 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 	// Pinned rendering GUCs (#593 slice D, gucpin.go): the walsender session's
 	// GUCs determine pgoutput's tuple text, which must byte-match the baseline
 	// COPY text (pinned identically in internal/pgbaseline).
-	replConn, err := ConnectReplPinned(ctx, c.cfg.ReplDSN)
+	connectCtx, cancelConnect := context.WithTimeout(ctx, sourceConnectTimeout)
+	replConn, err := ConnectReplPinned(connectCtx, c.cfg.ReplDSN)
+	cancelConnect()
 	if err != nil {
 		return fmt.Errorf("pgcapture: connect replication: %w", err)
 	}
 	defer closeReplConn(replConn)
 
-	queryConn, err := pgx.Connect(ctx, c.cfg.QueryDSN)
+	connectCtx, cancelConnect = context.WithTimeout(ctx, sourceConnectTimeout)
+	queryConn, err := pgx.Connect(connectCtx, c.cfg.QueryDSN)
+	cancelConnect()
 	if err != nil {
 		return fmt.Errorf("pgcapture: connect query: %w", err)
 	}
@@ -241,10 +265,23 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 	// must be visible now, not discovered during a failed recovery.
 	c.warnCaptureCoverage(startupCtx, queryConn)
 
-	startLSN, err := ensureSlot(startupCtx, replConn, queryConn, c.cfg.SlotName, c.cfg.StartLSN, c.cfg.ExpectExistingSlot)
+	// The creation of the slot is bounded by the run's ctx alone: PostgreSQL ends
+	// it once the write transactions open when it began have ended, which on a
+	// busy source takes longer than any budget for catalog reads (#3178).
+	startLSN, err := ensureSlot(startupCtx, replConn, queryConn, c.cfg.SlotName, c.cfg.StartLSN, c.cfg.ExpectExistingSlot,
+		func(conn *pgconn.PgConn, slot string) (pglogrepl.CreateReplicationSlotResult, error) {
+			return c.createSlotWaiting(ctx, conn, slot)
+		})
 	if err != nil {
 		return err
 	}
+	// The catalog reads after the slot get a budget of their own: a creation that
+	// took minutes must not leave them an expired one, which would turn off DDL
+	// detection for this run.
+	cancelStartup()
+	afterSlotCtx, cancelAfterSlot := context.WithTimeout(ctx, startupTimeout)
+	defer cancelAfterSlot()
+	startupCtx = afterSlotCtx
 
 	// Where the slot stands is where replication starts, whatever LSN is
 	// asked for: PostgreSQL moves a lower one forward to it and never
@@ -506,7 +543,7 @@ func (c *Capturer) receiveLoop(ctx context.Context, replConn *pgconn.PgConn, dec
 			}
 			ev, emit, err := decoder.Decode(logmsg)
 			if err != nil {
-				return err
+				return &decodeError{err}
 			}
 			if emit {
 				ev.ReadAt = readAt

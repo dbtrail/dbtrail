@@ -20,6 +20,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/dbtrail/dbtrail/internal/event"
+	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/pgdelta"
 )
 
@@ -290,16 +291,16 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		return full("the delta beside the previous file was written for another file", nil)
 	}
 
-	keyCols := make([]string, len(in.PKCols))
-	for i, c := range in.PKCols {
-		keyCols[i] = c.Name
-	}
+	keyCols := pgKeyNames(in.PKCols)
 	keys := make([]string, 0, len(fold.Changes))
 	for k := range fold.Changes {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	stepAt := time.Now()
+	// The file's key index, built here when it has none (#3085): this
+	// update pays for it once, and says so (lookup_index_built_ms).
+	steps.indexBuilt = pgdelta.EnsureKeyIndex(ctx, in.Schema, in.Table, src, keyCols, in.DuckDBTuning)
 	positions, err := pgdelta.BasePositionsOf(ctx, duck, src, keyCols, keys)
 	steps.positions = time.Since(stepAt)
 	if err != nil {
@@ -455,6 +456,8 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		if ferr == nil {
 			if ferr = os.Rename(folded, dst); ferr != nil {
 				os.Remove(folded)
+			} else {
+				pgdelta.WriteKeyIndexBeside(ctx, in.Schema, in.Table, dst, keyCols, in.DuckDBTuning)
 			}
 		}
 		if ferr != nil {
@@ -511,7 +514,8 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 	if err != nil {
 		return failed(fmt.Errorf("carry %s.%s forward beside its delta: %w", in.Schema, in.Table, err))
 	}
-	made = append(made, dst)
+	pgdelta.CarryKeyIndex(src, dst, linked, in.Schema, in.Table)
+	made = append(made, dst, pgdelta.KeyIndexPath(dst))
 	// Read back as a whole chain that ends at this pair: a pair before that
 	// did not arrive would publish the table as it was before it.
 	names, err := pgPairBeside(dst)
@@ -540,6 +544,17 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 	return true, nil
 }
 
+// pgKeyNames is the names of a PostgreSQL table's key columns, in the
+// order its key is joined in (the table's): what BasePositionsOf asks the
+// key index for, and what the index is built on.
+func pgKeyNames(pk []metadata.ColumnMeta) []string {
+	names := make([]string, len(pk))
+	for i, c := range pk {
+		names[i] = c.Name
+	}
+	return names
+}
+
 // pgPairSteps is how long each step of writePGPair took, for its lines: the
 // steps of one table, in the order they run, and the table's start for the
 // whole. A step that did not run is 0. The steps do not overlap, so with
@@ -548,7 +563,8 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 //   - fetch: reading the window's changes from the index (and its archives);
 //   - fold: folding them into one change per key, in this process;
 //   - positions: finding the changed keys' rows in the table file
-//     (pgdelta.BasePositionsOf: a pass over the file's key columns for a
+//     (pgdelta.BasePositionsOf: through the file's key index, built first
+//     when the file has none, or a pass over the file's key columns for a
 //     NULL, unless the file is remembered, and the join);
 //   - pair_write: writing the window's pair;
 //   - carry: linking the pairs before into the new folder;
@@ -560,9 +576,12 @@ type pgPairSteps struct {
 	fold  time.Duration
 
 	positions time.Duration
-	pairWrite time.Duration
-	carry     time.Duration
-	foldPair  time.Duration
+	// indexBuilt is the part of positions spent building the file's key
+	// index, on the update that built it; zero on every other.
+	indexBuilt time.Duration
+	pairWrite  time.Duration
+	carry      time.Duration
+	foldPair   time.Duration
 }
 
 // attrs is the steps as a log line's fields, in milliseconds, and total_ms
@@ -573,6 +592,9 @@ func (s pgPairSteps) attrs(ending bool) []any {
 		"fetch_ms", s.fetch.Milliseconds(), "fold_ms", s.fold.Milliseconds(),
 		"positions_ms", s.positions.Milliseconds(), "pair_write_ms", s.pairWrite.Milliseconds(),
 		"carry_ms", s.carry.Milliseconds(),
+	}
+	if s.indexBuilt > 0 {
+		a = append(a, "lookup_index_built_ms", s.indexBuilt.Milliseconds())
 	}
 	if ending {
 		a = append(a, "fold_pair_ms", s.foldPair.Milliseconds())
@@ -1058,5 +1080,6 @@ func pgCarryForward(ctx context.Context, srcPath, snapshotDir, schema, table str
 		undo()
 		return false, nil, err
 	}
+	pgdelta.CarryKeyIndex(srcPath, filepath.Join(snapshotDir, schema, table+".parquet"), linked, schema, table)
 	return linked, delta, nil
 }

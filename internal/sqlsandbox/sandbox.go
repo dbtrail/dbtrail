@@ -270,6 +270,36 @@ type Session struct {
 	// not fit anywhere (a CH-benCHmark Q5 that filled 351 GB of spill and
 	// answered in 5 s in the written order).
 	KeepJoinOrder bool
+	// JoinNDV turns the join check on (joinguard.go): the source's count of
+	// distinct values of each column, by lowercased name, which the copy
+	// does not have. Before the statement runs, its plan is read; a join
+	// estimated far past its inputs has the statement planned again in the
+	// order written, run in that order when that plan has none, and refused
+	// with a JoinTooBigError, nothing run, when it has one too. Nil: no
+	// check, as before. Only the PostgreSQL port sets it, for a connection
+	// that can send a refused statement to its source. With KeepJoinOrder
+	// set, only the order written is planned: a join estimated far past its
+	// inputs there refuses the statement, and nothing else changes.
+	//
+	// A pointer, so Session stays comparable (its callers compare sessions
+	// with ==): two sessions are the same only with the same counts.
+	JoinNDV *JoinCounts
+	// RetryOutOfMemoryInWrittenOrder runs a statement that failed with the
+	// engine's out of memory error in the copy's own join order once more
+	// in the order written, in the same slot and within what is left of its
+	// time, before the error is returned (oomretry.go): Result says so with
+	// WrittenOrderRetry, and an error of both attempts is the first's
+	// QueryError with WrittenOrderRetry set. Only the PostgreSQL port sets
+	// it; the MySQL port and the SQL page get the engine's error as before.
+	RetryOutOfMemoryInWrittenOrder bool
+	// SkipCommonSubplan runs the statement with DuckDB's common_subplan
+	// optimizer off. That optimizer materializes a subplan a statement reads
+	// twice; over a view of the copy it wrote the whole view to disk: the
+	// CH-benCHmark's Q17, which reads order_line twice, wrote 59 million rows
+	// (about 3.3 GB) and took 19.8 s, and 3.4 s with it off, with the same
+	// answer. Only the PostgreSQL port sets it; the MySQL port and the SQL
+	// page keep it on.
+	SkipCommonSubplan bool
 	// PostgresRules runs the statement by PostgreSQL's rules where the
 	// engine's session decides the answer (#2786), for the copy of a
 	// PostgreSQL source: NULL sorts as the largest value (last ascending,
@@ -278,6 +308,11 @@ type Session struct {
 	// is the one written for MySQL. Division by zero is not covered: the
 	// copy answers NULL where PostgreSQL fails the statement.
 	PostgresRules bool
+	// TrimPadded reads the views' char(n) columns without their padding
+	// (views.WithPaddingTrimmed). Only the PostgreSQL port sets it: the SQL
+	// page, the dashboards and a downloaded script keep the stored value.
+	// Read where the views are built, so it does not travel to the worker.
+	TrimPadded bool
 	// PostgresNames heads a result column the statement gives no name of
 	// its own the way PostgreSQL does (#2803): `count` for count(*), the
 	// function's name for a call, the type's for a cast of an expression,
@@ -450,6 +485,16 @@ type Result struct {
 	Elapsed        time.Duration `json:"elapsed_ns"`
 	// Phases is where the time went, for the measurement #2026 asks for.
 	Phases Phases `json:"phases"`
+	// JoinOrderWritten: the join check (Session.JoinNDV) ran the statement
+	// in the order written. JoinCheckSkipped: why the check could not be
+	// made, when it was asked for and could not; the statement ran as it
+	// would without it.
+	JoinOrderWritten bool   `json:"-"`
+	JoinCheckSkipped string `json:"-"`
+	// WrittenOrderRetry is WrittenOrderRetryOK when the statement ran out of
+	// memory in the copy's join order and this is its answer in the order
+	// written (Session.RetryOutOfMemoryInWrittenOrder), "" otherwise.
+	WrittenOrderRetry string `json:"-"`
 	// Note is a sentence the caller adds for the reader, set by the parent
 	// and never by the worker (#2210: the answer came from an earlier copy).
 	Note string `json:"-"`
@@ -556,6 +601,31 @@ type MayHaveChangedError struct{ Reason string }
 
 func (e *MayHaveChangedError) Error() string { return e.Reason }
 
+// JoinCounts is what the join check reads (Session.JoinNDV): NDV, the
+// source's count of distinct values of each column by lowercased name. Not
+// changed once given to a Session.
+type JoinCounts struct {
+	NDV map[string]float64
+}
+
+// joinNDV is s's counts for the worker, nil for no check.
+func (s Session) joinNDV() map[string]float64 {
+	if s.JoinNDV == nil {
+		return nil
+	}
+	return s.JoinNDV.NDV
+}
+
+// JoinTooBigError: the statement was not run because the caller asked for
+// the join check (Session.JoinNDV) and the copy's plan of it has a join
+// estimated far past its inputs both in the copy's join order and in the
+// order written (joinguard.go). Reason names the joins. A decision about the
+// statement made before it ran, not a fault of the copy: the PostgreSQL port
+// sends it to the source.
+type JoinTooBigError struct{ Reason string }
+
+func (e *JoinTooBigError) Error() string { return e.Reason }
+
 // BehindSourceError: the statement was not run because its server has a
 // limit on how far behind the source the copy may answer (#2777), and the
 // data the statement would read is further behind than that, or how far
@@ -574,9 +644,29 @@ func (e *BehindSourceError) Error() string { return e.Reason }
 // and failed. Message is DuckDB's own text: a Permission Error for a path
 // outside the copy, an Out of Memory Error past the cap, a Binder Error for
 // an unknown column.
-type QueryError struct{ Message string }
+type QueryError struct {
+	Message string
+	// WrittenOrderRetry is what the retry in the order written
+	// (Session.RetryOutOfMemoryInWrittenOrder) did with an out-of-memory
+	// error: WrittenOrderRetryFailed when the second run ran out of memory
+	// or time too (Message is the first run's, with a sentence that says
+	// so), or one of the WrittenOrderRetrySkipped* names when it was not run
+	// again. "" otherwise.
+	WrittenOrderRetry string
+	// ranWrittenOrder: the join check ran the statement in the order
+	// written, as the worker's answer said, or its stderr when the kernel
+	// stopped it. For writtenOrderRetryWanted.
+	ranWrittenOrder bool
+}
 
 func (e *QueryError) Error() string { return e.Message }
+
+// engineError is the QueryError of a worker's answer whose error is the
+// engine's (errQuery): its text, and the join order it ran in, which the
+// retry in the order written reads (oomretry.go).
+func engineError(out wireResult, spill spillSpec, noSpill error) *QueryError {
+	return &QueryError{Message: spillCapMessage(out.Error.Message, spill, noSpill), ranWrittenOrder: out.JoinOrder == joinOrderWritten}
+}
 
 // TimeoutError: the worker ran past Limits.Timeout and was killed.
 type TimeoutError struct {
@@ -866,6 +956,10 @@ type Runner struct {
 	// afterSpoolDir is a test hook that receives a statement's result-file
 	// folder once it is made, before the job is written.
 	afterSpoolDir func(dir string)
+	// beforeWrittenOrderRetry is a test hook called once a first attempt of
+	// a statement that asked for the retry in the order written failed,
+	// before the retry is decided (oomretry.go).
+	beforeWrittenOrderRetry func()
 }
 
 // New builds a Runner.
@@ -1411,7 +1505,9 @@ func (s *Slot) Run(ctx context.Context, job Job) (Result, error) {
 	}
 	start := time.Now()
 	ran = true
-	res, err := s.r.spawn(ctx, job, job.Limits.withDefaults(s.r.limits))
+	// Run again in the order written, in this slot, when it ran out of
+	// memory in the copy's own (Session.RetryOutOfMemoryInWrittenOrder).
+	res, err := s.r.runWithWrittenOrderRetry(ctx, job, job.Limits.withDefaults(s.r.limits))
 	if err == nil {
 		res.Phases.Total = time.Since(start)
 	}
@@ -1656,6 +1752,7 @@ func marshalJob(job Job, limits Limits, spill spillSpec, spool string, more bool
 	return json.Marshal(wireJob{
 		CopyDirs: allowedDirs(job.CopyDirs), ViewsSQL: viewsSQL, AskViews: asking, SQL: job.SQL, NoFileReaders: job.NoFileReaders, Schema: job.Schema,
 		TimeZone: job.Session.TimeZone, MySQLClock: job.Session.MySQLClock, SelectLimit: job.Session.SelectLimit, KeepJoinOrder: job.Session.KeepJoinOrder, PostgresRules: job.Session.PostgresRules, PostgresNames: job.Session.PostgresNames,
+		JoinNDV: job.Session.joinNDV(), SkipCommonSubplan: job.Session.SkipCommonSubplan,
 		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
 		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes, More: more,
@@ -1941,7 +2038,9 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 		if w.oomKilled {
 			// The kernel stopped the worker at its own ceiling (#2226): the
 			// statement ran out of memory, the worker did not fail.
-			return Result{}, &QueryError{Message: oomFenceMessage}
+			// The worker said on stderr whether the join check had it run
+			// in the order written (joinOrderWrittenLine).
+			return Result{}, &QueryError{Message: oomFenceMessage, ranWrittenOrder: strings.Contains(w.stderr.text(), joinOrderWrittenLine)}
 		}
 		if waitErr != nil {
 			err = fmt.Errorf("%w (no result: %v)", waitErr, err)
@@ -1955,9 +2054,11 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 		case errRefused:
 			return Result{}, &RefusedError{Reason: out.Error.Message}
 		case errQuery:
-			return Result{}, &QueryError{Message: spillCapMessage(out.Error.Message, spill, noSpill)}
+			return Result{}, engineError(out, spill, noSpill)
 		case errTooLarge:
 			return Result{}, ErrResultTooLarge
+		case errJoinTooBig:
+			return Result{}, &JoinTooBigError{Reason: out.Error.Message}
 		case errSpool:
 			// The result file could not be written (a full disk, its folder
 			// gone): the server's trouble, not the statement's. Answered as a
@@ -1970,6 +2071,7 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 	}
 	res := Result{Columns: out.Columns, Rows: out.Rows, Truncated: out.Truncated,
 		TruncatedCells: out.TruncatedCells, Elapsed: time.Duration(out.ElapsedNS),
+		JoinOrderWritten: out.JoinOrder == joinOrderWritten, JoinCheckSkipped: out.JoinCheckSkipped,
 		Phases: Phases{
 			Open: time.Duration(out.OpenNS), Lockdown: time.Duration(out.LockdownNS),
 			Views: time.Duration(out.ViewsNS), Query: time.Duration(out.ElapsedNS),

@@ -1,6 +1,8 @@
 package consoleapp
 
 import (
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -30,6 +32,26 @@ func TestPGBaselineConfig(t *testing.T) {
 	}
 	if cfg.OutputDir != "/out" || cfg.Compression != "zstd" {
 		t.Errorf("output/compression wrong: %q / %q", cfg.OutputDir, cfg.Compression)
+	}
+}
+
+// The full read the daemon starts copies four tables at once, as the MySQL
+// one does (#3115). Zero would mean one connection to the source per CPU of
+// the machine DBTrail runs on.
+func TestPGBaselineConfig_tablesAtOnce(t *testing.T) {
+	cfg, err := pgBaselineConfig(console.BaselineRequest{
+		SourceDSN: "postgres://repl:secret@pg:5432/appdb", Flavor: "postgres",
+	}, "/out")
+	if err != nil {
+		t.Fatalf("pgBaselineConfig: %v", err)
+	}
+	if cfg.Parallelism != 4 {
+		t.Errorf("the daemon's PostgreSQL full read copies %d tables at once, want 4", cfg.Parallelism)
+	}
+	// The MySQL full read's number, which this one follows.
+	args := buildConsoleMydumperArgs("h", 3306, "u", nil, "/dump", "", false, nil, false)
+	if i := slices.Index(args, "--threads"); i < 0 || i+1 >= len(args) || args[i+1] != strconv.Itoa(cfg.Parallelism) {
+		t.Errorf("the MySQL full read's --threads is not %d: %v", cfg.Parallelism, args)
 	}
 }
 

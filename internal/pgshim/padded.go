@@ -29,8 +29,8 @@ import (
 // marked too.
 //
 // Not told apart: a domain over char(n). The snapshot records the domain's
-// own type, not what it is made of, so such a column is read as any other
-// type of the user's (an enum, say) and is not marked.
+// own type, not what it is made of, so such a column is not marked; a
+// statement that reads it goes by the rule of user_types.go instead.
 
 // The marks, in place of the copy's type. Each holds CHAR, so typeIsText
 // takes a marked column for text, as the copy holds it.
@@ -96,13 +96,36 @@ func screenTypes(tables []CatalogTable, read func(*CatalogTable) bool) map[strin
 	out := map[string][]string{}
 	for i := range tables {
 		t := &tables[i]
+		// The table is in the catalog, by name and by schema.name (paddedExempt).
+		out[listedKey+strings.ToLower(t.Name)] = []string{relType}
+		out[listedKey+strings.ToLower(t.Schema+"."+t.Name)] = []string{relType}
 		for _, c := range t.Columns {
 			n := strings.ToLower(c.Name)
 			typ := strings.ToUpper(c.Type)
 			if m := sourceMark(c); m != "" && (read == nil || read(t)) {
-				typ = m
+				if m == charNType && c.TrimmedOnCopy {
+					// Read by the view without its padding: text to the
+					// screen, under trimmedUse's own rule (trimmed.go). The
+					// table is still named, for what reaches the column
+					// without its name (paddedRead).
+					out[trimmedKey] = []string{relType}
+					out[trimmedKey+n] = []string{relType}
+					out[relKey+strings.ToLower(t.Name)] = []string{relType}
+				} else {
+					typ = m
+				}
 			}
 			out[n] = append(out[n], typ)
+			if onlyTextOnCopy(c) && (read == nil || read(t)) {
+				out[onlyCopyTextKey] = []string{relType}
+				out[onlyCopyTextKey+n] = []string{relType}
+			}
+			if !provenNotPadded(c) && (read == nil || read(t)) {
+				out[starUnprovenKey] = []string{relType}
+			}
+			if userTypeColumn(c) && (read == nil || read(t)) {
+				markUserType(out, t.Name, n)
+			}
 			if paddedType(typ) {
 				// The table itself: its name, or its alias, written as a
 				// value stands for every column of it (paddedUse).
@@ -177,6 +200,17 @@ func paddedKind(types map[string][]string, name string) (padded, sized bool) {
 	return padded, padded && sized
 }
 
+// paddedArray reports whether a column of that name is an array of a padded
+// type. Only a plain char(n) is known to group the same on both sides.
+func paddedArray(types map[string][]string, name string) bool {
+	for _, t := range types[name] {
+		if paddedType(t) && strings.HasSuffix(t, "[]") {
+			return true
+		}
+	}
+	return false
+}
+
 // paddedAmong reports whether any column of the screen's types is padded
 // on the source, and whether every such column is a char(n).
 func paddedAmong(types map[string][]string) (padded, sized bool) {
@@ -211,9 +245,11 @@ func paddedWhat(name string, sized bool) string {
 // nothing else (no subquery, no WITH, no UNION, INTERSECT or EXCEPT), with
 // or without a table before it and an alias after it. There PostgreSQL and
 // the copy write the same padded value, and nothing can read it again under
-// another name. Named anywhere else (a comparison, a join, GROUP BY, ORDER
-// BY, a function, ||, a cast, a CASE, an aggregate, USING), the statement is
-// the source's. The same holds for a star: it stands for the padded column
+// another name, or, for a char(n), as a whole key of that statement's GROUP
+// BY (#3219): every value of a char(n) has the same length, so the groups
+// are the same. Named anywhere else (a comparison, a join, ORDER BY, a
+// function, ||, a cast, a CASE, an aggregate, USING, an expression in GROUP
+// BY), the statement is the source's. The same holds for a star: it stands for the padded column
 // too, so it is left to the copy only as a whole item of that one select
 // list.
 //
@@ -222,10 +258,49 @@ func paddedWhat(name string, sized bool) string {
 // equal are two on the copy: beside one of those, DISTINCT and GROUP BY are
 // the source's as well.
 func paddedUse(toks []rtToken, types map[string][]string) string {
+	return paddedUseOrdered(toks, types, true)
+}
+
+// paddedUseOrdered is paddedUse; mainOrder as in trimmedUse.
+func paddedUseOrdered(toks []rtToken, types map[string][]string, mainOrder bool) string {
+	if why := userTypeUse(toks, types); why != "" {
+		return why
+	}
+	if why := paddedRead(toks, types, true); why != "" {
+		return why
+	}
+	return trimmedUse(toks, types, mainOrder)
+}
+
+// paddedRead is paddedUse. exemptions false reads the statement without any
+// of the exemptions of padded_star.go and padded_lists.go, to tell whether
+// one of them is what let it pass (paddedForNoSource).
+func paddedRead(toks []rtToken, types map[string][]string, exemptions bool) string {
 	anyPadded, allSized := paddedAmong(types)
 	if !anyPadded {
-		return ""
+		// A char(n) the view trims is reached without its name as any other
+		// (NATURAL JOIN, TABLE, a list of column names, the table written as
+		// a value): those are refused below. Its own uses are trimmedUse's.
+		if _, ok := types[trimmedKey]; !ok {
+			return ""
+		}
+		allSized = true
 	}
+
+	if why := keywordColumnList(toks); why != "" {
+		return why + " on a copy that holds a char(n) column"
+	}
+
+	// The stars whose padded columns the statement never reads (padded_star.go).
+	var exempt map[int]bool
+	// And the later items of a FROM list and the stars of EXISTS (SELECT *
+	// ...), which read no column (padded_lists.go).
+	lists := false
+	if exemptions {
+		exempt = paddedExempt(toks, types)
+		lists = listsProven(toks, types)
+	}
+	exists := &existsStars{}
 
 	// One SELECT and nothing else, and where its select list's items are.
 	selects, sel := 0, -1
@@ -311,6 +386,65 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 		}
 		return false, -1
 	}
+	// keys are the keys of the statement's GROUP BY, each [start, end), when
+	// it is one SELECT and nothing else.
+	var keys [][2]int
+	if plain {
+		depth := 0
+	clause:
+		for g, t := range toks {
+			switch {
+			case t.kind == rtOp && (t.text == "(" || t.text == "["):
+				depth++
+			case t.kind == rtOp && (t.text == ")" || t.text == "]"):
+				depth--
+			case depth == 0 && t.kind == rtWord && t.text == "group" && g+1 < len(toks) && toks[g+1].kind == rtWord && toks[g+1].text == "by":
+				start, in := g+2, 0
+				for j := g + 2; ; j++ {
+					if j >= len(toks) {
+						keys = append(keys, [2]int{start, j})
+						break clause
+					}
+					u := toks[j]
+					switch {
+					case u.kind == rtOp && (u.text == "(" || u.text == "["):
+						in++
+					case u.kind == rtOp && (u.text == ")" || u.text == "]"):
+						in--
+					case in == 0 && u.kind == rtOp && u.text == ",":
+						keys = append(keys, [2]int{start, j})
+						start = j + 1
+					case in == 0 && (u.kind == rtOp && u.text == ";" || u.kind == rtWord && groupEnd[u.text]):
+						keys = append(keys, [2]int{start, j})
+						break clause
+					}
+				}
+			}
+		}
+	}
+	// wholeKey reports whether the token at i is a whole key of GROUP BY:
+	// [name .]... <the token>, nothing else. Every value of a char(n) is
+	// padded to the same length, so the padded values PostgreSQL finds equal
+	// are the ones the copy does, and the groups are the same (#3219). Not
+	// so for a bpchar without a length (sized).
+	wholeKey := func(i int) bool {
+		for _, k := range keys {
+			if i < k[0] || i >= k[1] {
+				continue
+			}
+			if i != k[1]-1 {
+				return false
+			}
+			j := k[0]
+			for ; j < i; j += 2 {
+				if !name(toks[j]) || !isOpTok(toks, j+1, ".") {
+					return false
+				}
+			}
+			return j == i
+		}
+		return false
+	}
 	at := func(i int) rtToken {
 		if i < 0 || i >= len(toks) {
 			return rtToken{kind: rtOp}
@@ -391,7 +525,7 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 				// A table that holds a padded column, not before a dot: named
 				// in FROM (its alias is noted), or written as a value.
 				p := at(i - 1)
-				if !(p.kind == rtWord && (p.text == "from" || p.text == "join" || p.text == "table") || isOpTok(toks, i-1, ".")) {
+				if !(p.kind == rtWord && (p.text == "from" || p.text == "join" || p.text == "table") || isOpTok(toks, i-1, ".") || lists && fromListItem(toks, i)) {
 					return fmt.Sprintf("the table %q, which holds a char(n) column, written where a value or a second table of a list stands", n) + otherRows
 				}
 				j := i + 1
@@ -400,13 +534,28 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 				}
 				if a := at(j); a.kind == rtQuoted || a.kind == rtWord && !aliasStop[a.text] {
 					relAlias[strings.ToLower(a.text)] = j
+				} else if a.kind == rtWord && (j > i+1 || !fromFollower[a.text]) {
+					// A name PostgreSQL takes as the table's alias and this
+					// reads as a keyword (FROM codes last): its uses as the
+					// whole row could not be told from the keyword's.
+					return fmt.Sprintf("the table %q, which holds a char(n) column, given the name %q, which the port reads as a keyword", n, a.text) + otherRows
 				}
 			}
 			padded, sized := paddedKind(types, n)
 			if !padded {
 				continue
 			}
+			// Read without exemptions (paddedForNoSource), a cut counts as
+			// any other use, so a connection with no source runs the whole
+			// screen on it.
+			if exemptions && paddedCut(toks, i) {
+				continue
+			}
 			whole, alias := wholeItem(i)
+			if !whole && sized && !paddedArray(types, n) && wholeKey(i) {
+				// A key of GROUP BY: the same groups on both sides.
+				continue
+			}
 			if !whole {
 				return paddedWhat(n, sized) + ", used where its trailing blanks count (PostgreSQL ignores them, the copy compares them)"
 			}
@@ -423,6 +572,9 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 			}
 			if isOpTok(toks, i-1, "(") && isOpTok(toks, i+1, ")") && at(i-2).kind == rtWord && at(i-2).text == "count" && !isOpTok(toks, i-3, ".") {
 				// count(*) counts rows, whatever they hold.
+				continue
+			}
+			if exempt[i] || lists && exists.star(toks, i) {
 				continue
 			}
 			if whole, _ := wholeItem(i); !whole {
@@ -449,6 +601,12 @@ func paddedUse(toks []rtToken, types map[string][]string) string {
 		}
 	}
 	return ""
+}
+
+// groupEnd are the words that end a GROUP BY's list of keys.
+var groupEnd = map[string]bool{
+	"having": true, "order": true, "limit": true, "offset": true, "window": true, "fetch": true, "for": true,
+	"union": true, "intersect": true, "except": true,
 }
 
 // catalogUnread is the veto of a statement that reads a table while the
@@ -492,10 +650,22 @@ func (s *session) warnCatalogUnread() {
 // of a padded column, no star and no name written with Unicode escapes.
 // types are every table's (the statement's tables are not read either).
 func paddedInText(text string, types map[string][]string) string {
+	if why := userTypeInText(text, types); why != "" {
+		return why
+	}
+	low := strings.ToLower(text)
+	if _, ok := types[trimmedKey]; ok {
+		// A char(n) the view trims is safe only in the forms trimmedUse
+		// reads, and this text is not read.
+		for name := range types {
+			if n, ok := strings.CutPrefix(name, trimmedKey); ok && n != "" && strings.Contains(low, n) {
+				return fmt.Sprintf("the char(n) column %q, named in a statement the port does not read whole", n)
+			}
+		}
+	}
 	if padded, _ := paddedAmong(types); !padded {
 		return ""
 	}
-	low := strings.ToLower(text)
 	if strings.Contains(low, "*") || strings.Contains(low, "u&") {
 		return "a statement the port does not read whole, with a * or a name written with escapes, on a copy that holds a char(n) column"
 	}
@@ -524,6 +694,9 @@ func paddedInText(text string, types map[string][]string) string {
 // (paddedRefusal, describeWith).
 func (s *session) paddedVeto(text string) string {
 	s.catalogBusy = ""
+	if s.argsPadded {
+		return "an argument of a declared type the copy would read as plain text (a bpchar, a domain, inet...)"
+	}
 	if s.bound == nil || s.bound.Catalog == nil {
 		return ""
 	}
@@ -542,7 +715,21 @@ func (s *session) paddedVeto(text string) string {
 	case unlexed != "":
 		veto = paddedInText(text, types)
 	default:
-		veto = paddedUse(toks, types)
+		if s.canFallBack() {
+			veto = paddedUse(toks, types)
+		} else {
+			veto = paddedForNoSource(toks, types)
+		}
+		if veto == "" && s.argsBound && s.screened != "" {
+			// A portal's arguments are written into the text as strings, which
+			// trimmedUse may let through ('ab'), but the statement compares the
+			// column with a parameter: its Describe, written with NULLs, was
+			// vetoed and announced no rows, and the source decides it whatever
+			// the value. Read as the client wrote it, it is vetoed the same.
+			if tmpl, unlexed := lexSQL(s.screened); unlexed == "" {
+				veto = trimmedUse(tmpl, types, s.canFallBack())
+			}
+		}
 	}
 	if veto != "" {
 		if unread {
@@ -551,6 +738,22 @@ func (s *session) paddedVeto(text string) string {
 		s.logger.Debug("pgshim: not answered by the copy", "construct", veto)
 	}
 	return veto
+}
+
+// paddedForNoSource is paddedUse for a connection with no source to fall back
+// on. A statement that passes only by an exemption (a star nothing reads, a
+// later item of a FROM list, the star of an EXISTS) passes the whole screen
+// too: it was refused before, and the copy must not now answer it with text
+// sorted its own way.
+func paddedForNoSource(toks []rtToken, types map[string][]string) string {
+	veto := paddedUseOrdered(toks, types, false)
+	if padded, _ := paddedAmong(types); veto != "" || !padded {
+		return veto
+	}
+	if len(paddedExempt(toks, types)) > 0 || paddedRead(toks, types, false) != "" {
+		return screenWith(toks, types, false, true)
+	}
+	return ""
 }
 
 // paddedError is the error of a statement paddedVeto keeps from the copy.

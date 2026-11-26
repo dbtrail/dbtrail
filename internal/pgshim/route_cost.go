@@ -20,7 +20,9 @@ import (
 // with EXPLAIN (FORMAT JSON) over the connection the port forwards on, and
 // goes to the copy only when its plan is expensive there: a total cost of at
 // least CostThreshold, or a sequential scan estimated at ScanRows rows or
-// more. Anything else is answered by the source (ReasonCheapPlan). A plan
+// more. Anything else is answered by the source (ReasonCheapPlan), and so is
+// an expensive statement whose result the plan estimates above the copy's
+// row cap (ReasonResultOverRowCap): the copy would refuse it. A plan
 // that cannot be had (EXPLAIN refused, the connection lost, a statement it
 // would not be safe to ask about) sends the statement to the source too
 // (ReasonExplainFailed), which then answers it, its own error included. This
@@ -57,6 +59,12 @@ type CostPolicy struct {
 	// it without asking the source again (rememberedVerdict); 0 is
 	// DefaultCostRemember, a negative value remembers nothing.
 	Remember time.Duration
+	// RowCap is the most rows the copy returns for one statement (the
+	// host's cap: a result with more is refused, not cut); 0 when the host
+	// gives none. A statement the plan sends to the copy whose result the
+	// plan estimates above it is not tried there: the source answers it
+	// (ReasonResultOverRowCap, #3154).
+	RowCap int64
 }
 
 // DefaultCostRemember is how long a connection keeps a plan's verdict: past
@@ -94,11 +102,28 @@ func (p CostPolicy) toCopy(pl pgPlan) (bool, string) {
 	return false, fmt.Sprintf("plan cost %.0f below %.0f, no sequential scan over %d rows", pl.cost, p.CostThreshold, p.ScanRows)
 }
 
-// pgPlan is what the policy reads of a plan: the top node's Total Cost, and
-// the most rows any Seq Scan node, at any depth, is estimated to return.
+// overRowCap says why a plan the policy sends to the copy is not worth
+// trying there, "" when it is: the plan estimates the statement's result
+// (pgPlan.resultRows) above the copy's row cap, so the copy would run it and
+// refuse the result. It is the MySQL port's rule (internal/shim
+// resultOverRowCap, #2115), with PostgreSQL's plan.
+func (p CostPolicy) overRowCap(pl pgPlan) string {
+	if p.RowCap <= 0 || pl.resultRows <= float64(p.RowCap) {
+		return ""
+	}
+	return fmt.Sprintf("the plan returns about %.0f rows, over the copy's row cap of %d: not tried on the copy", pl.resultRows, p.RowCap)
+}
+
+// pgPlan is what the policy reads of a plan: the top node's Total Cost, the
+// most rows any Seq Scan node, at any depth, is estimated to return, and the
+// rows the statement is estimated to return when that estimate is one to
+// trust (resultEstimate), 0 when it is not.
 type pgPlan struct {
 	cost           float64
 	maxSeqScanRows float64
+	resultRows     float64
+	// oneTable: the plan reads one table and joins nothing (fastlane.go).
+	oneTable bool
 }
 
 // parsePGPlan reads EXPLAIN (FORMAT JSON)'s answer: an array with one object
@@ -128,7 +153,79 @@ func parsePGPlan(raw []byte) (pgPlan, error) {
 	if err := walkPGPlan(top, 1, &pl, 0); err != nil {
 		return pgPlan{}, err
 	}
+	pl.resultRows = resultEstimate(top)
+	pl.oneTable = readsOneTable(top)
 	return pl, nil
+}
+
+// resultEstimate is the plan's estimate of the rows the statement returns,
+// or 0 when there is none to trust. It is trusted for one shape, the one the
+// MySQL port trusts (readrouter Plan.ReadIsResult): one table read alone,
+// where every row the scan reads is a row of the result. That is a Seq Scan,
+// an Index Scan, an Index Only Scan or a Bitmap Heap Scan with no Filter
+// (nothing checked row by row: the table read whole, or an index read by key
+// or by range), under nothing but a Limit, a Sort, an Incremental Sort, a
+// Gather or a Gather Merge, none of which adds or drops a row beyond what
+// the top node already counts. The estimate is the top node's Plan Rows: a
+// LIMIT has cut it, and a Gather has counted every process.
+//
+// A plan asked for without values (GENERIC_PLAN, for a prepared statement
+// with parameters) is not judged by this at all: routeByCostPlan drops its
+// estimate.
+//
+// Any other plan has no estimate here, and the statement is tried on the
+// copy as before: a filter no index serves is a guess from an assumed
+// selectivity (a scan estimated at 221,203 rows that returns 1), and so are
+// a join's rows and the groups of an aggregate.
+func resultEstimate(top map[string]any) float64 {
+	rows, ok := top["Plan Rows"].(float64)
+	if !ok || rows < 0 {
+		return 0
+	}
+	node := top
+	for depth := 0; depth <= maxPlanDepth; depth++ {
+		switch node["Node Type"] {
+		case "Limit", "Sort", "Incremental Sort", "Gather", "Gather Merge":
+			list, _ := node["Plans"].([]any)
+			if len(list) != 1 {
+				return 0
+			}
+			child, ok := list[0].(map[string]any)
+			if !ok {
+				return 0
+			}
+			node = child
+		case "Seq Scan", "Index Scan", "Index Only Scan":
+			_, filtered := node["Filter"]
+			if _, more := node["Plans"]; filtered || more {
+				// A subplan or an init plan under it decides rows too.
+				return 0
+			}
+			return rows
+		case "Bitmap Heap Scan":
+			// Its children read the index; a Recheck Cond is the index's
+			// own condition, asked again of a page kept whole.
+			if _, filtered := node["Filter"]; filtered {
+				return 0
+			}
+			list, _ := node["Plans"].([]any)
+			for _, c := range list {
+				child, ok := c.(map[string]any)
+				if !ok {
+					return 0
+				}
+				// A subplan or an init plan under it decides rows too, as
+				// under the other scans.
+				if rel, _ := child["Parent Relationship"].(string); rel == "InitPlan" || rel == "SubPlan" {
+					return 0
+				}
+			}
+			return rows
+		default:
+			return 0
+		}
+	}
+	return 0
 }
 
 // maxPlanDepth bounds the walk: a plan nested deeper is not one PostgreSQL
@@ -321,6 +418,25 @@ func (s *session) routeByCostPlan(text string, generic bool) (d routeDecision, k
 		s.logger.Debug("pgshim: sent to the source", "reason", ReasonCheapPlan, "plan", why)
 		return routeDecision{RouteSource, ReasonCheapPlan}, true, nil, &pl
 	}
+	if generic {
+		// A plan asked for without the statement's values (a prepared
+		// statement with parameters) estimates by fixed guesses wherever a
+		// parameter stands: LIMIT $1 is taken to let a tenth of the rows
+		// through, an index condition on $1 a fixed share of the table. Its
+		// rows say nothing of what an execution returns, and the verdict is
+		// kept for as long as the prepared statement lives: no such plan
+		// sends a statement to the source for its size. It is tried on the
+		// copy, as before, which is what the MySQL port does with a LIMIT
+		// it cannot read (readrouter resultRows).
+		pl.resultRows = 0
+	}
+	if over := pol.overRowCap(pl); over != "" {
+		// The copy would run it and refuse its result for its size (#3154):
+		// the shape did not go to the copy by its plan.
+		s.pendingSide = nil
+		s.logger.Debug("pgshim: sent to the source", "reason", ReasonResultOverRowCap, "plan", over)
+		return routeDecision{RouteSource, ReasonResultOverRowCap}, true, nil, &pl
+	}
 	s.logger.Debug("pgshim: sent to the copy", "plan", why)
 	if s.src.any() && !s.knownValid && s.bound != nil && s.bound.CopyWait != nil {
 		// The copy will wait for the source's position (waitForCopy): read
@@ -504,7 +620,7 @@ func sourceUnreachable(perr *pgErr) bool {
 // which needs no source (waitForCopy).
 func (s *session) copyWhileUnreachable(why string) routeDecision {
 	s.logger.Debug("pgshim: the source cannot be asked for a plan; the copy answers", "why", why)
-	s.notice("Answered by the copy: the source could not be asked whether this statement is cheaper there (" + why + "), so routing by its plan is off for the moment.")
+	s.unreachableNote = "Answered by the copy: the source could not be asked whether this statement is cheaper there (" + why + "), so routing by its plan is off for the moment."
 	return routeDecision{RouteCopy, ReasonSourceUnreachable}
 }
 
@@ -584,8 +700,10 @@ func (s *session) costVerdictKey(text string) string {
 
 // routeByCostRemembered is routeByCost for a simple query, with the verdicts
 // the connection remembers: a remembered one is used without asking, and a
-// new one is kept when it may be.
-func (s *session) routeByCostRemembered(text string) (routeDecision, *pgErr) {
+// new one is kept when it may be. oneTable says the plan it decided by reads
+// one table and joins nothing (fastlane.go); false when it decided without
+// one, as by a remembered verdict, which is only ever the source's.
+func (s *session) routeByCostRemembered(text string) (d routeDecision, oneTable bool, stop *pgErr) {
 	pol := s.costPolicy()
 	keepFor := pol.remember()
 	key := ""
@@ -594,24 +712,29 @@ func (s *session) routeByCostRemembered(text string) (routeDecision, *pgErr) {
 		if v, ok := s.costVerdicts[key]; ok {
 			if time.Since(v.at) < keepFor {
 				s.logger.Debug("pgshim: routed by a remembered plan", "side", v.d.side, "reason", v.d.reason)
-				return v.d, nil
+				return v.d, false, nil
 			}
 			delete(s.costVerdicts, key)
 		}
 	}
 	d, keep, stop, pl := s.routeByCostPlan(text, false)
+	oneTable = pl != nil && pl.oneTable
 	// Only a verdict for the source is kept: the source answers by its own
 	// tables whatever happened to them since, while a kept verdict for the
 	// copy would send the shape there after its table was dropped and made
 	// again on the source, its old rows still on the copy (#2985); asking
 	// costs little next to a statement expensive enough for the copy.
-	if key != "" && stop == nil && keep && pl != nil && d.side == RouteSource && pol.clear(*pl) && valuesOnlyEqualed(text) {
+	//
+	// And only a cheap plan's: a statement sent to the source for the size
+	// of its result (ReasonResultOverRowCap) is an expensive one, and the
+	// same shape with another value may be one the copy should answer.
+	if key != "" && stop == nil && keep && pl != nil && d.side == RouteSource && d.reason == ReasonCheapPlan && pol.clear(*pl) && valuesOnlyEqualed(text) {
 		if s.costVerdicts == nil || len(s.costVerdicts) >= costVerdictsMax {
 			s.costVerdicts = map[string]costVerdict{}
 		}
 		s.costVerdicts[key] = costVerdict{d: d, at: time.Now()}
 	}
-	return d, stop
+	return d, oneTable, stop
 }
 
 // explainOnSource runs one EXPLAIN as a simple query on the source, outside

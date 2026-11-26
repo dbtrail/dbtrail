@@ -272,6 +272,13 @@ var docs = map[string]Doc{
 		Example: "false",
 		ReadBy:  "watch",
 	},
+	"BINTRAIL_BASELINE_REREAD_REFUSED_TABLES": {
+		Group:   "archives",
+		Text:    "When a scheduled snapshot update is refused for tables changed by a statement that leaves no row changes to apply (a TRUNCATE, a table dropped and created again, a change of its columns), watch reads only those tables again from the source and brings every table to one point, instead of reading the whole server. A table refused again before an update goes through, and a read that ends without a snapshot, take the full read as before, at most once a day, except a read that ran out of disk space, since a full read needs that space too. Set false to always take the full read.",
+		Default: "on",
+		Example: "false",
+		ReadBy:  "watch",
+	},
 	"BINTRAIL_KEY_INDEX": {
 		Group:   "archives",
 		Text:    "During a snapshot refresh that writes table deltas, finds the changed rows through a small key index file kept beside each table (<table>.keyidx), building it when missing, instead of scanning the whole table file. 0, false, no or off turns it off: every refresh scans the file and no key index is built.",
@@ -697,6 +704,13 @@ var docs = map[string]Doc{
 		Text:    "How many statements run on the copy at the same time, 1 to 64 (similar to innodb_thread_concurrency). Empty or 0 lets the router work it out from the cores and memory it may use, one statement per two cores; the rest wait their turn.",
 		Default: "worked out from the machine (one statement per two cores, limited by memory)",
 		Example: "8",
+		ReadBy:  "router",
+	},
+	"BINTRAIL_ROUTER_MAX_CONNECTIONS": {
+		Group:   "router",
+		Text:    "How many clients may be connected to the MySQL port at once, 1 to 1024. One more is refused with error 1040 (Too many connections), as a MySQL server at its max_connections does.",
+		Default: "256",
+		Example: "512",
 		ReadBy:  "router",
 	},
 	"BINTRAIL_ROUTER_MAX_WAIT": {

@@ -248,6 +248,10 @@ func TestRefresh_recordsItsCutOnlyWhenItCheckedTheArchives_2152(t *testing.T) {
 				t.Fatalf("read footer: %v", err)
 			}
 			rec := readRecord2152(t, filepath.Dir(filepath.Dir(p)))
+			// #3084: a MySQL refresh never writes PostgreSQL's run cut.
+			if _, err := os.Stat(filepath.Join(filepath.Dir(filepath.Dir(p)), reconstruct.PGRunCutFile)); !os.IsNotExist(err) {
+				t.Fatalf("a MySQL refresh left %s in its folder: %v", reconstruct.PGRunCutFile, err)
+			}
 			got, ok := rec["shop.orders"]
 			if ok != tc.want {
 				t.Fatalf("record = %v, want an entry for shop.orders: %v", rec, tc.want)

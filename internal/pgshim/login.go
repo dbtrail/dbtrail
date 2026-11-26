@@ -74,6 +74,16 @@ type Binding struct {
 	// type, and what the source recorded of each. Nil: such statements are
 	// refused.
 	Catalog func(ctx context.Context) ([]CatalogTable, error)
+	// CatalogStamp, when set, names the snapshot the copy reads now, read
+	// without one of the copy's workers: the catalog a connection keeps
+	// (catalogCacheFor) is read again as soon as it changes, not only once
+	// it is ten seconds old. Nil: it is kept the ten seconds.
+	CatalogStamp func(ctx context.Context) (string, error)
+	// CopyTableNames, when set, is the schema and name of each table a
+	// statement on the copy can read, read without one of the copy's workers:
+	// what the capture gate asks of every statement sent to the source, which
+	// must not wait behind the copy's reports. Nil: Catalog is read.
+	CopyTableNames func(ctx context.Context) ([][2]string, error)
 	// TimeTravel, when set, answers the time-travel statements of this
 	// connection (single-row _flashback and _snapshot AS OF, as the first
 	// mode serves them). It reads the index and the snapshot directly. Nil:
@@ -101,6 +111,12 @@ type Binding struct {
 	// not known to answer as PostgreSQL does (forward.go, route.go). Nil:
 	// those are answered as the port answers them without one.
 	Forward *Forward
+	// WrittenOrders, when set, is the statement shapes of the server that
+	// ran out of memory on the copy in its join order and answered in the
+	// order written, shared by its connections: their next statements run
+	// in the order written from the start (writtenorder.go). Nil remembers
+	// nothing.
+	WrittenOrders *WrittenOrders
 	// Routed, when set, is told which side answered each statement that
 	// reached the copy or the source, and why (route.go), for the port's
 	// status.
@@ -187,15 +203,45 @@ type RunOptions struct {
 	// and the source answers it (#3086). Without it a snapshot alone
 	// answers, as on a connection with nowhere else to send the statement.
 	NeedTails bool
+	// Trimmed are the names (lowercased) of the char(n) columns the screen
+	// took as read without their padding (trimmed.go): the host refuses the
+	// statement before running it, with a *sqlsandbox.MayHaveChangedError,
+	// when a table it reads holds one as a char(n) its view does not trim,
+	// and the source answers it. TrimmedUnknown among them: which ones could
+	// not be read.
+	Trimmed []string
+	// FastLane says the source's plan of the statement reads one table and
+	// joins nothing (fastlane.go): the host may run it on a worker it keeps
+	// for such statements, so it does not wait behind a report. False when
+	// there was no plan, and for a probe.
+	FastLane bool
+	// JoinNDV is the source's count of distinct values of each column, by
+	// lowercased name, for the copy's join check (sqlsandbox.Session.JoinNDV,
+	// joinstats.go): the host refuses the statement before running it, with
+	// a *sqlsandbox.JoinTooBigError, when its joins would explode in the
+	// copy's order and in the order written, and the source answers it. Set
+	// only on a connection that can send a statement to its source, for the
+	// tables the statement reads, and only for one that can join two inputs.
+	// Nil: no check.
+	JoinNDV map[string]float64
+	// KeepJoinOrder runs the statement with its joins in the order written
+	// (sqlsandbox.Session.KeepJoinOrder): its shape ran out of memory in the
+	// copy's own order before and answered in this one (writtenorder.go).
+	KeepJoinOrder bool
 }
+
+// TrimmedUnknown, among RunOptions.Trimmed, says which columns a statement
+// takes as trimmed could not be read: any table it reads that holds a
+// trimmed char(n) refuses it (console.PGTrimmedUnknown).
+const TrimmedUnknown = "\x00"
 
 // runOptions are the options the connection's next statement runs in.
 func (s *session) runOptions() RunOptions {
-	return RunOptions{Schema: s.schema(), TimeZone: s.set.zone.duck}
+	return RunOptions{Schema: s.schema(), TimeZone: s.set.zone.duck, FastLane: s.fastLane}
 }
 
 // handleLoginConn runs one connection of a port with a login of its own.
-func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, cancels *cancelRegistry, logger *slog.Logger) {
+func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, cancels *cancelRegistry, logger *slog.Logger, place *connPlace) {
 	// The first defer, so the last to run: one connection's panic is logged
 	// with its stack and ends that connection, not the process the port
 	// shares with every other one.
@@ -247,11 +293,21 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, c
 	if database == "" {
 		database = user
 	}
+	place.spoke.Store(true)
 	password, err := scramExchange(be, encrypted, pt.bindingData())
 	if err != nil {
 		// Debug: psql itself closes here once, to ask for the password and
 		// connect again. A malformed exchange was told why.
 		logger.Debug("pgshim: no password was proved", "err", err, "user", user, "remote", c.RemoteAddr())
+		return
+	}
+	// The client's proof reached the port: it has done its part of the login
+	// and keeps its place from here, while the proof is checked and its
+	// server is opened, however long that takes (prelogin.go). Unless its
+	// place went to a newer connection first: its socket is closed, and its
+	// proof is not checked, so nothing is logged as a wrong password.
+	if !place.loggedIn() {
+		logger.Info("pgshim: "+errLostPlace.Error(), "user", user, "database", database, "remote", c.RemoteAddr())
 		return
 	}
 	bound, refused := cfg.Login(connCtx, user, database, password, func() { _ = c.Close() })
@@ -320,6 +376,7 @@ var loginTimeout = 30 * time.Second
 // runFree answers a statement that is not time travel on the copy.
 func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][][]byte, tag string, perr *pgErr) {
 	started := time.Now()
+	s.joinCheck, s.oomRetry, s.writtenOrder = "", "", ""
 	// A session time zone the copy could not be asked about when it was set
 	// is asked about now (settings.go), before the statement's own context:
 	// the question has its own, and the statement's must stay the one a
@@ -351,8 +408,10 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	if err == nil {
 		// A char(n) column used where the copy counts its padding (#3068):
 		// the source's, or refused where nothing is sent there.
-		if refusal := s.paddedRefusal(text); refusal != nil {
-			return nil, nil, nil, "", refusal
+		if !s.heavy {
+			if refusal := s.paddedRefusal(text); refusal != nil {
+				return nil, nil, nil, "", refusal
+			}
 		}
 		// A table whose capture dropped its changes (not_captured.go): the
 		// copy holds old rows of it, and the source answers, before the copy
@@ -375,11 +434,31 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		// does not run one it would answer from the snapshot alone (#3086).
 		opts := s.runOptions()
 		opts.NeedTails = s.holdsBackCopy(apart && named > 0)
-		res, err = s.bound.Run(ctx, text, opts)
+		opts.Trimmed = s.trimmedFor(text)
+		// The join check's counts (joinstats.go), for this statement's
+		// tables only.
+		var want string
+		opts.JoinNDV, want = s.joinNDVFor(text)
+		// A shape that ran out of memory in the copy's join order and
+		// answered in the order written runs in the order written from the
+		// start, within half of the client's time (writtenorder.go).
+		shape := s.writtenOrderKey(qstr)
+		remembered := shape != "" && s.bound.WrittenOrders.has(shape)
+		run := ctx
+		if remembered {
+			startInWrittenOrder(&opts)
+			var cancel context.CancelFunc
+			run, cancel = s.writtenOrderContext(ctx)
+			defer cancel()
+		}
+		res, err = s.bound.Run(run, text, opts)
 		var changed *sqlsandbox.MayHaveChangedError
 		if opts.NeedTails && errors.As(err, &changed) {
 			s.logger.Debug("pgshim: the copy's recent changes for a statement were not ready; it did not run there, and the source answers it", "why", changed.Reason)
 		}
+		s.joinCheck = rememberedJoinCheck(remembered, s.noteJoinCheck(res, err, opts.JoinNDV != nil, want))
+		s.oomRetry = sqlsandbox.WrittenOrderRetryOf(res, err)
+		err = s.settleWrittenOrder(ctx, run, qstr, shape, remembered, res, err)
 	}
 	if res.Spool != nil {
 		// Only a bug gets here: this port asks for no result in a file.
@@ -526,10 +605,14 @@ func freeError(err error, logger *slog.Logger) *pgErr {
 	var unavailable *sqlsandbox.UnavailableError
 	var differ *sqlsandbox.ColumnsDifferError
 	var changed *sqlsandbox.MayHaveChangedError
+	var tooBig *sqlsandbox.JoinTooBigError
 	var stopped *stoppedErr
 	switch {
 	case errors.As(err, &stopped):
 		return stopped.perr
+	case errors.As(err, &tooBig):
+		// program_limit_exceeded: the statement, not a fault of the copy.
+		return &pgErr{"54000", tooBig.Reason}
 	case errors.As(err, &own):
 		return &pgErr{own.Code, own.Message}
 	case errors.As(err, &refused):

@@ -222,7 +222,7 @@ func TestPGRouter_loginOverTLS(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := newRouterFiles(t)
-	prod, err := f.owner.Add(console.ServerEntry{Name: "prod", Flavor: console.FlavorPostgres, DSN: "u:p@tcp(127.0.0.1:1)/idx_prod"})
+	prod, err := addServedPG(t, f.owner, console.ServerEntry{Name: "prod", DSN: "u:p@tcp(127.0.0.1:1)/idx_prod"})
 	if err != nil {
 		t.Fatal(err)
 	}

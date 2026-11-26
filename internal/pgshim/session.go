@@ -65,6 +65,9 @@ type session struct {
 	database      string
 	catalogTables []CatalogTable
 	catalogAt     time.Time
+	// catalogStamp is bound.CatalogStamp as read just before catalogTables
+	// were ("" not read).
+	catalogStamp string
 	// up is the connection to the server's source (forward.go), nil until a
 	// statement needs it; upLost says why it was lost, after which nothing
 	// more is sent there.
@@ -76,22 +79,59 @@ type session struct {
 	// fallback is why the statement the copy just failed goes to the
 	// source instead (route.go), "" when it does not; set by runFree.
 	fallback string
+	// screened is the text of the prepared statement a portal is running,
+	// as the client wrote it and the screen read it, with its $n
+	// (runPortal); "" for a statement of the simple protocol, whose text is
+	// the one the screen read. copyText holds the portal's text to it.
+	screened string
 	// busyRefused is the busy reason the statement the copy just failed
 	// was refused for instead (copyFailed, #3109), "" when it was not.
 	busyRefused string
 	// screenBusy is why the statement route just decided was not screened
 	// (routeFree): the copy was too busy to list its columns.
 	screenBusy string
+	// untypedVeto is what of the statement route just decided the screen
+	// vetoed with no column's type (routeFree), "" when nothing: on the
+	// simple protocol a statement the source's plan finds expensive goes to
+	// the copy anyway (heavy.go).
+	untypedVeto string
+	// heavy says the statement being answered goes to the copy because the
+	// source's plan found it expensive, whatever the screen says of how the
+	// copy answers it (heavy.go).
+	heavy bool
+	// fastLane says the statement being answered on the copy was found by
+	// the source's plan to read one table and join nothing (fastlane.go);
+	// set for that statement alone, and read by runOptions.
+	fastLane bool
+	// joinCheck is what the copy's join check did with the statement it
+	// last ran (RouteNote.JoinCheck), "" for nothing to count; taken by
+	// routeNote.
+	joinCheck string
+	// oomRetry is what the copy's retry in the order written did with the
+	// statement's run (runFree), for its RouteNote; "" when nothing.
+	oomRetry string
+	// writtenOrder is what a remembered shape did with the statement's run
+	// (settleWrittenOrder), for its RouteNote; "" when none.
+	writtenOrder string
 	// catalogBusy is the busy reason the copy's list of columns could not
 	// be read for at its last read (catalog), "" when it was read or failed
 	// otherwise.
 	catalogBusy string
+	// argsBound: the statement being decided holds arguments already written
+	// into its text, whose declared types the text no longer shows, so no
+	// star of it is exempted (paddedExempt).
+	argsBound bool
+	// argsPadded: one of those arguments is declared bpchar (paddedArgument).
+	argsPadded bool
 	// costVerdicts are the source's plans' verdicts this connection
 	// remembers, by statement shape (route_cost.go).
 	costVerdicts map[string]costVerdict
 	// pendingSide is a plan's verdict for the copy on the statement being
 	// answered, remembered once the copy answers it (settleCostSide).
 	pendingSide *pendingCostSide
+	// unreachableNote is what the client is told if the copy answers a
+	// statement whose plan could not be asked (screenTyped).
+	unreachableNote string
 	// sourceAnsweredAt is when the source last answered a statement of this
 	// connection: the copy may not answer it with data older than that
 	// (copyOlderThanSource). Zero when the source never answered one.
@@ -199,18 +239,42 @@ func (s *session) handleSimpleQuery(qstr string) error {
 	started := time.Now()
 	var d routeDecision
 	screenBusy := ""
+	s.heavy, s.fastLane = false, false
+	defer func() { s.heavy, s.fastLane = false, false }()
+	oneTable := false
 	if s.abortedRefusal(qstr) == nil {
 		d = s.route(s.classify(qstr), qstr)
-		screenBusy = s.takeScreenBusy()
 	}
-	if byCostApplies(d) {
+	// A statement the screen sent to the source for how the copy would
+	// answer it, not for what the copy cannot run: the source's plan is
+	// asked too, and if it is expensive the copy answers it (heavy.go).
+	vetoed := d
+	relaxable := d.side == RouteSource && d.reason == ReasonVeto && s.untypedVeto != ""
+	if byCostApplies(d) || relaxable {
 		// The screen lets the copy answer it: the source's plan says
 		// whether the copy is worth it (route_cost.go).
 		var stop *pgErr
-		if d, stop = s.routeByCostRemembered(qstr); stop != nil {
+		if d, oneTable, stop = s.routeByCostRemembered(qstr); stop != nil {
 			s.fail(stop)
 			s.routeNote(qstr, d, time.Since(started), true)
 			return s.readyFlush()
+		}
+		s.heavy = s.expensive(d)
+		if relaxable && !s.heavy {
+			// Not expensive, or not told: the screen's veto stands.
+			d = vetoed
+		} else {
+			if relaxable {
+				s.logger.Debug("pgshim: sent to the copy, expensive on the source, though the copy may answer otherwise", "reason", ReasonHeavyOnCopy, "construct", s.untypedVeto)
+				d = routeDecision{RouteCopy, ReasonHeavyOnCopy}
+			}
+			// Headed for the copy: only now its list of columns is read, which
+			// can wait for one of its workers.
+			d = s.screenTyped(qstr, d)
+			if relaxable && d.side == RouteCopy {
+				d = routeDecision{RouteCopy, ReasonHeavyOnCopy}
+			}
+			screenBusy = s.takeScreenBusy()
 		}
 	}
 	if busyOnCopy(withScreenBusy(d, screenBusy)) {
@@ -226,7 +290,11 @@ func (s *session) handleSimpleQuery(qstr string) error {
 		return s.readyFlush()
 	}
 	s.fallback, s.busyRefused = "", ""
+	// Only now, for the statement the copy runs: what the screen read of
+	// the copy's columns on the way here was not its run.
+	s.fastLane = oneTable && d.side == RouteCopy
 	cols, types, rows, tag, perr := s.run(qstr)
+	s.fastLane = false
 	if perr != nil {
 		if why := s.takeBusyRefused(); why != "" && d.side == RouteCopy {
 			// The copy was busy (#3109, route.go): refused, not sent to the

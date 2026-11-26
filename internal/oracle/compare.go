@@ -277,8 +277,18 @@ func reorder(r TableRows, row int, columns []string) []string {
 // is not the source's text, while a view that already made them wall
 // clocks (WallClockDatetimes) needs no list.
 func ReadView(ctx context.Context, ddb *sql.DB, schema, table string, columns, pk, datetimes []string) (TableRows, error) {
+	return ReadViewRendered(ctx, ddb, schema, table, columns, pk, datetimes, nil)
+}
+
+// ReadViewRendered is ReadView with the columns render names read by their
+// Render.View (Table.Render), whatever datetimes says.
+func ReadViewRendered(ctx context.Context, ddb *sql.DB, schema, table string, columns, pk, datetimes []string, render map[string]Render) (TableRows, error) {
 	parts := make([]string, len(columns))
 	for i, c := range columns {
+		if r, ok := render[c]; ok {
+			parts[i] = fmt.Sprintf(`IFNULL(%s, 'NULL')`, fmt.Sprintf(r.View, `"`+c+`"`))
+			continue
+		}
 		if slices.Contains(datetimes, c) {
 			parts[i] = fmt.Sprintf(`IFNULL(strftime("%s", '%%Y-%%m-%%d %%H:%%M:%%S'), 'NULL')`, c)
 			continue

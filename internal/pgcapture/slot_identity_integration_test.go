@@ -53,14 +53,14 @@ func TestEnsureSlot_refusesAnotherSlotOfItsName(t *testing.T) {
 		if err := conn.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)", s).Scan(&exists); err != nil || !exists {
 			continue
 		}
-		if lsn, err := ensureSlot(ctx, nil, conn, s, saved, true); err == nil || !strings.Contains(err.Error(), "not a pgoutput logical slot") {
+		if lsn, err := ensureSlot(ctx, nil, conn, s, saved, true, nil); err == nil || !strings.Contains(err.Error(), "not a pgoutput logical slot") {
 			t.Errorf("resuming on %s: LSN %s, %v; want a refusal that says what the slot is", s, lsn, err)
 		}
 	}
-	if lsn, err := ensureSlot(ctx, nil, conn, own, saved, true); err != nil || lsn != saved {
+	if lsn, err := ensureSlot(ctx, nil, conn, own, saved, true, nil); err != nil || lsn != saved {
 		t.Errorf("resuming on the capture's own slot: %s, %v; want %s", lsn, err, saved)
 	}
-	if _, err := ensureSlot(ctx, nil, conn, "bintrail_it_identity_none", saved, true); err == nil || !strings.Contains(err.Error(), "no longer exists") {
+	if _, err := ensureSlot(ctx, nil, conn, "bintrail_it_identity_none", saved, true, nil); err == nil || !strings.Contains(err.Error(), "no longer exists") {
 		t.Errorf("resuming with no slot: %v", err)
 	}
 }

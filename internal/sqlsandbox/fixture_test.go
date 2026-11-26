@@ -30,7 +30,7 @@ type copyFixture struct {
 	views string
 }
 
-func newCopyFixture(t *testing.T) copyFixture {
+func newCopyFixture(t testing.TB) copyFixture {
 	t.Helper()
 	f := copyFixture{archiveRoot: t.TempDir(), baselineRoot: t.TempDir()}
 	const id = "11111111-2222-3333-4444-555555555555"
@@ -53,7 +53,7 @@ func (f copyFixture) job(sqlText string) Job {
 
 // writeFixtureArchive mirrors internal/views' fixture: one UPDATE through the
 // real archive column set and the real Parquet writer.
-func writeFixtureArchive(t *testing.T, root, id string) {
+func writeFixtureArchive(t testing.TB, root, id string) {
 	t.Helper()
 	path := filepath.Join(root, "bintrail_id="+id, "event_date=2026-05-01", "event_hour=03", "events.parquet")
 	w, err := baseline.NewWriter(path, archive.BinlogEventColumns, baseline.WriterConfig{
@@ -84,7 +84,7 @@ func writeFixtureArchive(t *testing.T, root, id string) {
 	}
 }
 
-func writeFixtureBaseline(t *testing.T, root string) string {
+func writeFixtureBaseline(t testing.TB, root string) string {
 	t.Helper()
 	path := filepath.Join(root, "2026-04-30T03-00-00Z", "shop", "orders.parquet")
 	schemaFile := filepath.Join(t.TempDir(), "shop.orders-schema.sql")

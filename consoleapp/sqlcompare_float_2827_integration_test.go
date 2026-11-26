@@ -164,7 +164,11 @@ func sourceText(t *testing.T, dsn, db, stmt string) [][]string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Close()
+	// Not closed: Close hands the resultset to go-mysql's pool, and the
+	// port in this same process builds its answers from that pool
+	// (BuildSimpleTextResultset), which keeps a pooled one's column
+	// definitions: the port's next answer then fails with "row types aren't
+	// consistent" or goes out under these columns' names and types.
 	var out [][]string
 	for _, row := range res.RowDatas {
 		r := make([]string, len(res.Fields))

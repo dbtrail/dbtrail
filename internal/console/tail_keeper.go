@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/query"
@@ -118,6 +119,11 @@ type tailSource interface {
 type tailFloor struct {
 	anchor      query.BinlogPos
 	lastEventID uint64
+	// reachID, when not 0, is an event id the cursor at or past which has
+	// folded every change the cut holds, though the cut records no last
+	// event id of its own (reachedFloor). Only a PostgreSQL source sets it
+	// (pg_run_cut.go); it does not bound the read the way lastEventID does.
+	reachID uint64
 }
 
 // tailTable is a reconstruct.Tail as the keeper drives it.
@@ -203,6 +209,12 @@ type tailEntry struct {
 	// goes on only over that copy (a prune drops keys an older file still
 	// carries, reconstruct.Tail.WriteDelta).
 	fileCut string
+	// segHigh is, for a PostgreSQL tail only, the highest position and the
+	// rows of each file of segs (pg_tail_chain.go); nil for any other.
+	segHigh map[string]pgSegment
+	// pgPruned is, for a PostgreSQL tail, how many leading files of segs are
+	// from before its last prune: no merge takes them in.
+	pgPruned int
 	// old are the earlier versions, kept while a statement may still read
 	// them.
 	old []tailOldFile
@@ -229,6 +241,12 @@ type tailKeeper struct {
 	mu  sync.Mutex
 	src tailSource
 	pub tailPublish
+
+	// dirNow is the directory of the tails and what it is, for a statement
+	// that must not wait for an update of the tails (ensureDir). Nil when
+	// there is none, or none this keeper holds open.
+	dirNow atomic.Pointer[tailDirSeen]
+
 	// life is the keeper's lifetime: every build runs under it, and stop
 	// (close) ends them all when the keeper is replaced or forgotten.
 	life context.Context
@@ -370,6 +388,12 @@ func (k *tailKeeper) refreshWithin(ctx context.Context, d time.Duration, tables 
 func (k *tailKeeper) refreshWithinBuilding(ctx context.Context, d time.Duration, tables []views.BaselineTable) (map[string]tailView, map[string]bool, bool, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	return k.refreshWithinBuildingLocked(ctx, d, tables)
+}
+
+// refreshWithinBuildingLocked is refreshWithinBuilding with k.mu held by the
+// caller.
+func (k *tailKeeper) refreshWithinBuildingLocked(ctx context.Context, d time.Duration, tables []views.BaselineTable) (map[string]tailView, map[string]bool, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, d)
 	defer cancel()
 	drops := k.drops
@@ -837,7 +861,9 @@ func (k *tailKeeper) failBuild(key string, b *tailBuild, t views.BaselineTable, 
 //   - both cuts and the cursor are positions in one numbering of the binary
 //     log, the only order the comparisons below mean anything in;
 //   - the newer cut is after the older one: one that moved back or did not
-//     move is another copy, not a later point of the same one;
+//     move is another copy, not a later point of the same one (except, for a
+//     PostgreSQL source, the same point carried by an update from the same
+//     read of the source: pgSameFloorStands);
 //   - the newer cut's last event id is not below the older's: the tail did
 //     not read the ids the newer window would;
 //   - the cursor has folded everything the newer cut holds (reached): an
@@ -850,6 +876,10 @@ func (k *tailKeeper) pruneTo(e *tailEntry, t views.BaselineTable, cut string) bo
 	to, ok := k.standsFor(e, t)
 	if !ok {
 		return false
+	}
+	// A PostgreSQL source only (pg_tail_chain.go); for any other, no step.
+	if k.pgPruneKeepingChain(e, t, cut, to) {
+		return true
 	}
 	n, err := e.tail.PruneThrough(to.anchor, to.lastEventID)
 	if err != nil {
@@ -883,7 +913,9 @@ func (k *tailKeeper) standsFor(e *tailEntry, t views.BaselineTable) (tailFloor, 
 		return tailFloor{}, false
 	case reconstruct.BinlogBaseName(from.File) != base || reconstruct.BinlogBaseName(mark.File) != base:
 		return tailFloor{}, false
-	case from == to.anchor || !from.AtOrBefore(to.anchor):
+	case !from.AtOrBefore(to.anchor):
+		return tailFloor{}, false
+	case from == to.anchor && !k.pgSameFloorStands(e, t, to): // PostgreSQL only (pg_run_cut.go)
 		return tailFloor{}, false
 	case to.lastEventID < e.from.lastEventID:
 		return tailFloor{}, false
@@ -916,14 +948,17 @@ func (k *tailKeeper) sameBase(e *tailEntry, t views.BaselineTable) bool {
 // refresh's cut records the last event of the table it folded; every event of
 // the table it holds is at or below it, and indexed before the cursor was
 // read). A dump's cut records no id, and the source may be ahead of capture:
-// only the position says it then.
+// only the position says it then. A PostgreSQL cut records no id either; the
+// update that published it can say the id it held every change through
+// (tailFloor.reachID, pg_run_cut.go).
 func (k *tailKeeper) reachedFloor(to tailFloor) bool {
 	mark := k.mark.Pos
 	if to.anchor.File == "" || to.anchor.IsLSN() || mark.IsLSN() ||
 		reconstruct.BinlogBaseName(to.anchor.File) != reconstruct.BinlogBaseName(mark.File) {
 		return false
 	}
-	return to.anchor.AtOrBefore(mark) || to.lastEventID != 0 && to.lastEventID <= k.mark.ID
+	return to.anchor.AtOrBefore(mark) || to.lastEventID != 0 && to.lastEventID <= k.mark.ID ||
+		to.reachID != 0 && to.reachID <= k.mark.ID
 }
 
 // admits says whether the read of a window from f would return an event at
@@ -1128,6 +1163,10 @@ func (k *tailKeeper) write(t views.BaselineTable, e *tailEntry) error {
 	}
 	k.written++
 	path := filepath.Join(k.dir, fmt.Sprintf("%d-%s.%s.parquet", k.written, url.PathEscape(t.Schema), url.PathEscape(t.Table)))
+	// A PostgreSQL tail only (pg_tail_chain.go); for any other, no step.
+	if merged, err := k.pgMergeNewest(e, path); merged {
+		return err
+	}
 	if !whole {
 		n, err := e.tail.WriteDelta(path)
 		if err != nil {
@@ -1138,6 +1177,7 @@ func (k *tailKeeper) write(t views.BaselineTable, e *tailEntry) error {
 		e.segs = append(slices.Clip(e.segs), path)
 		e.segRows += n
 		e.dirty = false
+		k.pgNoteSegment(e, path, n)
 		return nil
 	}
 	n, err := e.tail.WriteFile(path)
@@ -1147,6 +1187,7 @@ func (k *tailKeeper) write(t views.BaselineTable, e *tailEntry) error {
 	k.rowsWritten += n
 	k.retire(e)
 	e.segs, e.segRows, e.dirty, e.fileCut = []string{path}, n, false, e.cut
+	k.pgNoteSegment(e, path, n)
 	return nil
 }
 
@@ -1154,7 +1195,20 @@ func (k *tailKeeper) write(t views.BaselineTable, e *tailEntry) error {
 // statement's sandbox is allowed to read it before the first version is
 // written into it.
 func (k *tailKeeper) ensureDir() (string, error) {
-	k.mu.Lock()
+	if !k.mu.TryLock() {
+		// An update of the tails holds the lock, for as long as it takes, and
+		// checked the directory when it began. A statement needs no more than
+		// the directory's name while that is still the very directory the
+		// keeper made: Lstat, so a link put under its name is not taken for
+		// it, against the handle the keeper holds open, so its number cannot
+		// have gone to another. Anything else waits and takes the normal way.
+		if seen := k.dirNow.Load(); seen != nil {
+			if fi, err := os.Lstat(seen.path); err == nil && os.SameFile(fi, seen.id) {
+				return seen.path, nil
+			}
+		}
+		k.mu.Lock()
+	}
 	defer k.mu.Unlock()
 	// The directory a statement's sandbox allows must be the one its tails
 	// are in: one found gone is made again here, not after.
@@ -1174,12 +1228,21 @@ func (k *tailKeeper) dirCheckLocked() {
 	}
 	slog.Warn("Engine Routing: the directory of the copy's tails was removed while this process used it; "+
 		"it is made again and every tail is built again from the index", "dir", k.dir)
+	// Before the handle goes: what it vouches for is over.
+	k.dirNow.Store(nil)
 	if k.dirLock != nil {
 		k.dirLock.Close()
 	}
 	k.dir, k.dirLock = "", nil
 	k.dropAll()
 	k.orphans = nil
+}
+
+// tailDirSeen is a directory of the tails by name and by what it is, read
+// from the handle the keeper holds open on it.
+type tailDirSeen struct {
+	path string
+	id   os.FileInfo
 }
 
 func (k *tailKeeper) makeDir() (string, error) {
@@ -1202,6 +1265,11 @@ func (k *tailKeeper) makeDir() (string, error) {
 			})
 		}
 		k.dir, k.dirLock = dir, lock
+		if lock != nil {
+			if id, err := lock.Stat(); err == nil {
+				k.dirNow.Store(&tailDirSeen{path: dir, id: id})
+			}
+		}
 	}
 	return k.dir, nil
 }

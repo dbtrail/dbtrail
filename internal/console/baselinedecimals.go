@@ -2,8 +2,13 @@ package console
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
@@ -128,18 +133,127 @@ type CopyTable struct {
 	Schema, Table string
 	Hidden        []string
 	Relation      *baseline.PGRelation
+	// Trimmed are the columns of Relation the view reads without their
+	// padding (baseline.PGPaddedToTrim): what the PostgreSQL port's catalog
+	// says of each (TrimmedOnCopy).
+	Trimmed map[string]bool
 }
 
 // CopyTables are the tables the copy serves this connection, after the
 // server's hidden rules: the ones a statement can read, no more.
 func (q *SQLOnCopy) CopyTables(ctx context.Context) ([]CopyTable, error) {
-	in, err := q.s.buildViewsInput(ctx, q.b, viewsRequest{PinSnapshot: true, OmitEvents: true, StateOnly: true, ForStatement: true, LocalCopy: true, ApplyHidden: true})
+	out, _, err := q.CopyTablesStamped(ctx)
+	return out, err
+}
+
+// CopyTablesStamped is CopyTables with the stamp (PGCopyStamp) of the
+// snapshot files they were read from.
+func (q *SQLOnCopy) CopyTablesStamped(ctx context.Context) ([]CopyTable, string, error) {
+	in, err := q.s.buildViewsInput(ctx, q.b, pgCopyRequest)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	out := make([]CopyTable, 0, len(in.Baselines))
 	for _, t := range in.Baselines {
-		out = append(out, CopyTable{Schema: t.Schema, Table: t.Table, Hidden: t.HiddenColumns, Relation: t.PGRelation})
+		out = append(out, CopyTable{Schema: t.Schema, Table: t.Table, Hidden: t.HiddenColumns, Relation: t.PGRelation, Trimmed: pgTrimmedOnCopy(t.PGRelation)})
 	}
-	return out, nil
+	stamp := pgCopyStamp(in)
+	q.s.pgStampOf(q.id).put(time.Now(), stamp)
+	return out, stamp, nil
+}
+
+// PGCopyStamp names the snapshot files a statement on the copy reads now,
+// and the columns the server hides of each: two calls give the same stamp
+// only when the copy's tables, their columns and their types are the same.
+// It reads no table and needs none of the copy's workers. The PostgreSQL
+// port reads it before reusing the catalog it keeps, so that a new snapshot
+// (a column's type changed with it, #3251) is not answered with the old
+// one's list of columns. It is read before nearly every statement, and with
+// the snapshots in S3 and no local mirror yet each read lists S3, so one is
+// shared by the server's connections for pgStampFor: a new snapshot is seen
+// that much later at most.
+func (q *SQLOnCopy) PGCopyStamp(ctx context.Context) (string, error) {
+	return q.s.pgStampOf(q.id).get(time.Now(), func() (string, error) { return q.PGCopyStampFresh(ctx) })
+}
+
+// PGCopyStampFresh is PGCopyStamp read now: what reading the catalog
+// compares with the stamp of its tables (CopyTablesStamped), which is never
+// an older one.
+func (q *SQLOnCopy) PGCopyStampFresh(ctx context.Context) (string, error) {
+	in, err := q.s.buildViewsInput(ctx, q.b, pgCopyRequest)
+	if err != nil {
+		return "", err
+	}
+	stamp := pgCopyStamp(in)
+	q.s.pgStampOf(q.id).put(time.Now(), stamp)
+	return stamp, nil
+}
+
+// pgStampOf is server id's stamp memo, made on first use.
+func (s *Server) pgStampOf(id string) *pgStampMemo {
+	m, _ := s.pgStamps.LoadOrStore(id, &pgStampMemo{})
+	return m.(*pgStampMemo)
+}
+
+// pgStampFor is how long a stamp is shared (PGCopyStamp).
+const pgStampFor = 250 * time.Millisecond
+
+// pgStampMemo is one server's last stamp and when it was read.
+type pgStampMemo struct {
+	mu  sync.Mutex
+	at  time.Time
+	val string
+}
+
+// get is the stamp read at most pgStampFor before now, or read reads it.
+// An error is not kept.
+func (m *pgStampMemo) get(now time.Time, read func() (string, error)) (string, error) {
+	m.mu.Lock()
+	if !m.at.IsZero() && now.Sub(m.at) >= 0 && now.Sub(m.at) < pgStampFor {
+		v := m.val
+		m.mu.Unlock()
+		return v, nil
+	}
+	m.mu.Unlock()
+	return read()
+}
+
+// put keeps a stamp just read, unless a later one is kept already.
+func (m *pgStampMemo) put(at time.Time, val string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if at.After(m.at) {
+		m.at, m.val = at, val
+	}
+}
+
+// pgCopyRequest is the views input the port's catalog is read from.
+var pgCopyRequest = viewsRequest{PinSnapshot: true, OmitEvents: true, StateOnly: true, ForStatement: true, LocalCopy: true, ApplyHidden: true}
+
+// pgCopyStamp is in's stamp: each table's name, file and hidden columns.
+// Names and paths are hashed whole, each with its length, so that no two
+// lists run together into the same text.
+func pgCopyStamp(in views.Input) string {
+	rows := make([]string, 0, len(in.Baselines))
+	for _, t := range in.Baselines {
+		parts := append([]string{t.Schema, t.Table, t.Path}, t.HiddenColumns...)
+		var b strings.Builder
+		for _, p := range parts {
+			fmt.Fprintf(&b, "%d:%s,", len(p), p)
+		}
+		rows = append(rows, b.String())
+	}
+	sort.Strings(rows)
+	h := sha256.New()
+	for _, r := range rows {
+		fmt.Fprintf(h, "%d:%s\n", len(r), r)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// pgTrimmedOnCopy are the char(n) columns of rel the copy's view reads
+// without their padding (baseline.PGPaddedToTrim), the one call the console
+// makes for it.
+func pgTrimmedOnCopy(rel *baseline.PGRelation) map[string]bool {
+	return baseline.PGPaddedToTrim(rel)
 }

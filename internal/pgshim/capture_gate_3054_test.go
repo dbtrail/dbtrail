@@ -83,12 +83,12 @@ func TestCaptureTextRefusal(t *testing.T) {
 }
 
 func TestCaptureTablesRefusal(t *testing.T) {
-	copyTables := []CatalogTable{{Schema: "public", Name: "orders"}, {Schema: "public", Name: "customers"}, {Schema: "Sales", Name: "Q1"}}
+	copyTables := [][2]string{{"public", "orders"}, {"public", "customers"}, {"Sales", "Q1"}}
 	const notHeld, system = "this statement reads a table the copy does not hold", "this statement reads a table of the system catalog"
 	for _, c := range []struct {
 		name   string
 		proven [][2]string
-		copy   []CatalogTable
+		copy   [][2]string
 		want   string
 	}{
 		{"a table of the copy", [][2]string{{"public", "orders"}}, copyTables, ""},
@@ -106,7 +106,7 @@ func TestCaptureTablesRefusal(t *testing.T) {
 		{"another pg_ schema", [][2]string{{"pg_temp_3", "t"}}, copyTables, system},
 		// A copy that somehow lists a system table does not make it one of
 		// its own.
-		{"the system catalog listed by the copy", [][2]string{{"pg_catalog", "pg_authid"}}, []CatalogTable{{Schema: "pg_catalog", Name: "pg_authid"}}, system},
+		{"the system catalog listed by the copy", [][2]string{{"pg_catalog", "pg_authid"}}, [][2]string{{"pg_catalog", "pg_authid"}}, system},
 	} {
 		if got := captureTablesRefusal(c.proven, c.copy); got != c.want {
 			t.Errorf("%s: %q, want %q", c.name, got, c.want)

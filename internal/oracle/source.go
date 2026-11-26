@@ -115,6 +115,10 @@ func ReadSource(ctx context.Context, db *sql.DB, schema string, t Table) (TableR
 	}
 	parts := make([]string, len(cols))
 	for i, c := range cols {
+		if r, ok := t.Render[c]; ok {
+			parts[i] = fmt.Sprintf(r.Source, "`"+c+"`")
+			continue
+		}
 		parts[i] = fmt.Sprintf("CAST(`%s` AS CHAR)", c)
 	}
 	rows, err := db.QueryContext(ctx, fmt.Sprintf("SELECT %s FROM `%s`.`%s`", strings.Join(parts, ", "), schema, t.Name))

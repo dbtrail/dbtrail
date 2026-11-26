@@ -272,6 +272,7 @@ What a stale compose file costs:
 | What your file is missing | What it costs | How it looks |
 |---|---|---|
 | `BINTRAIL_TELEMETRY_DIR` on the `bintrail`, `router` and `shim` services (file version 5) | the usage telemetry choice lives inside the container, so the next `up -d` that recreates it deletes the choice | **Silent.** Telemetry you turned off in the web interface, or with `telemetry off`, is on again after the upgrade. `BINTRAIL_TELEMETRY=off` and `DO_NOT_TRACK=1` in the file are not affected |
+| the S3 variables, `BINTRAIL_TELEMETRY_DIR` and three `.env` settings on the `pg-router` service, and `BINTRAIL_TELEMETRY_DIR` on `iceberg-export-loop` (file version 13) | on the PostgreSQL port, time travel for a moment older than the local snapshots cannot read the server's S3 destination unless the machine has a role; `pg-router` and `iceberg-export-loop` do not follow the usage telemetry choice made in the web interface | **Silent** but for the time-travel query, which fails with an S3 credentials error. `PG_ROUTER_MAX_SOURCE_CONNECTIONS`, `PG_ROUTER_STATUS_STATEMENTS`, `SQL_PORT_MAX_ROWS` and `PG_ROUTER_AWS_*` in `.env` have no effect on `pg-router`. With MySQL or MariaDB servers only, the telemetry part is all that changes |
 | the `pg-router` service on port 5433 (file version 9) | nothing answers on the PostgreSQL port, where PostgreSQL clients read the copy of a PostgreSQL server | PostgreSQL clients that connect to 5433 are refused, with the port turned on or off. Nothing says so. An installation with MySQL or MariaDB servers only loses nothing |
 | the `router` service on port 3309 (file version 4) | nothing answers on the MySQL port. This version serves it from the `router` service only; the `bintrail` service no longer opens it | MySQL clients that connected to 3309 are refused. With the port turned on, `bintrail` prints a `WARNING` at startup that says so (below) |
 | the state paths on the `bintrail-state` volume | your username and password, the servers you added, and the AI connection token live inside the container, so the next `up -d` that recreates it deletes them | **Silent.** The web interface comes back asking you to create a password, exactly like a fresh install, and reports no loss. Fix this one first |
@@ -866,11 +867,20 @@ psql "host=127.0.0.1 port=5433 dbname=<server id or name> user=app sslmode=requi
 ```
 
 The database name is the server's id or name; the username can be anything.
-The copy answers reads, by PostgreSQL's rules. A transaction block a client
-opens runs on your PostgreSQL as the server's forwarding user, read-only, when
-one is set (`bintrail-console server forward-user`; see
-[docs/postgres.md](postgres.md#transactions-on-the-source-the-forwarding-user));
-without one, the copy answers alone. A statement that is not a read is refused.
+The copy answers reads, by PostgreSQL's rules. When the server has a
+forwarding user (`bintrail-console server forward-user`; see
+[docs/postgres.md](postgres.md#transactions-on-the-source-the-forwarding-user)),
+your PostgreSQL answers the rest as that user, read-only: a statement the copy
+answers differently or not at all, a transaction block a client opens, a
+catalog statement the copy does not answer, and a statement that is cheap on
+the source by its plan
+([which side answers](postgres.md#which-side-answers-a-statement-on-the-postgresql-port)).
+The role DBTrail captures with is used there only when you allow it for the
+server, and then only for a plain `SELECT` on tables the copy holds
+([forwarding with the capture account](postgres.md#forwarding-with-the-capture-account)).
+A server with neither is answered by the copy alone, and so is a server that
+hides tables or columns. A statement that is not a read is refused and never
+reaches the source.
 To see which side answered a statement and why, send `SHOW
 dbtrail.router_status` on the same connection
 ([docs/postgres.md](postgres.md#which-side-answered-a-statement-show-dbtrailrouter_status)).
@@ -933,10 +943,20 @@ that is already there).
 | `PG_ROUTER_WORKERS` | statements that run on the copy at once (1 to 16) | 4 |
 | `PG_ROUTER_THREADS` | threads each statement may use (1 to 16) | 2 |
 | `PG_ROUTER_MAX_CONNECTIONS` | clients connected at once; one more is refused | 256 |
+| `PG_ROUTER_MAX_SOURCE_CONNECTIONS` | connections to the servers' own PostgreSQL held at once, every server together (1 to 1024); past it a statement that needs one waits up to 30 seconds and is then refused | 16 |
 | `PG_ROUTER_MAX_WAIT` | how long a statement waits for its turn, e.g. `30s` | no limit of its own |
+| `PG_ROUTER_STATUS_STATEMENTS` | `true` keeps a row per statement shape and side in the service's status (values blanked). It names your tables and columns, and the status address asks for no password | off |
 | `PG_ROUTER_MEMORY`, `PG_ROUTER_CPUS` | ceilings for the whole service, e.g. `8g` and `4` | none |
 | `PG_ROUTER_CPU_SHARES` | CPU priority of the service against the others (`cpu_shares`); `1024` is the default priority, the same as capture's | 256, below capture |
 | `SQL_MEMORY` | memory each statement may use (shared with the other services) | 2GB |
+| `SQL_PORT_MAX_ROWS` | most rows one statement returns; a result with more is refused, not cut (shared with the other services) | the port's row cap |
+| `PG_ROUTER_AWS_ACCESS_KEY_ID`, `PG_ROUTER_AWS_SECRET_ACCESS_KEY`, `PG_ROUTER_AWS_SESSION_TOKEN` | S3 keys for this service alone, which only reads S3 ([below](#read-only-keys-for-the-router)) | the shared `AWS_*` keys |
+
+**S3.** The service is given the same S3 variables as `bintrail` (`AWS_*`,
+`BINTRAIL_S3_ENDPOINT`, `BINTRAIL_S3_PATH_STYLE`): time travel on this port
+for a moment older than the snapshots in the local folder reads the server's
+S3 destination from this process. Without credentials that query fails; the
+rest of the port does not need them.
 
 ### Time-travel SQL (`AS OF`) and the compose stack
 
@@ -1048,6 +1068,7 @@ surface, use the demo image ([demo.md](./demo.md)).
 | `AWS_REGION` | compose (optional) | Region for the S3 bucket(s) used by Archive to S3 / baselines |
 | `ROUTER_AWS_ACCESS_KEY_ID`, `ROUTER_AWS_SECRET_ACCESS_KEY` | compose `router` service (optional) | S3 keys for the router alone, which only reads S3: give it read-only keys ([the policy](s3-iam-policy.md#read-only-access-for-the-router)) while `bintrail` keeps the keys that write. Unset = the shared `AWS_*` keys, as before. Both or neither: half a pair is refused at start |
 | `ROUTER_AWS_SESSION_TOKEN` | compose `router` service (optional) | The token of temporary router keys. Without it the router's own keys carry no token, never the shared `AWS_SESSION_TOKEN` |
+| `PG_ROUTER_AWS_ACCESS_KEY_ID`, `PG_ROUTER_AWS_SECRET_ACCESS_KEY`, `PG_ROUTER_AWS_SESSION_TOKEN` | compose `pg-router` service (optional) | The same three for the PostgreSQL router, with the same rules: read-only keys of its own, both or neither, and its own pair never carries the shared token |
 
 (`SERVER_ID` is no longer needed — `bintrail-console watch` derives a stable
 one from the source DSN.)
@@ -1116,9 +1137,22 @@ then `docker compose up -d router`. The rules:
   up in the web interface with an access key) is read with those keys by both
   services; `ROUTER_AWS_*` does not replace them.
 
-With the packaged systemd units, both services read
+**The PostgreSQL router has the same, under its own names.** The `pg-router`
+service reads S3 for time travel on the PostgreSQL port, and only reads. Set
+`PG_ROUTER_AWS_ACCESS_KEY_ID` and `PG_ROUTER_AWS_SECRET_ACCESS_KEY` (and
+`PG_ROUTER_AWS_SESSION_TOKEN` for temporary keys) in `.env`, then `docker
+compose up -d pg-router`. Every rule above holds with those names: unset, it
+reads with the shared keys; its own pair never carries the shared token; half
+a pair is refused at start (`docker compose logs pg-router` names the missing
+variable); and its startup log says which keys it reads with, in a line that
+starts with `PostgreSQL router: S3 is read with`. The same read-only policy
+serves both routers, and the two do not share their own keys: `ROUTER_AWS_*`
+is not read by `pg-router`, nor `PG_ROUTER_AWS_*` by `router`.
+
+With the packaged systemd units, the three services read
 `/etc/bintrail/bintrail-console.env`. Put the router's keys in a file of its
-own and add it with `systemctl edit bintrail-router`:
+own and add it with `systemctl edit bintrail-router` (`systemctl edit
+bintrail-pg-router` for the PostgreSQL router):
 
 ```ini
 [Service]
@@ -1128,7 +1162,8 @@ EnvironmentFile=/etc/bintrail/router-aws.env
 A later `EnvironmentFile` wins, so that file's `AWS_ACCESS_KEY_ID` and
 `AWS_SECRET_ACCESS_KEY` replace the shared ones for the router alone. If the
 shared file sets `AWS_SESSION_TOKEN`, put `AWS_SESSION_TOKEN=` (empty) in the
-router's file for long-term keys: the router drops an empty token at start.
+router's file for long-term keys: the router drops an empty token at start,
+and so does the PostgreSQL router.
 
 ## Image details
 

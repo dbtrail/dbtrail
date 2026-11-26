@@ -348,6 +348,13 @@ func splitPKValues(s string) []string {
 	return append(parts, cur.String())
 }
 
+// SplitPKValues splits a stored pk_values string into its components, each
+// unescaped: the inverse of BuildPKValues' escape and join. A component
+// formatPKValue spelled in hex (its bytes were not valid UTF-8) comes back
+// in that spelling, hexPKPrefix and all: telling it from a value whose own
+// text starts with hexPKPrefix is the caller's to do, with the value's bytes.
+func SplitPKValues(s string) []string { return splitPKValues(s) }
+
 // DropPKComponent removes the idx-th component from a stored pk_values string
 // built over n key columns, keeping every other component spelled exactly as
 // stored. It reports false, and returns "", when the string does not hold

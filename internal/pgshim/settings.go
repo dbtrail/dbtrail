@@ -1133,12 +1133,16 @@ func (s *session) statementContext() (context.Context, func()) {
 	}
 	ctx, cancel := context.WithCancelCause(base)
 	stop := func() bool { return true }
+	var out context.Context = ctx
 	if d := s.set.stmtTimeout; d > 0 {
 		t := time.AfterFunc(d, func() { cancel(errStatementTimeout) })
 		stop = t.Stop
+		// The instant it ends the statement, which the copy's retry in the
+		// order written reads: it is a cancel, not ctx's deadline.
+		out = sqlsandbox.WithClientDeadline(ctx, time.Now().Add(d))
 	}
 	release := s.cancelTarget.running(cancel)
-	return ctx, func() {
+	return out, func() {
 		release()
 		stop()
 		cancel(nil)

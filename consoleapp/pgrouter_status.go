@@ -55,6 +55,10 @@ type pgRouterStatusDoc struct {
 	SQLModeForcedFrom string `json:"sql_mode_forced_from,omitempty"`
 	FreshByDefault    bool   `json:"fresh_by_default,omitempty"`
 	PerServerMode     bool   `json:"per_server_mode,omitempty"`
+	// CopyLanes is the copy's lane for short statements now
+	// (pgrouter_fastlane.go): how many workers are kept for them, and the
+	// long statements that run and wait. Absent when the router keeps none.
+	CopyLanes *pgCopyLanesDoc `json:"copy_lanes,omitempty"`
 }
 
 // pgRouterServerNumbers is one server's decisions.
@@ -65,6 +69,26 @@ type pgRouterServerNumbers struct {
 	// Reasons uses pgshim's Reason* names, which are the MySQL port's
 	// where they mean the same. Never null.
 	Reasons map[string]uint64 `json:"reasons"`
+	// JoinChecks counts what the copy's join check did with the statements
+	// the copy answered (pgshim JoinCheck* names: planned, written_order,
+	// no_statistics, could_not_run); one it refused is under Reasons,
+	// join_too_big. It also counts, on either side, what the retry in the
+	// order written did with a statement that ran out of memory in the
+	// copy's join order: oom_retry_written_order_ok (the copy answered),
+	// _failed (out of memory or time again: under Reasons as
+	// copy_refused_after_written_order when the source answered),
+	// _other_error (the second run's own error, answered as that error) and
+	// _skipped_forced_order, _skipped_check_chose_written_order,
+	// _skipped_no_time (not run again). And, on either side, what the port's
+	// memory of shapes that needed the order written did (pgshim
+	// writtenorder.go): written_order_remembered (the statement ran in the
+	// order written from the start, with no retry; its join check, of the
+	// order written alone, is not counted as planned) and, among those (a
+	// part of it, not beside it), written_order_forgotten (it ran out of
+	// memory or time in that order: the shape was forgotten, and under
+	// Reasons it is copy_refused_after_written_order when the source
+	// answered). Absent until one is counted.
+	JoinChecks map[string]uint64 `json:"join_checks,omitempty"`
 	// Answers is what each side ("copy", "source", "refused") finished:
 	// counts, errors and times.
 	Answers map[string]console.RouteAnswers `json:"answers"`
@@ -93,7 +117,14 @@ type pgRouterServerNumbers struct {
 	// this machine's clock, rounded up; DataAgeMaxSeconds the worst since
 	// CountingSince. A source with no write since makes it grow though
 	// nothing is missing; this machine's clock ahead of the source's makes
-	// it larger, behind it smaller, down to 0. Absent until a fresh answer.
+	// it larger, behind it smaller, down to 0. Absent until an answer that
+	// has one.
+	//
+	// For an answer that read a table from its snapshot alone (#3125),
+	// DataAsOf is the oldest bound its snapshot files record: every change
+	// committed before it is in the file. It is a minute before the moment
+	// the file was written at, and a table with no change keeps the bound of
+	// the update that last wrote its file, so it only errs old.
 	DataAsOf          string `json:"data_as_of,omitempty"`
 	DataAgeSeconds    *int64 `json:"data_age_seconds,omitempty"`
 	DataAgeMaxSeconds *int64 `json:"data_age_max_seconds,omitempty"`
@@ -106,7 +137,7 @@ type pgRouterServerNumbers struct {
 
 // Why the copy's last answer has no age.
 const (
-	pgAgeSnapshotAlone = "the last answer read a table without its newest captured changes (fast mode, a table with none, a statement on the change log, an earlier copy, or a wait for them that ran out), and how far a PostgreSQL snapshot reaches is not recorded: it is as old as the snapshot it read"
+	pgAgeSnapshotAlone = "the last answer read a table without its newest captured changes (fast mode, a table with none, a statement on the change log, an earlier copy, or a wait for them that ran out), and a snapshot file it read does not record how far it reaches (a full read taken before that was recorded, a table capture lost or dropped changes of, a copy that is not in a local folder): it is as old as the snapshot it read"
 	pgAgeUnplaced      = "which snapshot files the last answer read could not be told"
 )
 
@@ -125,7 +156,10 @@ type pgForwardAccounts interface {
 // pgRouteStats is the tally.
 type pgRouteStats struct {
 	// modes, when set, gives the document each server's mode.
-	modes      pgModes
+	modes pgModes
+	// lanes, when set, gives the document the copy's lane for short
+	// statements (pgrouter_fastlane.go).
+	lanes      *pgCopyLanes
 	mu         sync.Mutex
 	since      time.Time
 	statements bool
@@ -135,6 +169,7 @@ type pgRouteStats struct {
 type pgRouteTally struct {
 	copy, source, refused uint64
 	reasons               map[string]uint64
+	joinChecks            map[string]uint64
 	answers               map[string]*pgRouteAnswers
 	rows                  map[pgShapeKey]*pgShapeRow
 	notCounted            uint64
@@ -206,7 +241,7 @@ func (r *pgRouteStats) age(id string, a console.CopyRunAge) {
 		r.perServer[id] = t
 	}
 	latest := !a.Ran.Before(t.ageRan)
-	if !a.Tailed {
+	if !pgAgeKnown(a) {
 		t.unknown++
 		if latest {
 			t.ageRan, t.ageThrough, t.ageWhy = a.Ran, time.Time{}, pgAgeSnapshotAlone
@@ -223,6 +258,13 @@ func (r *pgRouteStats) age(id string, a console.CopyRunAge) {
 	if latest {
 		t.ageRan, t.ageThrough, t.ageWhy = a.Ran, a.Through, ""
 	}
+}
+
+// pgAgeKnown reports whether a has an age: every table it read had its
+// recent changes laid over it, or the snapshot files it read say how far
+// they reach (#3125).
+func pgAgeKnown(a console.CopyRunAge) bool {
+	return a.Tailed || (a.Snapshot && !a.Through.IsZero())
 }
 
 // pgAgeSeconds is d in whole seconds, rounded up: a lag is never said
@@ -255,6 +297,29 @@ func (r *pgRouteStats) note(id string, n pgshim.RouteNote) {
 		t.refused++
 	}
 	t.reasons[n.Reason]++
+	if n.JoinCheck != "" {
+		if t.joinChecks == nil {
+			t.joinChecks = map[string]uint64{}
+		}
+		t.joinChecks[n.JoinCheck]++
+	}
+	if n.OOMRetry != "" {
+		// Whichever side answered: a retry that failed sent it to the
+		// source.
+		if t.joinChecks == nil {
+			t.joinChecks = map[string]uint64{}
+		}
+		t.joinChecks[pgOOMRetryPrefix+n.OOMRetry]++
+	}
+	if n.WrittenOrder != "" {
+		if t.joinChecks == nil {
+			t.joinChecks = map[string]uint64{}
+		}
+		t.joinChecks[pgWrittenOrderRemembered]++
+		if n.WrittenOrder == pgshim.WrittenOrderForgotten {
+			t.joinChecks[pgWrittenOrderForgotten]++
+		}
+	}
 	a := t.answers[n.Side]
 	if a == nil {
 		a = &pgRouteAnswers{}
@@ -363,10 +428,27 @@ func (c *pgConnAges) routed() func(pgshim.RouteNote) {
 	}
 }
 
+// pgOOMRetryPrefix names, under join_checks, what the copy's retry in the
+// order written did (RouteNote.OOMRetry): oom_retry_written_order_ok,
+// _failed, _other_error and _skipped_<why> (sqlsandbox oomretry.go).
+const pgOOMRetryPrefix = "oom_retry_written_order_"
+
+// Under join_checks, what the memory of shapes that needed the order written
+// did (RouteNote.WrittenOrder): every statement it ran in the order written
+// from the start, and those of them that ran out of memory there too.
+const (
+	pgWrittenOrderRemembered = "written_order_remembered"
+	pgWrittenOrderForgotten  = "written_order_forgotten"
+)
+
 // doc is the status document now: the counts, then each server's mode,
 // asked of the console outside the tally's lock, which every statement takes.
 func (r *pgRouteStats) doc(listen string) pgRouterStatusDoc {
 	d := r.counts(listen)
+	if r.lanes != nil {
+		n := r.lanes.numbers()
+		d.CopyLanes = &n
+	}
 	if r.modes != nil {
 		forced, _ := console.SQLModeSetting()
 		fresh := forced == console.SQLModeForcedFresh
@@ -409,7 +491,7 @@ func (r *pgRouteStats) counts(listen string) pgRouterStatusDoc {
 		Servers: map[string]pgRouterServerNumbers{}}
 	for id, t := range r.perServer {
 		n := pgRouterServerNumbers{Copy: t.copy, Source: t.source, Refused: t.refused,
-			Reasons: maps.Clone(t.reasons), Answers: map[string]console.RouteAnswers{}, ForwardingOff: t.barred}
+			Reasons: maps.Clone(t.reasons), JoinChecks: maps.Clone(t.joinChecks), Answers: map[string]console.RouteAnswers{}, ForwardingOff: t.barred}
 		switch {
 		case t.ageWhy != "":
 			n.DataAgeUnknownReason = t.ageWhy

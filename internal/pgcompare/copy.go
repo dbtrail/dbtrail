@@ -34,6 +34,12 @@ type SnapshotCopy struct {
 // OpenSnapshotCopy prepares the copy held in snapshotDir (one complete
 // snapshot, <root>/<timestamp>). schema, when set, is where unqualified
 // names resolve, as on the source.
+//
+// Its views keep a char(n) padded: they are the snapshot's views, not the
+// PostgreSQL port's, which read a char(n) without its padding (#3219,
+// views.WithPaddingTrimmed). What a test here finds about char(n) is about
+// that copy; the port's is tested through the port
+// (charn_trim_battery_integration_test.go).
 func OpenSnapshotCopy(ctx context.Context, runner *sqlsandbox.Runner, snapshotDir, schema string) (*SnapshotCopy, error) {
 	abs, err := filepath.Abs(snapshotDir)
 	if err != nil {

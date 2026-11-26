@@ -142,7 +142,11 @@ func hideHostPathsInError(err error, roots []string) error {
 	case errors.As(err, &qe):
 		if hidden := hideHostPaths(qe.Message, roots); hidden != qe.Message {
 			logHiddenPath("an engine error", qe.Message)
-			return &QueryError{Message: hidden}
+			// A copy: what the parent knows of the statement's join order
+			// and its retry travels with the text (oomretry.go).
+			hiddenErr := *qe
+			hiddenErr.Message = hidden
+			return &hiddenErr
 		}
 	}
 	return err

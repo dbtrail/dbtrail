@@ -17,6 +17,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/keyidx"
 	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/pgdelta"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
@@ -318,13 +319,17 @@ func mergeBaselineIntoParquet(ctx context.Context, in mergeInput, rep *TableRepo
 		}
 		keyidx.WriteBeside(ctx, in.Schema, in.Table, path, keys, in.DuckDBTuning)
 	}
+	// A PostgreSQL table's own key index (#3085), for its text key.
+	if in.PG && len(in.PKCols) > 0 {
+		pgdelta.WriteKeyIndexBeside(ctx, in.Schema, in.Table, path, pgKeyNames(in.PKCols), in.DuckDBTuning)
+	}
 	return nil
 }
 
 // wantKeyIndex says whether a file the merge wrote gets a key index built:
 // a PostgreSQL baseline stores its key as text, which the index cannot hold,
-// so no DuckDB session is opened to find that out; a table with no key has
-// nothing to index.
+// so no DuckDB session is opened to find that out (it gets the index of
+// pgdelta instead); a table with no key has nothing to index.
 func wantKeyIndex(in mergeInput) bool {
 	return !in.PG && len(in.PKCols) > 0
 }
@@ -752,6 +757,12 @@ func renderBaselineValue(col baseline.Column, v any) (text string, isNull bool, 
 
 	case []byte:
 		if baseline.IsBinaryType(col.MySQLType) {
+			if len(t) == 0 {
+				// An empty value. "0x" alone is not decoded (decodeBinaryLiteral
+				// wants at least one digit), so it would be stored as the two
+				// bytes "0x"; the empty text is stored as the empty value.
+				return "", false, nil
+			}
 			// The 0x<hex> form convertValue's decodeBinaryLiteral decodes. Always
 			// hex — never the raw bytes — so bytes that happen to spell "0x1234"
 			// round-trip as themselves rather than being decoded as a literal.

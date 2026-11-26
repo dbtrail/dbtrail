@@ -69,7 +69,14 @@ func startPGExtPort(t *testing.T, ctx context.Context) pgExtEnv {
 // nil answers a request for TLS 'N'.
 func startPGExtPortTLS(t *testing.T, ctx context.Context, tlsConfig *tls.Config) pgExtEnv {
 	t.Helper()
-	return startPGPortFor(t, ctx, tlsConfig, pgPortFixture{table: pgExtTable, slot: pgExtSlot, pub: pgExtPub, setup: []string{
+	return startPGExtPortWith(t, ctx, tlsConfig, false)
+}
+
+// startPGExtPortWith is startPGExtPortTLS, on a server whose forwarding is
+// off when copyOnly (pgPortFixture.copyOnly).
+func startPGExtPortWith(t *testing.T, ctx context.Context, tlsConfig *tls.Config, copyOnly bool) pgExtEnv {
+	t.Helper()
+	return startPGPortFor(t, ctx, tlsConfig, pgPortFixture{table: pgExtTable, slot: pgExtSlot, pub: pgExtPub, copyOnly: copyOnly, setup: []string{
 		"CREATE TABLE " + pgExtTable + ` (
 		id int PRIMARY KEY, status text, amount numeric(10,2), placed timestamptz,
 		day date, ok boolean, weight double precision, note text, data bytea, uid uuid, big bigint)`,
@@ -89,9 +96,21 @@ type pgPortFixture struct {
 	setup            []string
 	// entry, when set, edits the server's registry entry before it is saved
 	// (its source and forwarding account, #2771); sources, when set, is the
-	// port's bound on connections to the sources.
-	entry   func(*console.ServerEntry)
-	sources int
+	// port's bound on connections to the sources. Without entry the server
+	// gets the source and a forwarding user of its own that can only read
+	// the fixture's table (pgFixtureRole): the port serves a PostgreSQL
+	// server only when it can forward (0.140.0), and with an account of its
+	// own what the copy does not answer is PostgreSQL's own answer, so these
+	// fixtures go on comparing what the copy answers with PostgreSQL.
+	// noForward leaves that out. copyOnly gives the server that user too,
+	// and a rule that hides a table nobody has: a server that hides tables
+	// or columns sends nothing to its source, so the copy answers every
+	// statement alone, the one way a served server still does. For the tests
+	// of what the copy itself answers, refusals included.
+	entry     func(*console.ServerEntry)
+	noForward bool
+	copyOnly  bool
+	sources   int
 	// sourceWait, when set, is how long a statement waits for a connection
 	// to the source when sources are all taken (#2985).
 	sourceWait time.Duration
@@ -105,6 +124,16 @@ type pgPortFixture struct {
 	// router's --max-wait; negative refuses at once, as a full line).
 	workers int
 	maxWait time.Duration
+	// noFastLane gives the copy workers alone, none kept for short
+	// statements; otherwise it has one more, kept for them, as the
+	// pg-router does (pgrouter_fastlane.go, pgCopySlots).
+	noFastLane bool
+	// sqlMemory, when set, is each copy worker's memory (the router's
+	// --sql-memory, "<n>MiB").
+	sqlMemory string
+	// writtenOrderRemember, when set, is how long the port runs a statement
+	// shape that needed the order written that way (pgshim writtenorder.go).
+	writtenOrderRemember time.Duration
 }
 
 func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx pgPortFixture) pgExtEnv {
@@ -135,6 +164,9 @@ func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx
 		exec1(stmt)
 	}
 	exec1("CREATE PUBLICATION " + fx.pub + " FOR TABLE " + fx.table)
+	if fx.entry == nil && !fx.noForward {
+		ensureFixtureRole(t, ctx)
+	}
 
 	outDir := t.TempDir()
 	repl := baseDSN + "?replication=database"
@@ -168,18 +200,32 @@ func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx
 	entry := console.ServerEntry{Name: "pgsrv", DSN: dsn, Flavor: console.FlavorPostgres, BaselineDir: outDir}
 	if fx.entry != nil {
 		fx.entry(&entry)
+	} else if !fx.noForward {
+		entry.SourceDSN, entry.SourceSlot, entry.SourcePublication = pgFwdSourceDSN(t), fx.slot, fx.pub
+		entry.RouteDSN = withAccount(t, entry.SourceDSN, pgFixtureRole, pgFixturePass)
 	}
 	ent, err := f.owner.Add(entry)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if fx.entry == nil && fx.copyOnly {
+		ent = hideNothingThere(t, f.owner, ent.ID)
+	}
 	f.savePortFile(t, true, "tok")
 	settings, workers := f.settings(""), 2
+	if fx.sqlMemory != "" {
+		settings.SQLMemory = fx.sqlMemory
+	}
 	if fx.maxWait != 0 {
 		settings.MaxWait = fx.maxWait
 	}
 	if fx.workers > 0 {
 		workers = fx.workers
+	}
+	if !fx.noFastLane {
+		// As the router sizes it: one worker beyond --workers, kept for
+		// short statements (pgCopySlots).
+		workers = pgCopySlots(workers)
 	}
 	srv, runner, err := newRouterConsole(settings, console.SQLPool{Workers: workers, Threads: 2})
 	if err != nil {
@@ -189,6 +235,10 @@ func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx
 	srv.RefreshFollowedFiles()
 	routes := newPGRouteStats(time.Now(), true)
 	router := &pgRouterPort{srv: srv, addr: freeAddr(t), maxConns: 32, poll: 20 * time.Millisecond, out: io.Discard, tls: tlsConfig, routes: routes}
+	if !fx.noFastLane {
+		router.lanes = newPGCopyLanes(runner)
+		routes.lanes = router.lanes
+	}
 	if fx.sources > 0 {
 		router.sources = newPGSourceSlots(fx.sources)
 		if fx.sourceWait > 0 {
@@ -196,6 +246,9 @@ func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx
 		}
 	}
 	router.cost = fx.cost
+	if fx.writtenOrderRemember != 0 {
+		router.writtenOrders = &pgWrittenOrders{remember: fx.writtenOrderRemember}
+	}
 	if router.cost == nil {
 		router.cost = &pgshim.CostPolicy{}
 	}
@@ -366,9 +419,11 @@ func TestIntegrationPGRouterExtended(t *testing.T) {
 			// What the simple protocol refuses the extended one refuses,
 			// with the same code; and nothing is written.
 			for _, c := range []struct{ stmt, code string }{
-				{"DELETE FROM " + tbl + " WHERE id = $1", "0A000"},
-				{"UPDATE " + tbl + " SET note = $1", "0A000"},
-				{"INSERT INTO " + tbl + " (id) VALUES ($1)", "0A000"},
+				// A write is refused before it is sent: the port is
+				// read-only toward the source.
+				{"DELETE FROM " + tbl + " WHERE id = $1", "25006"},
+				{"UPDATE " + tbl + " SET note = $1", "25006"},
+				{"INSERT INTO " + tbl + " (id) VALUES ($1)", "25006"},
 				{"SELECT * FROM no_such_table WHERE id = $1", "42P01"},
 			} {
 				got := pgxAnswer(ctx, port, c.stmt, 99)
@@ -421,12 +476,13 @@ func TestIntegrationPGRouterExtended(t *testing.T) {
 		same("commit", &pgproto3.Query{String: "COMMIT"})
 		same("portal after commit", &pgproto3.Execute{Portal: "c1"}, &pgproto3.Sync{})
 		same("begin again", &pgproto3.Query{String: "BEGIN"})
-		// The error: PostgreSQL reports a missing table at Parse, the port
-		// when the statement runs; what matters to the client is the code
-		// and the failed block, compared below.
+		// The error: the block lives on the source, which reports a missing
+		// table at Parse; the port has answered the Parse itself and relays
+		// the error when the statement runs there. What matters to the
+		// client is the code and the failed block, compared below.
 		src.send(t, &pgproto3.Parse{Query: "SELECT * FROM no_such_table"}, &pgproto3.Bind{}, &pgproto3.Execute{}, &pgproto3.Sync{})
 		got := port.send(t, &pgproto3.Parse{Query: "SELECT * FROM no_such_table"}, &pgproto3.Bind{}, &pgproto3.Execute{}, &pgproto3.Sync{})
-		if strings.Join(got, ",") != "ParseComplete,BindComplete,Error 42P01,ReadyForQuery E" {
+		if strings.Join(got, ",") != "ParseComplete,Error 42P01,ReadyForQuery E" {
 			t.Errorf("an error in a block: %q", got)
 		}
 		same("in the failed block", &pgproto3.Parse{Query: q}, &pgproto3.Bind{}, &pgproto3.Execute{}, &pgproto3.Sync{})

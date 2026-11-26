@@ -243,7 +243,7 @@ func (r *Run) check(ctx context.Context, open func() (*sql.DB, error), s session
 		if !s.wallClock {
 			datetimes = t.Datetimes
 		}
-		view, err := ReadView(ctx, ddb, r.Schema, t.Name, source.Columns, source.PK, datetimes)
+		view, err := ReadViewRendered(ctx, ddb, r.Schema, t.Name, source.Columns, source.PK, datetimes, t.Render)
 		if err != nil {
 			return fmt.Errorf("seed %d step %d (%s, session %s): %w", r.Seed, cx.Step, cx.StepName, s.zone, err)
 		}

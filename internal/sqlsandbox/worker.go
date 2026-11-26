@@ -227,6 +227,14 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 			res = wireResult{Error: &wireError{Kind: errSession, Message: fmt.Sprintf("sql worker panicked: %v", r)}}
 		}
 	}()
+	// The order the join check chose travels with an engine error too, so
+	// the parent does not run the same plan again (oomretry.go).
+	ranWritten := false
+	defer func() {
+		if ranWritten && res.Error != nil && res.Error.Kind == errQuery {
+			res.JoinOrder = joinOrderWritten
+		}
+	}()
 	if sess.err != nil {
 		return sessionErr("%v", sess.err)
 	}
@@ -254,13 +262,14 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 	}
 	// The joins in the order written (Session.KeepJoinOrder). The database
 	// is the job's own (serveJob opens a new one per job), so the next
-	// statement plans its joins as always. The only writer of
-	// disabled_optimizers: a SET replaces the whole list, so another
-	// optimizer turned off later must be added to this one, not set apart.
-	if job.KeepJoinOrder {
-		const keep = "SET disabled_optimizers = 'join_order'"
-		if _, err := conn.ExecContext(ctx, keep); err != nil {
-			return sessionErr("%s: %v", keep, err)
+	// statement plans its joins as always. With the common_subplan
+	// optimizer off for the PostgreSQL port (Session.SkipCommonSubplan) in
+	// the same list: a SET replaces the whole list, so both are written by
+	// disabledOptimizersSQL, here and in the join check below (checkJoins),
+	// and another optimizer turned off later is added there.
+	if stmt := disabledOptimizersSQL(job.KeepJoinOrder, job.SkipCommonSubplan); stmt != "" {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			return sessionErr("%s: %v", stmt, err)
 		}
 	}
 	// Then the restrictions, then the views, then the lock. The views are
@@ -381,6 +390,32 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 		if _, err := conn.ExecContext(ctx, "SET TimeZone = '"+strings.ReplaceAll(job.TimeZone, "'", "''")+"'"); err != nil {
 			return wireResult{Error: &wireError{Kind: errRefused, Message: fmt.Sprintf(
 				"the session time zone %q (SET time_zone) cannot be applied on the copy: %v", job.TimeZone, firstLine(err.Error()))}}
+		}
+	}
+	// The join check (joinguard.go, Session.JoinNDV): the statement's plan in
+	// this session, its views and settings in place, and before the lock,
+	// because running it in the order written is a SET. When the order
+	// written was asked for already, only that order is checked
+	// (checkJoinsWritten): there is no other to move to.
+	if job.JoinNDV != nil {
+		var check joinCheck
+		if job.KeepJoinOrder {
+			check = checkJoinsWritten(ctx, conn, job.SQL, job.JoinNDV)
+		} else {
+			check = checkJoins(ctx, conn, job.SQL, job.JoinNDV, job.SkipCommonSubplan)
+		}
+		switch {
+		case check.refusal != "":
+			return wireResult{Error: &wireError{Kind: errJoinTooBig, Message: check.refusal}}
+		case check.written:
+			res.JoinOrder = joinOrderWritten
+			ranWritten = true
+			// Said on stderr too, before the statement runs: a worker the
+			// kernel stops leaves no answer, and the parent reads this line
+			// to know which order it ran in (oomretry.go).
+			fmt.Fprintln(stderr, joinOrderWrittenLine)
+		case check.skipped != "":
+			res.JoinCheckSkipped = check.skipped
 		}
 	}
 	if _, err := conn.ExecContext(ctx, lockLast); err != nil {

@@ -128,6 +128,11 @@ type Config struct {
 	// BINTRAIL_CONSOLE_BASELINE_TRIGGER=1. nil when no refresh loop runs, and the
 	// baseline listing then simply carries no refresh section.
 	BaselineRefresh BaselineRefreshReporter
+	// RefreshLine is the rule the daemon's snapshot update draws its line with
+	// (#3083), so the Snapshots page grades "aging" on the same line the
+	// update rewrites a table on. nil when this process updates no snapshot:
+	// the verdict is then graded on the span alone, as before.
+	RefreshLine RefreshLineSource
 	// BaselineRestore runs operator-chosen point-in-time restores into the
 	// server's own baseline store. Wired whenever the watch daemon has a
 	// baseline supervisor (creation or refresh opt-in); nil elsewhere.
@@ -504,6 +509,9 @@ type BaselineRefreshDefaults struct {
 // gates) lives in a connManager bundle resolved per request from the
 // X-Bintrail-Server header.
 type Server struct {
+	// pgStamps is each server's last stamp of its copy for the PostgreSQL
+	// port, by registry id (*pgStampMemo, PGCopyStamp).
+	pgStamps sync.Map
 	// lagTrend keeps the last coverage reads per server, to tell a capture
 	// gap that keeps widening from one being worked off (#2201).
 	lagTrend lagTrendBook
@@ -575,6 +583,8 @@ type Server struct {
 	// baselineRefresh: non-nil only when the watch daemon opted into the
 	// periodic refresh (see Config.BaselineRefresh).
 	baselineRefresh BaselineRefreshReporter
+	// refreshLine: see Config.RefreshLine.
+	refreshLine RefreshLineSource
 	// schemaSnapCtrl: non-nil only when this process runs the control plane
 	// (see Config.SchemaSnapshotCtrl).
 	schemaSnapCtrl SchemaSnapshotController
@@ -628,6 +638,9 @@ type Server struct {
 	baselineRefreshDefaults BaselineRefreshDefaults
 	// localPruneLoop is Config.LocalPruneLoop.
 	localPruneLoop bool
+	// folderUsage measures snapshot folders for the pages that report what
+	// they hold (#2475).
+	folderUsage folderUsageCache
 	// mayCreateFolders is Config.MayCreateFolders.
 	mayCreateFolders bool
 	// version is the running build's version string (Config.Version).
@@ -941,6 +954,7 @@ func New(cfg Config) (*Server, error) {
 		monitorCtrl:             cfg.MonitorCtrl,
 		baselineCtrl:            cfg.BaselineCtrl,
 		baselineRefresh:         cfg.BaselineRefresh,
+		refreshLine:             cfg.RefreshLine,
 		schemaSnapCtrl:          cfg.SchemaSnapshotCtrl,
 		verifyCtrl:              cfg.VerifyCtrl,
 		verifyHistory:           cfg.VerifyHistory,
