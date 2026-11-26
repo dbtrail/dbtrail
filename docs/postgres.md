@@ -2330,15 +2330,21 @@ could only read in part is not remembered. Only a second run that answered
 teaches the port anything: a second run that failed, a statement not run
 again, a cancel, a time-out or any other error leaves the memory as it was.
 The answer does not change, only the plan: the order written turns off the
-engine's join order optimizer and nothing else. A remembered statement skips
-the join check, which plans the statement in the engine's own order, the one
-that ran out of memory; the second run skips it too, so a remembered shape
-is never refused as `join_too_big`. When a remembered statement runs out of
-memory or out of the copy's time in the order written, the shape is
-forgotten and the statement goes to the source as
-`copy_refused_after_written_order`, without a third run, as when the second
-run fails; any other error is answered as that error, and the shape stays
-remembered. Each shape is
+engine's join order optimizer and nothing else. A remembered statement keeps
+the join check, for the order written alone: one shape covers every value of
+it, and a value can make it far larger than the one it was learned with, so
+a join estimated far past its inputs in the order written sends it to the
+source as `join_too_big` before it runs, and the shape stays remembered. A
+remembered statement gets at most half of what is left of the client's
+`statement_timeout` on the copy, as the second run does, so the source still
+has the other half. When it runs out of memory or of time in the order
+written (the copy's own limit, or that half), the shape is forgotten and the
+statement goes to the source as `copy_refused_after_written_order`, without a
+third run, as when the second run fails. Where there is no source to send it
+to, the client gets the error: the out of memory one, or `57014` for time.
+The client's own `statement_timeout` ending it forgets the shape too, and is
+answered as always. Any other error is answered as that error, and the shape
+stays remembered. Each shape is
 remembered for 24 hours from when it was learned, however often it is used,
 so the engine's own order is tried again once a day: as the data changes it
 may fit again, and it is usually the faster one when it does. A new snapshot
@@ -2350,8 +2356,11 @@ shared by all its connections, kept in memory only: a restart of the port
 forgets it (opening the port again after a password change does not).
 `/status` counts it under `join_checks`, on either side:
 `written_order_remembered` for each statement run in the order written from
-the start, and, among those, `written_order_forgotten` for one that ran out of
-memory or time there. The log has one `INFO` line when a shape is learned and one
+the start, and `written_order_forgotten` for those of them that ran out of
+memory or time there. The second is part of the first, not beside it: a
+statement that was forgotten adds one to both, so the two are not added up as
+separate runs. A remembered statement whose join check passed adds nothing to
+`planned`. The log has one `INFO` line when a shape is learned and one
 when it is forgotten, not one per statement.
 
 **The copy does not cache a subplan a statement reads twice.** On this port

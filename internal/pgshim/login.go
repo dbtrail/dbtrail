@@ -441,21 +441,29 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		opts.JoinNDV, want = s.joinNDVFor(text)
 		// A shape that ran out of memory in the copy's join order and
 		// answered in the order written runs in the order written from the
-		// start, with nothing for the join check to count (writtenorder.go).
+		// start, within half of the client's time (writtenorder.go).
 		shape := s.writtenOrderKey(qstr)
 		remembered := shape != "" && s.bound.WrittenOrders.has(shape)
+		run := ctx
 		if remembered {
 			startInWrittenOrder(&opts)
-			want = ""
+			var cancel context.CancelFunc
+			run, cancel = s.writtenOrderContext(ctx)
+			defer cancel()
 		}
-		res, err = s.bound.Run(ctx, text, opts)
+		res, err = s.bound.Run(run, text, opts)
 		var changed *sqlsandbox.MayHaveChangedError
 		if opts.NeedTails && errors.As(err, &changed) {
 			s.logger.Debug("pgshim: the copy's recent changes for a statement were not ready; it did not run there, and the source answers it", "why", changed.Reason)
 		}
 		s.joinCheck = s.noteJoinCheck(res, err, opts.JoinNDV != nil, want)
+		if remembered && s.joinCheck == JoinCheckPlanned {
+			// Checked in the order written and passed: counted as
+			// written_order_remembered, not as a run in the copy's order.
+			s.joinCheck = ""
+		}
 		s.oomRetry = sqlsandbox.WrittenOrderRetryOf(res, err)
-		err = s.settleWrittenOrder(qstr, shape, remembered, res, err)
+		err = s.settleWrittenOrder(ctx, run, qstr, shape, remembered, res, err)
 	}
 	if res.Spool != nil {
 		// Only a bug gets here: this port asks for no result in a file.

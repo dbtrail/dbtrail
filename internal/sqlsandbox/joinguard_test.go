@@ -482,12 +482,43 @@ func TestWorker_joinCheckOrders(t *testing.T) {
 			t.Fatalf("%+v, %d plans", res.Error, len(*plans))
 		}
 	})
-	t.Run("the order written already asked for: no check", func(t *testing.T) {
-		plans := fakeJoinDanger(t, nil)
+	t.Run("the order written already asked for: only that order is checked", func(t *testing.T) {
+		planner := fakeJoinDanger(t, nil, "")
+		if res := runJob(job(), nil, os.Stderr); res.Error != nil {
+			t.Fatal(res.Error.Message)
+		}
+		plans := fakeJoinDanger(t, nil, "")
 		j := job()
 		j.KeepJoinOrder = true
-		if res := runJob(j, nil, os.Stderr); res.Error != nil || len(*plans) != 0 || res.JoinOrder != "" {
-			t.Fatalf("%+v, %d plans %q", res.Error, len(*plans), res.JoinOrder)
+		res := runJob(j, nil, os.Stderr)
+		if res.Error != nil || len(*plans) != 1 || res.JoinOrder != "" || len(res.Rows) != 1 {
+			t.Fatalf("%+v, %d plans %q rows %v", res.Error, len(*plans), res.JoinOrder, res.Rows)
+		}
+		// Planned with the join order off, as it runs: not the planner's.
+		if bytes.Equal((*planner)[0], (*plans)[0]) {
+			t.Errorf("the plan checked is the planner's: %s", (*plans)[0])
+		}
+	})
+	t.Run("the order written already asked for and flagged: refused, nothing run", func(t *testing.T) {
+		plans := fakeJoinDanger(t, nil, "CROSS_PRODUCT of 1 x 2")
+		j := job()
+		j.KeepJoinOrder = true
+		res := runJob(j, nil, os.Stderr)
+		if res.Error == nil || res.Error.Kind != errJoinTooBig || len(res.Rows) != 0 || len(*plans) != 1 {
+			t.Fatalf("%+v rows %v, %d plans", res.Error, res.Rows, len(*plans))
+		}
+		if !strings.Contains(res.Error.Message, "CROSS_PRODUCT of 1 x 2") || !strings.Contains(res.Error.Message, "in the order written") ||
+			strings.Contains(res.Error.Message, "copy's join order") {
+			t.Errorf("the refusal: %q", res.Error.Message)
+		}
+	})
+	t.Run("the order written already asked for, a plan that cannot be read: runs, and says so", func(t *testing.T) {
+		fakeJoinDanger(t, errors.New("garbled"))
+		j := job()
+		j.KeepJoinOrder = true
+		res := runJob(j, nil, os.Stderr)
+		if res.Error != nil || res.JoinOrder != "" || !strings.Contains(res.JoinCheckSkipped, "garbled") {
+			t.Fatalf("%+v %q %q", res.Error, res.JoinOrder, res.JoinCheckSkipped)
 		}
 	})
 }

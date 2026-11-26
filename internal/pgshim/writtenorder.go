@@ -1,6 +1,7 @@
 package pgshim
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -33,15 +34,18 @@ import (
 // about the plan, so an answer the port then does not give (copy_too_old, a
 // result too large) still counts.
 //
-// A remembered shape runs with sqlsandbox.Session.KeepJoinOrder and without
-// the join check (joinstats.go), whose plan is the copy's own order, the one
-// that ran out of memory; the retry runs without it too. KeepJoinOrder turns
-// off the engine's join order optimizer and nothing else, so the answer is
-// the same, only its plan changes. When a remembered shape runs out of
-// memory or out of the copy's time in the order written, it is forgotten and
-// the statement goes to the source as one that ran out of memory in both
-// orders (copy_refused_after_written_order), as the retry's did: it is not
-// run a third time. Any other error leaves it remembered, and is answered as
+// A remembered shape runs with sqlsandbox.Session.KeepJoinOrder, with the
+// join check (joinstats.go) of that order alone: a join that would explode
+// there refuses it before it runs (join_too_big), since one shape covers
+// every value of it. KeepJoinOrder turns off the engine's join order
+// optimizer and nothing else, so the answer is the same, only its plan
+// changes. It gets at most half of what is left of the client's
+// statement_timeout, as the retry does. When it runs out of memory or of
+// time in the order written (the copy's cap, or that half), the shape is
+// forgotten and the statement goes to the source as one that ran out of
+// memory in both orders (copy_refused_after_written_order), as the retry's
+// did: it is not run a third time. A cut by the client's statement_timeout
+// forgets it too. Any other error leaves it remembered, and is answered as
 // that error, as before.
 //
 // Each shape is kept for WrittenOrderRemember from when it was learned. Using
@@ -164,20 +168,49 @@ func (s *session) writtenOrderKey(text string) string {
 	return s.costVerdictKey(text)
 }
 
-// startInWrittenOrder is opts for a remembered shape: the order written, and
-// no join check.
+// startInWrittenOrder is opts for a remembered shape: the order written.
+// The join check stays (RunOptions.JoinNDV): with the order written asked
+// for, the copy checks that order alone, and refuses the statement when a
+// join there would explode (sqlsandbox checkJoinsWritten). A shape keeps
+// its key whatever its values, and one value can make it far larger than
+// the one it was learned with.
 func startInWrittenOrder(opts *RunOptions) {
 	opts.KeepJoinOrder = true
-	opts.JoinNDV = nil
+}
+
+// writtenOrderContext is the context a remembered shape runs on the copy
+// in: on a connection that can send it to its source, at most half of what
+// is left of the client's statement_timeout, as the retry in the order
+// written gets (sqlsandbox writtenOrderRetryBudget), so the source still has
+// the other half when the order written runs out of time. ctx itself
+// otherwise.
+func (s *session) writtenOrderContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	at, ok := sqlsandbox.ClientDeadlineOf(ctx)
+	if !ok || !s.canFallBack() {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, time.Until(at)/2)
+}
+
+// sentence is text ending in a full stop, so another can follow it.
+func sentence(text string) string {
+	text = strings.TrimRight(text, " ")
+	if strings.HasSuffix(text, ".") {
+		return text
+	}
+	return text + "."
 }
 
 // settleWrittenOrder is told what the copy's run of text did, key its shape's
 // key ("" for none) and remembered whether it ran in the order written for
-// it, and returns the error to answer with. It remembers a shape whose retry
-// in the order written answered, and forgets a remembered one that ran out
-// of memory or time in the order written, whose error it then marks as one
-// that ran out of memory in both orders.
-func (s *session) settleWrittenOrder(text, key string, remembered bool, res sqlsandbox.Result, err error) error {
+// it, in run, a context of ctx's (writtenOrderContext), and returns the
+// error to answer with. It remembers a shape whose retry in the order
+// written answered, and forgets a remembered one that ran out of memory or
+// time in the order written. Where the statement can go to the source, that
+// error is then marked as one that ran out of memory in both orders, which
+// sends it there; a cut by the client's statement_timeout is that, as it
+// always is, and on a connection with no source a time-out stays one.
+func (s *session) settleWrittenOrder(ctx, run context.Context, text, key string, remembered bool, res sqlsandbox.Result, err error) error {
 	if key == "" {
 		return err
 	}
@@ -193,28 +226,46 @@ func (s *session) settleWrittenOrder(text, key string, remembered bool, res sqls
 	// that is this memory's doing, not a statement that asked for it.
 	s.oomRetry = ""
 	s.writtenOrder = WrittenOrderRemembered
+	if err == nil {
+		return nil
+	}
 	var qe *sqlsandbox.QueryError
 	var timedOut *sqlsandbox.TimeoutError
-	var marked sqlsandbox.QueryError
+	var marked *sqlsandbox.QueryError
 	switch {
 	case errors.As(err, &qe) && qe.WrittenOrderRetry == sqlsandbox.WrittenOrderRetrySkippedForcedOrder:
-		marked = *qe
-		marked.Message += " It ran with its joins in the order written, which this statement shape needed before, and ran out of memory in that order too."
+		m := *qe
+		m.Message = sentence(m.Message) + " It ran with its joins in the order written, which this statement shape needed before, and ran out of memory in that order too."
+		marked = &m
+	case errors.Is(context.Cause(ctx), errStatementTimeout):
+		// The client's own statement_timeout ended it: answered as that, as
+		// always, nothing more to send anywhere.
+	case ctx.Err() == nil && run.Err() != nil:
+		// Its half of the client's time (writtenOrderContext) is over: the
+		// source has the rest.
+		marked = &sqlsandbox.QueryError{Message: "The statement ran on the copy for half of what was left of statement_timeout, the most it may take there so that the source has the rest, and was stopped." +
+			" It ran with its joins in the order written, which this statement shape needed before because it ran out of memory in the copy's own order."}
 	case errors.As(err, &timedOut):
 		// Out of the copy's time in the order written: what the retry's own
-		// time-out was before this memory (oomretry.go), which sends the
-		// statement to the source, and not a statement_timeout of the
-		// client's (a cancel, never this error).
-		marked = sqlsandbox.QueryError{Message: timedOut.Error() + " It ran with its joins in the order written, which this statement shape needed before because it ran out of memory in the copy's own order, and ran out of time in that order."}
+		// time-out was before this memory (oomretry.go).
+		if s.canFallBack() {
+			marked = &sqlsandbox.QueryError{Message: sentence(timedOut.Error()) +
+				" It ran with its joins in the order written, which this statement shape needed before because it ran out of memory in the copy's own order, and ran out of time in that order."}
+		}
 	default:
 		return err
 	}
 	s.writtenOrder = WrittenOrderForgotten
 	if w.forget(key) {
 		line, _, _ := strings.Cut(err.Error(), "\n")
-		s.logger.Info("pgshim: a statement shape remembered as needing the order written ran out of memory or time in that order; it is forgotten, and this statement goes on as one that ran out of memory in both orders",
+		s.logger.Info("pgshim: a statement shape remembered as needing the order written ran out of memory or time in that order; it is forgotten",
 			"shape", Fingerprint(text), "error", line)
 	}
+	if marked == nil {
+		// Nowhere else to send it, or the client's own limit: the time-out
+		// is the answer (57014).
+		return err
+	}
 	marked.WrittenOrderRetry = sqlsandbox.WrittenOrderRetryFailed
-	return &marked
+	return marked
 }

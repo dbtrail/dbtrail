@@ -163,7 +163,7 @@ func TestSettleWrittenOrder(t *testing.T) {
 		s.bound.WrittenOrders = &WrittenOrders{}
 		key := s.writtenOrderKey("SELECT n FROM t")
 		s.oomRetry = sqlsandbox.WrittenOrderRetryOf(tc.res, tc.err)
-		if got := s.settleWrittenOrder("SELECT n FROM t", key, false, tc.res, tc.err); got != tc.err {
+		if got := s.settleWrittenOrder(context.Background(), context.Background(), "SELECT n FROM t", key, false, tc.res, tc.err); got != tc.err {
 			t.Errorf("%s: the error changed to %v", tc.what, got)
 		}
 		if s.bound.WrittenOrders.has(key) != tc.learnt {
@@ -183,7 +183,7 @@ func TestSettleWrittenOrder(t *testing.T) {
 	}
 	// Answered in the order written from the start.
 	s, key := remembered()
-	if err := s.settleWrittenOrder("SELECT n FROM t", key, true, sqlsandbox.Result{}, nil); err != nil || s.writtenOrder != WrittenOrderRemembered || !s.bound.WrittenOrders.has(key) {
+	if err := s.settleWrittenOrder(context.Background(), context.Background(), "SELECT n FROM t", key, true, sqlsandbox.Result{}, nil); err != nil || s.writtenOrder != WrittenOrderRemembered || !s.bound.WrittenOrders.has(key) {
 		t.Errorf("answered: %v, %q, remembered %v", err, s.writtenOrder, s.bound.WrittenOrders.has(key))
 	}
 	// Out of memory in the order written: forgotten, and the error says it
@@ -191,9 +191,9 @@ func TestSettleWrittenOrder(t *testing.T) {
 	s, key = remembered()
 	s.oomRetry = sqlsandbox.WrittenOrderRetrySkippedForcedOrder
 	first := &sqlsandbox.QueryError{Message: oom, WrittenOrderRetry: sqlsandbox.WrittenOrderRetrySkippedForcedOrder}
-	err := s.settleWrittenOrder("SELECT n FROM t", key, true, sqlsandbox.Result{}, first)
+	err := s.settleWrittenOrder(context.Background(), context.Background(), "SELECT n FROM t", key, true, sqlsandbox.Result{}, first)
 	var qe *sqlsandbox.QueryError
-	if !errors.As(err, &qe) || qe.WrittenOrderRetry != sqlsandbox.WrittenOrderRetryFailed || !strings.HasPrefix(qe.Message, oom) || !strings.Contains(qe.Message, "order written") {
+	if !errors.As(err, &qe) || qe.WrittenOrderRetry != sqlsandbox.WrittenOrderRetryFailed || !strings.HasPrefix(qe.Message, oom+". It ran") || !strings.Contains(qe.Message, "order written") {
 		t.Errorf("out of memory in the order written: %#v", err)
 	}
 	if first.WrittenOrderRetry != sqlsandbox.WrittenOrderRetrySkippedForcedOrder {
@@ -206,10 +206,11 @@ func TestSettleWrittenOrder(t *testing.T) {
 		t.Errorf("sent to the source as %q", got)
 	}
 	// Out of the copy's time in the order written: forgotten too, and sent
-	// to the source as the retry's time-out was before this memory.
+	// to the source as the retry's time-out was before this memory, in a
+	// message whose sentences are apart.
 	s, key = remembered()
-	err = s.settleWrittenOrder("SELECT n FROM t", key, true, sqlsandbox.Result{}, &sqlsandbox.TimeoutError{Limit: time.Minute})
-	if !errors.As(err, &qe) || qe.WrittenOrderRetry != sqlsandbox.WrittenOrderRetryFailed || !strings.Contains(qe.Message, "ran out of time") {
+	err = s.settleWrittenOrder(context.Background(), context.Background(), "SELECT n FROM t", key, true, sqlsandbox.Result{}, &sqlsandbox.TimeoutError{Limit: time.Minute})
+	if !errors.As(err, &qe) || qe.WrittenOrderRetry != sqlsandbox.WrittenOrderRetryFailed || !strings.Contains(qe.Message, "ran out of time") || !strings.Contains(qe.Message, "stopped. It ran") {
 		t.Errorf("out of time in the order written: %#v", err)
 	}
 	if s.bound.WrittenOrders.has(key) || s.writtenOrder != WrittenOrderForgotten {
@@ -218,26 +219,66 @@ func TestSettleWrittenOrder(t *testing.T) {
 	if got := s.copyFallback(err, freeError(err, s.logger)); got != ReasonCopyRefusedAfterWrittenOrder {
 		t.Errorf("out of time: sent to the source as %q", got)
 	}
+	// Out of time with nowhere else to send it: forgotten, and the time-out
+	// is the answer, 57014.
+	s, key = remembered()
+	s.bound.Forward = nil
+	timeout := &sqlsandbox.TimeoutError{Limit: time.Minute}
+	if got := s.settleWrittenOrder(context.Background(), context.Background(), "SELECT n FROM t", key, true, sqlsandbox.Result{}, timeout); got != timeout || s.bound.WrittenOrders.has(key) || s.writtenOrder != WrittenOrderForgotten {
+		t.Errorf("out of time without a source: %v, remembered %v, note %q", got, s.bound.WrittenOrders.has(key), s.writtenOrder)
+	} else if code := s.statementError(context.Background(), got).code; code != "57014" {
+		t.Errorf("out of time without a source: code %s", code)
+	}
+	// Its half of the client's time over (writtenOrderContext), the
+	// statement's own context alive: forgotten, and to the source.
+	s, key = remembered()
+	run, stop := context.WithCancel(context.Background())
+	stop()
+	err = s.settleWrittenOrder(context.Background(), run, "SELECT n FROM t", key, true, sqlsandbox.Result{}, context.Canceled)
+	if !errors.As(err, &qe) || qe.WrittenOrderRetry != sqlsandbox.WrittenOrderRetryFailed || !strings.Contains(qe.Message, "statement_timeout") {
+		t.Errorf("its half of the client's time over: %#v", err)
+	}
+	if s.bound.WrittenOrders.has(key) || s.copyFallback(err, freeError(err, s.logger)) != ReasonCopyRefusedAfterWrittenOrder {
+		t.Errorf("its half of the client's time over: remembered %v", s.bound.WrittenOrders.has(key))
+	}
+	// The client's statement_timeout itself: forgotten, answered as that.
+	s, key = remembered()
+	stmt, cut := context.WithCancelCause(context.Background())
+	cut(errStatementTimeout)
+	if got := s.settleWrittenOrder(stmt, stmt, "SELECT n FROM t", key, true, sqlsandbox.Result{}, context.Canceled); got != context.Canceled || s.bound.WrittenOrders.has(key) || s.writtenOrder != WrittenOrderForgotten {
+		t.Errorf("statement_timeout: %v, remembered %v, note %q", got, s.bound.WrittenOrders.has(key), s.writtenOrder)
+	} else if code := s.statementError(stmt, got).code; code != "57014" {
+		t.Errorf("statement_timeout: code %s", code)
+	}
+	// A cancel request: kept, as any error that is not the shape's.
+	s, key = remembered()
+	stmt, cut = context.WithCancelCause(context.Background())
+	cut(errCanceledByUser)
+	if got := s.settleWrittenOrder(stmt, stmt, "SELECT n FROM t", key, true, sqlsandbox.Result{}, context.Canceled); got != context.Canceled || !s.bound.WrittenOrders.has(key) {
+		t.Errorf("a cancel request: %v, remembered %v", got, s.bound.WrittenOrders.has(key))
+	}
 	// Any other error, a cancel among them: kept, and that error.
-	for _, other := range []error{&sqlsandbox.QueryError{Message: "Binder Error: x"}, context.Canceled, &sqlsandbox.QueryError{Message: "Out of Memory Error: x"}} {
+	for _, other := range []error{&sqlsandbox.QueryError{Message: "Binder Error: x"}, context.Canceled, &sqlsandbox.QueryError{Message: "Out of Memory Error: x"},
+		&sqlsandbox.JoinTooBigError{Reason: "x"}} {
 		s, key = remembered()
-		if got := s.settleWrittenOrder("SELECT n FROM t", key, true, sqlsandbox.Result{}, other); got != other || !s.bound.WrittenOrders.has(key) || s.writtenOrder != WrittenOrderRemembered {
+		if got := s.settleWrittenOrder(context.Background(), context.Background(), "SELECT n FROM t", key, true, sqlsandbox.Result{}, other); got != other || !s.bound.WrittenOrders.has(key) || s.writtenOrder != WrittenOrderRemembered {
 			t.Errorf("%v: %v, remembered %v, note %q", other, got, s.bound.WrittenOrders.has(key), s.writtenOrder)
 		}
 	}
 	// No key, no memory: nothing.
 	s = routeSession(true)
-	if got := s.settleWrittenOrder("SELECT n FROM t", "", false, ok, nil); got != nil || s.writtenOrder != "" {
+	if got := s.settleWrittenOrder(context.Background(), context.Background(), "SELECT n FROM t", "", false, ok, nil); got != nil || s.writtenOrder != "" {
 		t.Errorf("without a key: %v, %q", got, s.writtenOrder)
 	}
 }
 
-// A remembered shape runs in the order written and without the join check,
-// whose plan is the copy's own order, the one that ran out of memory.
+// A remembered shape runs in the order written, and keeps the join check:
+// the copy then checks the order written alone, and one value of a shape
+// can make it far larger than the one it was learned with.
 func TestStartInWrittenOrder(t *testing.T) {
 	opts := RunOptions{Schema: "public", JoinNDV: map[string]float64{"a": 1}}
 	startInWrittenOrder(&opts)
-	if !opts.KeepJoinOrder || opts.JoinNDV != nil || opts.Schema != "public" {
+	if !opts.KeepJoinOrder || opts.JoinNDV == nil || opts.Schema != "public" {
 		t.Errorf("%+v", opts)
 	}
 }
@@ -255,9 +296,11 @@ type rememberLogin struct {
 	mu     sync.Mutex
 	notes  []RouteNote
 	runs   []RunOptions
+	// deadline is the deadline of the last run of LIMIT 66.
+	deadline time.Time
 }
 
-func (l *rememberLogin) run(_ context.Context, st string, opts RunOptions) (sqlsandbox.Result, error) {
+func (l *rememberLogin) run(ctx context.Context, st string, opts RunOptions) (sqlsandbox.Result, error) {
 	l.mu.Lock()
 	l.runs = append(l.runs, opts)
 	l.mu.Unlock()
@@ -271,6 +314,16 @@ func (l *rememberLogin) run(_ context.Context, st string, opts RunOptions) (sqls
 		return sqlsandbox.Result{}, &sqlsandbox.QueryError{Message: oom, WrittenOrderRetry: sqlsandbox.WrittenOrderRetrySkippedForcedOrder}
 	case strings.Contains(st, "LIMIT 9"):
 		return sqlsandbox.Result{}, &sqlsandbox.QueryError{Message: oom + " It ran out of memory in the order written too.", WrittenOrderRetry: sqlsandbox.WrittenOrderRetryFailed}
+	case strings.Contains(st, "LIMIT 77") && opts.KeepJoinOrder:
+		return sqlsandbox.Result{}, &sqlsandbox.JoinTooBigError{Reason: "a join in the order written"}
+	case strings.Contains(st, "LIMIT 66") && opts.KeepJoinOrder:
+		// Slow in the order written: it runs until its context ends.
+		dl, _ := ctx.Deadline()
+		l.mu.Lock()
+		l.deadline = dl
+		l.mu.Unlock()
+		<-ctx.Done()
+		return sqlsandbox.Result{}, ctx.Err()
 	case strings.Contains(st, "LIMIT 7") && opts.KeepJoinOrder:
 		return sqlsandbox.Result{}, &sqlsandbox.TimeoutError{Limit: time.Minute}
 	case strings.Contains(st, "LIMIT 8") && opts.KeepJoinOrder:
@@ -383,6 +436,27 @@ func TestRoute_rememberedWrittenOrder(t *testing.T) {
 		check("out of time in the order written: forgotten, to the source", do("SELECT n FROM t LIMIT 7"),
 			outcome{code: "08001", side: RouteSource, reason: ReasonCopyRefusedAfterWrittenOrder, written: WrittenOrderForgotten, keepOrder: true, runs: runs(1)})
 		check("after a time-out: the copy's own order again", do("SELECT n FROM t LIMIT 1"),
+			outcome{side: RouteCopy, reason: ReasonAnswersTheSame, retry: sqlsandbox.WrittenOrderRetryOK, runs: runs(1)})
+		check("a join too big in the order written: to the source, nothing forgotten", do("SELECT n FROM t LIMIT 77"),
+			outcome{code: "08001", side: RouteSource, reason: ReasonJoinTooBig, written: WrittenOrderRemembered, keepOrder: true, runs: runs(1)})
+		// Under statement_timeout: half of what is left for the order
+		// written, then the source.
+		if _, err := c.Exec(ctx, "SET statement_timeout = '4s'").ReadAll(); err != nil {
+			t.Fatal(err)
+		}
+		start := time.Now()
+		check("slow in the order written under statement_timeout: its half, then forgotten and to the source", do("SELECT n FROM t LIMIT 66"),
+			outcome{code: "08001", side: RouteSource, reason: ReasonCopyRefusedAfterWrittenOrder, written: WrittenOrderForgotten, keepOrder: true, runs: runs(1)})
+		l.mu.Lock()
+		left := l.deadline.Sub(start)
+		l.mu.Unlock()
+		if left < time.Second || left > 2100*time.Millisecond {
+			t.Errorf("%s: the order written was given %v of a 4 s statement_timeout, want about half", protocol, left)
+		}
+		if _, err := c.Exec(ctx, "SET statement_timeout = 0").ReadAll(); err != nil {
+			t.Fatal(err)
+		}
+		check("forgotten after its half: the copy's own order again", do("SELECT n FROM t LIMIT 2"),
 			outcome{side: RouteCopy, reason: ReasonAnswersTheSame, retry: sqlsandbox.WrittenOrderRetryOK, runs: runs(1)})
 	}
 }
