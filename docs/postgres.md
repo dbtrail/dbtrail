@@ -1263,8 +1263,9 @@ listener, its own workers, its own memory.
   (a server that hides tables or columns sends nothing to its source) the
   copy answers every statement that way, and so it does for a light one
   the source cannot take right now: the source cannot be reached
-  (`source_unreachable`), or the capture account's gate keeps the statement
-  from it (`capture_gate`). A NOTICE comes with the answer; drivers that
+  (`source_unreachable`, though a statement that reads a table is then
+  refused, since its columns cannot be compared with the source's), or the
+  capture account's gate keeps the statement from it (`capture_gate`). A NOTICE comes with the answer; drivers that
   drop notices, or `client_min_messages` above `notice`, hide it. `/status`
   counts the heavy statements answered this way under
   `heavy_older_on_copy`, by kind: `tails_not_ready` (from the snapshot
@@ -2159,6 +2160,53 @@ The source answers a cheap statement for:
   count(*) FROM t`, a `*` inside a `WITH` whose outer query names other
   columns). An argument declared `bpchar` is the source's too: it compares
   without its trailing blanks.
+- **A table whose columns changed on the source since its snapshot** goes to
+  the source. PostgreSQL does not announce an `ALTER TABLE` to capture:
+  capture learns a table's new columns only from the next change made to it,
+  and the copy reads the table with the columns of its snapshot until the
+  table's next snapshot records the new ones (a scheduled update finds the
+  change and takes a full read in its place where it may). In that window
+  the copy would answer with rows PostgreSQL does not return: a `text` column
+  made `char(n)` compares otherwise, a `numeric(10,2)` made `numeric(10,0)`
+  keeps its decimals, a column added is missing from `SELECT *`. So before
+  the copy answers a statement, the port reads from the source's catalog
+  (`pg_class` and `pg_attribute`, never a row of a table), as the account it
+  forwards with, each table's OID and its columns (name, type, type modifier
+  and position), and compares them with what the table's snapshot recorded.
+  Any difference in a table the statement reads sends the whole statement to
+  the source (`copy_shape_differs` in `/status`), whatever columns it names
+  and however expensive it is there. This is the one case where a heavy
+  statement does not stay on the copy: its answer there would not be a value
+  written a little otherwise, but rows of a table that no longer exists in
+  that form. A statement that reads only tables that did not change stays on
+  the copy. In detail:
+  - The source's answer for a table is kept for one second, so a burst of
+    statements asks once. A statement within that second of an `ALTER TABLE`
+    can still be answered by the copy.
+  - A name without a schema is checked in every schema the copy holds it in:
+    a change of `public.t` also sends an unqualified read of `t` to the
+    source when the `search_path` points at `other.t`.
+  - A table dropped or renamed on the source, dropped and created again
+    (another OID), or whose snapshot does not record its columns (one taken
+    before they were recorded) counts as changed.
+  - When the source cannot be asked (it does not answer within two seconds,
+    or refuses the question), the statement is refused with `55000`
+    (`copy_shape_unchecked`) instead of being answered by the copy, whose
+    columns may be the old ones. Run it again. The failure is kept for two
+    seconds, so a source that is down is not asked by every statement.
+  - On a server that hides tables or columns, which sends nothing to its
+    source, a statement that reads a changed table is refused with `55000`
+    until the table's next snapshot (counted as `refused`, under
+    `copy_shape_differs`).
+  - A prepared statement described on the copy before the change and run
+    after it gets what PostgreSQL gives one: `0A000 cached plan must not
+    change result type` when its columns changed, after which drivers
+    prepare it again. One described while its table differs is described by
+    the source, and stays there for as long as it is prepared.
+  - What this does not see: a rewrite that keeps every column's type
+    (`ALTER COLUMN n TYPE int USING n + 1` on an `int` column) changes values
+    and no column, so the copy goes on answering the old values until the
+    table's next full read.
 - **A text column under a nondeterministic collation** (an ICU collation
   created with `deterministic = false`, one that ignores case or accents)
   follows the same rule: PostgreSQL finds `'ab'` and `'AB'` equal, groups
@@ -2425,7 +2473,11 @@ What this costs and where it can go wrong:
   the source cannot be reached (down, refusing the forwarding user, its
   connection lost, or no connection free in that wait), the copy answers
   the statement, as before routing by plan, with a NOTICE that routing by
-  plan is off for the moment (`source_unreachable` in `/status`).
+  plan is off for the moment (`source_unreachable` in `/status`). A statement
+  that reads a table is refused then (`copy_shape_unchecked`), because the
+  columns of its tables on the source cannot be compared with the copy's
+  either (see the table whose columns changed, above); one that reads no
+  table is still answered by the copy.
 - **A statement shape the source answers is asked about once a minute, not
   every time**, when its answer cannot depend on its values: a connection
   remembers the verdict on `SELECT ... WHERE id = 5` for a minute, by its shape (values blanked)
@@ -2781,10 +2833,12 @@ The reasons, with the MySQL port's names where they mean the same:
 | source | `copy_columns_differ` | a column the copy writes otherwise (a `numeric` without precision) |
 | source | `copy_behind_source`, `copy_age_unknown` | the server's lag limit |
 | source | `table_not_captured` | a table whose capture lost or dropped changes since its snapshot was read (a table capture skips, a capture ledger that does not say which tables or cannot be read, a lost slot, a snapshot published over a known loss), in fresh and fast mode: the copy holds that table as of its snapshot only. Without a forwarding user, or on a server that hides tables, the copy answers it from that snapshot with a notice that says so |
+| source | `copy_shape_differs` | a table whose columns on the source are not the ones its snapshot recorded (an `ALTER TABLE` since, which PostgreSQL does not announce to capture), heavy statements included. On a server that hides tables or columns the statement is refused instead, and counted as `refused` under this reason |
 | source | `join_too_big` | the copy's plan of it has a join estimated far larger than its inputs (from the source's `n_distinct`), in the copy's own join order and in the order written: the copy did not run it |
 | refused | `read_only` | not a read |
 | refused | `copy_queue_full` | for the copy, whose workers were all taken and the line for one full: refused with `53000`, not sent to the source; run it again |
 | refused | `copy_wait_timeout` | for the copy, it waited for a worker as long as `--max-wait` lets it: refused with `53000`, not sent to the source; run it again |
+| refused | `copy_shape_unchecked` | the columns of a table it reads could not be read from the source to compare with its snapshot's: refused with `55000`, not sent anywhere; run it again |
 
 Here `answers_the_same` counts the statements the copy answered: the ones it
 answers as PostgreSQL does and whose plan on the source is expensive.
@@ -3371,6 +3425,14 @@ rename), and records what changed in `schema_changes`:
 
 Nothing is installed in your database for this; it is read from the stream
 alone.
+
+**A change no write followed is not in the stream.** Until the next change
+made to the table, nothing of an `ALTER TABLE` reaches bintrail-pg, and the
+copy keeps the columns of the table's snapshot until its next snapshot. The
+PostgreSQL port does not wait for either: before the copy answers a
+statement, it compares the columns of the tables the statement reads with
+the source's catalog, and sends the statement to the source when they differ
+(see [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port)).
 
 **Which rows belong to which shape is exact.** PostgreSQL decodes every
 change with the table as it was when that change was made, so a row is never

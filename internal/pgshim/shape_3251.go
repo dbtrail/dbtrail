@@ -2,6 +2,7 @@ package pgshim
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
@@ -96,7 +97,12 @@ func (s *session) copyShapeDiffers(ctx context.Context, text string) (why string
 	for _, at := range read {
 		t := &v.tables[at]
 		sh, found := now[[2]string{t.Schema, t.Name}]
-		if why := copyShapeWhy(t, sh, found); why != "" {
+		if why, detail := copyShapeWhy(t, sh, found); why != "" {
+			// Which columns changed is the operator's, in the log: a
+			// column the server hides from this client is in the snapshot's
+			// shape too, and its name must not reach the client.
+			logEveryMinute(s.logger, "pgshim: shape differs "+t.Schema+"."+t.Name, "pgshim: a table changed on the source since its snapshot; the copy does not answer statements that read it",
+				"table", t.Schema+"."+t.Name, "change", detail)
 			return why, nil
 		}
 	}
@@ -132,21 +138,29 @@ func shapeCopyOnlyError(why string) *pgErr {
 
 // copyShapeWhy says why the copy's table t is not, on the source, the table
 // its snapshot recorded (now, found false when the source has no table of
-// that name), "" when it is.
-func copyShapeWhy(t *CatalogTable, now SourceShape, found bool) string {
+// that name), "" when it is. why is for the client and names the table
+// alone, never a column: the snapshot's shape holds the columns the server
+// hides too. The table may be named: a table the server hides from the
+// connection is not in its catalog, so never among t. detail says which
+// columns changed, for the log.
+func copyShapeWhy(t *CatalogTable, now SourceShape, found bool) (why, detail string) {
 	name := t.Schema + "." + t.Name
 	switch {
 	case !found:
-		return name + " is not on your PostgreSQL under that name any more (dropped, or renamed), and the copy still holds it as its snapshot read it"
+		why = name + " is not on your PostgreSQL under that name any more (dropped, or renamed), and the copy still holds it as its snapshot read it"
+		return why, "not on the source"
 	case t.Recorded == nil:
-		return "the copy's snapshot does not record the columns of " + name + ", so they cannot be compared with your PostgreSQL's (its next snapshot records them)"
+		why = "the copy's snapshot does not record the columns of " + name + ", so they cannot be compared with your PostgreSQL's (its next snapshot records them)"
+		return why, "no shape recorded"
 	case now.OID != t.Recorded.OID:
-		return name + " on your PostgreSQL is not the table the copy's snapshot was read from: it was dropped and created again"
+		why = name + " on your PostgreSQL is not the table the copy's snapshot was read from: it was dropped and created again"
+		return why, fmt.Sprintf("OID %d on the source, %d in the snapshot", now.OID, t.Recorded.OID)
 	}
 	if diff := baseline.PGColumnsDiff(t.Recorded.Columns, now.Columns); diff != "" {
-		return "the columns of " + name + " on your PostgreSQL are not the ones of the copy's snapshot (" + diff + "): PostgreSQL does not announce an ALTER TABLE to capture, so the copy keeps the old columns until the table's next snapshot"
+		why = "the columns of " + name + " on your PostgreSQL are not the ones of the copy's snapshot: PostgreSQL does not announce an ALTER TABLE to capture, so the copy keeps the old columns until the table's next snapshot"
+		return why, diff
 	}
-	return ""
+	return "", ""
 }
 
 // shapeTablesRead are the tables of the copy's catalog the statement text

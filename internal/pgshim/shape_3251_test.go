@@ -364,7 +364,7 @@ func TestCopyShapeWhy_3251(t *testing.T) {
 	tables := shapedCatalogOf("t")
 	tbl := &tables[0]
 	now := sameShapes(tables)[[2]string{"public", "t"}]
-	if got := copyShapeWhy(tbl, now, true); got != "" {
+	if got, _ := copyShapeWhy(tbl, now, true); got != "" {
 		t.Errorf("the same: %q", got)
 	}
 	for _, tc := range []struct {
@@ -380,7 +380,7 @@ func TestCopyShapeWhy_3251(t *testing.T) {
 		{"a column added", nil, func(s SourceShape) SourceShape {
 			s.Columns = append(slices.Clone(s.Columns), baseline.PGColumn{Name: "e", TypeOID: 25, TypeMod: -1, Ordinal: 3})
 			return s
-		}, true, "(added e)"},
+		}, true, "the columns of public.t on your PostgreSQL are not the ones"},
 	} {
 		tt, nn := *tbl, now
 		if tc.tbl != nil {
@@ -389,9 +389,56 @@ func TestCopyShapeWhy_3251(t *testing.T) {
 		if tc.now != nil {
 			nn = tc.now(nn)
 		}
-		if got := copyShapeWhy(&tt, nn, tc.found); !strings.Contains(got, tc.want) {
+		if got, _ := copyShapeWhy(&tt, nn, tc.found); !strings.Contains(got, tc.want) {
 			t.Errorf("%s: %q, want it to say %q", tc.name, got, tc.want)
 		}
+	}
+	// Which columns changed goes to the log, never to the client.
+	added := now
+	added.Columns = append(slices.Clone(now.Columns), baseline.PGColumn{Name: "e", TypeOID: 25, TypeMod: -1, Ordinal: 3})
+	if why, detail := copyShapeWhy(tbl, added, true); strings.Contains(why, `e`+")") || strings.Contains(why, "added") || detail != "added e" {
+		t.Errorf("a column added: client %q, log %q", why, detail)
+	}
+}
+
+// A column the server hides from the client changes type on the source: the
+// statement is refused, and the client is not told the column's name.
+func TestCopyShape_3251_hiddenColumnNotNamed(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	p, k := newShapePort(t)
+	// big's snapshot records a column secret_salary the server hides: it is
+	// not among the catalog's columns, which are the ones a statement reads.
+	withHidden := func() []CatalogTable {
+		tables := shapedCatalogOf(shapePortTables...)
+		r := *tables[1].Recorded
+		r.Columns = append(slices.Clone(r.Columns), baseline.PGColumn{Name: "secret_salary", TypeOID: 1700, TypeMod: -1, Ordinal: 3})
+		tables[1].Recorded = &r
+		return tables
+	}
+	p.l.catalog = withHidden
+	k.edit(func(now map[[2]string]SourceShape) { putShapes(now, sameShapes(withHidden())) })
+	p.l.barred = func() string { return "the server hides tables or columns" }
+	c := costPortConn(t, ctx, p.l)
+	if got := costSimple(ctx, c, p.l, "SELECT sum(n) FROM big"); got != (costOutcome{"7", "", RouteCopy, ReasonHiddenRules}) {
+		t.Fatalf("unchanged: %+v, want the copy's", got)
+	}
+	k.edit(func(now map[[2]string]SourceShape) {
+		s := now[[2]string{"public", "big"}]
+		s.Columns = slices.Clone(s.Columns)
+		s.Columns[2].TypeOID = 25
+		now[[2]string{"public", "big"}] = s
+	})
+	var pe *pgconn.PgError
+	_, err := c.Exec(ctx, "SELECT sum(n) FROM big").ReadAll()
+	if !errors.As(err, &pe) || pe.Code != "55000" {
+		t.Fatalf("simple: %v, want 55000", err)
+	}
+	if strings.Contains(strings.ToLower(pe.Message+pe.Detail+pe.Hint), "secret") {
+		t.Errorf("simple: the client was told the hidden column's name: %q", pe.Message)
+	}
+	if _, err := c.Prepare(ctx, "s", "SELECT sum(n) FROM big", nil); !errors.As(err, &pe) || pe.Code != "55000" || strings.Contains(strings.ToLower(pe.Message), "secret") {
+		t.Errorf("prepare: %v, want 55000 without the hidden column's name", err)
 	}
 }
 
