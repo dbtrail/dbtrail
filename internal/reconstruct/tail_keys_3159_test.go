@@ -187,10 +187,13 @@ func TestTailKey_binaryShortValueRefuses(t *testing.T) {
 		ddl: "CREATE TABLE `t` (\n  `id` binary(4) NOT NULL,\n  `v` int DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n",
 		pk:  []metadata.ColumnMeta{{Name: "id", IsPK: true, DataType: "binary", ColumnType: "binary(4)"}},
 	}
-	for _, v := range [][]byte{{0x01, 0x02, 0x03}, {0x01}, {}} {
+	for _, v := range [][]byte{{0x01, 0x02, 0x03}, {0x01}} {
 		_, _, err := c.fold(t, nil, []query.ResultRow{c.event(1, event.EventInsert, nil, img("id", v, "v", num("1")))})
 		wantRefusal(t, err, "ends in 0x00 bytes")
 	}
+	// All 0x00: the binary log carries the empty value.
+	_, _, err0 := c.fold(t, nil, []query.ResultRow{c.event(1, event.EventInsert, nil, img("id", []byte{}, "v", num("1")))})
+	wantRefusal(t, err0, "the empty value")
 	// Seen on the old half of a key change too: the tombstone it files
 	// would carry the short spelling.
 	_, _, err := c.fold(t, nil, []query.ResultRow{c.event(1, event.EventUpdate,
