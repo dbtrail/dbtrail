@@ -507,10 +507,10 @@ func encodeKeyIndexHeader(bind keyIndexBinding, names []string) []byte {
 
 // keyIndexBlock is one entry of the table of blocks.
 type keyIndexBlock struct {
-	first        []byte
-	off          uint64
-	size, count  uint32
-	crc          uint32
+	first       []byte
+	off         uint64
+	size, count uint32
+	crc         uint32
 }
 
 // keyIndex is an open index: its header and table of blocks read and

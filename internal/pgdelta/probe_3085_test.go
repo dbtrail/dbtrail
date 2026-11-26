@@ -31,12 +31,9 @@ import (
 //     control: if those read one row group and the scattered ones the whole
 //     file, it prunes and scattered keys cannot benefit; if both read the
 //     whole file, it does not prune).
-// duckdbutilTuning1x512 is the probe's budget for the key index's build: the
-// same one thread and 512 MiB as its session.
-func duckdbutilTuning1x512() duckdbutil.Tuning {
-	return duckdbutil.Tuning{Threads: 1, MemoryLimit: "512MiB"}
-}
-
+//
+// And the key index of the same file: its build, its size, and the same
+// 1,000 keys found through it.
 func TestProbeKeyPasses3085(t *testing.T) {
 	if os.Getenv("BINTRAIL_PG_KEY_PROBE") != "1" {
 		t.Skip("a measurement: set BINTRAIL_PG_KEY_PROBE=1 to run it")
@@ -239,4 +236,10 @@ func TestProbeKeyPasses3085(t *testing.T) {
 		t.Logf("EXPLAIN ANALYZE, %s:\n%s", c.name, plan.String())
 		cleanup()
 	}
+}
+
+// duckdbutilTuning1x512 is the probe's budget for the key index's build: the
+// same one thread and 512 MiB as its session.
+func duckdbutilTuning1x512() duckdbutil.Tuning {
+	return duckdbutil.Tuning{Threads: 1, MemoryLimit: "512MiB"}
 }
