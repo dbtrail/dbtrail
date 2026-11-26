@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strconv"
 	"strings"
@@ -106,6 +107,11 @@ type RouteNote struct {
 	// written did with the statement's run (WrittenOrderRemembered,
 	// WrittenOrderForgotten, writtenorder.go), "" when it did nothing.
 	WrittenOrder string
+	// HeavyOlder is the kind of older data the copy answered a heavy
+	// statement with (Binding.OlderKind: tails_not_ready,
+	// older_than_earlier), where a light one would have gone to the source
+	// (freshRefusals, #3116); "" when it did not.
+	HeavyOlder string
 }
 
 // routeDecision is which side answers a statement, and why.
@@ -365,8 +371,9 @@ func (s *session) copyFallback(err error, perr *pgErr) string {
 		return ReasonCopyBehindSource
 	case errors.As(err, &changed):
 		// The copy's recent changes were not ready for a statement that had
-		// to have them (RunOptions.NeedTails, #3086): the moment's, as the
-		// answer it would have given and copyOlderThanSource held back.
+		// to have them, or were older than an earlier answer of the copy on
+		// this connection (RunOptions.NeedTails, #3086, #3116): the
+		// moment's, under the reason the MySQL router gives both.
 		return ReasonCopyTooOld
 	case busyReason(err) != "":
 		// Not a fallback: the statement is refused (copyFailed).
@@ -547,13 +554,54 @@ func (s *session) copyOlderThanSource(waited, apart bool) string {
 
 // holdsBackCopy reports whether copyOlderThanSource decides on the copy's
 // answer to a statement (apart as it is given there): only then is an
-// answer read from a snapshot alone held back, and only then is the copy
-// told before it runs that it must have the recent changes
-// (RunOptions.NeedTails, #3086). One condition for both, so the copy is never
-// refused a statement whose answer would have been given.
+// answer read from a snapshot alone held back after it ran. Every statement
+// it holds back was also told before it ran that it must have the recent
+// changes (freshRefusals, which asks it of more statements than this), so
+// the copy does not run one whose answer it would throw away for want of
+// them.
 func (s *session) holdsBackCopy(apart bool) bool {
 	return !apart && s.src.any() && s.bound != nil && s.bound.RunAge != nil && s.canFallBack()
 }
+
+// freshRefusals says which of fresh mode's two refusals before running the
+// copy is held to for qstr, about to run there (RunOptions.NeedTails and
+// NoOlderTails, #3116): the snapshot alone, and recent changes older than an
+// earlier answer of the copy on this connection.
+//
+// A light statement on a connection that can send it to the source is held
+// to both, which is the MySQL router's rule (sqlsandbox.Session.StrictStar
+// is set on every routing connection): the source answers it instead.
+//
+// A statement the source's plan found expensive (costHeavy: the cost
+// routing's own verdict, a side a shape is held on within the band
+// included) stays on the copy (product decision, 2026-11-24, heavy.go): it
+// is answered with what the copy holds, and the copy's notice says how old
+// that is. It is held only to what held it before #3116: the snapshot alone
+// on a connection the source answered about one of its tables
+// (holdsBackCopy, #3086), whose answer copyOlderThanSource would throw away.
+//
+// The light rule is only for a statement the source can really answer: one
+// sent to the copy as answers_the_same (s.copyReason). Not one the copy
+// answers because the source cannot be asked (source_unreachable), nor one
+// the capture account's gate keeps from the source (capture_gate): refused,
+// it would reach a source that is down or refuses it, and the client would
+// get an error where the copy answers. Nor the copy's own commands (SHOW
+// TABLES, DESCRIBE t, copy_command) nor a read of the copy's catalog, as
+// waitForCopy: they would go to a source that does not take them, or
+// answers with its own catalog.
+func (s *session) freshRefusals(qstr string, apart bool) (needTails, noOlderTails bool) {
+	held := s.holdsBackCopy(apart)
+	if s.costHeavy() {
+		return held, false
+	}
+	light := s.canFallBack() && s.copyReason == ReasonAnswersTheSame && isSelectLike(qstr) && !readsCatalog(qstr)
+	return light || held, light
+}
+
+// costHeavy reports whether the statement being run goes to the copy
+// because the source's plan found it expensive (expensive): s.heavy on the
+// simple protocol, s.portalHeavy for a portal of the extended one.
+func (s *session) costHeavy() bool { return s.heavy || s.portalHeavy }
 
 // positionWarnEvery is how often a connection that cannot learn the source's
 // position says so at warn level.
@@ -1867,13 +1915,15 @@ func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, fa
 	s.oomRetry = ""
 	writtenOrder := s.writtenOrder
 	s.writtenOrder = ""
+	heavyOlder := s.heavyOlder
+	s.heavyOlder = ""
 	if s.bound == nil || s.bound.Routed == nil || d.side == "" {
 		return
 	}
 	if d.side != RouteCopy {
 		joinCheck = ""
 	}
-	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed, JoinCheck: joinCheck, OOMRetry: oomRetry, WrittenOrder: writtenOrder})
+	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed, JoinCheck: joinCheck, OOMRetry: oomRetry, WrittenOrder: writtenOrder, HeavyOlder: heavyOlder})
 }
 
 // fieldName reports whether the token at j is the field a date_trunc or a
@@ -2475,4 +2525,29 @@ func aliasUse(toks []rtToken, types map[string][]string, untyped bool) string {
 		}
 	}
 	return ""
+}
+
+// loggedAt is when each line logEveryMinute says was last said, by key.
+var loggedAt struct {
+	mu sync.Mutex
+	at map[string]time.Time
+}
+
+// logEveryMinute says msg at info level at most once a minute for the
+// process under key: a line that every statement of a kind could say.
+func logEveryMinute(logger *slog.Logger, key, msg string, args ...any) {
+	loggedAt.mu.Lock()
+	if loggedAt.at == nil {
+		loggedAt.at = map[string]time.Time{}
+	}
+	due := time.Since(loggedAt.at[key]) >= time.Minute
+	if due {
+		loggedAt.at[key] = time.Now()
+	}
+	loggedAt.mu.Unlock()
+	if due {
+		logger.Info(msg, args...)
+	} else {
+		logger.Debug(msg, args...)
+	}
 }

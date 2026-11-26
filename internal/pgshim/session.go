@@ -99,6 +99,19 @@ type session struct {
 	// source's plan found it expensive, whatever the screen says of how the
 	// copy answers it (heavy.go).
 	heavy bool
+	// portalHeavy is heavy for the portal of the extended protocol being
+	// run: the source's plan sent its statement to the copy for its cost
+	// (runPortal). Only fresh mode's refusals read it (freshRefusals): the
+	// rest of heavy.go is not relaxed on the extended protocol.
+	portalHeavy bool
+	// copyReason is the route reason of the statement being run on the copy
+	// (handleSimpleQuery, runPortal): freshRefusals sends a light one to the
+	// source only when it was sent to the copy as answers_the_same.
+	copyReason string
+	// heavyOlder is the kind of older data the copy answered the statement
+	// being run with because it is heavy (freshRefusals), for its RouteNote;
+	// "" when none.
+	heavyOlder string
 	// fastLane says the statement being answered on the copy was found by
 	// the source's plan to read one table and join nothing (fastlane.go);
 	// set for that statement alone, and read by runOptions.
@@ -293,8 +306,9 @@ func (s *session) handleSimpleQuery(qstr string) error {
 	// Only now, for the statement the copy runs: what the screen read of
 	// the copy's columns on the way here was not its run.
 	s.fastLane = oneTable && d.side == RouteCopy
+	s.copyReason = d.reason
 	cols, types, rows, tag, perr := s.run(qstr)
-	s.fastLane = false
+	s.fastLane, s.copyReason = false, ""
 	if perr != nil {
 		if why := s.takeBusyRefused(); why != "" && d.side == RouteCopy {
 			// The copy was busy (#3109, route.go): refused, not sent to the

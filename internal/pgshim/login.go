@@ -127,6 +127,11 @@ type Binding struct {
 	// copy (copyOlderThanSource); nil: the copy's answers are given as they
 	// are.
 	RunAge func() CopyAge
+	// OlderKind, when set, says what kind of older data a note of the
+	// copy's answer says it holds (console.PGOlderKind), "" for none: a
+	// heavy statement answered with older data is counted under it in the
+	// port's status (RouteNote.HeavyOlder, #3116).
+	OlderKind func(note string) string
 	// CopyWait, when set, waits within ctx until the copy holds every commit
 	// of the source before lsn, a WAL position, and says whether it does, or
 	// why not (waitForCopy). nil: nothing waits, and RunAge alone decides.
@@ -196,13 +201,23 @@ type RunOptions struct {
 	// of a SET), not as an answer to the client: the host must not count it
 	// as one.
 	Probe bool
-	// NeedTails says the answer is given only if every table it reads has
-	// its recent changes over its snapshot (copyOlderThanSource): when they
-	// are not ready in the copy's wait for them, the host refuses the
-	// statement before running it, with a *sqlsandbox.MayHaveChangedError,
-	// and the source answers it (#3086). Without it a snapshot alone
-	// answers, as on a connection with nowhere else to send the statement.
+	// NeedTails says the answer is not given from the snapshot alone
+	// (session.freshRefusals): in fresh mode, when a table it reads has no
+	// recent changes ready over its snapshot in the copy's wait for them,
+	// the host refuses the statement before running it, with a
+	// *sqlsandbox.MayHaveChangedError, and the source answers it (#3086,
+	// #3116). Without it the snapshot alone answers, with a notice that
+	// says so.
 	NeedTails bool
+	// NoOlderTails says the answer is not given with recent changes older
+	// than an earlier answer of the copy on this connection read
+	// (session.freshRefusals): in fresh mode the host refuses the statement
+	// before running it, with a *sqlsandbox.MayHaveChangedError, and the
+	// source answers it (#3116). Without it the older changes answer, with
+	// a notice that says so. NeedTails and NoOlderTails together are the
+	// two cases a routed MySQL statement is refused in
+	// (sqlsandbox.Session.StrictStar).
+	NoOlderTails bool
 	// Trimmed are the names (lowercased) of the char(n) columns the screen
 	// took as read without their padding (trimmed.go): the host refuses the
 	// statement before running it, with a *sqlsandbox.MayHaveChangedError,
@@ -429,11 +444,11 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		if waited, stop = s.waitForCopy(ctx, qstr, apart); stop != nil {
 			return nil, nil, nil, "", stop
 		}
-		// An answer copyOlderThanSource would hold back unless every table it
-		// read had its recent changes: the copy is told before it runs, so it
-		// does not run one it would answer from the snapshot alone (#3086).
+		// Fresh mode's two refusals before running (#3086, #3116): which of
+		// them the copy is held to, by what the source's plan said of the
+		// statement (freshRefusals).
 		opts := s.runOptions()
-		opts.NeedTails = s.holdsBackCopy(apart && named > 0)
+		opts.NeedTails, opts.NoOlderTails = s.freshRefusals(qstr, apart && named > 0)
 		opts.Trimmed = s.trimmedFor(text)
 		// The join check's counts (joinstats.go), for this statement's
 		// tables only.
@@ -453,8 +468,11 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		}
 		res, err = s.bound.Run(run, text, opts)
 		var changed *sqlsandbox.MayHaveChangedError
-		if opts.NeedTails && errors.As(err, &changed) {
-			s.logger.Debug("pgshim: the copy's recent changes for a statement were not ready; it did not run there, and the source answers it", "why", changed.Reason)
+		if (opts.NeedTails || opts.NoOlderTails) && errors.As(err, &changed) {
+			// Said at info once a minute for the process (#3116): every
+			// such statement costs the source a run the copy was meant to
+			// take, and /status counts them only as copy_too_old.
+			logEveryMinute(s.logger, "copy_too_old", "pgshim: a statement went to the source in fresh mode: the copy's recent changes for it were not ready, or older than an earlier answer of the copy on its connection (said once a minute)", "why", changed.Reason)
 		}
 		s.joinCheck = rememberedJoinCheck(remembered, s.noteJoinCheck(res, err, opts.JoinNDV != nil, want))
 		s.oomRetry = sqlsandbox.WrittenOrderRetryOf(res, err)
@@ -538,6 +556,15 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		return nil, nil, nil, "", refusal
 	}
 	if res.Note != "" {
+		if s.costHeavy() && s.bound.OlderKind != nil {
+			// The copy's note is about how old what it read is: a light
+			// statement would have gone to the source for it (freshRefusals).
+			// Counted in /status, said at info once a minute (#3116).
+			if kind := s.bound.OlderKind(res.Note); kind != "" {
+				s.heavyOlder = kind
+				logEveryMinute(s.logger, "heavy_older_on_copy", "pgshim: a heavy statement was answered by the copy with older data, where a light one would go to the source (said once a minute)", "kind", kind, "note", res.Note)
+			}
+		}
 		s.notice(res.Note)
 	}
 	s.recordFree(qstr, res)

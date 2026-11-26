@@ -773,10 +773,11 @@ func (s *session) runPortal(p *portal) *pgErr {
 	s.argsBound = len(p.stmt.paramOIDs) > 0
 	s.argsPadded = paddedArgument(p.stmt.paramOIDs)
 	s.fastLane = fastLaneFor(p.stmt, p.route)
+	s.portalHeavy, s.copyReason = s.expensive(p.route), p.route.reason
 	cols, types, rows, tag, perr := s.run(p.text)
 	s.screened = ""
 	s.argsBound, s.argsPadded = false, false
-	s.fastLane = false
+	s.fastLane, s.portalHeavy, s.copyReason = false, false, ""
 	if why := s.takeBusyRefused(); why != "" && perr != nil && p.route.side == RouteCopy {
 		// The copy was busy (#3109, route.go): refused, and counted so.
 		p.route = routeDecision{RouteRefused, why}

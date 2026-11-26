@@ -105,7 +105,7 @@ var reasonMeans = map[string]string{
 	ReasonResultOverRowCap:  "the statement is expensive on the source, and its plan there says it returns more rows than the copy returns for one statement, so the copy was not tried",
 	ReasonHeavyOnCopy:       "the statement is expensive on the source, so the copy answered it, though its answer may differ from PostgreSQL's (an order of text, a decimal, a char(n)'s padding)",
 	ReasonExplainFailed:     "the source's plan for the statement could not be had, so the source answers it",
-	ReasonCopyTooOld:        "the copy could not show it had caught up with what the source already answered this connection about a table the statement reads",
+	ReasonCopyTooOld:        "the copy could not show its answer was as new as it had to be: it had not caught up with what the source already answered this connection about a table the statement reads, or, in fresh mode, a table's newest captured changes were not ready, or were older than what an earlier answer of the copy on this connection read",
 	ReasonTableNotCaptured:  "the statement reads a table whose capture lost or dropped changes since its snapshot, so the copy holds old rows of it",
 	ReasonSourceUnreachable: "the source could not be asked for the statement's plan, so the copy answered as it does without one",
 	ReasonJoinTooBig:        "the copy's plan of the statement has a join estimated far larger than its inputs, in the copy's join order and in the order written, so it was not run there",

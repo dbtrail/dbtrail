@@ -1200,6 +1200,9 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		// names resolved where PostgreSQL resolves them, and a column the
 		// statement did not name headed as PostgreSQL heads it (#2803).
 		bound.Answered = copySQL.NoteAnswered
+		// The kind of older data a heavy statement's answer holds, for
+		// /status (#3116).
+		bound.OlderKind = console.PGOlderKind
 		// How far the copy's last answer on this connection reaches, so one
 		// older than what the source already answered it is not given
 		// (#2985): the instant of its tails when every table it read had
@@ -1328,9 +1331,10 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 }
 
 // pgRunContext is the context a statement of the port runs on the copy
-// under: one whose answer the port gives only with its tables' recent
-// changes (opts.NeedTails) is refused before it runs when they are not ready
-// (console.WithPGNeedTails, #3086).
+// under: in fresh mode it is refused before it runs when its tables' recent
+// changes are not ready (opts.NeedTails, console.WithPGNeedTails, #3086), or
+// are older than an earlier answer of the copy on the connection read
+// (opts.NoOlderTails, console.WithPGNoOlderTails, #3116).
 func pgSnapshotAgeFor(opts pgshim.RunOptions) *console.PGSnapshotAge {
 	if opts.Probe {
 		return nil
@@ -1341,6 +1345,14 @@ func pgSnapshotAgeFor(opts pgshim.RunOptions) *console.PGSnapshotAge {
 func pgRunContext(ctx context.Context, opts pgshim.RunOptions) context.Context {
 	if opts.NeedTails {
 		ctx = console.WithPGNeedTails(ctx)
+	}
+	if opts.NoOlderTails {
+		ctx = console.WithPGNoOlderTails(ctx)
+	}
+	if !opts.Probe {
+		// An answer to the client: never read without its recent changes
+		// with nothing said (#3116).
+		ctx = console.WithPGPortStatement(ctx)
 	}
 	// The char(n) columns the screen took as read without their padding,
 	// checked against the snapshot the statement reads (#3219).

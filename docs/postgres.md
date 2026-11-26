@@ -1244,21 +1244,54 @@ listener, its own workers, its own memory.
     open read the snapshot from their next statement on: an answer older
     than the one before it on the same connection, which is told once by a
     NOTICE.
-  What fresh mode does not cover yet, where the answer comes from the
-  snapshot alone. The client is told only by a NOTICE that comes with the
-  answer (drivers that drop notices, or `client_min_messages` above
-  `notice`, hide it), and the statement is not sent to the source for it:
+  When a table's recent changes are not ready, a light statement is not
+  answered from the snapshot alone: it goes to the source, which answers it
+  (`copy_too_old` in `/status`), as the MySQL router sends it to MySQL. The
+  same happens when the recent changes it would read are older than what an
+  earlier answer of the copy on the same connection read, so a value the
+  connection was shown does not go back. Both are decided before the copy
+  runs anything, over the simple and the extended protocol alike, and what
+  a connection was shown is kept per connection until it closes.
+  **Heavy statements prefer the copy even with older data.** A statement
+  whose plan on your PostgreSQL is over the port's cost thresholds (the
+  same verdict that sends it to the copy, see
+  [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port))
+  stays on the copy in both cases: it is answered from the snapshot alone,
+  or with the older changes, and the client is told by a NOTICE. The one
+  exception is the rule below for a table the source already answered the
+  connection about. On a connection with nowhere else to send the statement
+  (a server that hides tables or columns sends nothing to its source) the
+  copy answers every statement that way, and so it does for a light one
+  the source cannot take right now: the source cannot be reached
+  (`source_unreachable`), or the capture account's gate keeps the statement
+  from it (`capture_gate`). A NOTICE comes with the answer; drivers that
+  drop notices, or `client_min_messages` above `notice`, hide it. `/status`
+  counts the heavy statements answered this way under
+  `heavy_older_on_copy`, by kind: `tails_not_ready` (from the snapshot
+  alone) and `older_than_earlier` (older than an earlier answer on the
+  connection); the router's log says it at info level once a minute, and
+  says the same of the light statements sent to the source for it, which
+  `/status` counts under `copy_too_old`. A table that cannot have recent
+  changes laid over it at all (capture does not record it, its key is of a
+  type they do not take, they stopped over their memory budget until the
+  next snapshot), and a statement whose tables cannot be told from its text
+  (a name with a letter outside ASCII, say), are treated the same way: the
+  source answers a light statement, and a heavy one is answered from the
+  snapshot with a NOTICE that says why. The MySQL port answers those from
+  the snapshot with nothing said. The recent changes can be missing in
+  these cases:
   - **Right after a snapshot update**, each table's recent changes are
     gathered again from the new snapshot on, which takes a few seconds; until
-    then statements on that table are answered from the snapshot.
+    then light statements on that table go to the source.
   - **The first statement on a table** after the router starts, or after the
     server turns to fresh mode, starts gathering that table's changes: it,
-    and any statement in the next moments, may still answer from the
-    snapshot.
+    and any light statement in the next moments, may still go to the source.
+    This moves light reads to the source for a few seconds after each start,
+    as on the MySQL router; heavy ones stay on the copy.
   - **A table with no write since capture started** has no recent changes to
     lay over it, which is the right answer for that table alone. But a
     statement answers fresh only when every table it reads does, so a join
-    with such a table is answered from the snapshot for all of its tables.
+    with such a table is not answered fresh for any of its tables.
   - **Waiting for the source** (`BINTRAIL_SQL_FRESH_WAIT`) does not apply to
     PostgreSQL yet: a statement does not wait for the newest changes to
     arrive before it reads.
