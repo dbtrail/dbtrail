@@ -14,9 +14,9 @@ import (
 )
 
 // The statistics query on a real PostgreSQL, and through the port: n_distinct
-// in both of its forms (a count, and minus a fraction of the rows), a column
-// whose name two tables share left out (the copy's plan names columns
-// without their table), and the counts handed to the copy with the statement.
+// in both of its forms (a count, and minus a fraction of the rows), by table,
+// and the counts of the statement's own tables handed to the copy with it, a
+// column whose name both hold left out.
 func TestIntegrationJoinStatistics(t *testing.T) {
 	dsn := testutil.SkipIfNoPostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -47,36 +47,46 @@ func TestIntegrationJoinStatistics(t *testing.T) {
 	exec("INSERT INTO jg_stats.jg_stock SELECT g % 20, g FROM generate_series(1, 2000) g")
 	exec("ANALYZE jg_stats.jg_orders, jg_stats.jg_stock")
 
-	rows := exec(joinStatsSQL)
+	rows := exec(JoinStatsSQL)
 	if len(rows) != 1 || len(rows[0]) != 1 {
 		t.Fatalf("the statistics query answered %v", rows)
 	}
-	ndv, err := parseJoinStats(rows[0][0])
+	tables, err := ParseJoinStats(rows[0][0])
 	if err != nil {
 		t.Fatalf("%s: %v", rows[0][0], err)
 	}
+	orders, stock := tables["jg_stats.jg_orders"], tables["jg_stats.jg_stock"]
 	// A unique column: n_distinct -1, so its count is the table's rows.
-	if got := ndv["jg_o_id"]; got < 4900 || got > 5100 {
+	if got := orders["jg_o_id"]; got < 4900 || got > 5100 {
 		t.Errorf("jg_o_id: %v", got)
 	}
-	for _, col := range []string{"jg_o_w_id", "jg_s_w_id"} {
-		if got := ndv[col]; got != 20 {
-			t.Errorf("%s: %v, want 20", col, got)
-		}
-	}
-	if got, ok := ndv["jg_shared"]; ok {
-		t.Errorf("a name two tables share: %v", got)
+	if orders["jg_o_w_id"] != 20 || stock["jg_s_w_id"] != 20 || stock["jg_shared"] < 1900 {
+		t.Errorf("orders %v, stock %v", orders, stock)
 	}
 
-	// Through the port, forwarding to that PostgreSQL: a statement its plan
-	// sends to the copy carries the counts.
-	l := &costLogin{src: &fakeSource{realDSN: dsn}, cost: &CostPolicy{CostThreshold: 0.01}, joinStats: &JoinStats{}}
+	// Through the port, forwarding to that PostgreSQL, the counts read as
+	// the host reads them.
+	read := func(ctx context.Context) (JoinTables, error) {
+		c, err := pgconn.Connect(ctx, dsn)
+		if err != nil {
+			return nil, err
+		}
+		defer c.Close(context.Background())
+		res, err := c.Exec(ctx, JoinStatsSQL).ReadAll()
+		if err != nil {
+			return nil, err
+		}
+		return ParseJoinStats(res[0].Rows[0][0])
+	}
+	l := &costLogin{src: &fakeSource{realDSN: dsn}, cost: &CostPolicy{CostThreshold: 0.01}, joinStats: &JoinStats{Read: read, spawn: func(f func()) { f() }}}
+	l.joinStats.current()
 	c := costPortConn(t, ctx, l)
 	if got := costSimple(ctx, c, l, "SELECT count(*) FROM jg_stats.jg_orders o JOIN jg_stats.jg_stock s ON o.jg_o_w_id = s.jg_s_w_id"); got.side != RouteCopy || got.answer != "7" {
 		t.Fatalf("the join: %+v", got)
 	}
-	sent := l.joinNDVs()
-	if len(sent) != 1 || !maps.Equal(sent[0], ndv) {
-		t.Errorf("the copy was given %v, want %v", sent, ndv)
+	runs := l.joinRuns()
+	want := map[string]float64{"jg_o_id": orders["jg_o_id"], "jg_o_w_id": 20, "jg_s_w_id": 20}
+	if len(runs) != 1 || !maps.Equal(runs[0].ndv, want) {
+		t.Errorf("the copy was given %v, want %v", runs, want)
 	}
 }

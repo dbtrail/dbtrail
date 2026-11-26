@@ -478,6 +478,28 @@ func TestWorker_joinCheckOrders(t *testing.T) {
 	})
 }
 
+// What the check costs a statement the worker runs: a point lookup through
+// the copy's views, without the check and with it (its EXPLAIN). The
+// PostgreSQL port does not ask it for a statement that reads one table, so
+// the second is what such a lookup paid before it skipped them.
+func BenchmarkWorker_pointLookupJoinCheck(b *testing.B) {
+	f := newCopyFixture(b)
+	for _, bc := range []struct {
+		name string
+		ndv  map[string]float64
+	}{{"without", nil}, {"with", map[string]float64{"id": 1}}} {
+		b.Run(bc.name, func(b *testing.B) {
+			for range b.N {
+				res := runJob(wireJob{CopyDirs: []string{f.archiveRoot, f.baselineRoot}, ViewsSQL: f.views, SQL: "SELECT * FROM shop.orders WHERE id = 1",
+					Threads: 1, MemoryLimit: "256MB", MaxRows: 10, MaxResultBytes: 1 << 20, JoinNDV: bc.ndv}, nil, os.Stderr)
+				if res.Error != nil {
+					b.Fatal(res.Error.Message)
+				}
+			}
+		})
+	}
+}
+
 // The one SET of disabled_optimizers: a SET replaces the whole list, so the
 // order written and the PostgreSQL port's common_subplan go in one.
 func TestDisabledOptimizersSQL(t *testing.T) {

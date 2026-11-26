@@ -2255,11 +2255,24 @@ estimated at more than 100 times its larger input (a cross product: also more
 than 10 billion rows) has the statement planned again in the order written;
 it runs in that order when that plan has no such join, and when it has one
 too, the copy does not run it at all and the source answers it at once
-(`join_too_big` in `/status`). The counts are read from the source on the
-connection already open to ask a statement's plan, once every 10 minutes for
-the server, not for each statement; without them (no forwarding user, the
+(`join_too_big` in `/status`). The counts are read from the source as the
+forwarding user, on a connection of the port's own and in the background,
+never inside a client's statement: once every 10 minutes for the server,
+not for each statement, whether or not routing by plan is on. A read that
+fails or finds none is said once in the log (a `WARNING` per server and
+cause) and tried again after 1 minute, then 2, 4, 8 and every 10; counts
+are used for up to an hour after the last good read. Only the counts of the
+tables a statement reads are given to the copy, and a statement that reads
+one table once, or that the source's plan reads one table with, is not
+checked: it cannot join two inputs. Without counts (no forwarding user, the
 capture account, statistics the forwarding user cannot read, a table never
-analyzed) the copy runs every statement as before. What the check cannot
+analyzed, a partitioned table, whose partitions hold the counts) the copy
+runs every statement as before. `/status` counts what the check did with
+each statement the copy answered under `join_checks`: `planned` (checked,
+the copy's own order), `written_order`, `no_statistics` and
+`could_not_run` (the copy's plan could not be had or read, also said once
+in the log). A prepared statement is checked at each execution, with its
+values, not when it is described. What the check cannot
 read it does not count against a statement: a condition that is not one
 column equal to another, a column name two tables share, a join that returns
 at most the rows of one side. On the 22 CH-benCHmark reports, read through

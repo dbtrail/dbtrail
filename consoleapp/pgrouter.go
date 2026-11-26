@@ -1162,7 +1162,10 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			}
 			closers = append(closers, untrack)
 			bound.Forward = &pgshim.Forward{DSN: fwd.DSN, CaptureAccount: fwd.CaptureAccount, Acquire: sources.acquire, Park: sources.park, Limit: sources.limit(), Timeout: timeout,
-				Barred: pgForwardBarred(tgt.ID, tgt.TimeTravelRefusal, routes, logger), Cost: cost, Sides: sides.of(tgt.ID), JoinStats: joinStats.of(tgt.ID)}
+				Barred: pgForwardBarred(tgt.ID, tgt.TimeTravelRefusal, routes, logger), Cost: cost, Sides: sides.of(tgt.ID)}
+			if !fwd.CaptureAccount {
+				bound.Forward.JoinStats = joinStats.of(tgt.ID, fwd.DSN, logger)
+			}
 		}
 		if tgt.SQL == nil {
 			// The connection is made and every statement says why it cannot
@@ -1325,14 +1328,6 @@ func (p *pgCostSides) of(id string) *pgshim.CostSides {
 	return v.(*pgshim.CostSides)
 }
 
-// pgJoinStats is a port's pgshim.JoinStats, one per server: a server's
-// column statistics are its own source's.
-type pgJoinStats struct{ by sync.Map }
-
-func (p *pgJoinStats) of(id string) *pgshim.JoinStats {
-	v, _ := p.by.LoadOrStore(id, &pgshim.JoinStats{})
-	return v.(*pgshim.JoinStats)
-}
 
 // pgHiddenBarred is why nothing is sent to the source of a server that hides
 // tables or columns (#2770): the rules are applied by the copy's views, and a

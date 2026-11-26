@@ -69,6 +69,11 @@ type pgRouterServerNumbers struct {
 	// Reasons uses pgshim's Reason* names, which are the MySQL port's
 	// where they mean the same. Never null.
 	Reasons map[string]uint64 `json:"reasons"`
+	// JoinChecks counts what the copy's join check did with the statements
+	// the copy answered (pgshim JoinCheck* names: planned, written_order,
+	// no_statistics, could_not_run); one it refused is under Reasons,
+	// join_too_big. Absent until one is counted.
+	JoinChecks map[string]uint64 `json:"join_checks,omitempty"`
 	// Answers is what each side ("copy", "source", "refused") finished:
 	// counts, errors and times.
 	Answers map[string]console.RouteAnswers `json:"answers"`
@@ -149,6 +154,7 @@ type pgRouteStats struct {
 type pgRouteTally struct {
 	copy, source, refused uint64
 	reasons               map[string]uint64
+	joinChecks            map[string]uint64
 	answers               map[string]*pgRouteAnswers
 	rows                  map[pgShapeKey]*pgShapeRow
 	notCounted            uint64
@@ -276,6 +282,12 @@ func (r *pgRouteStats) note(id string, n pgshim.RouteNote) {
 		t.refused++
 	}
 	t.reasons[n.Reason]++
+	if n.JoinCheck != "" {
+		if t.joinChecks == nil {
+			t.joinChecks = map[string]uint64{}
+		}
+		t.joinChecks[n.JoinCheck]++
+	}
 	a := t.answers[n.Side]
 	if a == nil {
 		a = &pgRouteAnswers{}
@@ -434,7 +446,7 @@ func (r *pgRouteStats) counts(listen string) pgRouterStatusDoc {
 		Servers: map[string]pgRouterServerNumbers{}}
 	for id, t := range r.perServer {
 		n := pgRouterServerNumbers{Copy: t.copy, Source: t.source, Refused: t.refused,
-			Reasons: maps.Clone(t.reasons), Answers: map[string]console.RouteAnswers{}, ForwardingOff: t.barred}
+			Reasons: maps.Clone(t.reasons), JoinChecks: maps.Clone(t.joinChecks), Answers: map[string]console.RouteAnswers{}, ForwardingOff: t.barred}
 		switch {
 		case t.ageWhy != "":
 			n.DataAgeUnknownReason = t.ageWhy

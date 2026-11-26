@@ -103,6 +103,10 @@ type session struct {
 	// the source's plan to read one table and join nothing (fastlane.go);
 	// set for that statement alone, and read by runOptions.
 	fastLane bool
+	// joinCheck is what the copy's join check did with the statement it
+	// last ran (RouteNote.JoinCheck), "" for nothing to count; taken by
+	// routeNote.
+	joinCheck string
 	// catalogBusy is the busy reason the copy's list of columns could not
 	// be read for at its last read (catalog), "" when it was read or failed
 	// otherwise.

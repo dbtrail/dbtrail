@@ -90,6 +90,9 @@ type RouteNote struct {
 	// error.
 	Took   time.Duration
 	Failed bool
+	// JoinCheck is what the copy's join check did with a statement the copy
+	// answered (JoinCheck* names), "" when there was nothing to count.
+	JoinCheck string
 }
 
 // routeDecision is which side answers a statement, and why.
@@ -1838,10 +1841,15 @@ func (s *session) noteIfFailed(st *preparedStatement) {
 func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, failed bool) {
 	s.noteLast(d, failed)
 	s.settleCostSide(stmt, d, failed)
+	joinCheck := s.joinCheck
+	s.joinCheck = ""
 	if s.bound == nil || s.bound.Routed == nil || d.side == "" {
 		return
 	}
-	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed})
+	if d.side != RouteCopy {
+		joinCheck = ""
+	}
+	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed, JoinCheck: joinCheck})
 }
 
 // fieldName reports whether the token at j is the field a date_trunc or a

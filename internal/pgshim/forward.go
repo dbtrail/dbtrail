@@ -95,8 +95,9 @@ type Forward struct {
 	// alone decides, against the threshold.
 	Sides *CostSides
 	// JoinStats, when set, is the server's column statistics for the copy's
-	// join check, read from the source and shared by its connections
-	// (joinstats.go). Nil: the copy runs statements without the check.
+	// join check, read from the source with JoinStats.Read and shared by its
+	// connections (joinstats.go). Nil: the copy runs statements without the
+	// check. Not used with the capture account.
 	JoinStats *JoinStats
 }
 
