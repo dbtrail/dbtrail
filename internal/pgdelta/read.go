@@ -315,6 +315,10 @@ func textLimit(maxBytes, held int64) int64 {
 	return max(maxBytes-held, 0)
 }
 
+// errRowsNotAsked is a read of rows by number that did not hand back the
+// rows asked for, each once: the numbers were wrong for the file.
+var errRowsNotAsked = errors.New("the file did not hold the rows asked for")
+
 // rowReads counts baseValuesAt's reads of rows by their number, for the
 // tests that hold a call to one read.
 var rowReads atomic.Uint64
@@ -368,10 +372,10 @@ func baseValuesAt(ctx context.Context, db *sql.DB, basePath string, positions ma
 		}
 		key, ok := keyAt[pos]
 		if !ok {
-			return nil, fmt.Errorf("%s: row %d was not asked for", basePath, pos)
+			return nil, fmt.Errorf("%w: %s: row %d was not asked for", errRowsNotAsked, basePath, pos)
 		}
 		if _, twice := found[key]; twice {
-			return nil, fmt.Errorf("%s: row %d was read twice", basePath, pos)
+			return nil, fmt.Errorf("%w: %s: row %d was read twice", errRowsNotAsked, basePath, pos)
 		}
 		row := make(map[string]*string, len(columns))
 		for i, c := range columns {
@@ -394,7 +398,7 @@ func baseValuesAt(ctx context.Context, db *sql.DB, basePath string, positions ma
 		return nil, fmt.Errorf("read the rows of the changed keys in %s: %w", basePath, err)
 	}
 	if len(found) != len(positions) {
-		return nil, fmt.Errorf("%s: %d of the %d rows asked for were read", basePath, len(found), len(positions))
+		return nil, fmt.Errorf("%w: %s: %d of the %d rows asked for were read", errRowsNotAsked, basePath, len(found), len(positions))
 	}
 	return found, nil
 }

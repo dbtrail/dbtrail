@@ -6,12 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 )
@@ -609,6 +612,9 @@ func freshNoKeyIndexMemo(t *testing.T) {
 		noKeyIndexMu.Lock()
 		defer noKeyIndexMu.Unlock()
 		clear(noKeyIndexFor)
+		keyIndexRetryMu.Lock()
+		defer keyIndexRetryMu.Unlock()
+		clear(keyIndexRetries)
 	}
 	clearMemo()
 	t.Cleanup(clearMemo)
@@ -619,9 +625,9 @@ func countBuilds(t *testing.T) *int {
 	t.Helper()
 	n := new(int)
 	was := keyIndexBuild
-	keyIndexBuild = func(ctx context.Context, schema, table, basePath string, keyColumns []string, tuning duckdbutil.Tuning) KeyIndexResult {
+	keyIndexBuild = func(ctx context.Context, basePath string, keyColumns []string, tuning duckdbutil.Tuning) (KeyIndexResult, error) {
 		*n++
-		return was(ctx, schema, table, basePath, keyColumns, tuning)
+		return was(ctx, basePath, keyColumns, tuning)
 	}
 	t.Cleanup(func() { keyIndexBuild = was })
 	return n
@@ -841,5 +847,280 @@ func TestCutValuesOfThroughTheKeyIndex(t *testing.T) {
 	})
 	if err != nil || reads != 1 || !reflect.DeepEqual(cutRows(with, "big"), cutRows(without, "big")) {
 		t.Fatalf("%d reads: with the index %q, without %q, %v", reads, cutRows(with, "big"), cutRows(without, "big"), err)
+	}
+}
+
+// warnLines captures the log for the test and returns how many WARN lines
+// it holds containing msg.
+func captureLog(t *testing.T) func(msg string) int {
+	t.Helper()
+	var buf strings.Builder
+	var mu sync.Mutex
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(writerFunc(func(p []byte) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return buf.Write(p)
+	}), &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return func(msg string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		n := 0
+		for _, line := range strings.Split(buf.String(), "\n") {
+			if strings.Contains(line, "level=WARN") && strings.Contains(line, msg) {
+				n++
+			}
+		}
+		return n
+	}
+}
+
+type writerFunc func(p []byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+func freshWarned(t *testing.T) {
+	t.Helper()
+	warnedMu.Lock()
+	clear(warned)
+	warnedMu.Unlock()
+	t.Cleanup(func() {
+		warnedMu.Lock()
+		clear(warned)
+		warnedMu.Unlock()
+	})
+}
+
+// A read of the rows that fails for a reason that is not the index's (the
+// session gone here, as memory or a full temporary folder would fail it)
+// leaves a good index as it is, said once; only a read that proves the
+// index wrong removes it.
+func TestKeyIndexLeftWhenTheReadFailsForAnotherReason(t *testing.T) {
+	freshNoNullMemo(t)
+	freshWarned(t)
+	warns := captureLog(t)
+	base := filepath.Join(t.TempDir(), "t.parquet")
+	writeBase(t, base, []string{"id", "val"}, []cell{v("a"), v("1")}, []cell{v("b"), v("2")})
+	buildIndex(t, base, []string{"id"})
+	gone := duck(t)
+	gone.Close()
+	for range 2 {
+		if _, _, ok := lookupByKeyIndex(context.Background(), gone, base, []string{"id"}, []string{"a"}, nil, -1); ok {
+			t.Fatal("answered with a session that is closed")
+		}
+	}
+	if !exists(KeyIndexPath(base)) {
+		t.Fatal("a good index was removed for a read that failed on its own")
+	}
+	if n := warns("could not be read from the table file"); n != 1 {
+		t.Fatalf("%d warnings for the same file, want one", n)
+	}
+	// Two keys at one row: the index is wrong, and removed.
+	bind, err := bindingOf(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeKeyIndexFile(context.Background(), KeyIndexPath(base), bind, []string{"id"}, recordsOf([]byte("a"), 0, []byte("b"), 0)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := BasePositionsOf(context.Background(), duck(t), base, []string{"id"}, []string{"a", "b"})
+	if err != nil || got["a"] != 0 || got["b"] != 1 || exists(KeyIndexPath(base)) {
+		t.Fatalf("two keys at one row: %v, %v, index still there %v", got, err, exists(KeyIndexPath(base)))
+	}
+}
+
+// An index that cannot be checked (here a folder in its place, which opens
+// and does not read) is left, and its warning is given once per version of
+// the file, at lookups and at updates alike.
+func TestKeyIndexUncheckedIsSaidOnce(t *testing.T) {
+	freshNoNullMemo(t)
+	freshNoKeyIndexMemo(t)
+	freshWarned(t)
+	warns := captureLog(t)
+	db := duck(t)
+	base := filepath.Join(t.TempDir(), "t.parquet")
+	writeBase(t, base, []string{"id", "val"}, []cell{v("a"), v("1")})
+	if err := os.Mkdir(KeyIndexPath(base), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	builds := countBuilds(t)
+	for range 3 {
+		if got, err := BasePositionsOf(context.Background(), db, base, []string{"id"}, []string{"a"}); err != nil || got["a"] != 0 {
+			t.Fatalf("%v, %v", got, err)
+		}
+		EnsureKeyIndex(context.Background(), "s", "t", base, []string{"id"}, duckdbutil.Tuning{})
+	}
+	if *builds != 0 || !exists(KeyIndexPath(base)) {
+		t.Fatalf("%d builds over an index that cannot be checked, or it was removed", *builds)
+	}
+	if n := warns("cannot be checked; it is left as it is and the file's key columns are read instead"); n != 1 {
+		t.Fatalf("%d lookup warnings, want one", n)
+	}
+	if n := warns("cannot be checked; it is left as it is and the file's key columns are read\""); n != 1 {
+		t.Fatalf("%d update warnings, want one", n)
+	}
+	if _, memo := noKeyIndexEntry(base); memo {
+		t.Error("an index that cannot be checked was remembered")
+	}
+}
+
+// Right after a build, an index that cannot be checked is left as it is and
+// nothing is remembered.
+func TestEnsureKeyIndexUncheckedAfterTheBuild(t *testing.T) {
+	freshNoKeyIndexMemo(t)
+	freshWarned(t)
+	base := filepath.Join(t.TempDir(), "t.parquet")
+	writeBase(t, base, []string{"id", "val"}, []cell{v("a"), v("1")})
+	was := keyIndexBuild
+	keyIndexBuild = func(ctx context.Context, basePath string, keyColumns []string, tuning duckdbutil.Tuning) (KeyIndexResult, error) {
+		return KeyIndexResult{Path: KeyIndexPath(basePath)}, os.Mkdir(KeyIndexPath(basePath), 0o755)
+	}
+	t.Cleanup(func() { keyIndexBuild = was })
+	EnsureKeyIndex(context.Background(), "s", "t", base, []string{"id"}, duckdbutil.Tuning{})
+	if !exists(KeyIndexPath(base)) {
+		t.Fatal("an index that cannot be checked was removed after its build")
+	}
+	if _, memo := noKeyIndexEntry(base); memo {
+		t.Error("remembered as a file to build no index beside")
+	}
+	if _, later := keyIndexHeldBack(base); later {
+		t.Error("held back as a build that failed")
+	}
+}
+
+// A build that fails for a reason of the moment is tried again later, not
+// at the next update, and later still after a second failure; one that
+// fails for what the file holds is not tried again however long it waits.
+func TestEnsureKeyIndexRetriesOnlyWhatMayPass(t *testing.T) {
+	freshNoKeyIndexMemo(t)
+	warns := captureLog(t)
+	now := time.Now()
+	wasNow := keyIndexNow
+	keyIndexNow = func() time.Time { return now }
+	t.Cleanup(func() { keyIndexNow = wasNow })
+	base := filepath.Join(t.TempDir(), "t.parquet")
+	writeBase(t, base, []string{"id", "val"}, []cell{v("a"), v("1")})
+	n := 0
+	was := keyIndexBuild
+	keyIndexBuild = func(ctx context.Context, basePath string, keyColumns []string, tuning duckdbutil.Tuning) (KeyIndexResult, error) {
+		n++
+		return KeyIndexResult{Path: KeyIndexPath(basePath)}, errors.New("Out of Memory Error: could not allocate block")
+	}
+	t.Cleanup(func() { keyIndexBuild = was })
+	ensure := func() { EnsureKeyIndex(context.Background(), "s", "t", base, []string{"id"}, duckdbutil.Tuning{}) }
+	ensure()
+	ensure()
+	if n != 1 {
+		t.Fatalf("%d builds right after a failure of the moment", n)
+	}
+	if _, memo := noKeyIndexEntry(base); memo {
+		t.Fatal("a failure of the moment remembered until the file is rewritten")
+	}
+	now = now.Add(keyIndexRetryFirst + time.Second)
+	ensure()
+	if n != 2 {
+		t.Fatalf("%d builds once the wait is over", n)
+	}
+	now = now.Add(keyIndexRetryFirst + time.Second)
+	ensure()
+	if n != 2 {
+		t.Fatal("the wait did not grow after a second failure")
+	}
+	if c := warns("the build is tried again in 10m0s"); c != 1 {
+		t.Fatalf("%d warnings naming the doubled wait", c)
+	}
+	keyIndexBuild = was
+	now = now.Add(time.Hour)
+	ensure()
+	if !exists(KeyIndexPath(base)) {
+		t.Fatal("not built once the failure passed")
+	}
+	if _, later := keyIndexHeldBack(base); later {
+		t.Error("still held back after a build that succeeded")
+	}
+
+	// A NULL key: not tried again, however long it waits, and said so.
+	holed := filepath.Join(t.TempDir(), "t.parquet")
+	writeBase(t, holed, []string{"id", "val"}, []cell{v("a"), v("1")}, []cell{null, v("2")})
+	builds := countBuilds(t)
+	EnsureKeyIndex(context.Background(), "s", "t", holed, []string{"id"}, duckdbutil.Tuning{})
+	now = now.Add(48 * time.Hour)
+	EnsureKeyIndex(context.Background(), "s", "t", holed, []string{"id"}, duckdbutil.Tuning{})
+	if *builds != 1 {
+		t.Fatalf("%d builds over a file with a NULL key", *builds)
+	}
+	if c := warns("not tried again until the file is rewritten or the daemon restarts"); c != 1 {
+		t.Fatalf("%d warnings saying the file is not tried again", c)
+	}
+}
+
+// A file put in place of the one the lookup read, with an index of its own,
+// keeps that index although the old index's rows disagree with the new
+// file.
+func TestKeyIndexOfAFileReplacedMidLookupIsKept(t *testing.T) {
+	freshNoNullMemo(t)
+	db := duck(t)
+	dir := t.TempDir()
+	base := filepath.Join(dir, "t.parquet")
+	writeBase(t, base, []string{"id", "val"}, []cell{v("a"), v("1")}, []cell{v("b"), v("2")})
+	buildIndex(t, base, []string{"id"})
+	next := filepath.Join(t.TempDir(), "t.parquet")
+	writeBase(t, next, []string{"id", "val"}, []cell{v("b"), v("2")}, []cell{v("a"), v("1")})
+	buildIndex(t, next, []string{"id"})
+	afterKeyIndexFind = func(string) {
+		if err := os.Rename(KeyIndexPath(next), KeyIndexPath(base)); err != nil {
+			t.Error(err)
+		}
+		if err := os.Rename(next, base); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { afterKeyIndexFind = func(string) {} })
+	got, err := BasePositionsOf(context.Background(), db, base, []string{"id"}, []string{"a"})
+	if err != nil || got["a"] != 1 {
+		t.Fatalf("the new file's row: %v, %v", got, err)
+	}
+	afterKeyIndexFind = func(string) {}
+	if _, verdict, err := openUsableKeyIndex(base, []string{"id"}); verdict != keyIndexUsable {
+		t.Fatalf("the new file's index was not kept: %v", err)
+	}
+}
+
+// A temporary file a build cut off left beside the file is removed at the
+// next update.
+func TestEnsureKeyIndexRemovesALeftoverTemporaryFile(t *testing.T) {
+	freshNoKeyIndexMemo(t)
+	base := filepath.Join(t.TempDir(), "t.parquet")
+	writeBase(t, base, []string{"id", "val"}, []cell{v("a"), v("1")})
+	buildIndex(t, base, []string{"id"})
+	if err := os.WriteFile(KeyIndexPath(base)+".tmp", []byte("cut off"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	EnsureKeyIndex(context.Background(), "s", "t", base, []string{"id"}, duckdbutil.Tuning{})
+	if exists(KeyIndexPath(base) + ".tmp") {
+		t.Fatal("the leftover temporary file is still there")
+	}
+}
+
+// A build that waits for its turn binds its index to the file as it is when
+// its turn comes, not as it was when it asked.
+func TestBuildKeyIndexReadsTheFileWhenItsTurnComes(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "t.parquet")
+	writeBase(t, base, []string{"id", "val"}, []cell{v("a"), v("1")})
+	keyIndexSlots <- struct{}{}
+	done := make(chan error, 1)
+	go func() {
+		_, err := BuildKeyIndex(context.Background(), base, []string{"id"}, duckdbutil.Tuning{})
+		done <- err
+	}()
+	time.Sleep(200 * time.Millisecond)
+	writeBase(t, base, []string{"id", "val"}, []cell{v("a"), v("1")}, []cell{v("b"), v("2")})
+	<-keyIndexSlots
+	if err := <-done; err != nil {
+		t.Fatalf("the build after its wait: %v", err)
+	}
+	if _, verdict, err := openUsableKeyIndex(base, []string{"id"}); verdict != keyIndexUsable {
+		t.Fatalf("the index is not bound to the file as it is: %v", err)
 	}
 }
