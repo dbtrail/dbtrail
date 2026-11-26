@@ -172,10 +172,13 @@ func TestIntegrationPGRouterShape_3251(t *testing.T) {
 			if got, why := answered(c, gone, extended); !strings.HasPrefix(got, "error 42703") || why != pgshim.ReasonCopyShapeDiffers {
 				t.Errorf("extended=%v: %s: %q (%s), want PostgreSQL's 42703 from the source", extended, gone, got, why)
 			}
-			// The table that did not change stays on the copy.
+			// The table that did not change stays on the copy, on a
+			// connection the source did not answer about it (on this one the
+			// join above did, and the rule of #2985 holds a snapshot's answer
+			// back: copy_too_old).
 			const same = "SELECT id, c FROM shp_same ORDER BY id"
 			want := pgUserRows(t, ctx, source, same, extended)
-			if got, why := answered(c, same, extended); got != want || why != pgshim.ReasonAnswersTheSame {
+			if got, why := answered(pgClient(t, ctx, env.portDSN(), nil), same, extended); got != want || why != pgshim.ReasonAnswersTheSame {
 				t.Errorf("extended=%v: a table that did not change: %s: %q (%s), want the copy's %q", extended, same, got, why, want)
 			}
 		}

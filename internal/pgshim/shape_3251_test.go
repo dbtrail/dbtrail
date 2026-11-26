@@ -122,10 +122,17 @@ func TestCopyShape_3251_simple(t *testing.T) {
 	defer cancel()
 	p, k := newShapePort(t)
 	c := costPortConn(t, ctx, p.l)
+	// A statement the copy should answer runs on a connection of its own:
+	// one the source already answered about a table holds the copy's answer
+	// from a snapshot back (copy_too_old, #2985), which is not this rule.
 	expect := func(name, stmt string, want costOutcome, runs int32) {
 		t.Helper()
+		on := c
+		if want.side == RouteCopy {
+			on = costPortConn(t, ctx, p.l)
+		}
 		before := p.l.runs.Load()
-		if got := costSimple(ctx, c, p.l, stmt); got != want {
+		if got := costSimple(ctx, on, p.l, stmt); got != want {
 			t.Errorf("%s: %s: %+v, want %+v", name, stmt, got, want)
 		}
 		if d := p.l.runs.Load() - before; d != runs {
@@ -133,8 +140,9 @@ func TestCopyShape_3251_simple(t *testing.T) {
 		}
 	}
 	expect("every shape as its snapshot", "SELECT sum(n) FROM big", tablesOnCopy, 1)
-	if got := k.lastAsked(); !slices.Equal(got, [][2]string{{"public", "big"}}) {
-		t.Errorf("the source was asked about %v, want public.big alone: the tables the statement reads", got)
+	// big without a schema is big in every schema the copy holds.
+	if got := k.lastAsked(); !slices.Equal(got, [][2]string{{"public", "big"}, {"other", "big"}}) {
+		t.Errorf("the source was asked about %v, want public.big and other.big: the tables the statement may read", got)
 	}
 
 	k.edit(addColumn("big"))
@@ -164,8 +172,9 @@ func TestCopyShape_3251_simple(t *testing.T) {
 	}
 	// The copy's own commands are not the source's: asked of nothing.
 	asked := k.asked.Load()
+	own := costPortConn(t, ctx, p.l)
 	for _, stmt := range []string{"SHOW TABLES", "DESCRIBE big"} {
-		if got := costSimple(ctx, c, p.l, stmt); got.code != "" || got.side != RouteCopy || got.reason != ReasonCopyCommand {
+		if got := costSimple(ctx, own, p.l, stmt); got.code != "" || got.side != RouteCopy || got.reason != ReasonCopyCommand {
 			t.Errorf("%s: %+v, want the copy's", stmt, got)
 		}
 	}
@@ -261,10 +270,15 @@ func TestCopyShape_3251_sourceCannotBeAsked(t *testing.T) {
 	if _, err := c.Prepare(ctx, "s", "SELECT sum(n) FROM big", nil); !errors.As(err, &pe) || pe.Code != "55000" {
 		t.Errorf("prepare: %v, want 55000", err)
 	}
+	if d := p.l.runs.Load() - runs; d != 0 {
+		t.Errorf("the copy ran %d statements, want none", d)
+	}
 	k.fail(nil)
 	if _, err := c.Prepare(ctx, "early", "SELECT sum(n) FROM big", nil); err != nil {
 		t.Fatal(err)
 	}
+	// Its Describe ran on the copy; its execution must not.
+	runs = p.l.runs.Load()
 	k.fail(errors.New("timeout: the source did not answer within 2s"))
 	if r := c.ExecPrepared(ctx, "early", nil, nil, nil).Read(); !errors.As(r.Err, &pe) || pe.Code != "55000" {
 		t.Errorf("execute: %v, want 55000", r.Err)
@@ -322,8 +336,18 @@ func TestCopyShape_3251_preparedStatements(t *testing.T) {
 		t.Errorf("prepared after the change: %s %s/%s, want the source's 42", got, n.Side, n.Reason)
 	}
 	k.edit(func(now map[[2]string]SourceShape) { putShapes(now, sameShapes(shapedCatalogOf(shapePortTables...))) })
-	if got, n := exec("before"); got != "7" || n.Side != RouteCopy {
-		t.Errorf("described before, healed: %s %s/%s, want the copy's 7: the reason is the moment's", got, n.Side, n.Reason)
+	// Healed, the shape rule holds it no more. The source answered this
+	// connection about big meanwhile, so the copy's snapshot answer is held
+	// back by the rule of #2985 (copy_too_old), as for any statement.
+	if _, n := exec("before"); n.Reason == ReasonCopyShapeDiffers {
+		t.Errorf("described before, healed: %s/%s: the reason is the moment's, and must not keep the statement", n.Side, n.Reason)
+	}
+	d := costPortConn(t, ctx, p.l)
+	if _, err := d.Prepare(ctx, "again", "SELECT sum(n) FROM big", nil); err != nil {
+		t.Fatal(err)
+	}
+	if res := d.ExecPrepared(ctx, "again", nil, nil, nil).Read(); res.Err != nil || len(res.Rows) != 1 || string(res.Rows[0][0]) != "7" {
+		t.Errorf("healed, a new connection: %v %q, want the copy's 7", res.Err, res.Rows)
 	}
 	if got, n := exec("after"); got != "42" || n.Side != RouteSource {
 		t.Errorf("described by the source, healed: %s %s/%s, want the source still", got, n.Side, n.Reason)
