@@ -551,19 +551,19 @@ func (s *session) describeFree(st *preparedStatement) (cols []string, types []co
 	// shape. Where nothing goes to the source, or the columns could not be
 	// compared, the Describe is refused.
 	ctx, done := s.statementContext()
-	why, perr := s.copyShapeDiffers(ctx, RewriteForCopy(st.query))
+	changed, perr := s.copyShapeDiffers(ctx, RewriteForCopy(st.query))
 	done()
 	if perr != nil {
 		return nil, nil, false, perr
 	}
-	if why != "" {
+	if changed != "" {
 		if s.canFallBack() && isSelectLike(st.query) {
-			s.logger.Debug("pgshim: a statement reads a table changed on the source since its snapshot; the source describes it", "why", why)
+			s.logger.Debug("pgshim: a statement reads a table changed on the source since its snapshot; the source describes it", "why", changed)
 			st.fallback = ReasonCopyShapeDiffers
 			return nil, nil, false, nil
 		}
 		s.busyRefused = ReasonCopyShapeDiffers
-		return nil, nil, false, shapeCopyOnlyError(why)
+		return nil, nil, false, shapeCopyOnlyError(changed)
 	}
 	got, perr, err := s.describeWith(st, "")
 	if perr != nil {
