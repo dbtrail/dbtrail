@@ -696,3 +696,59 @@ func TestIntegrationPGFirstRunStopDuringTheMarkerCheckRecordsNothing_3114(t *tes
 		t.Errorf("schema_changes holds %d record(s), want the 1 it had", n)
 	}
 }
+
+// The same stop on a resumed run, during the check of the transaction at the
+// saved position (#3196): that read answers "not held", and the check right
+// after it takes the stop, so neither the row nor the TRUNCATE marker the
+// index already holds goes in again.
+func TestIntegrationPGResumeStopDuringTheResendCheckIndexesNothing_3114(t *testing.T) {
+	prevWithin, prevStep := commitWithin, beforeWrite
+	t.Cleanup(func() { commitWithin, beforeWrite = prevWithin, prevStep })
+	commitWithin = func() time.Duration { return time.Hour }
+	at := time.Date(2026, 2, 19, 14, 0, 0, 0, time.UTC)
+	run := func(t *testing.T, db *sql.DB, floor int64, first event.Event) {
+		t.Helper()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		beforeWrite = func(step string) {
+			if step == "resend" {
+				cancel()
+			}
+		}
+		events := make(chan event.Event, 2)
+		events <- first
+		events <- event.Event{EventType: event.EventCommit, EndPos: 0x500}
+		state := &pgStreamState{serverID: 91, lsn: 0x500, resumed: true, resendLSN: 0x500, resendFloor: uint64(floor)}
+		if err := streamLoopPG(ctx, events, indexer.New(db, 1000), db, nil, time.Hour, nil, time.Hour,
+			state, slog.New(slog.DiscardHandler), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("row", func(t *testing.T) {
+		db := lockIndex(t)
+		floor := leftAt(t, db, 0x500, 1)
+		for round := range 25 {
+			run(t, db, floor, event.Event{BinlogFile: "0/500", StartPos: 0x500, EndPos: 0x500, Timestamp: at, Schema: "public", Table: "orders",
+				EventType: event.EventInsert, PKValues: "1", RowAfter: map[string]any{"id": "1"}})
+			if n := pgCount(t, db); n != 1 {
+				t.Fatalf("round %d: the index holds %d row(s), want the 1 it had", round, n)
+			}
+		}
+	})
+	t.Run("truncate", func(t *testing.T) {
+		db := lockIndex(t)
+		marker := event.Event{BinlogFile: "0/500", StartPos: 0x500, EndPos: 0x500, Schema: "public", Table: "orders", EventType: event.EventDDL,
+			DDLType: event.DDLTruncateTable, DDLQuery: "TRUNCATE public.orders", Timestamp: at}
+		if err := indexer.InsertSchemaChange(db, marker, nil); err != nil {
+			t.Fatal(err)
+		}
+		run(t, db, 0, marker)
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM schema_changes`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Errorf("schema_changes holds %d record(s), want the 1 it had", n)
+		}
+	})
+}

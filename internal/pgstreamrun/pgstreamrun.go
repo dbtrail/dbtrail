@@ -481,9 +481,10 @@ func recordSlotLoss(ctx context.Context, db *sql.DB, serverID uint32, detail str
 // beforeWrite, when a test sets it, runs just before the checkpoint commits
 // its rows ("commit"), writes its position ("save") and acknowledges it to the
 // slot ("ack"), before a schema record ("ddl"), a record of a table that left
-// the publication ("left"), the health reading ("health") and the check of a
-// row against the index ("recognize"), and once a commit was handled
-// ("received"), so a test can act at exactly that point.
+// the publication ("left"), the health reading ("health"), the check of a
+// row against the index on a run with no saved position ("recognize") and on
+// a resumed one ("resend"), and once a commit was handled ("received"), so a
+// test can act at exactly that point.
 var beforeWrite func(step string)
 
 // ackCheckpoint tells the capturer the position is durable. A variable so a
@@ -1261,7 +1262,12 @@ func streamLoopPG(
 				// index already records is not recorded again
 				// (pgStreamState.resendLSN). An inferred change has its own check
 				// just below.
+				// A read cut short by a stop answers "not recorded"; the stop is
+				// taken by the check below, which asks ctx before going on.
 				if state.resendLSN != 0 && ev.EndPos == state.resendLSN && !strings.HasPrefix(ev.DDLQuery, event.InferredDDLPrefix) {
+					if beforeWrite != nil {
+						beforeWrite("resend")
+					}
 					if resendHeldMarker(ctx, indexDB, ev, logger) {
 						resentDropped++
 						continue
@@ -1335,6 +1341,11 @@ func streamLoopPG(
 					key := ev.Schema + "." + ev.Table
 					held, seen := resendHeld[key]
 					if !seen {
+						// A read cut short by a stop answers "not held"; the stop
+						// is taken by the check below, before the row is added.
+						if beforeWrite != nil {
+							beforeWrite("resend")
+						}
 						held = resendHeldRow(ctx, indexDB, ev, state.resendFloor, logger)
 						resendHeld[key] = held
 					}
