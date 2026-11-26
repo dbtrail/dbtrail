@@ -80,6 +80,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -131,6 +132,24 @@ var keyIndexLookups atomic.Uint64
 // KeyIndexLookups is how many calls of BasePositionsOf, since the process
 // started, were answered from a key index beside the file.
 func KeyIndexLookups() uint64 { return keyIndexLookups.Load() }
+
+// keyIndexEnv is the key index's switch, the one the MySQL index answers to
+// (reconstruct.KeyIndexEnv): 0/false/no/off (any case, spaces around) and no
+// PostgreSQL key index is used or built; anything else, unset included,
+// keeps it on. The MySQL side says at boot which way it went.
+const keyIndexEnv = "BINTRAIL_KEY_INDEX"
+
+// keyIndexOn is the switch, read once per process; a variable so a test can
+// set it.
+var keyIndexOn = sync.OnceValue(func() bool { return keyIndexSwitch(os.Getenv(keyIndexEnv)) })
+
+func keyIndexSwitch(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "0", "false", "no", "off":
+		return false
+	}
+	return true
+}
 
 // KeyIndexPath is the index's path beside basePath.
 func KeyIndexPath(basePath string) string {
@@ -737,7 +756,7 @@ func (ix *keyIndex) scanBlock(b int, want []string, found map[string]int64) erro
 // does not hold up, and the caller reads the file. See the file's comment
 // for what is checked.
 func positionsByKeyIndex(ctx context.Context, db *sql.DB, basePath string, keyColumns, keys []string) (map[string]int64, bool) {
-	if strings.Contains(basePath, "://") || len(keyColumns) == 0 || len(keys) == 0 {
+	if strings.Contains(basePath, "://") || len(keyColumns) == 0 || len(keys) == 0 || !keyIndexOn() {
 		return nil, false
 	}
 	path := KeyIndexPath(basePath)
@@ -783,8 +802,11 @@ func positionsByKeyIndex(ctx context.Context, db *sql.DB, basePath string, keyCo
 	if len(found) > 0 {
 		vals, err := baseValuesAt(ctx, db, basePath, found, keyColumns, -1)
 		if err != nil {
+			// Removed, unless the lookup was cancelled: an index whose rows
+			// cannot be read back (two keys at one row among the causes) would
+			// say so again at every update.
 			if ctx.Err() == nil {
-				slog.Warn("the rows the PostgreSQL key index names could not be checked against the table file; the file's key columns are read instead", "path", path, "error", err)
+				dropKeyIndex(path, "the rows the PostgreSQL key index names could not be checked against the table file; the index is removed and the file's key columns are read instead", err)
 			}
 			return nil, false
 		}
@@ -851,7 +873,12 @@ func compactStrings(s []string) []string {
 // dependency, so nothing here fails the caller. A build that failed is a
 // warning with its reason, a skip for disk a warning, any other skip a debug
 // line, a written index one Info line with its cost.
+//
+// With the switch off (BINTRAIL_KEY_INDEX=0) nothing is built.
 func WriteKeyIndexBeside(ctx context.Context, schema, table, basePath string, keyColumns []string, tuning duckdbutil.Tuning) KeyIndexResult {
+	if !keyIndexOn() {
+		return KeyIndexResult{Path: KeyIndexPath(basePath), Skipped: keyIndexEnv + " is off"}
+	}
 	res, err := BuildKeyIndex(ctx, basePath, keyColumns, tuning)
 	switch {
 	case err != nil && ctx.Err() != nil:

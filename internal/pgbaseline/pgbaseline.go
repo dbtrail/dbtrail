@@ -476,6 +476,8 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	// and the source's transaction is closed: a build is a sort of every key,
 	// and the source must not hold its snapshot open for it. Nothing here
 	// fails the run; a table without an index is read as before.
+	// Ended here, not at return: the deferred ROLLBACK and Close then find
+	// the connection closed and do nothing, which is what they are for.
 	_, _ = conn.Exec(context.Background(), "ROLLBACK")
 	conn.Close(context.Background())
 	for _, t := range tables {

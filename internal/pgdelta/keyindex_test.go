@@ -572,3 +572,31 @@ func TestKeyIndexBlockCRCFindsAChangedRow(t *testing.T) {
 		t.Fatalf("a changed row number: %v", err)
 	}
 }
+
+// BINTRAIL_KEY_INDEX=0 turns the PostgreSQL index off as it does MySQL's:
+// one beside the file is not used, and none is written.
+func TestKeyIndexSwitchOff(t *testing.T) {
+	for raw, on := range map[string]bool{"": true, "1": true, "on": true, "bogus": true, "0": false, " OFF ": false, "no": false, "false": false} {
+		if keyIndexSwitch(raw) != on {
+			t.Errorf("%q: on is %v", raw, !on)
+		}
+	}
+	freshNoNullMemo(t)
+	db := duck(t)
+	base := filepath.Join(t.TempDir(), "t.parquet")
+	writeBase(t, base, []string{"id", "val"}, []cell{v("a"), v("1")})
+	buildIndex(t, base, []string{"id"})
+	was := keyIndexOn
+	keyIndexOn = func() bool { return false }
+	t.Cleanup(func() { keyIndexOn = was })
+	var got map[string]int64
+	var err error
+	if n := lookupsOf(func() { got, err = BasePositionsOf(context.Background(), db, base, []string{"id"}, []string{"a"}) }); n != 0 || err != nil || got["a"] != 0 {
+		t.Fatalf("switched off: %d lookups, %v, %v", n, got, err)
+	}
+	other := filepath.Join(t.TempDir(), "t.parquet")
+	writeBase(t, other, []string{"id", "val"}, []cell{v("a"), v("1")})
+	if res := WriteKeyIndexBeside(context.Background(), "s", "t", other, []string{"id"}, duckdbutil.Tuning{}); res.Skipped == "" || exists(KeyIndexPath(other)) {
+		t.Fatalf("switched off, an index was written: %+v", res)
+	}
+}

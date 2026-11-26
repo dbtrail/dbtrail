@@ -512,7 +512,7 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		return failed(fmt.Errorf("carry %s.%s forward beside its delta: %w", in.Schema, in.Table, err))
 	}
 	pgdelta.CarryKeyIndex(src, dst, linked, in.Schema, in.Table)
-	made = append(made, dst)
+	made = append(made, dst, pgdelta.KeyIndexPath(dst))
 	// Read back as a whole chain that ends at this pair: a pair before that
 	// did not arrive would publish the table as it was before it.
 	names, err := pgPairBeside(dst)
