@@ -537,3 +537,38 @@ func TestKeyIndexFileReplacedDuringTheLookup(t *testing.T) {
 		t.Fatalf("the new file's rows: %v, %v", got, err)
 	}
 }
+
+// A row number changed in a block, the block still in order and every row
+// number inside the file: only the block's CRC can tell, and it does.
+func TestKeyIndexBlockCRCFindsAChangedRow(t *testing.T) {
+	smallKeyIndexBlocks(t, 2)
+	base := filepath.Join(t.TempDir(), "t.parquet")
+	var rows [][]cell
+	for i := range 9 {
+		rows = append(rows, []cell{v(fmt.Sprintf("k%02d", i)), v("x")})
+	}
+	writeBase(t, base, []string{"id", "val"}, rows...)
+	buildIndex(t, base, []string{"id"})
+	b, err := os.ReadFile(KeyIndexPath(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The first block: k00 at row 0 (0, 3, "k00", 0), then k01 at row 1
+	// (2, 1, "1", 1). Its last byte is k01's row: 1 becomes 0.
+	at := keyIndexHeaderSize([]string{"id"}) + 6 + 3
+	if b[at] != 1 {
+		t.Fatalf("byte %d is %d, not k01's row: the layout this test assumes moved", at, b[at])
+	}
+	b[at] = 0
+	if err := os.WriteFile(KeyIndexPath(base), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ix, err := openKeyIndex(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ix.Close()
+	if _, err := ix.find([]string{"k01"}); !errors.Is(err, errKeyIndexDamaged) {
+		t.Fatalf("a changed row number: %v", err)
+	}
+}
