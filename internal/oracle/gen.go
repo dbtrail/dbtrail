@@ -102,16 +102,11 @@ var (
 		Source: "IF(LENGTH(%[1]s) = 0, '', CONCAT('0x', HEX(%[1]s)))",
 		View:   "CASE WHEN octet_length(%[1]s) = 0 THEN '' ELSE '0x' || hex(%[1]s) END",
 	}
-	// RenderMicros: a DATETIME(6), or a TIMESTAMP(6) read in UTC, with its
-	// six digits of fraction. The view's microseconds since the epoch are
+	// RenderMicros: a DATETIME(6) with its six digits of fraction. The view's microseconds since the epoch are
 	// the same whether it reads the column as a wall clock or an instant.
 	RenderMicros = Render{
 		Source: "CAST(%[1]s AS CHAR)",
 		View:   "strftime(make_timestamp(epoch_us(%[1]s)), '%%Y-%%m-%%d %%H:%%M:%%S.%%f')",
-	}
-	RenderTimestampUTC = Render{
-		Source: "CAST(CONVERT_TZ(%[1]s, @@session.time_zone, '+00:00') AS CHAR)",
-		View:   RenderMicros.View,
 	}
 )
 
@@ -153,15 +148,13 @@ func Tables() []Table {
 
 // KeyTypeTables returns the tables keyed by the types a tail takes besides
 // integers (#3159), fresh copies: BINARY(16) (a UUID), VARBINARY, DATE,
-// DATETIME, DATETIME(6), TIMESTAMP(6), DECIMAL and a composite of an integer,
-// a VARBINARY and a DATE. Not in Tables: a seed draws its table by index, so
+// DATETIME, DATETIME(6), DECIMAL and a composite of an integer, a VARBINARY
+// and a DATE. Not in Tables: a seed draws its table by index, so
 // a table added there would change every seed's draws.
 //
-// Their keys are ones a tail takes: no BINARY(16) value ends in 0x00 and no
-// binary value's text starts with 0x (reconstruct refuses both, and the
-// oracle over tails takes a refusal for a finding). The TIMESTAMP keys are
-// wall clocks at -05:00, so the server turns a wall clock in another zone
-// into the instant it stores.
+// Their keys are ones a tail takes: no BINARY(16) value ends in 0x00, no
+// binary value is empty or has text that starts with 0x (reconstruct
+// refuses those, and the oracle over tails takes a refusal for a finding).
 func KeyTypeTables() []Table {
 	return []Table{
 		{
@@ -195,16 +188,6 @@ func KeyTypeTables() []Table {
 			DDL:  "CREATE TABLE `t_dt6` (`at` DATETIME(6) NOT NULL, `v` INT NOT NULL, PRIMARY KEY (`at`)) ENGINE=InnoDB",
 			PK:   []string{"at"}, Cols: []string{"at", "v"}, Render: map[string]Render{"at": RenderMicros},
 			key: func(k int) []string { return []string{"'" + microsKey(k) + "'"} },
-		},
-		{
-			Name: "t_ts",
-			DDL:  "CREATE TABLE `t_ts` (`at` TIMESTAMP(6) NOT NULL, `v` INT NOT NULL, PRIMARY KEY (`at`)) ENGINE=InnoDB",
-			PK:   []string{"at"}, Cols: []string{"at", "v"}, Render: map[string]Render{"at": RenderTimestampUTC},
-			// A wall clock at -05:00 turned into the session's zone by the
-			// server. Not a '...-05:00' literal: MySQL applies its offset
-			// where it stores a value, not in a WHERE comparison, so a
-			// DELETE by it would match nothing.
-			key: func(k int) []string { return []string{"CONVERT_TZ('" + microsKey(k) + "', '-05:00', @@session.time_zone)"} },
 		},
 		{
 			Name: "t_dec",
@@ -241,13 +224,13 @@ func uuidKey(k int) []byte {
 	return b
 }
 
-// varbinaryKey is key k of t_vbin: the empty value, values ending in 0x00
+// varbinaryKey is key k of t_vbin: a value of one byte 0x7f, values ending in 0x00
 // beside the same bytes without it, bytes that are not UTF-8, and text with
 // '|' and '\' in it.
 func varbinaryKey(k int) []byte {
 	switch {
 	case k == 0:
-		return []byte{}
+		return []byte{0x7f} // not the empty value, which has no tail
 	case k%5 == 1:
 		return []byte{byte(k), 0}
 	case k%5 == 2:
@@ -269,7 +252,7 @@ func dateKey(k int) string {
 	return time.Date(1969, 12, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, k*13).Format("2006-01-02")
 }
 
-// microsKey is key k of t_dt6 and t_ts: a second apart, every third with no
+// microsKey is key k of t_dt6: a second apart, every third with no
 // fraction (written without one, so the server pads it to .000000).
 func microsKey(k int) string {
 	at := time.Date(2024, 3, 10, 1, 0, 0, 0, time.UTC).Add(time.Duration(k) * time.Second)
@@ -293,10 +276,30 @@ func decimalKey(k int) string {
 	return strconv.FormatFloat(v, 'f', -1, 64)
 }
 
-// TableByName returns the table called name, of Tables or KeyTypeTables; it
+// RefusedKeyTables returns tables keyed by a type that looks like one a tail
+// takes and is not: a DECIMAL with ZEROFILL, which a dump prints padded
+// ("0001.25") and the binary log does not (#3159). The oracle over tails
+// checks that no read lays a tail over them, and that their reads still
+// equal the source.
+func RefusedKeyTables() []Table {
+	return []Table{
+		{
+			Name: "t_deczf",
+			DDL:  "CREATE TABLE `t_deczf` (`x` DECIMAL(6,2) UNSIGNED ZEROFILL NOT NULL, `v` INT NOT NULL, PRIMARY KEY (`x`)) ENGINE=InnoDB",
+			PK:   []string{"x"}, Cols: []string{"x", "v"},
+			// The source prints the zeros; the view reads the number. Both
+			// as the number: CAST(x + 0) is MySQL's, without the padding.
+			Render: map[string]Render{"x": {Source: "CAST(%[1]s + 0 AS CHAR)", View: "CAST(%[1]s AS VARCHAR)"}},
+			key: func(k int) []string { return []string{strconv.FormatFloat(float64(k)*1.25+0.5, 'f', -1, 64)} },
+		},
+	}
+}
+
+// TableByName returns the table called name, of Tables, KeyTypeTables or
+// RefusedKeyTables; it
 // panics on an unknown name, which only a test can spell.
 func TableByName(name string) Table {
-	for _, t := range append(Tables(), KeyTypeTables()...) {
+	for _, t := range slices.Concat(Tables(), KeyTypeTables(), RefusedKeyTables()) {
 		if t.Name == name {
 			return t
 		}

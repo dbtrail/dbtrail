@@ -29,8 +29,11 @@ import (
 // key when the view is read, so the tail never needs their positions. That
 // is only exact where the tail's key and the copy's are stored as the same
 // value and compared without a collation: integers, DECIMAL (its fixed-scale
-// text), DATE, DATETIME and TIMESTAMP (days and microseconds), and BINARY and
-// VARBINARY (their bytes), #3159. Text is left out whatever its collation:
+// text), DATE and DATETIME (days and microseconds), and BINARY and VARBINARY
+// (their bytes), #3159. Not TIMESTAMP: the copy holds it as the dump's
+// session printed it, and nothing records that session's zone (mydumper's
+// --skip-tz-utc leaves no SET TIME_ZONE and its metadata names none), so a
+// key could not be proven to be the instant the binary log carries. Text is left out whatever its collation:
 // the anti-join runs under the sandbox's case-folding default, so a tail key
 // 'A' would drop a published 'a' that a _bin column keeps apart.
 
@@ -76,14 +79,13 @@ const (
 	keyInteger
 	// keyDecimal: stored as text, MySQL's own with the column's scale on
 	// both sides (go-mysql prints it the server's way, a dump has the
-	// server's text), so 1.5 is "1.50" in both.
+	// server's text), so 1.5 is "1.50" in both. Not ZEROFILL: a dump prints
+	// it padded ("0001.50"), the binary log does not.
 	keyDecimal
 	// keyDate: days since the epoch on both sides.
 	keyDate
-	// keyDatetime: DATETIME and TIMESTAMP, microseconds since the epoch on
-	// both sides. A TIMESTAMP is captured in UTC (the parser pins it) and a
-	// dump is read in UTC (mydumper's default --tz-utc, the assumption every
-	// TIMESTAMP in the copy already rests on).
+	// keyDatetime: DATETIME, microseconds since the epoch on both sides (a
+	// wall clock, no zone).
 	keyDatetime
 	// keyBinary: VARBINARY, its bytes; a trailing 0x00 is data.
 	keyBinary
@@ -96,23 +98,25 @@ const (
 )
 
 // tailKeyTypes are the MySQL types a tail key may have, by kind. Not YEAR or
-// BIT, which Parquet may store as integers too, and no text type.
+// BIT, which Parquet may store as integers too, no text type, and not
+// TIMESTAMP (keyDatetime says why).
 var tailKeyTypes = map[string]keyKind{
 	"tinyint": keyInteger, "smallint": keyInteger, "mediumint": keyInteger, "int": keyInteger, "integer": keyInteger, "bigint": keyInteger,
 	"decimal": keyDecimal, "numeric": keyDecimal,
 	"date":     keyDate,
-	"datetime": keyDatetime, "timestamp": keyDatetime,
+	"datetime":  keyDatetime,
 	"varbinary": keyBinary,
 	"binary":    keyFixedBinary,
 }
 
 // keyCol is one key column of a tail: its name as the copy spells it, its
 // name in the events' images (the schema snapshot's), and its kind; width
-// is n of a BINARY(n).
+// is n of a BINARY(n), scale the digits after the point of a DECIMAL.
 type keyCol struct {
 	name, image string
 	kind        keyKind
 	width       int
+	scale       int
 }
 
 // NewTail starts an empty tail for schema.table. createTableSQL is the
@@ -213,9 +217,12 @@ func tailKeyColumns(name string, cols []baseline.Column, pk []string) ([]keyCol,
 		}
 		kind := tailKeyTypes[strings.ToLower(strings.TrimSpace(c.MySQLType))]
 		if kind == keyNone {
-			return nil, fmt.Sprintf("%s: its key column %s is %s, and only keys of integers, DECIMAL, DATE, DATETIME, TIMESTAMP, BINARY or VARBINARY have a tail", name, c.Name, c.MySQLType)
+			return nil, fmt.Sprintf("%s: its key column %s is %s, and only keys of integers, DECIMAL, DATE, DATETIME, BINARY or VARBINARY have a tail", name, c.Name, c.MySQLType)
 		}
-		k := keyCol{name: c.Name, kind: kind}
+		k := keyCol{name: c.Name, kind: kind, scale: c.DecimalScale}
+		if kind == keyDecimal && strings.Contains(strings.ToLower(c.DeclaredType), "zerofill") {
+			return nil, fmt.Sprintf("%s: its key column %s is a DECIMAL with ZEROFILL, which a dump prints padded with zeros and the binary log does not", name, c.Name)
+		}
 		if kind == keyFixedBinary {
 			if k.width = FixedBinaryWidth(c.DeclaredType); k.width == 0 {
 				return nil, fmt.Sprintf("%s: its key column %s is BINARY of a width its definition does not say", name, c.Name)
@@ -239,6 +246,10 @@ func checkKeyValue(k keyCol, v any) string {
 		s, ok := v.(string)
 		if !ok || !decimalText(s) {
 			return fmt.Sprintf("its DECIMAL key %s holds %v, which is not MySQL's text of a number", k.name, v)
+		}
+		if _, frac, _ := strings.Cut(s, "."); len(frac) != k.scale {
+			// Not the column's scale: not the text the copy holds.
+			return fmt.Sprintf("its DECIMAL key %s holds %s, not %d digits after the point", k.name, s, k.scale)
 		}
 		if s[0] == '-' && strings.Trim(s[1:], "0.") == "" {
 			// A negative zero: MySQL prints a stored zero without its sign,
@@ -264,6 +275,12 @@ func checkKeyValue(k keyCol, v any) string {
 			// so a value whose own text starts 0x can share a key with
 			// another value: the fold would keep one of the two rows.
 			return fmt.Sprintf("its binary key %s holds a value that starts with the text %s", k.name, hexPKPrefix)
+		}
+		if len(b) == 0 {
+			// A version before this one wrote an empty value into the copy
+			// as the two bytes 0x, this one writes it empty (a dump has it
+			// empty too): which the copy holds cannot be told.
+			return fmt.Sprintf("its binary key %s holds the empty value", k.name)
 		}
 		if k.kind == keyFixedBinary && len(b) != k.width {
 			return fmt.Sprintf("its BINARY(%d) key %s holds a value that ends in 0x00 bytes, which the binary log does not carry", k.width, k.name)
@@ -348,6 +365,25 @@ func (t *Tail) Apply(page []query.ResultRow) error {
 				}
 			}
 		}
+		// The key the fold files the event under is the stored pk_values;
+		// the tombstone and the upsert are written from it and from the
+		// image. Both must be one key: the image the event's own key was
+		// built from (the earlier row of an UPDATE or a DELETE, the new row
+		// of an INSERT), decoded here, must spell pk_values exactly. Decoded
+		// under another schema snapshot than the one capture used, it may
+		// not, and the tail would drop one row and write another.
+		if t.typedKey() {
+			from := page[i].RowBefore
+			if page[i].EventType == event.EventInsert {
+				from = page[i].RowAfter
+			}
+			if from == nil {
+				return &TailRefusal{fmt.Sprintf("%s.%s: event %d has no row image to check its key against", t.schema, t.table, page[i].EventID)}
+			}
+			if got := event.BuildPKValues(t.pkCols, from); got != page[i].PKValues {
+				return &TailRefusal{fmt.Sprintf("%s.%s: event %d: its row image spells the key %q, and its stored key is %q", t.schema, t.table, page[i].EventID, got, page[i].PKValues)}
+			}
+		}
 	}
 	// The keys changed come from the fold, not from the page's own pk_values:
 	// an UPDATE that moves a row to another key is folded as a DELETE of the
@@ -403,6 +439,16 @@ func (t *Tail) PruneThrough(anchor query.BinlogPos, afterID uint64) (int, error)
 	}
 	t.needFull = true
 	return len(drop), nil
+}
+
+// typedKey says the key has a column that is not an integer.
+func (t *Tail) typedKey() bool {
+	for _, k := range t.keys {
+		if k.kind != keyInteger {
+			return true
+		}
+	}
+	return false
 }
 
 // Keys is how many keys the tail holds.
@@ -536,7 +582,10 @@ func (t *Tail) tailRow(key string, ev *query.ResultRow) (map[string]any, error) 
 	if ev.EventType == event.EventDelete {
 		vals, err := tailKeyValues(key, t.keys)
 		if err != nil {
-			return nil, fmt.Errorf("%s.%s: %w", t.schema, t.table, err)
+			// A refusal, not an error: the writer's caller ends the tail on
+			// one, where an error leaves the last version standing and is
+			// tried again at every write.
+			return nil, &TailRefusal{fmt.Sprintf("%s.%s: %v", t.schema, t.table, err)}
 		}
 		for _, c := range t.cols {
 			row[c.Name] = nil
@@ -547,7 +596,7 @@ func (t *Tail) tailRow(key string, ev *query.ResultRow) (map[string]any, error) 
 		row[baseline.TableDeltaOpColumn] = baseline.TableDeltaOpDelete
 	} else {
 		if ev.RowAfter == nil {
-			return nil, fmt.Errorf("%s.%s: the change of key %q has no row image", t.schema, t.table, key)
+			return nil, &TailRefusal{fmt.Sprintf("%s.%s: the change of key %q has no row image", t.schema, t.table, key)}
 		}
 		for k, v := range ev.RowAfter {
 			row[k] = v

@@ -1423,14 +1423,19 @@ server's lag limit (`max_behind_source_seconds`) decides as always. A table
 cannot have a tail when:
 
 - a column of its primary key is not an integer, `DECIMAL`, `DATE`,
-  `DATETIME`, `TIMESTAMP`, `BINARY` or `VARBINARY` (a text key, under any
-  collation, has no tail: the copy compares text without MySQL's
-  collation, so a key could match another row);
+  `DATETIME`, `BINARY` or `VARBINARY`. A text key, under any collation, has
+  no tail: the copy compares text without MySQL's collation, so a key could
+  match another row. A `TIMESTAMP` key has none: the snapshot does not
+  record the time zone its dump was read in, so its keys cannot be proven
+  to be the instants the binary log carries. Neither has a `DECIMAL ...
+  ZEROFILL` key, which a dump prints padded with zeros;
 - a change since its snapshot has a key value the copy may store another
-  way: a `BINARY(n)` value that ends in 0x00 bytes (MySQL pads it, the
-  binary log does not carry the padding), a binary value whose text starts
-  with `0x`, a zero date, or a `DECIMAL` minus zero (until a snapshot
-  newer than that change);
+  way, until a snapshot newer than that change: a `BINARY(n)` value that
+  ends in 0x00 bytes (MySQL pads it, the binary log does not carry the
+  padding), an empty binary value, a binary value whose text starts with
+  `0x`, a zero date, a `DECIMAL` minus zero or one with another number of
+  decimals than the column's, or a key its row does not spell the way
+  capture stored it;
 - its definition changed since its snapshot, capture lost events since, or
   the source server changed;
 - capture does not record it, `bintrail index` also wrote the index, or the

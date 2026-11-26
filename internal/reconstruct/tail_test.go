@@ -328,7 +328,7 @@ func TestNewTail_refusals(t *testing.T) {
 	pk := []metadata.ColumnMeta{{Name: "id", IsPK: true}}
 	dir := t.TempDir()
 	for _, ok := range []string{"tinyint", "tinyint(1)", "smallint unsigned", "mediumint", "int", "int unsigned", "bigint", "bigint unsigned",
-		"decimal(10,0)", "decimal(10,2)", "date", "datetime", "datetime(6)", "timestamp", "timestamp(3)", "binary(16)", "varbinary(20)"} {
+		"decimal(10,0)", "decimal(10,2)", "decimal(10,2) unsigned", "date", "datetime", "datetime(6)", "binary(16)", "varbinary(20)"} {
 		base := writeTailBase(t, dir, strings.ReplaceAll(ok, " ", "_")+".parquet", ddl(ok))
 		if _, err := NewTail("s", "t", ddl(ok), base, pk); err != nil {
 			t.Errorf("%s: refused: %v", ok, err)
@@ -343,6 +343,9 @@ func TestNewTail_refusals(t *testing.T) {
 		{"time key", ddl("time"), "only keys of integers"},
 		{"float key", ddl("double"), "only keys of integers"},
 		{"blob key", ddl("blob"), "only keys of integers"},
+		{"timestamp key", ddl("timestamp"), "only keys of integers"},
+		{"timestamp(6) key", ddl("timestamp(6)"), "only keys of integers"},
+		{"decimal zerofill key", ddl("decimal(6,2) unsigned zerofill"), "ZEROFILL"},
 		{"no definition", "", "does not record"},
 		{"system versioned", strings.TrimSuffix(ddl("int"), ";\n") + " WITH SYSTEM VERSIONING;\n", "system-versioned"},
 	} {
@@ -682,7 +685,7 @@ func TestTailKeyRefusal(t *testing.T) {
 	if why != "" || len(names) != 1 || names[0] != "ID" {
 		t.Fatalf("int key: names=%v why=%q", names, why)
 	}
-	if _, why = TailKeyRefusal("s.t", cols, []string{"id", "code"}); why != "s.t: its key column code is varchar(16), and only keys of integers, DECIMAL, DATE, DATETIME, TIMESTAMP, BINARY or VARBINARY have a tail" {
+	if _, why = TailKeyRefusal("s.t", cols, []string{"id", "code"}); why != "s.t: its key column code is varchar(16), and only keys of integers, DECIMAL, DATE, DATETIME, BINARY or VARBINARY have a tail" {
 		t.Fatalf("varchar in a composite key: %q", why)
 	}
 	if names, why = TailKeyRefusal("s.t", cols, []string{"b", "id"}); why != "" || len(names) != 2 || names[1] != "ID" {

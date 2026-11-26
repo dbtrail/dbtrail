@@ -85,10 +85,10 @@ func TestOracleTails(t *testing.T) {
 
 // TestOracleTailKeyTypes is the mixed scenario over the tables keyed by the
 // types a tail takes besides integers (#3159: BINARY(16), VARBINARY, DATE,
-// DATETIME, DATETIME(6), TIMESTAMP(6) written in another zone, DECIMAL, and
-// a composite of an integer, a VARBINARY and a DATE), beside t_text, whose
-// VARCHAR key under the default collation must stay without one: every
-// read must equal the source, and every table but t_text must have a tail
+// DATETIME, DATETIME(6), DECIMAL, and a composite of an integer, a VARBINARY
+// and a DATE), beside t_text, whose VARCHAR key under the default collation
+// must stay without one, and t_deczf, a DECIMAL ZEROFILL key that must too:
+// every read must equal the source, and every other table must have a tail
 // whenever ops changed it since the cut (whyNoTail).
 func TestOracleTailKeyTypes(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
@@ -98,7 +98,8 @@ func TestOracleTailKeyTypes(t *testing.T) {
 	seeds := oracleEnvInt(t, "BINTRAIL_ORACLE_SEEDS", 2)
 	steps := oracleEnvInt(t, "BINTRAIL_ORACLE_STEPS", 12)
 	first := uint64(oracleEnvInt(t, "BINTRAIL_ORACLE_SEED", 1))
-	tables := append(oracle.KeyTypeTables(), oracle.TableByName("t_text"))
+	refused := append(oracle.RefusedKeyTables(), oracle.TableByName("t_text"))
+	tables := append(oracle.KeyTypeTables(), refused...)
 	for seed := first; seed < first+uint64(seeds); seed++ {
 		t.Run("seed="+strconv.FormatUint(seed, 10), func(t *testing.T) {
 			res, chains := runTailSeed(t, seed, steps, tables, 1, 3, 4)
@@ -112,8 +113,10 @@ func TestOracleTailKeyTypes(t *testing.T) {
 					t.Errorf("%s: no read laid a tail over it in %d steps (applied %v)", tb.Name, res.Steps, res.Applied)
 				}
 			}
-			if _, ok := chains.last["t_text"]; ok {
-				t.Error("t_text, keyed by text under the default collation, was read with a tail")
+			for _, tb := range refused {
+				if _, ok := chains.last[tb.Name]; ok {
+					t.Errorf("%s, keyed by a type a tail does not take, was read with a tail", tb.Name)
+				}
 			}
 			t.Logf("seed %d: %d steps, %d ops, applied %v, chains up to %d files, tails over %d tables, in %s", seed, res.Steps, res.Ops, res.Applied, chains.longest, len(chains.last), res.Wall.Round(time.Millisecond))
 		})

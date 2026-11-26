@@ -18,8 +18,8 @@ import (
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
-// #3159: a tail over a table keyed by DECIMAL, DATE, DATETIME, TIMESTAMP,
-// BINARY or VARBINARY. The seam is the anti-join of baseline.TableTailStateSQL:
+// #3159: a tail over a table keyed by DECIMAL, DATE, DATETIME, BINARY or
+// VARBINARY. The seam is the anti-join of baseline.TableTailStateSQL:
 // it drops a published row when its key EQUALS a tail row's key, compared as
 // the two files store them, under the sandbox's case-folding collation. So
 // every case writes a copy the way a dump does (the server's text through
@@ -199,8 +199,9 @@ func TestTailKey_binaryShortValueRefuses(t *testing.T) {
 }
 
 // VARBINARY: a trailing 0x00 is part of the value, so 01 and 0100 are two
-// rows; the empty value is a row; bytes that are UTF-8 with '|' and '\' in
-// them; bytes that are not UTF-8.
+// rows; bytes that are UTF-8 with '|' and '\' in them; bytes that are not
+// UTF-8. The empty value is refused (below); one published and untouched
+// stays.
 func TestTailKey_varbinary(t *testing.T) {
 	c := keyTailCase{
 		ddl:    "CREATE TABLE `t` (\n  `id` varbinary(20) NOT NULL,\n  `v` int DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n",
@@ -217,21 +218,13 @@ func TestTailKey_varbinary(t *testing.T) {
 	}
 	got := c.state(t, base, []query.ResultRow{
 		c.event(1, event.EventDelete, img("id", []byte{0x01, 0x00}, "v", num("2")), nil),
-		c.event(2, event.EventDelete, img("id", []byte{}, "v", num("3")), nil),
 		c.event(3, event.EventUpdate, img("id", []byte{0xff, 0xfe}, "v", num("4")), img("id", []byte{0xff, 0xfe}, "v", num("40"))),
 		c.event(4, event.EventDelete, img("id", []byte(`a|b\c`), "v", num("5")), nil),
 		c.event(5, event.EventInsert, nil, img("id", []byte{0x00}, "v", num("7"))),
 		// Not the published "Ab": bytes compare without a collation.
 		c.event(6, event.EventInsert, nil, img("id", []byte("ab"), "v", num("8"))),
 	})
-	wantKeyRows(t, got, "[01]=1", "[FFFE]=40", "[00]=7", "["+strings.ToUpper(hex.EncodeToString([]byte("Ab")))+"]=6", "["+strings.ToUpper(hex.EncodeToString([]byte("ab")))+"]=8")
-
-	// The empty value inserted after the cut: one row, not the two bytes
-	// "0x" (renderBaselineValue writes it as the empty text).
-	got = c.state(t, nil, []query.ResultRow{
-		c.event(1, event.EventInsert, nil, img("id", []byte{}, "v", num("1"))),
-	})
-	wantKeyRows(t, got, "[]=1")
+	wantKeyRows(t, got, "[01]=1", "[]=3", "[FFFE]=40", "[00]=7", "["+strings.ToUpper(hex.EncodeToString([]byte("Ab")))+"]=6", "["+strings.ToUpper(hex.EncodeToString([]byte("ab")))+"]=8")
 }
 
 // A binary value whose own text starts with 0x is refused: pk_values spells
@@ -247,6 +240,19 @@ func TestTailKey_binaryAmbiguousOrUndecodedRefuses(t *testing.T) {
 	wantRefusal(t, err, "starts with the text 0x")
 	_, _, err = c.fold(t, nil, []query.ResultRow{c.event(1, event.EventInsert, nil, img("id", "AQI=", "v", num("1")))})
 	wantRefusal(t, err, "was not decoded")
+	// The empty value, inserted or deleted: an earlier version wrote it into
+	// the copy as the bytes 0x, this one empty, and the two do not match.
+	// The bytes 0x themselves are the text case above.
+	for _, ev := range []query.ResultRow{
+		c.event(1, event.EventInsert, nil, img("id", []byte{}, "v", num("1"))),
+		c.event(1, event.EventDelete, img("id", []byte{}, "v", num("1")), nil),
+		c.event(1, event.EventUpdate, img("id", []byte{}, "v", num("1")), img("id", []byte{1}, "v", num("1"))),
+	} {
+		_, _, err = c.fold(t, nil, []query.ResultRow{ev})
+		wantRefusal(t, err, "the empty value")
+	}
+	_, _, err = c.fold(t, nil, []query.ResultRow{c.event(1, event.EventInsert, nil, img("id", []byte("0x"), "v", num("1")))})
+	wantRefusal(t, err, "starts with the text 0x")
 	// The text "0X…" is not formatPKValue's mark (lower case x): kept.
 	if _, _, err = c.fold(t, nil, []query.ResultRow{c.event(1, event.EventInsert, nil, img("id", []byte("0XFF"), "v", num("1")))}); err != nil {
 		t.Fatal(err)
@@ -255,10 +261,9 @@ func TestTailKey_binaryAmbiguousOrUndecodedRefuses(t *testing.T) {
 
 // DATETIME with and without fractional seconds, before and after the epoch,
 // and a dump that printed .000000 or nothing: the anti-join compares
-// microseconds, not text. TIMESTAMP is stored the same way (in UTC on both
-// sides; the oracle checks a session in another zone).
+// microseconds, not text. (TIMESTAMP has no tail: TestNewTail_refusals.)
 func TestTailKey_datetime(t *testing.T) {
-	for _, typ := range []string{"datetime(6)", "timestamp(6)"} {
+	for _, typ := range []string{"datetime(6)"} {
 		t.Run(typ, func(t *testing.T) {
 			c := keyTailCase{
 				ddl:    "CREATE TABLE `t` (\n  `at` " + typ + " NOT NULL,\n  `v` int DEFAULT NULL,\n  PRIMARY KEY (`at`)\n);\n",
@@ -340,7 +345,9 @@ func TestTailKey_decimal(t *testing.T) {
 	})
 	wantKeyRows(t, got, "-1.25=20", "0.50=3", "10.00=4", "2.50=5")
 
-	for _, bad := range []any{"-0.00", "1e2", "", 1.5} {
+	// Minus zero, not a number, a float, and a scale other than the
+	// column's (1.5 and 1.500 in a DECIMAL(10,2) are not the copy's 1.50).
+	for _, bad := range []any{"-0.00", "1e2", "", 1.5, "1.5", "1.500", "2"} {
 		_, _, err := c.fold(t, nil, []query.ResultRow{c.event(1, event.EventInsert, nil, img("x", bad, "v", num("1")))})
 		if err == nil {
 			t.Errorf("%v: folded", bad)
@@ -355,6 +362,9 @@ func TestTailKey_decimal(t *testing.T) {
 		whole.event(1, event.EventDelete, img("x", "-7", "v", num("2")), nil),
 	})
 	wantKeyRows(t, got, "5=1")
+	if _, _, err := whole.fold(t, nil, []query.ResultRow{whole.event(1, event.EventInsert, nil, img("x", "5.0", "v", num("1")))}); err == nil {
+		t.Error("5.0 folded into a DECIMAL(10,0)")
+	}
 }
 
 // A composite key mixing an integer with the new types: every part of the
@@ -396,7 +406,7 @@ func TestNewTail_keyStoredAsAnotherTypeRefuses(t *testing.T) {
 func TestTailKeyValues_byKind(t *testing.T) {
 	bin := keyCol{name: "b", kind: keyBinary}
 	fixed := keyCol{name: "f", kind: keyFixedBinary, width: 2}
-	dec := keyCol{name: "x", kind: keyDecimal}
+	dec := keyCol{name: "x", kind: keyDecimal, scale: 2}
 	date := keyCol{name: "d", kind: keyDate}
 	for _, c := range []struct {
 		key  string
@@ -405,7 +415,8 @@ func TestTailKeyValues_byKind(t *testing.T) {
 	}{
 		{"0xFFFE", []keyCol{bin}, "[[255 254]]"},
 		{`a\|b`, []keyCol{bin}, "[[97 124 98]]"},
-		{"", []keyCol{bin}, "[[]]"},
+		{"", []keyCol{bin}, ""}, // the empty value
+		{"0x", []keyCol{bin}, ""}, // hex of nothing: the empty value again
 		{"0xZZ", []keyCol{bin}, ""},
 		{"0xFF", []keyCol{fixed}, ""}, // shorter than BINARY(2)
 		{"0xFF01", []keyCol{fixed}, "[[255 1]]"},
@@ -422,5 +433,86 @@ func TestTailKeyValues_byKind(t *testing.T) {
 		if got != c.want {
 			t.Errorf("%q: got %q (err %v), want %q", c.key, got, err, c.want)
 		}
+	}
+}
+
+// The key an event is filed under is its stored pk_values; the image the
+// tail writes its tombstone and its row from must spell exactly that key,
+// or one row is dropped and another written (an image decoded under another
+// schema snapshot than capture used). Checked on every event of a key that
+// is not all integers: a DELETE, both sides of an UPDATE, an INSERT.
+func TestTailKey_imageMustSpellTheStoredKey(t *testing.T) {
+	c := keyTailCase{
+		ddl: "CREATE TABLE `t` (\n  `d` date NOT NULL,\n  `v` int DEFAULT NULL,\n  PRIMARY KEY (`d`)\n);\n",
+		pk:  []metadata.ColumnMeta{{Name: "d", IsPK: true, DataType: "date"}},
+	}
+	for _, ev := range []query.ResultRow{
+		c.event(1, event.EventDelete, img("d", "2024-01-02", "v", num("1")), nil),
+		c.event(1, event.EventUpdate, img("d", "2024-01-02", "v", num("1")), img("d", "2024-01-02", "v", num("2"))),
+		c.event(1, event.EventInsert, nil, img("d", "2024-01-02", "v", num("1"))),
+	} {
+		ev.PKValues = "2024-01-03"
+		_, _, err := c.fold(t, nil, []query.ResultRow{ev})
+		wantRefusal(t, err, "its stored key is")
+	}
+	// A binary key stored in hex and decoded to other bytes.
+	b := keyTailCase{
+		ddl: "CREATE TABLE `t` (\n  `id` varbinary(8) NOT NULL,\n  `v` int DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n",
+		pk:  []metadata.ColumnMeta{{Name: "id", IsPK: true, DataType: "varbinary"}},
+	}
+	ev := b.event(1, event.EventDelete, img("id", []byte{0xff, 0x01}, "v", num("1")), nil)
+	ev.PKValues = "0xFF02"
+	_, _, err := b.fold(t, nil, []query.ResultRow{ev})
+	wantRefusal(t, err, "its stored key is")
+	// Integer keys are not checked, as before.
+	tail, err := NewTail("shop", "orders", tailOrdersDDL, writeTailBase(t, t.TempDir(), "orders.parquet", tailOrdersDDL), tailOrdersPK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tail.Apply([]query.ResultRow{tailEvent(1, event.EventInsert, "7", "x", 10)}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A tombstone that cannot be built ends the tail (a *TailRefusal the
+// keeper drops the tail on), not an error that leaves the last version up
+// and is tried again at every write.
+func TestTail_tombstoneThatCannotBeBuiltRefuses(t *testing.T) {
+	c := keyTailCase{
+		ddl: "CREATE TABLE `t` (\n  `x` decimal(10,2) NOT NULL,\n  `v` int DEFAULT NULL,\n  PRIMARY KEY (`x`)\n);\n",
+		pk:  []metadata.ColumnMeta{{Name: "x", IsPK: true, DataType: "decimal"}},
+	}
+	tail, _, err := c.fold(t, nil, []query.ResultRow{c.event(1, event.EventDelete, img("x", "1.50", "v", num("1")), nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A key no event of this build files: what a fold bug would leave.
+	ev := tail.fold.Changes["1.50"]
+	delete(tail.fold.Changes, "1.50")
+	tail.fold.Changes["1.5"] = ev
+	_, err = tail.WriteFile(filepath.Join(t.TempDir(), "t.tail.parquet"))
+	wantRefusal(t, err, "not 2 digits after the point")
+	// So is an upsert with no row image.
+	tail2, _, err := c.fold(t, nil, []query.ResultRow{c.event(1, event.EventInsert, nil, img("x", "1.50", "v", num("1")))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tail2.fold.Changes["1.50"].RowAfter = nil
+	_, err = tail2.WriteFile(filepath.Join(t.TempDir(), "t.tail.parquet"))
+	wantRefusal(t, err, "has no row image")
+}
+
+// An empty binary value is written as the empty text, which the copy's
+// writer stores as the empty value; "0x" alone it would store as two bytes.
+// For a column that is not a key (an empty key has no tail).
+func TestRenderBaselineValue_emptyBinary(t *testing.T) {
+	for _, typ := range []string{"varbinary", "blob", "binary"} {
+		got, isNull, err := renderBaselineValue(baseline.Column{Name: "b", MySQLType: typ}, []byte{})
+		if err != nil || isNull || got != "" {
+			t.Errorf("%s: %q null=%v err=%v, want the empty text", typ, got, isNull, err)
+		}
+	}
+	if got, _, _ := renderBaselineValue(baseline.Column{Name: "b", MySQLType: "varbinary"}, []byte{0x30, 0x78}); got != "0x3078" {
+		t.Errorf("the bytes 0x: %q", got)
 	}
 }
