@@ -238,7 +238,7 @@ func TestIntegrationPGCaptureTakenOverSavesNothing_3114(t *testing.T) {
 	_, ended := r.startRun()
 	r.insert(1)
 	at := r.waitSavedAt(1)
-	if _, err := r.index.Exec(`UPDATE pg_capture_owner SET owner = REPEAT('f', 32) WHERE id = 1`); err != nil {
+	if _, err := r.index.Exec(`UPDATE capture_owner SET owner = REPEAT('f', 32) WHERE id = 1`); err != nil {
 		t.Fatal(err)
 	}
 	r.insert(2)

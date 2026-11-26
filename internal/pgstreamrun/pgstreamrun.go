@@ -492,8 +492,10 @@ func reportCaptureFailure(logger *slog.Logger, loopErr, capErr error) {
 // same index, so this one writes nothing more to it and acknowledges nothing
 // to the slot. Nothing is lost: what was not saved is sent again to whoever
 // captures next. A batch that was already in flight is removed by that run's
-// start when a position is saved (deleteEventsPastCheckpointPG), and recognized
-// on arrival when none is yet (firstRunResend).
+// start when it reached the index first (deleteEventsPastCheckpointPG, with a
+// saved position) or recognized on arrival (firstRunResend, with none). One
+// that reaches the index after the start cleanup stays a duplicate: only the
+// position is fenced (capture_owner.go).
 func lostCaptureLock(ctx context.Context) bool {
 	return errors.Is(context.Cause(ctx), streamrun.ErrStopWithoutFlush)
 }
@@ -507,8 +509,9 @@ func recordSlotLoss(ctx context.Context, db *sql.DB, serverID uint32, detail str
 }
 
 // beforeWrite, when a test sets it, runs just before the checkpoint commits
-// its rows ("commit"), writes its position ("save") and acknowledges it to the
-// slot ("ack"), before a schema record ("ddl"), a record of a table that left
+// its rows ("commit"), writes its position ("save"; "owned" once the save
+// holds the capture owner row) and acknowledges it to the slot ("ack"), before
+// a schema record ("ddl"), a record of a table that left
 // the publication ("left"), the health reading ("health"), the check of a
 // row against the index on a run with no saved position ("recognize") and on
 // a resumed one ("resend"), and once a commit was handled ("received"), so a
@@ -1715,26 +1718,22 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 	// the two are equal, so a save by any writer that does not set it (an
 	// older capture, bintrail-pg reset) leaves the position untrusted.
 	args := []any{lsnStr, commitLSN, lsnStr, pgFlavor, state.eventsIndexed, lastEventTime, state.serverID,
-		state.sentThrough, caughtUpAgo, captureFrom, caughtUpSourceAt, checkpointEvent, captureSkips}
-	// A run of One saves only while it owns the capture (capture_owner.go):
-	// the row comes out of a SELECT of the owner table that matches its token,
-	// so a save that names another token inserts nothing and updates nothing,
-	// on a first run as on a resumed one. A state with no owner (tests that
+		state.sentThrough, caughtUpAgo, captureFrom, caughtUpSourceAt, checkpointEvent, captureSkips,
+		state.resumed, state.stampEvent}
+	stmt := `INSERT INTO stream_state ` + checkpointColumns + ` VALUES (` + checkpointValues + `)
+		ON DUPLICATE KEY UPDATE` + checkpointUpdate
+	// A run of One saves only while it owns the capture (capture_owner.go),
+	// checked in the save's own transaction. A state with no owner (tests that
 	// drive the loop without One) saves as before.
-	stmt := `INSERT INTO stream_state ` + checkpointColumns + ` VALUES (` + checkpointValues + `)`
 	if state.owner != "" {
-		stmt = `INSERT INTO stream_state ` + checkpointColumns + ` SELECT ` + checkpointValues + `
-		FROM pg_capture_owner WHERE id = 1 AND owner = ?`
-		args = append(args, state.owner)
-	}
-	args = append(args, state.resumed, state.stampEvent)
-	if _, err := db.ExecContext(ctx, stmt+` ON DUPLICATE KEY UPDATE`+checkpointUpdate, args...); err != nil {
-		return fmt.Errorf("pgstreamrun: save checkpoint at %s: %w", lsnStr, err)
-	}
-	if state.owner != "" {
-		if err := stillCaptureOwner(db, state.owner); err != nil {
-			return err
+		if err := saveOwned(db, state.owner, stmt, args...); err != nil {
+			if errors.Is(err, errCaptureOwnerChanged) {
+				return err
+			}
+			return fmt.Errorf("pgstreamrun: save checkpoint at %s: %w", lsnStr, err)
 		}
+	} else if _, err := db.ExecContext(ctx, stmt, args...); err != nil {
+		return fmt.Errorf("pgstreamrun: save checkpoint at %s: %w", lsnStr, err)
 	}
 	state.caughtUpAt, state.caughtUpSourceAt = time.Time{}, time.Time{}
 	state.stampEvent = false

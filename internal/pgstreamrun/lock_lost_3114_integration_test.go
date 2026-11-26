@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/metadata"
@@ -621,6 +622,71 @@ func TestIntegrationPGLateFirstSaveFromAnEarlierRunInsertsNothing_3114(t *testin
 	}
 	if n != 0 {
 		t.Errorf("A's late first save wrote a stream_state row")
+	}
+}
+
+// The same fence on an index whose sessions run at READ COMMITTED, where a
+// plain read inside the save would be a snapshot: run A's save holds the owner
+// row from its check to its COMMIT, so run B's claim waits for it and B then
+// reads A's position. Were B to read the older one, it would remove what lies
+// past it, and A's position landing after would make the next run resume past
+// changes nobody holds.
+func TestIntegrationPGSaveHoldsTheOwnerAgainstAClaimUnderReadCommitted_3114(t *testing.T) {
+	_, name := testutil.CreateTestDB(t)
+	db, err := config.Connect(testutil.BaseDSN() + "/" + name + "?transaction_isolation=%27READ-COMMITTED%27")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	var level string
+	if err := db.QueryRow(`SELECT @@transaction_isolation`).Scan(&level); err != nil || level != "READ-COMMITTED" {
+		t.Fatalf("session isolation %q, %v; the test needs READ-COMMITTED", level, err)
+	}
+	if err := indexer.CreateIndexTables(context.Background(), db, 4, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	prevStep := beforeWrite
+	t.Cleanup(func() { beforeWrite = prevStep })
+	ctx := context.Background()
+	a, err := claimCaptureOwner(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveCheckpointPG(db, &pgStreamState{serverID: 91, owner: a}, 5000); err != nil {
+		t.Fatal(err)
+	}
+
+	claimed := make(chan error, 1)
+	var waited bool
+	beforeWrite = func(step string) {
+		if step != "owned" || waited {
+			return
+		}
+		go func() {
+			_, err := claimCaptureOwner(ctx, db)
+			claimed <- err
+		}()
+		select {
+		case err := <-claimed:
+			claimed <- err
+			t.Error("run B's claim went through while run A's save held the owner row")
+		case <-time.After(500 * time.Millisecond):
+		}
+		waited = true
+	}
+	if err := saveCheckpointPG(db, &pgStreamState{serverID: 91, owner: a}, 9000); err != nil {
+		t.Fatalf("A's save, owner at its check: %v", err)
+	}
+	beforeWrite = prevStep
+	if err := <-claimed; err != nil {
+		t.Fatal(err)
+	}
+	saved, err := loadStreamStatePG(db)
+	if err != nil || saved == nil || saved.lsn != 9000 {
+		t.Fatalf("after its claim B read %+v, %v; want A's position 9000", saved, err)
+	}
+	if err := saveCheckpointPG(db, &pgStreamState{serverID: 91, owner: a}, 9500); !errors.Is(err, errCaptureOwnerChanged) {
+		t.Errorf("A's save after B's claim returned %v, want errCaptureOwnerChanged", err)
 	}
 }
 
