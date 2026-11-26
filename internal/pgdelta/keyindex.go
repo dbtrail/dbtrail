@@ -1015,6 +1015,29 @@ func warnOnce(basePath, msg string, args ...any) {
 	slog.Warn(msg, args...)
 }
 
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// compactStrings drops the repeats of a sorted slice.
+func compactStrings(s []string) []string {
+	out := s[:0]
+	for i, x := range s {
+		if i == 0 || x != s[i-1] {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
 // WriteKeyIndexBeside is BuildKeyIndex under a publish's policy: the table
 // file is already written and the index is an accelerator, never a
 // dependency, so nothing here fails the caller. A build that failed is a
