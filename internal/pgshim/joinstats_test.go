@@ -320,7 +320,7 @@ func TestRoute_joinCheckOnAPreparedStatement(t *testing.T) {
 		return &sqlsandbox.JoinTooBigError{Reason: "estimated far past its inputs"}
 	}
 	c := costPortConn(t, ctx, l)
-	if _, err := c.Prepare(ctx, "j", bigJoin+" WHERE a.n > $1", nil); err != nil {
+	if _, err := c.Prepare(ctx, "j", bigJoin+" WHERE a.n = $1", nil); err != nil {
 		t.Fatalf("the Describe: %v", err)
 	}
 	for i := range 2 {
