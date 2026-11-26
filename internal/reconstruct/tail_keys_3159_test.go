@@ -263,7 +263,7 @@ func TestTailKey_datetime(t *testing.T) {
 			c := keyTailCase{
 				ddl:    "CREATE TABLE `t` (\n  `at` " + typ + " NOT NULL,\n  `v` int DEFAULT NULL,\n  PRIMARY KEY (`at`)\n);\n",
 				pk:     []metadata.ColumnMeta{{Name: "at", IsPK: true, DataType: strings.TrimSuffix(typ, "(6)"), ColumnType: typ}},
-				render: `strftime(make_timestamp(epoch_us(at)), '%Y-%m-%d %H:%M:%S.%f') || '=' || CAST(v AS VARCHAR)`,
+				render: `strftime(make_timestamp(epoch_us("at")), '%Y-%m-%d %H:%M:%S.%f') || '=' || CAST(v AS VARCHAR)`,
 			}
 			base := []map[string]string{
 				{"at": "2024-01-02 03:04:05.000000", "v": "1"},
@@ -286,7 +286,7 @@ func TestTailKey_datetime(t *testing.T) {
 		c := keyTailCase{
 			ddl:    "CREATE TABLE `t` (\n  `at` datetime NOT NULL,\n  `v` int DEFAULT NULL,\n  PRIMARY KEY (`at`)\n);\n",
 			pk:     []metadata.ColumnMeta{{Name: "at", IsPK: true, DataType: "datetime", ColumnType: "datetime"}},
-			render: `strftime(make_timestamp(epoch_us(at)), '%Y-%m-%d %H:%M:%S') || '=' || CAST(v AS VARCHAR)`,
+			render: `strftime(make_timestamp(epoch_us("at")), '%Y-%m-%d %H:%M:%S') || '=' || CAST(v AS VARCHAR)`,
 		}
 		got := c.state(t, []map[string]string{{"at": "2024-01-02 03:04:05", "v": "1"}, {"at": "2024-01-02 03:04:07", "v": "2"}}, []query.ResultRow{
 			c.event(1, event.EventDelete, img("at", "2024-01-02 03:04:05", "v", num("1")), nil),
