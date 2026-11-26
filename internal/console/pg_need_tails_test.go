@@ -20,3 +20,23 @@ func TestPGNeedTails(t *testing.T) {
 		t.Error("a context derived from a marked one does not")
 	}
 }
+
+// #3116: what an earlier answer of the copy read is kept per connection
+// (SQLOnCopy.seen), and each connection of a port gets its own SQLOnCopy, so
+// a new connection is held to nothing another one was shown.
+func TestSQLOnCopyForStartsEachConnectionClean_3116(t *testing.T) {
+	s := &Server{sqlRunner: &fakeSQLRunner{}}
+	b := &bundle{}
+	first, why := s.sqlOnCopyFor(b, "x")
+	if first == nil {
+		t.Fatalf("no SQL on the copy: %s", why)
+	}
+	first.seen.Store(42)
+	second, _ := s.sqlOnCopyFor(b, "x")
+	if second == first {
+		t.Fatal("two connections share one SQLOnCopy")
+	}
+	if got := second.seen.Load(); got != 0 {
+		t.Errorf("a new connection starts with the floor %d, want 0", got)
+	}
+}

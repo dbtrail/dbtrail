@@ -365,8 +365,9 @@ func (s *session) copyFallback(err error, perr *pgErr) string {
 		return ReasonCopyBehindSource
 	case errors.As(err, &changed):
 		// The copy's recent changes were not ready for a statement that had
-		// to have them (RunOptions.NeedTails, #3086): the moment's, as the
-		// answer it would have given and copyOlderThanSource held back.
+		// to have them, or were older than an earlier answer of the copy on
+		// this connection (RunOptions.NeedTails, #3086, #3116): the
+		// moment's, under the reason the MySQL router gives both.
 		return ReasonCopyTooOld
 	case busyReason(err) != "":
 		// Not a fallback: the statement is refused (copyFailed).
@@ -547,12 +548,28 @@ func (s *session) copyOlderThanSource(waited, apart bool) string {
 
 // holdsBackCopy reports whether copyOlderThanSource decides on the copy's
 // answer to a statement (apart as it is given there): only then is an
-// answer read from a snapshot alone held back, and only then is the copy
-// told before it runs that it must have the recent changes
-// (RunOptions.NeedTails, #3086). One condition for both, so the copy is never
-// refused a statement whose answer would have been given.
+// answer read from a snapshot alone held back after it ran. A SELECT it
+// holds back that reads no catalog was also told before it ran that it must have the recent
+// changes (needsTails, which asks it of more statements than this), so the
+// copy does not run one whose answer it would throw away for want of them.
 func (s *session) holdsBackCopy(apart bool) bool {
 	return !apart && s.src.any() && s.bound != nil && s.bound.RunAge != nil && s.canFallBack()
+}
+
+// needsTails reports whether the copy is told that qstr, about to run there,
+// must have its tables' recent changes (RunOptions.NeedTails, #3116): on a
+// connection that can send it to the source, whether or not the source has
+// answered this connection yet. It is the MySQL router's rule
+// (sqlsandbox.Session.StrictStar is set on every routing connection): in
+// fresh mode the copy never answers there from the snapshot alone, nor with
+// recent changes older than an earlier answer of the copy on the
+// connection; the source answers.
+//
+// Not for the copy's own commands (SHOW TABLES, DESCRIBE t) nor a read of
+// the copy's catalog, as waitForCopy: refused, they would go to a source
+// that does not take them, or answers with its own catalog.
+func (s *session) needsTails(qstr string) bool {
+	return s.canFallBack() && isSelectLike(qstr) && !readsCatalog(qstr)
 }
 
 // positionWarnEvery is how often a connection that cannot learn the source's

@@ -1427,8 +1427,10 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 					// An earlier answer of the copy on this connection read
 					// the index further than these tails do. Under routing
 					// MySQL answers; on a connection that does not route these
-					// tails do (still newer than the snapshot), saying so.
-					if sess.StrictStar {
+					// tails do (still newer than the snapshot), saying so. A
+					// PostgreSQL statement whose source can answer it is
+					// refused as a routed one (pgNeedTails, #3116).
+					if sess.StrictStar || pgNeedTails(ctx) {
 						missing = "the copy's newest version is older than an earlier answer of the copy on this connection"
 					} else {
 						olderNote = "Answered from captured changes older than an earlier answer of the copy on this connection: the copy's newest version is behind it."

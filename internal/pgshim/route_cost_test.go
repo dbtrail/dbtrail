@@ -571,6 +571,12 @@ type costLogin struct {
 	// the snapshot. needTails records what each statement asked.
 	tailsPending atomic.Bool
 	needTails    []bool
+	// olderThanSeen is a copy whose recent changes are older than an
+	// earlier answer of the copy on the connection (#3116): a statement
+	// asked to have them (RunOptions.NeedTails) is refused before it runs,
+	// as the host's copy refuses it; any other is answered with the host's
+	// note that says so.
+	olderThanSeen atomic.Bool
 	// fastLane records RunOptions.FastLane of each statement the copy was
 	// given (fastlane.go).
 	fastLane []bool
@@ -662,6 +668,9 @@ func (l *costLogin) run(_ context.Context, st string, opts RunOptions) (sqlsandb
 	if opts.NeedTails && l.tailsPending.Load() {
 		return sqlsandbox.Result{}, &sqlsandbox.MayHaveChangedError{Reason: "fresh mode: the newest captured changes of public.t are not ready yet"}
 	}
+	if opts.NeedTails && l.olderThanSeen.Load() {
+		return sqlsandbox.Result{}, &sqlsandbox.MayHaveChangedError{Reason: "fresh mode: " + olderThanSeenReason}
+	}
 	l.runs.Add(1)
 	if l.copyErr != nil {
 		if err := l.copyErr(st); err != nil {
@@ -672,6 +681,9 @@ func (l *costLogin) run(_ context.Context, st string, opts RunOptions) (sqlsandb
 	l.heldAtCopy = append(l.heldAtCopy, l.held.Load())
 	l.mu.Unlock()
 	res := sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "n", Type: "INTEGER"}}, Rows: [][]any{{int32(7)}}}
+	if l.olderThanSeen.Load() {
+		res.Note = olderThanSeenNote
+	}
 	if l.retried && !opts.KeepJoinOrder {
 		res.WrittenOrderRetry = sqlsandbox.WrittenOrderRetryOK
 	}

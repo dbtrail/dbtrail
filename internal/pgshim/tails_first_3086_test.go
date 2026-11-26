@@ -10,9 +10,13 @@ import (
 // the copy that reads it is given only when the copy read that table with
 // its recent changes over it (copyOlderThanSource). The copy is told so
 // before it runs (RunOptions.NeedTails): when the changes are not ready, it
-// refuses without running the statement, and the source answers. Where the
-// answer would have been given anyway, the copy is not told, and a snapshot
-// alone still answers.
+// refuses without running the statement, and the source answers.
+//
+// Since #3116 the copy is told so on every connection that can send the
+// statement to its source, as a routed MySQL statement is refused there
+// (sqlsandbox.Session.StrictStar): a statement that reads another table, and
+// one on a connection the source never answered, are no longer answered from
+// the snapshot alone either.
 func TestTailsFirst_3086(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -39,11 +43,13 @@ func TestTailsFirst_3086(t *testing.T) {
 		{"a table the source answered about", readsT, false, tablesTooOld, true, 0},
 		{"the same table in a subquery", "SELECT sum(n) FROM big WHERE id IN (SELECT id FROM t)", false, tablesTooOld, true, 0},
 		{"the same table in capitals, with its schema", "SELECT sum(n) FROM big b JOIN PUBLIC.T x ON x.id = b.id", false, tablesTooOld, true, 0},
-		// Read apart from what the source answered: a snapshot alone is given.
-		{"another table", "SELECT sum(n) FROM big", false, tablesOnCopy, false, 1},
-		{"the same name in another schema", "SELECT sum(n) FROM big b JOIN other.t x ON x.id = b.id", false, tablesOnCopy, false, 1},
-		// Nothing answered by the source: nothing to go back from.
-		{"a connection the source never answered", readsT, true, tablesOnCopy, false, 1},
+		// Read apart from what the source answered: the snapshot alone is
+		// not given either (#3116).
+		{"another table", "SELECT sum(n) FROM big", false, tablesTooOld, true, 0},
+		{"the same name in another schema", "SELECT sum(n) FROM big b JOIN other.t x ON x.id = b.id", false, tablesTooOld, true, 0},
+		// Nothing answered by the source: the snapshot alone is still not
+		// given where the source can answer (#3116).
+		{"a connection the source never answered", readsT, true, tablesTooOld, true, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var run func(string) costOutcome

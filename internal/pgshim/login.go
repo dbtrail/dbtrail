@@ -196,12 +196,16 @@ type RunOptions struct {
 	// of a SET), not as an answer to the client: the host must not count it
 	// as one.
 	Probe bool
-	// NeedTails says the answer is given only if every table it reads has
-	// its recent changes over its snapshot (copyOlderThanSource): when they
-	// are not ready in the copy's wait for them, the host refuses the
-	// statement before running it, with a *sqlsandbox.MayHaveChangedError,
-	// and the source answers it (#3086). Without it a snapshot alone
-	// answers, as on a connection with nowhere else to send the statement.
+	// NeedTails says the source can answer the statement instead of the
+	// copy (session.needsTails). In fresh mode the host then refuses it
+	// before running it, with a *sqlsandbox.MayHaveChangedError, when a
+	// table it reads has no recent changes ready over its snapshot in the
+	// copy's wait for them (#3086), or when the recent changes it would read
+	// are older than an earlier answer of the copy on this connection
+	// (#3116), and the source answers it. Those are the two cases a routed
+	// MySQL statement is refused in (sqlsandbox.Session.StrictStar).
+	// Without it the copy answers both, with a notice that says so, as on a
+	// connection with nowhere else to send the statement.
 	NeedTails bool
 	// Trimmed are the names (lowercased) of the char(n) columns the screen
 	// took as read without their padding (trimmed.go): the host refuses the
@@ -429,11 +433,14 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		if waited, stop = s.waitForCopy(ctx, qstr, apart); stop != nil {
 			return nil, nil, nil, "", stop
 		}
-		// An answer copyOlderThanSource would hold back unless every table it
-		// read had its recent changes: the copy is told before it runs, so it
-		// does not run one it would answer from the snapshot alone (#3086).
+		// Fresh mode's two refusals before running (#3086, #3116): on a
+		// connection that can send the statement to its source, the copy does
+		// not answer from the snapshot alone, nor with recent changes older
+		// than an earlier answer of the copy on this connection. The source
+		// answers instead, as the MySQL router sends such a statement to
+		// MySQL (sqlsandbox.Session.StrictStar).
 		opts := s.runOptions()
-		opts.NeedTails = s.holdsBackCopy(apart && named > 0)
+		opts.NeedTails = s.needsTails(qstr)
 		opts.Trimmed = s.trimmedFor(text)
 		// The join check's counts (joinstats.go), for this statement's
 		// tables only.
@@ -454,7 +461,7 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		res, err = s.bound.Run(run, text, opts)
 		var changed *sqlsandbox.MayHaveChangedError
 		if opts.NeedTails && errors.As(err, &changed) {
-			s.logger.Debug("pgshim: the copy's recent changes for a statement were not ready; it did not run there, and the source answers it", "why", changed.Reason)
+			s.logger.Debug("pgshim: the copy's recent changes for a statement were not ready, or older than an earlier answer of the copy on this connection; it did not run there, and the source answers it", "why", changed.Reason)
 		}
 		s.joinCheck = rememberedJoinCheck(remembered, s.noteJoinCheck(res, err, opts.JoinNDV != nil, want))
 		s.oomRetry = sqlsandbox.WrittenOrderRetryOf(res, err)

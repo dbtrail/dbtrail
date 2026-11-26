@@ -1328,9 +1328,10 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 }
 
 // pgRunContext is the context a statement of the port runs on the copy
-// under: one whose answer the port gives only with its tables' recent
-// changes (opts.NeedTails) is refused before it runs when they are not ready
-// (console.WithPGNeedTails, #3086).
+// under: one the source can answer instead (opts.NeedTails) is refused
+// before it runs, in fresh mode, when its tables' recent changes are not
+// ready or are older than an earlier answer of the copy on the connection
+// (console.WithPGNeedTails, #3086, #3116).
 func pgSnapshotAgeFor(opts pgshim.RunOptions) *console.PGSnapshotAge {
 	if opts.Probe {
 		return nil
