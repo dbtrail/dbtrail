@@ -47,6 +47,13 @@ func TestPGChainOver(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			// The sequence's own edge, which the pair count reaches long
+			// before: lifted out of its way.
+			if c.lastSeq >= pgdelta.MaxSeq-1 {
+				prev := pgChainMaxPairs
+				pgChainMaxPairs = pgdelta.MaxSeq + 2
+				defer func() { pgChainMaxPairs = prev }()
+			}
 			why := pgChainOver(c.lastSeq, c.chainBytes, c.baseBytes, c.age)
 			if (why != "") != c.over {
 				t.Fatalf("pgChainOver = %q, want over %v", why, c.over)
