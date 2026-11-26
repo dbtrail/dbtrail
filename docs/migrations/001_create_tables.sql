@@ -209,3 +209,19 @@ CREATE TABLE IF NOT EXISTS partition_history (
     capture_from_pos   BIGINT UNSIGNED  DEFAULT NULL,
     CONSTRAINT partition_history_single_row CHECK (id = 1)
 ) ENGINE=InnoDB;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Capture owner (#3114)
+-- Which run of a capture may save the position in stream_state. A capture run
+-- writes a new token here when it starts, before it reads the saved position;
+-- a position save locks this row, compares the token and writes in the same
+-- transaction, so a save an earlier run sent that reaches the index after a
+-- newer run started changes nothing. One row; source-neutral (the PostgreSQL
+-- capture uses it). See internal/indexer.ddlCaptureOwner.
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS capture_owner (
+    id         TINYINT UNSIGNED NOT NULL PRIMARY KEY,
+    owner      CHAR(32)    NOT NULL,
+    claimed_at DATETIME(6) NOT NULL,
+    CONSTRAINT capture_owner_one_row CHECK (id = 1)
+) ENGINE=InnoDB;

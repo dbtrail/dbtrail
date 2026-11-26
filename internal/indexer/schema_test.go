@@ -187,6 +187,7 @@ func TestDDLConstants_noUTCTimestampDefault(t *testing.T) {
 		"ddlProfiles":        ddlProfiles,
 		"ddlAccessRules":     ddlAccessRules,
 		"ddlSchemaChanges":   ddlSchemaChanges,
+		"ddlCaptureOwner":    ddlCaptureOwner,
 	}
 	for name, ddl := range ddls {
 		if strings.Contains(strings.ToUpper(ddl), "DEFAULT UTC_TIMESTAMP") {

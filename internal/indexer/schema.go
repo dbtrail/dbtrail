@@ -83,6 +83,7 @@ func CreateIndexTables(ctx context.Context, db *sql.DB, partitions int, encrypt 
 		{"schema_changes", ddlSchemaChanges},
 		{"fk_constraints", ddlFKConstraints},
 		{"snapshot_id_seq", metadata.DDLSnapshotIDSeq},
+		{"capture_owner", ddlCaptureOwner},
 	}
 	for _, t := range ddls {
 		if _, err := db.Exec(t.ddl); err != nil {
@@ -348,4 +349,20 @@ const ddlSchemaChanges = `CREATE TABLE IF NOT EXISTS schema_changes (
     snapshot_id     INT UNSIGNED DEFAULT NULL COMMENT 'auto-snapshot after DDL; NULL when not taken (file mode or snapshot failure)',
     INDEX idx_detected_at (detected_at),
     INDEX idx_schema_table (schema_name, table_name)
+) ENGINE=InnoDB`
+
+// ─── Capture ownership ────────────────────────────────────────────────────────
+
+// ddlCaptureOwner is the run of a capture that may save the position in
+// stream_state (#3114). A capture run writes a new token here when it starts,
+// before it reads the saved position, and a position save checks the token in
+// the same index transaction, holding this row, so a save that an earlier run
+// sent and that reaches the index after a newer run started changes nothing.
+// One row, like stream_state, and source-neutral: the PostgreSQL capture uses
+// it today, and any capture that writes stream_state can.
+const ddlCaptureOwner = `CREATE TABLE IF NOT EXISTS capture_owner (
+    id         TINYINT UNSIGNED NOT NULL PRIMARY KEY,
+    owner      CHAR(32) NOT NULL COMMENT 'the token of the capture run that may save the position in stream_state (#3114); each run writes a new one when it starts, and a save that names another changes nothing',
+    claimed_at DATETIME(6) NOT NULL COMMENT 'when that run claimed it (UTC)',
+    CONSTRAINT capture_owner_one_row CHECK (id = 1)
 ) ENGINE=InnoDB`

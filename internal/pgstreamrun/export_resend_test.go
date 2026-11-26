@@ -17,3 +17,13 @@ func SetResendCheckTimeoutForTest(d time.Duration) (restore func()) {
 	resendCheckTimeout = d
 	return func() { resendCheckTimeout = prev }
 }
+
+// SetBeforeWriteForTest sets beforeWrite; restore puts it back.
+func SetBeforeWriteForTest(fn func(step string)) (restore func()) {
+	prev := beforeWrite
+	beforeWrite = fn
+	return func() { beforeWrite = prev }
+}
+
+// ErrCaptureOwnerChangedForTest is errCaptureOwnerChanged.
+var ErrCaptureOwnerChangedForTest = errCaptureOwnerChanged
