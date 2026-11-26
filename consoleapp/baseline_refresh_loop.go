@@ -1143,17 +1143,7 @@ func (s *baselineSupervisor) retainPolicy() time.Duration {
 // rule's full margin, which is safe and is also #2121's symptom on a new
 // index, so it is said (reportGateBlind) rather than left to a Debug line.
 func (s *baselineSupervisor) coverageRuleFor(ctx context.Context, req refreshRequest, interval time.Duration) coverageRule {
-	rule := coverageRule{retain: s.retainPolicy(), interval: interval}
-	if s.rotationInForce == nil {
-		return rule
-	}
-	asked, unreadable := false, false
-	var readErr error
-	rule.dropsAfter, _ = rotation.DropWindow(s.rotationInForce(), func() rotation.Effective {
-		e := readIndexRetention(ctx, req.IndexDSN)
-		asked, unreadable, readErr = true, e.Source == rotation.RetainUnreadable, e.Err
-		return e
-	})
+	rule, asked, unreadable, readErr := s.buildCoverageRule(ctx, req.IndexDSN, interval)
 	if asked {
 		why := "cannot read the retention this index was created under, so a snapshot that reads from within " +
 			"an hour and a cycle of the oldest events the index keeps is replaced as a precaution"
@@ -1170,6 +1160,34 @@ func (s *baselineSupervisor) coverageRuleFor(ctx context.Context, req refreshReq
 		s.reportGateBlind("retention", cause, req, why)
 	}
 	return rule
+}
+
+// buildCoverageRule is coverageRuleFor without the report: the rule, and
+// whether the index's own retention had to be asked and could not be read.
+func (s *baselineSupervisor) buildCoverageRule(ctx context.Context, indexDSN string, interval time.Duration) (rule coverageRule, asked, unreadable bool, readErr error) {
+	rule = coverageRule{retain: s.retainPolicy(), interval: interval}
+	if s.rotationInForce == nil {
+		return rule, false, false, nil
+	}
+	rule.dropsAfter, _ = rotation.DropWindow(s.rotationInForce(), func() rotation.Effective {
+		e := readIndexRetention(ctx, indexDSN)
+		asked, unreadable, readErr = true, e.Source == rotation.RetainUnreadable, e.Err
+		return e
+	})
+	return rule, asked, unreadable, readErr
+}
+
+// RefreshRule is console.RefreshLineSource (#3083): the rule this
+// supervisor's updates of that index draw their line with, so the Snapshots
+// page grades "aging" on the same line. Built by the same code as the gate's
+// and the fold's; the report is left to the update, which makes it once a
+// day, so a page that redraws does not repeat it.
+func (s *baselineSupervisor) RefreshRule(ctx context.Context, indexDSN string, every time.Duration) (status.RefreshRule, bool) {
+	if every <= 0 || indexDSN == "" {
+		return status.RefreshRule{}, false
+	}
+	rule, _, _, _ := s.buildCoverageRule(ctx, indexDSN, every)
+	return rule.shared(), true
 }
 
 // followRotation points the supervisor at the settings the rotation loop

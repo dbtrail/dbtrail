@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/config"
@@ -119,112 +118,30 @@ type coverageRule struct {
 	dropsAfter time.Duration
 }
 
-// reanchorBy is THE line, for the gate and for the fold alike (#1904): a
-// snapshot whose readers start at or before it is no longer safely covered,
-// and a chain of table deltas whose start is at or before it is ended (the
-// table is written in full, reconstruct.FullTableConfig.ChainStartFloor). ok
-// is false when there is no floor to draw it from.
-//
-// One function on purpose. The gate opens when a start reaches the line, and
-// the fold it releases is what has to move that start; if the two drew their
-// lines apart, a gate that opened would release a fold that appended a pair,
-// kept the start, and opened the gate again on every cycle, repairing nothing.
-//
-// Three bounds, and the line is the latest of them:
-//
-//   - the product's aging band over the LIVE floor, exactly the verdict
-//     status.BaselineStalenessFor gives (see snapshotStillCovered for why the
-//     live floor and not the archive-extended one). Not while rotation is
-//     known to be out of reach of the floor (floorHolds): on an index younger
-//     than its retention the span is the install's age, and this band
-//     rewrote every table in the first hours of every install (#3083). There
-//     the band is drawn over the window the index drops on (dropsOn, which is
-//     floorHolds' own window whenever it holds), never under the oldest hour.
-//     That is safe because the oldest hour is still there at the next cycle,
-//     and that cycle draws the line again;
-//   - the same band over the retention the operator CONFIGURED. The observed
-//     floor is an observation of that policy and the policy can change under
-//     it in a step: the rotation panel saves a new retain and the next
-//     rotation drops every newly expired partition in one statement, 30 days
-//     to 7 skipping the aging verdict entirely. Asked against the policy, a
-//     cycle between the save and the drop already sees the new line;
-//   - one hour plus one interval above the floor. The floor moves in whole
-//     hours, since partitions are hourly, and nothing looks again for an
-//     interval, so a start closer than that can be past the floor at the next
-//     cycle. On a long retention the band is wider and this never binds. It
-//     assumes the next cycle does come one interval later: a cycle skipped
-//     because another job holds the server, or a daemon that is down, stretches
-//     the gap past what the margin covers. Not drawn while rotation is known
-//     to be out of reach of the floor (floorHolds): on an index younger than
-//     its retention this bound ended every chain of the first hour, and each
-//     of those updates wrote every table in full (#2121).
-//
-// A busy table does not rewrite on every cycle: a rewrite starts a new chain
-// at the run, and the next cycle only ends it again when the retention is
-// shorter than two intervals plus an hour, where no chain could live anyway.
+// reanchorBy is THE line, for the gate, the fold and the staleness verdict
+// alike (#1904, #3083): status.RefreshRule.Line, where the three bounds and
+// why each is there are written down. A snapshot whose readers start at or
+// before it is no longer safely covered, and a chain of table deltas whose
+// start is at or before it is ended (the table is written in full,
+// reconstruct.FullTableConfig.ChainStartFloor). ok is false when there is no
+// floor to draw it from.
 func (r coverageRule) reanchorBy(liveFloor, now time.Time) (time.Time, bool) {
-	if liveFloor.IsZero() {
-		return time.Time{}, false
-	}
-	holds := r.floorHolds(liveFloor, now)
-	// status.BaselineStalenessFor: aging once now-start >= 0.8 of now-floor,
-	// broken before the floor, and never aging over a floor not behind now.
-	// Rounded up so a start exactly on the band's edge falls on the line.
-	line := liveFloor.Add(-time.Nanosecond)
-	if span := now.Sub(liveFloor); span > 0 {
-		if holds {
-			// A young index (#3083): now-floor is the install's age, not how
-			// long the index keeps events, and its band ended every chain
-			// within hours of the first snapshot. The band is drawn over the
-			// window the index drops on instead, and the line never sits
-			// under the oldest hour, so a start on or before it is still
-			// replaced: rotation leaves that hour alone until the next cycle,
-			// and every later start is newer than it.
-			line = now.Add(-agingBand(r.dropsOn()))
-			if liveFloor.After(line) {
-				line = liveFloor
-			}
-		} else {
-			line = now.Add(-agingBand(span))
-		}
-	}
-	floor := liveFloor
-	if r.retain > 0 {
-		if p := now.Add(-time.Duration(float64(r.retain) * status.BaselineAgingFraction)); p.After(line) {
-			line = p
-		}
-		if p := now.Add(-r.retain); p.After(floor) {
-			floor = p
-		}
-	}
-	if m := floor.Add(cycleMargin(r.interval)); m.After(line) && !holds {
-		line = m
-	}
-	return line, true
+	return r.shared().Line(liveFloor, now)
 }
 
-// agingBand is the product's aging band over a span (status.BaselineAgingFraction),
-// rounded up so a start exactly on the band's edge falls on the line.
-func agingBand(span time.Duration) time.Duration {
-	return time.Duration(math.Ceil(status.BaselineAgingFraction * float64(span)))
+// shared is the rule as the status package holds it, the one the staleness
+// verdict grades with (DeltaFloor.Refresh).
+func (r coverageRule) shared() status.RefreshRule {
+	return status.RefreshRule{Retain: r.retain, Interval: r.interval, DropsAfter: r.dropsAfter}
 }
 
-// cycleMargin is how far above the index's floor a start has to be for the
-// next cycle to still find it there: the hour the floor moves by and the
-// interval nothing looks again for (reanchorBy's third bound, and floorHolds).
-func cycleMargin(interval time.Duration) time.Duration { return time.Hour + interval }
+// cycleMargin is status.CycleMargin: the hour the floor moves by and the
+// interval nothing looks again for.
+func cycleMargin(interval time.Duration) time.Duration { return status.CycleMargin(interval) }
 
-// dropsOn is the window this index's events are dropped on as far as the rule
-// knows: the configured retention, or the index's own window when that is
-// shorter (no retention chosen, and an index created under a shorter one).
-// Zero when neither is known.
-func (r coverageRule) dropsOn() time.Duration {
-	w := r.retain
-	if r.dropsAfter > 0 && (w <= 0 || r.dropsAfter < w) {
-		w = r.dropsAfter
-	}
-	return max(w, 0)
-}
+// dropsOn is status.RefreshRule.DropsOn: the window this index's events are
+// dropped on as far as the rule knows, zero when not known.
+func (r coverageRule) dropsOn() time.Duration { return r.shared().DropsOn() }
 
 // chainOutlivesCycle reports whether a chain of table deltas begun by one
 // cycle can still be there at the next one (#2959), in steady state: an index
@@ -282,28 +199,12 @@ func minRetainForTableDeltas(interval time.Duration) (must, comfortable time.Dur
 	return must, must + time.Hour, true
 }
 
-// floorHolds reports whether rotation is known to leave the oldest live hour
-// alone until after the next cycle has looked (#2121): that hour is dropped
-// once it is older than the index's window, so while that hour is at least an
-// hour and an interval inside the window, the floor does not move and the
-// third bound has nothing to guard. The same hour and interval the bound
-// itself keeps, so a cycle that runs late is covered as far here as it is
-// there.
-//
-// The shorter of the two retentions the rule holds: with no retention chosen,
-// retain is the daemon default and dropsAfter the window this index was
-// created under, and the two are read by separate calls.
+// floorHolds is status.RefreshRule.FloorHolds: whether rotation is known to
+// leave the oldest live hour alone until after the next cycle has looked
+// (#2121).
 func (r coverageRule) floorHolds(liveFloor, now time.Time) bool {
-	window := r.dropsAfter
-	if r.retain > 0 && r.retain < window {
-		window = r.retain
-	}
-	if window <= 0 {
-		return false
-	}
-	return !liveFloor.Before(now.Add(-window).Add(cycleMargin(r.interval)))
+	return r.shared().FloorHolds(liveFloor, now)
 }
-
 // readLiveFloor reads the oldest hour the index's live partitions still hold,
 // or why it could not; a package variable so the refresh cycle's use of it can
 // be driven without an index.

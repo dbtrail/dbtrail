@@ -492,6 +492,9 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("console: could not load delta-coverage floor for baseline staleness", "server", serverID, "error", err)
 	} else {
 		floor = f
+		// The update's own line (#3083): "aging" means the next update
+		// rewrites the file, and never a file it keeps.
+		floor.Refresh = s.refreshRuleFor(r.Context(), serverID, b.dsn)
 	}
 	// Where a reader of each file starts (#1707). Bounded like the listing:
 	// this is the page's render path, and over S3 each read is a request.

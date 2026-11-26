@@ -69,6 +69,14 @@ func TestCoverageRule_aYoungIndexDoesNotRewriteOnItsAge_3083(t *testing.T) {
 	if !snapshotCoveredBy(floor, first, at, rule) {
 		t.Error("the gate calls the same snapshot no longer covered")
 	}
+	// The verdict the Snapshots page shows, graded as the page grades it.
+	if v := status.BaselineStalenessFor(first, floor, at); v != status.BaselineAging {
+		t.Fatalf("on the span alone the file grades %s: this test no longer shows the warning", v)
+	}
+	shared := rule.shared()
+	if v := (status.DeltaFloor{Hour: floor, Live: floor, Refresh: &shared}).Grade(first, at); v != status.BaselineOK {
+		t.Errorf("the page grades the file the update keeps as %s, want ok", v)
+	}
 }
 
 // A chain begun at the first snapshot lives, while the index is young, exactly
@@ -272,6 +280,17 @@ func TestCoverageRule_fromBirthThroughRotation_3083(t *testing.T) {
 						t.Fatalf("%s at %s: a reader's start %s is under the floor %s", name, at, start, floor)
 					}
 					line, _ := rule.reanchorBy(floor, at)
+					// The page's verdict on the same file, on the same floor:
+					// aging exactly when this cycle rewrites it (#3083).
+					shared := rule.shared()
+					switch v := (status.DeltaFloor{Hour: floor, Live: floor, Refresh: &shared}).Grade(start, at); {
+					case v == status.BaselineAging && start.After(line):
+						t.Fatalf("%s at %s: a file %s old the update keeps shows as aging", name, at, at.Sub(start))
+					case v != status.BaselineAging && !start.After(line):
+						t.Fatalf("%s at %s: a file %s old the update rewrites shows as %s", name, at, at.Sub(start), v)
+					case v == status.BaselineAging && rule.floorHolds(floor, at) && at.Sub(start) < band:
+						t.Fatalf("%s at %s: a file %s old shows as aging on a young index", name, at, at.Sub(start))
+					}
 					if !busy && start.After(line) {
 						rewrotePrev = false
 						continue
