@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/event"
