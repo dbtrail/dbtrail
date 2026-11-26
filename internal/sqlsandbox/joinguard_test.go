@@ -559,14 +559,14 @@ func TestRunner_joinTooBigIsTyped(t *testing.T) {
 	f := newCopyFixture(t)
 	r := newTestRunner(t, Limits{})
 	job := f.job(explodingCross)
-	job.Session.JoinNDV = map[string]float64{"range": 1}
+	job.Session.JoinNDV = &JoinCounts{NDV: map[string]float64{"range": 1}}
 	_, err := r.Run(context.Background(), job)
 	var tooBig *JoinTooBigError
 	if !errors.As(err, &tooBig) || !strings.Contains(tooBig.Reason, "CROSS_PRODUCT") {
 		t.Fatalf("err = %T %v", err, err)
 	}
 	job = f.job("SELECT count(*) AS n FROM range(1000) a, range(1000) b")
-	job.Session.JoinNDV = map[string]float64{"range": 1}
+	job.Session.JoinNDV = &JoinCounts{NDV: map[string]float64{"range": 1}}
 	res, err := r.Run(context.Background(), job)
 	if err != nil || len(res.Rows) != 1 || res.JoinOrderWritten {
 		t.Fatalf("a small cross product: %v %v %v", err, res.Rows, res.JoinOrderWritten)

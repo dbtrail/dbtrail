@@ -279,7 +279,10 @@ type Session struct {
 	// check, as before. Only the PostgreSQL port sets it, for a connection
 	// that can send a refused statement to its source; with KeepJoinOrder
 	// set there is nothing to check.
-	JoinNDV map[string]float64
+	//
+	// A pointer, so Session stays comparable (its callers compare sessions
+	// with ==): two sessions are the same only with the same counts.
+	JoinNDV *JoinCounts
 	// SkipCommonSubplan runs the statement with DuckDB's common_subplan
 	// optimizer off. That optimizer materializes a subplan a statement reads
 	// twice; over a view of the copy it wrote the whole view to disk: the
@@ -584,6 +587,21 @@ func (e *ColumnsDifferError) Error() string { return e.Reason }
 type MayHaveChangedError struct{ Reason string }
 
 func (e *MayHaveChangedError) Error() string { return e.Reason }
+
+// JoinCounts is what the join check reads (Session.JoinNDV): NDV, the
+// source's count of distinct values of each column by lowercased name. Not
+// changed once given to a Session.
+type JoinCounts struct {
+	NDV map[string]float64
+}
+
+// joinNDV is s's counts for the worker, nil for no check.
+func (s Session) joinNDV() map[string]float64 {
+	if s.JoinNDV == nil {
+		return nil
+	}
+	return s.JoinNDV.NDV
+}
 
 // JoinTooBigError: the statement was not run because the caller asked for
 // the join check (Session.JoinNDV) and the copy's plan of it has a join
@@ -1695,7 +1713,7 @@ func marshalJob(job Job, limits Limits, spill spillSpec, spool string, more bool
 	return json.Marshal(wireJob{
 		CopyDirs: allowedDirs(job.CopyDirs), ViewsSQL: viewsSQL, AskViews: asking, SQL: job.SQL, NoFileReaders: job.NoFileReaders, Schema: job.Schema,
 		TimeZone: job.Session.TimeZone, MySQLClock: job.Session.MySQLClock, SelectLimit: job.Session.SelectLimit, KeepJoinOrder: job.Session.KeepJoinOrder, PostgresRules: job.Session.PostgresRules, PostgresNames: job.Session.PostgresNames,
-		JoinNDV: job.Session.JoinNDV, SkipCommonSubplan: job.Session.SkipCommonSubplan,
+		JoinNDV: job.Session.joinNDV(), SkipCommonSubplan: job.Session.SkipCommonSubplan,
 		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
 		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes, More: more,

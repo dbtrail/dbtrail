@@ -1243,7 +1243,10 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			// the source, which pgshim decides.
 			// And common_subplan off for every statement of the port
 			// (sqlsandbox.Session.SkipCommonSubplan).
-			sess := sqlsandbox.Session{PostgresRules: true, TrimPadded: true, PostgresNames: true, TimeZone: opts.TimeZone, JoinNDV: opts.JoinNDV, SkipCommonSubplan: true}
+			sess := sqlsandbox.Session{PostgresRules: true, TrimPadded: true, PostgresNames: true, TimeZone: opts.TimeZone, SkipCommonSubplan: true}
+			if opts.JoinNDV != nil {
+				sess.JoinNDV = &sqlsandbox.JoinCounts{NDV: opts.JoinNDV}
+			}
 			// How far the snapshot files it reads reach (#3125), for an
 			// answer that reads a table without its recent changes.
 			snapshot := pgSnapshotAgeFor(opts)
