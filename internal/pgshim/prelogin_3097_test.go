@@ -99,9 +99,15 @@ func TestPreLogin_fullOfClientsPutsNobodyOut(t *testing.T) {
 // A place held by a connection that sent nothing for longer than the grace
 // goes to the newcomer, which logs in; the silent one is closed.
 func TestPreLogin_theOneWaitingLongestLosesItsPlace(t *testing.T) {
-	shortGrace(t, 100*time.Millisecond)
+	// The grace must be far longer than the two logins below take: with
+	// 100ms, a login slowed by -race on a busy runner pushed the first
+	// silent connection past the grace before the "refused" check, and the
+	// newcomer was let in.
+	const grace = 2 * time.Second
+	shortGrace(t, grace)
 	addr := serveAddrCfg(t, Config{Login: (&portLogin{run: one}).login, MaxConns: 3})
 	first := silent(t, addr)
+	since := time.Now()
 	time.Sleep(30 * time.Millisecond)
 	second := silent(t, addr)
 	client, code := loginCode(t, addr)
@@ -110,10 +116,14 @@ func TestPreLogin_theOneWaitingLongestLosesItsPlace(t *testing.T) {
 	}
 
 	// Full, and nobody has waited longer than the grace yet: refused.
-	if _, code := loginCode(t, addr); code != "53300" {
+	_, code = loginCode(t, addr)
+	if waited := time.Since(since); waited >= grace {
+		t.Fatalf("the logins took %v, past the grace of %v: the check below would mean nothing", waited, grace)
+	}
+	if code != "53300" {
 		t.Fatalf("before the grace: %q, want 53300", code)
 	}
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(time.Until(since.Add(grace + 150*time.Millisecond)))
 
 	// Now the first silent one, the oldest, loses its place.
 	c1, code := loginCode(t, addr)
