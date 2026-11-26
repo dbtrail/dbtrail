@@ -25,10 +25,13 @@ import (
 // change made on a real PostgreSQL table too: after each update the
 // snapshot's table (its file and the pair beside it) holds, row for row, what
 // the source holds. The second update reads its base file through the hard
-// link the first one carried into its folder, and does not read that file's
-// key columns again for a NULL: the file is the one the first update found
-// none in (#3082). Each update's line says how long each of its steps took,
-// and the steps add up to no more than the whole.
+// link the first one carried into its folder. The first update builds the
+// file's key index (#3085: the full read's file has none) and finds its rows
+// through it, and its line says what the build cost; the second finds its
+// rows through the index carried with the file, builds nothing, and its line
+// has no build. Neither reads the file's key columns for a NULL: an index
+// bound to the file says it holds none. Each update's line says how long
+// each of its steps took, and the steps add up to no more than the whole.
 func TestReconstructTables_PGPairStepTimesAndOneKeyPass(t *testing.T) {
 	pgDSN := testutil.SkipIfNoPostgres(t)
 	f := newPGFixture(t)
@@ -112,11 +115,14 @@ func TestReconstructTables_PGPairStepTimesAndOneKeyPass(t *testing.T) {
 
 	update := func(at time.Time, pairs int) (passes uint64) {
 		t.Helper()
-		before := pgdelta.KeyNullPasses()
+		before, lookups := pgdelta.KeyNullPasses(), pgdelta.KeyIndexLookups()
 		if _, _, _, err := f.run(root, pgRun{at: at, carry: true, chainFloor: f.base}); err != nil {
 			t.Fatalf("the update at %s: %v", at.Format("15:04"), err)
 		}
 		passes = pgdelta.KeyNullPasses() - before
+		if n := pgdelta.KeyIndexLookups() - lookups; n != 1 {
+			t.Fatalf("the update at %s found its rows through the key index %d times, want once", at.Format("15:04"), n)
+		}
 		got, _ := f.state(root, at)
 		if want := source(); !sameRows(got, want) {
 			t.Fatalf("after the update at %s the snapshot holds %v, and the source %v", at.Format("15:04"), got, want)
@@ -135,8 +141,8 @@ func TestReconstructTables_PGPairStepTimesAndOneKeyPass(t *testing.T) {
 	change(0x720, 14*time.Minute, 1, "40", s("forty"))
 	f.checkpoint(0x720)
 	at1 := f.at(20 * time.Minute)
-	if n := update(at1, 1); n != 1 {
-		t.Fatalf("the first update read the file's key columns for a NULL %d times, want once", n)
+	if n := update(at1, 1); n != 0 {
+		t.Fatalf("the first update read the file's key columns for a NULL %d times, want none", n)
 	}
 
 	change(0x800, 32*time.Minute, 2, "40", s("forty again"))
@@ -170,6 +176,11 @@ func TestReconstructTables_PGPairStepTimesAndOneKeyPass(t *testing.T) {
 		}
 		if total, ok := fields["total_ms"]; !ok || sum > total {
 			t.Fatalf("the steps add up to %d ms and the whole is %d ms (present %v): %s", sum, total, ok, line)
+		}
+		// The build is part of the positions, on the first update's line only.
+		built, ok := fields["lookup_index_built_ms"]
+		if (lines == 1) != ok || (ok && built > fields["positions_ms"]) {
+			t.Fatalf("line %d: lookup_index_built_ms is %d (present %v), and positions_ms %d: %s", lines, built, ok, fields["positions_ms"], line)
 		}
 	}
 	if lines != 2 {
