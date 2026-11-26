@@ -154,7 +154,7 @@ func TestPlanJoinDanger_edges(t *testing.T) {
 	ndv := map[string]float64{
 		"w_id": 200, "o_w_id": 200, "s_w_id": 200, "c_w_id": 200,
 		"i_id": 100000, "s_i_id": 100000, "id": 20000000, "o_id": 3000,
-		"mixed_case": 200, "quoted col": 200,
+		"mixed_case": 200, "quoted col": 200, "amount": 1,
 	}
 	big, mid := "20000000", "240698"
 	for _, tc := range []struct {
@@ -165,6 +165,10 @@ func TestPlanJoinDanger_edges(t *testing.T) {
 		{"one equality on a column with few values", planOf(t, joinNode("HASH_JOIN", "INNER", "s_w_id = c_w_id", big, mid)), true},
 		{"the same as a list", planOf(t, joinNode("HASH_JOIN", "INNER", []any{"s_w_id = c_w_id"}, big, mid)), true},
 		{"a selective key", planOf(t, joinNode("HASH_JOIN", "INNER", "s_i_id = i_id", big, mid)), false},
+		// Every amount is 1, joined to a key: each row meets one, whatever
+		// few values the column has.
+		{"a column of one value joined to a key", planOf(t, joinNode("HASH_JOIN", "INNER", "amount = id", "20000", "20000")), false},
+		{"a column of few values joined to a column of few values", planOf(t, joinNode("HASH_JOIN", "INNER", "amount = s_w_id", "50000", "50000")), true},
 		{"two equalities whose values multiply past the larger side", planOf(t, joinNode("HASH_JOIN", "INNER", []any{"s_w_id = c_w_id", "s_i_id = i_id"}, big, mid)), false},
 		{"no equality, only a range", planOf(t, joinNode("NESTED_LOOP_JOIN", "INNER", "s_w_id < c_w_id", big, mid)), false},
 		{"an equality of an expression: the copy's MOD", planOf(t, joinNode("HASH_JOIN", "INNER", "mod((s_w_id * s_i_id), 10000) = c_w_id", big, mid)), false},

@@ -26,7 +26,7 @@ import (
 //  2. Each join of two inputs is given an estimate of its output: left x
 //     right (DuckDB's estimates of its inputs, raised where the copy's views
 //     make them fall short: correctRows) over the product of
-//     min(ndv(a), ndv(b)) for each a = b of its
+//     max(ndv(a), ndv(b)) for each a = b of its
 //     conditions, that product capped at the larger input. ndv is the
 //     source's own count of distinct values of the column (PostgreSQL's
 //     pg_stats.n_distinct), which the copy does not have.
@@ -224,7 +224,11 @@ func judgeJoin(n *planNode, ndv map[string]float64) dangerJoin {
 			combo = math.Inf(1)
 			break
 		}
-		combo *= math.Max(math.Min(na, nb), 1)
+		// The larger of the two: each row of the side with fewer values
+		// meets, on average, rows/ndv of the other, the usual estimate. The
+		// smaller would make a column of few values joined to a key (every
+		// amount = 1 against ids 1..n) look like a cross product.
+		combo *= math.Max(math.Max(na, nb), 1)
 	}
 	if pairs == 0 {
 		return dangerJoin{}
