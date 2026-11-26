@@ -633,6 +633,19 @@ func TestIntegrationPGFirstRunCheckFailsTowardsKeeping_3114(t *testing.T) {
 	if f.heldRow(context.Background(), db, ev, logger) {
 		t.Error("a second arrival was taken for the single copy in the index")
 	}
+	// The same count for TRUNCATE markers: a transaction that truncates a
+	// table twice, of which the index records the first only, gets the second.
+	marker := event.Event{BinlogFile: "0/500", StartPos: 0x500, EndPos: 0x500, Schema: "public", Table: "orders", EventType: event.EventDDL,
+		DDLType: event.DDLTruncateTable, DDLQuery: "TRUNCATE public.orders", Timestamp: ev.Timestamp}
+	if err := indexer.InsertSchemaChange(db, marker, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !f.heldMarker(context.Background(), db, marker, logger) {
+		t.Error("the TRUNCATE in the index was not recognized")
+	}
+	if f.heldMarker(context.Background(), db, marker, logger) {
+		t.Error("a second TRUNCATE of the transaction was taken for the single record in the index")
+	}
 	f.endTxn(0x500)
 	if f.inWindow(0x500) {
 		t.Error("the window stayed open past the newest row")
