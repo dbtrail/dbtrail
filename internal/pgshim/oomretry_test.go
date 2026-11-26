@@ -179,7 +179,7 @@ func TestRoute_outOfMemoryAfterTheOrderWrittenGoesToTheSource(t *testing.T) {
 			check("extended: out of memory, not run again", extended("SELECT n FROM notretried"), outcome{"08001", RouteSource, ReasonCopyRefused, "", 0})
 			// A Describe without an Execute runs on the copy and is noted by
 			// no statement: the next statement does not take its retry.
-			if _, err := c.Prepare(ctx, "described", "SELECT n FROM retried WHERE n > $1", nil); err != nil {
+			if _, err := c.Prepare(ctx, "described", "SELECT n FROM retried AS r", nil); err != nil {
 				t.Fatalf("Prepare: %v", err)
 			}
 			check("a plain read after a Describe of a retried one", simple("SELECT n FROM t"), outcome{"", RouteCopy, ReasonAnswersTheSame, "", 1})
