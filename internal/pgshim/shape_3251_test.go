@@ -191,7 +191,9 @@ func TestCopyShape_3251_simple(t *testing.T) {
 		}},
 		{"dropped or renamed", func(now map[[2]string]SourceShape) { delete(now, [2]string{"public", "wide"}) }},
 	} {
-		k.edit(func(now map[[2]string]SourceShape) { now[[2]string{"public", "wide"}] = sameShapes(shapedCatalogOf(shapePortTables...))[[2]string{"public", "wide"}] })
+		k.edit(func(now map[[2]string]SourceShape) {
+			now[[2]string{"public", "wide"}] = sameShapes(shapedCatalogOf(shapePortTables...))[[2]string{"public", "wide"}]
+		})
 		expect(tc.name+", before", "SELECT sum(n) FROM wide", tablesOnCopy, 1)
 		k.edit(tc.edit)
 		expect(tc.name, "SELECT sum(n) FROM wide", shapeDiffers, 0)
@@ -199,7 +201,10 @@ func TestCopyShape_3251_simple(t *testing.T) {
 
 	// The table's next snapshot records the source's shape: the copy again,
 	// on the same connection.
-	k.edit(func(now map[[2]string]SourceShape) { clear(now); putShapes(now, sameShapes(shapedCatalogOf(shapePortTables...))) })
+	k.edit(func(now map[[2]string]SourceShape) {
+		clear(now)
+		putShapes(now, sameShapes(shapedCatalogOf(shapePortTables...)))
+	})
 	expect("healed", "SELECT sum(n) FROM big", tablesOnCopy, 1)
 }
 
