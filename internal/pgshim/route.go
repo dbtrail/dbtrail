@@ -55,6 +55,10 @@ const (
 	ReasonSessionDiffers    = "session_differs"     // a session setting the copy is not known to reproduce (TimeZone)
 	ReasonNotASelect        = "not_a_select"        // EXPLAIN, a cursor, a savepoint, VALUES
 	ReasonCopyRefused       = "copy_refused"        // the copy could not run it
+	// ReasonCopyRefusedAfterWrittenOrder: it ran out of memory on the copy
+	// in the copy's join order and again in the order written
+	// (sqlsandbox.Session.RetryOutOfMemoryInWrittenOrder).
+	ReasonCopyRefusedAfterWrittenOrder = "copy_refused_after_written_order"
 	ReasonTableNotOnCopy    = "table_not_on_copy"   // it reads a table the copy does not hold
 	ReasonCopyBehindSource  = "copy_behind_source"  // past the server's limit on the copy's lag
 	ReasonCopyAgeUnknown    = "copy_age_unknown"    // the copy's lag cannot be told, and the server has a limit
@@ -365,6 +369,13 @@ func (s *session) copyFallback(err error, perr *pgErr) string {
 		return ""
 	case perr.code == "42P01":
 		return ReasonTableNotOnCopy
+	}
+	var qerr *sqlsandbox.QueryError
+	if errors.As(err, &qerr) && qerr.WrittenOrderRetry == sqlsandbox.WrittenOrderRetryFailed {
+		// Out of memory in the copy's join order, and again run in the
+		// order written: the statement's, as copy_refused, under its own
+		// name so /status tells the two apart.
+		return ReasonCopyRefusedAfterWrittenOrder
 	}
 	return ReasonCopyRefused
 }

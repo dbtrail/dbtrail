@@ -92,6 +92,7 @@ var reasonMeans = map[string]string{
 	ReasonSessionDiffers:    "a session setting the copy is not known to reproduce (TimeZone)",
 	ReasonNotASelect:        "not a SELECT (EXPLAIN, a cursor, a savepoint, VALUES)",
 	ReasonCopyRefused:       "the copy could not run the statement",
+	ReasonCopyRefusedAfterWrittenOrder: "the copy ran out of memory for the statement in its own join order, and again when it ran the statement with its joins in the order written",
 	ReasonTableNotOnCopy:    "the statement reads a table the copy does not hold",
 	ReasonCopyBehindSource:  "the copy was further behind the source than the server's limit",
 	ReasonCopyAgeUnknown:    "how far behind the copy was could not be told, and the server has a limit",

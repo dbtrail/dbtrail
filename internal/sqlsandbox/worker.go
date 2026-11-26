@@ -227,6 +227,14 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 			res = wireResult{Error: &wireError{Kind: errSession, Message: fmt.Sprintf("sql worker panicked: %v", r)}}
 		}
 	}()
+	// The order the join check chose travels with an engine error too, so
+	// the parent does not run the same plan again (oomretry.go).
+	ranWritten := false
+	defer func() {
+		if ranWritten && res.Error != nil && res.Error.Kind == errQuery {
+			res.JoinOrder = joinOrderWritten
+		}
+	}()
 	if sess.err != nil {
 		return sessionErr("%v", sess.err)
 	}
@@ -395,6 +403,7 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 			return wireResult{Error: &wireError{Kind: errJoinTooBig, Message: check.refusal}}
 		case check.written:
 			res.JoinOrder = joinOrderWritten
+			ranWritten = true
 		case check.skipped != "":
 			res.JoinCheckSkipped = check.skipped
 		}

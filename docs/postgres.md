@@ -2281,7 +2281,32 @@ the order written, and Q21, which runs out of memory in both orders, goes to
 the source. What it does not catch is an order that keeps every join's
 output in proportion but builds a hash table from a side the engine thinks
 small: Q9 over fresh-mode views (order_line joined with stock first) is
-neither flagged nor changed.
+neither flagged nor changed by the check.
+
+**A statement that runs out of memory on the copy is tried once more in the
+order written.** When the copy's engine fails a statement with its
+`Out of Memory Error` in its own join order, the port runs it again on the
+copy with its joins in the order written, before it sends it anywhere else.
+Q9 over fresh-mode views ran out of a 2 GB worker after 21 to 59 seconds in
+the engine's order, and the source then took 42 seconds more; in the order
+written the copy answers it in 5.5 to 7.9 seconds. The second run takes the
+same worker slot as the first, so it adds no load beside it, and its time
+comes out of the statement's own: what is left of the copy's time limit and
+of the port's, and none at all when less than a second is left, in which case
+the statement goes to the source as before (`copy_refused`). It is not run
+again when the first run already used the order written (the join check
+chose it), when the error is any other than running out of memory, or when
+the client cancelled, hit its `statement_timeout` or left. Nothing of the
+copy's answer is sent to the client before the copy has the whole of it, so
+there are never rows or a row description already sent when it is run again.
+When the second run fails too, the statement goes to the source under its own
+reason, `copy_refused_after_written_order`; on a connection without a
+forwarding user the client gets the first run's error, which then says it was
+run again. `/status` counts both outcomes under `join_checks`, on either side:
+`oom_retry_written_order_ok` (the copy answered in the order written) and
+`oom_retry_written_order_failed`. Each retry is one `INFO` line in the log
+with the time of each run. The MySQL port and the SQL page are not changed:
+there an out-of-memory error is the answer, as before.
 
 **The copy does not cache a subplan a statement reads twice.** On this port
 the engine's `common_subplan` optimizer is off: over a view of the copy it
@@ -2660,6 +2685,7 @@ The reasons, with the MySQL port's names where they mean the same:
 | source | `catalog_not_on_copy` | a catalog statement the copy does not answer |
 | source | `table_not_on_copy` | a table the copy does not hold |
 | source | `copy_refused` | the copy could not run it |
+| source | `copy_refused_after_written_order` | the copy ran out of memory for it in its own join order, and again when it ran it once more with its joins in the order written |
 | source | `copy_columns_differ` | a column the copy writes otherwise (a `numeric` without precision) |
 | source | `copy_behind_source`, `copy_age_unknown` | the server's lag limit |
 | source | `table_not_captured` | a table whose capture lost or dropped changes since its snapshot was read (a table capture skips, a capture ledger that does not say which tables or cannot be read, a lost slot, a snapshot published over a known loss), in fresh and fast mode: the copy holds that table as of its snapshot only. Without a forwarding user, or on a server that hides tables, the copy answers it from that snapshot with a notice that says so |

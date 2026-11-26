@@ -1243,7 +1243,12 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			// the source, which pgshim decides.
 			// And common_subplan off for every statement of the port
 			// (sqlsandbox.Session.SkipCommonSubplan).
-			sess := sqlsandbox.Session{PostgresRules: true, TrimPadded: true, PostgresNames: true, TimeZone: opts.TimeZone, SkipCommonSubplan: true}
+			// A statement that runs out of memory in the copy's join order is
+			// run once more in the order written before the port is told
+			// (sqlsandbox oomretry.go): the PostgreSQL port's statements only,
+			// not its catalog reads.
+			sess := sqlsandbox.Session{PostgresRules: true, TrimPadded: true, PostgresNames: true, TimeZone: opts.TimeZone, SkipCommonSubplan: true,
+				RetryOutOfMemoryInWrittenOrder: true}
 			if opts.JoinNDV != nil {
 				sess.JoinNDV = &sqlsandbox.JoinCounts{NDV: opts.JoinNDV}
 			}
@@ -1259,6 +1264,11 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 				// How old what it read was, for /status (#2756), kept once
 				// the port says the client got it (bound.Routed).
 				ages.stash(snapshot.Place(copySQL.LastRunAge()))
+			}
+			if !opts.Probe {
+				// Whether it was run again in the order written, counted
+				// once the port says which side answered it.
+				ages.stashOOMRetry(pgOOMRetryOutcome(res, err))
 			}
 			return res, err
 		}

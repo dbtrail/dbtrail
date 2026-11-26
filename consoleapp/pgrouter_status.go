@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"cmp"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"maps"
 	"math"
@@ -15,6 +16,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/cli"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/pgshim"
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
 
 // The PostgreSQL port's status (#2770): which side answered each statement,
@@ -72,7 +74,12 @@ type pgRouterServerNumbers struct {
 	// JoinChecks counts what the copy's join check did with the statements
 	// the copy answered (pgshim JoinCheck* names: planned, written_order,
 	// no_statistics, could_not_run); one it refused is under Reasons,
-	// join_too_big. Absent until one is counted.
+	// join_too_big. It also counts the statements that ran out of memory in
+	// the copy's join order and were run again in the order written, on
+	// either side: oom_retry_written_order_ok (the copy answered) and
+	// oom_retry_written_order_failed (under Reasons as
+	// copy_refused_after_written_order when the source answered). Absent
+	// until one is counted.
 	JoinChecks map[string]uint64 `json:"join_checks,omitempty"`
 	// Answers is what each side ("copy", "source", "refused") finished:
 	// counts, errors and times.
@@ -349,6 +356,9 @@ type pgConnAges struct {
 	id      string
 	mu      sync.Mutex
 	pending console.CopyRunAge
+	// pendingOOMRetry is the join_checks name of the last run's retry in
+	// the order written (pgOOMRetryOutcome), "" when there was none.
+	pendingOOMRetry string
 	// last is the age of the connection's last answer when the copy gave
 	// it, zero otherwise: what SHOW dbtrail.router_status says of it
 	// (pgrouter_port_status.go).
@@ -384,6 +394,8 @@ func (c *pgConnAges) routed() func(pgshim.RouteNote) {
 		c.mu.Lock()
 		a := c.pending
 		c.pending = console.CopyRunAge{}
+		retry := c.pendingOOMRetry
+		c.pendingOOMRetry = ""
 		answered := n.Side == pgshim.RouteCopy && !n.Failed
 		c.last = console.CopyRunAge{}
 		if answered {
@@ -393,7 +405,58 @@ func (c *pgConnAges) routed() func(pgshim.RouteNote) {
 		if answered {
 			c.r.age(c.id, a)
 		}
+		if retry != "" {
+			c.r.countJoinCheck(c.id, retry)
+		}
 	}
+}
+
+// The join_checks names of a statement run again in the order written after
+// it ran out of memory in the copy's join order (sqlsandbox oomretry.go).
+const (
+	pgOOMRetryOK     = "oom_retry_written_order_ok"
+	pgOOMRetryFailed = "oom_retry_written_order_failed"
+)
+
+// pgOOMRetryOutcome is the join_checks name of what a run of the copy says
+// of its retry in the order written, "" when it had none.
+func pgOOMRetryOutcome(res sqlsandbox.Result, err error) string {
+	var qerr *sqlsandbox.QueryError
+	switch {
+	case err == nil && res.WrittenOrderRetry == sqlsandbox.WrittenOrderRetryOK:
+		return pgOOMRetryOK
+	case errors.As(err, &qerr) && qerr.WrittenOrderRetry == sqlsandbox.WrittenOrderRetryFailed:
+		return pgOOMRetryFailed
+	}
+	return ""
+}
+
+// stashOOMRetry keeps a run's retry outcome until the statement's side is
+// known; every run of a statement replaces it, so a Describe's does not
+// outlive the statement's own.
+func (c *pgConnAges) stashOOMRetry(outcome string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.pendingOOMRetry = outcome
+	c.mu.Unlock()
+}
+
+// countJoinCheck counts one join_checks name for server id, whichever side
+// answered.
+func (r *pgRouteStats) countJoinCheck(id, name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t := r.perServer[id]
+	if t == nil {
+		t = &pgRouteTally{reasons: map[string]uint64{}, answers: map[string]*pgRouteAnswers{}}
+		r.perServer[id] = t
+	}
+	if t.joinChecks == nil {
+		t.joinChecks = map[string]uint64{}
+	}
+	t.joinChecks[name]++
 }
 
 // doc is the status document now: the counts, then each server's mode,
