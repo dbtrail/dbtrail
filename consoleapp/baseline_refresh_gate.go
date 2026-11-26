@@ -205,6 +205,7 @@ func minRetainForTableDeltas(interval time.Duration) (must, comfortable time.Dur
 func (r coverageRule) floorHolds(liveFloor, now time.Time) bool {
 	return r.shared().FloorHolds(liveFloor, now)
 }
+
 // readLiveFloor reads the oldest hour the index's live partitions still hold,
 // or why it could not; a package variable so the refresh cycle's use of it can
 // be driven without an index.
