@@ -205,8 +205,21 @@ func TestSettleWrittenOrder(t *testing.T) {
 	if got := s.copyFallback(err, freeError(err, s.logger)); got != ReasonCopyRefusedAfterWrittenOrder {
 		t.Errorf("sent to the source as %q", got)
 	}
-	// Any other error, a time-out among them: kept, and that error.
-	for _, other := range []error{&sqlsandbox.QueryError{Message: "Binder Error: x"}, &sqlsandbox.TimeoutError{}, context.Canceled} {
+	// Out of the copy's time in the order written: forgotten too, and sent
+	// to the source as the retry's time-out was before this memory.
+	s, key = remembered()
+	err = s.settleWrittenOrder("SELECT n FROM t", key, true, sqlsandbox.Result{}, &sqlsandbox.TimeoutError{Limit: time.Minute})
+	if !errors.As(err, &qe) || qe.WrittenOrderRetry != sqlsandbox.WrittenOrderRetryFailed || !strings.Contains(qe.Message, "ran out of time") {
+		t.Errorf("out of time in the order written: %#v", err)
+	}
+	if s.bound.WrittenOrders.has(key) || s.writtenOrder != WrittenOrderForgotten {
+		t.Errorf("out of time: remembered %v, note %q", s.bound.WrittenOrders.has(key), s.writtenOrder)
+	}
+	if got := s.copyFallback(err, freeError(err, s.logger)); got != ReasonCopyRefusedAfterWrittenOrder {
+		t.Errorf("out of time: sent to the source as %q", got)
+	}
+	// Any other error, a cancel among them: kept, and that error.
+	for _, other := range []error{&sqlsandbox.QueryError{Message: "Binder Error: x"}, context.Canceled, &sqlsandbox.QueryError{Message: "Out of Memory Error: x"}} {
 		s, key = remembered()
 		if got := s.settleWrittenOrder("SELECT n FROM t", key, true, sqlsandbox.Result{}, other); got != other || !s.bound.WrittenOrders.has(key) || s.writtenOrder != WrittenOrderRemembered {
 			t.Errorf("%v: %v, remembered %v, note %q", other, got, s.bound.WrittenOrders.has(key), s.writtenOrder)
@@ -233,8 +246,9 @@ func TestStartInWrittenOrder(t *testing.T) {
 // statement whose shape runs out of memory in the copy's join order: in that
 // order it answers after its own retry (WrittenOrderRetryOK), and run in the
 // order written (RunOptions.KeepJoinOrder) it answers at once, except LIMIT
-// 9, which runs out of memory in both orders, and LIMIT 8, which fails with
-// another error when run in the order written. Its source cannot be reached
+// 9, which runs out of memory in both orders, LIMIT 8, which fails with
+// another error when run in the order written, and LIMIT 7, which runs out
+// of time in the order written. Its source cannot be reached
 // (a statement that gets 08001 was sent there).
 type rememberLogin struct {
 	orders *WrittenOrders
@@ -257,6 +271,8 @@ func (l *rememberLogin) run(_ context.Context, st string, opts RunOptions) (sqls
 		return sqlsandbox.Result{}, &sqlsandbox.QueryError{Message: oom, WrittenOrderRetry: sqlsandbox.WrittenOrderRetrySkippedForcedOrder}
 	case strings.Contains(st, "LIMIT 9"):
 		return sqlsandbox.Result{}, &sqlsandbox.QueryError{Message: oom + " It ran out of memory in the order written too.", WrittenOrderRetry: sqlsandbox.WrittenOrderRetryFailed}
+	case strings.Contains(st, "LIMIT 7") && opts.KeepJoinOrder:
+		return sqlsandbox.Result{}, &sqlsandbox.TimeoutError{Limit: time.Minute}
 	case strings.Contains(st, "LIMIT 8") && opts.KeepJoinOrder:
 		return sqlsandbox.Result{}, &sqlsandbox.QueryError{Message: "Binder Error: x"}
 	}
@@ -363,6 +379,10 @@ func TestRoute_rememberedWrittenOrder(t *testing.T) {
 			outcome{side: RouteCopy, reason: ReasonAnswersTheSame, written: WrittenOrderRemembered, keepOrder: true, runs: runs(1)})
 		clock.at = clock.at.Add(DefaultWrittenOrderRemember)
 		check("past its time: the copy's own order again", do("SELECT n FROM t LIMIT 6"),
+			outcome{side: RouteCopy, reason: ReasonAnswersTheSame, retry: sqlsandbox.WrittenOrderRetryOK, runs: runs(1)})
+		check("out of time in the order written: forgotten, to the source", do("SELECT n FROM t LIMIT 7"),
+			outcome{code: "08001", side: RouteSource, reason: ReasonCopyRefusedAfterWrittenOrder, written: WrittenOrderForgotten, keepOrder: true, runs: runs(1)})
+		check("after a time-out: the copy's own order again", do("SELECT n FROM t LIMIT 1"),
 			outcome{side: RouteCopy, reason: ReasonAnswersTheSame, retry: sqlsandbox.WrittenOrderRetryOK, runs: runs(1)})
 	}
 }

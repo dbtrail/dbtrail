@@ -38,10 +38,11 @@ import (
 // that ran out of memory; the retry runs without it too. KeepJoinOrder turns
 // off the engine's join order optimizer and nothing else, so the answer is
 // the same, only its plan changes. When a remembered shape runs out of
-// memory in the order written, it is forgotten and the statement goes to
-// the source as one that ran out of memory in both orders
-// (copy_refused_after_written_order): it is not run a third time. Any other
-// error leaves it remembered, and is answered as that error, as before.
+// memory or out of the copy's time in the order written, it is forgotten and
+// the statement goes to the source as one that ran out of memory in both
+// orders (copy_refused_after_written_order), as the retry's did: it is not
+// run a third time. Any other error leaves it remembered, and is answered as
+// that error, as before.
 //
 // Each shape is kept for WrittenOrderRemember from when it was learned. Using
 // it does not make that longer, so a shape is tried in the copy's own order
@@ -174,8 +175,8 @@ func startInWrittenOrder(opts *RunOptions) {
 // key ("" for none) and remembered whether it ran in the order written for
 // it, and returns the error to answer with. It remembers a shape whose retry
 // in the order written answered, and forgets a remembered one that ran out
-// of memory in the order written, whose error it then marks as one that ran
-// out of memory in both orders.
+// of memory or time in the order written, whose error it then marks as one
+// that ran out of memory in both orders.
 func (s *session) settleWrittenOrder(text, key string, remembered bool, res sqlsandbox.Result, err error) error {
 	if key == "" {
 		return err
@@ -193,16 +194,27 @@ func (s *session) settleWrittenOrder(text, key string, remembered bool, res sqls
 	s.oomRetry = ""
 	s.writtenOrder = WrittenOrderRemembered
 	var qe *sqlsandbox.QueryError
-	if !errors.As(err, &qe) || qe.WrittenOrderRetry != sqlsandbox.WrittenOrderRetrySkippedForcedOrder {
+	var timedOut *sqlsandbox.TimeoutError
+	var marked sqlsandbox.QueryError
+	switch {
+	case errors.As(err, &qe) && qe.WrittenOrderRetry == sqlsandbox.WrittenOrderRetrySkippedForcedOrder:
+		marked = *qe
+		marked.Message += " It ran with its joins in the order written, which this statement shape needed before, and ran out of memory in that order too."
+	case errors.As(err, &timedOut):
+		// Out of the copy's time in the order written: what the retry's own
+		// time-out was before this memory (oomretry.go), which sends the
+		// statement to the source, and not a statement_timeout of the
+		// client's (a cancel, never this error).
+		marked = sqlsandbox.QueryError{Message: timedOut.Error() + " It ran with its joins in the order written, which this statement shape needed before because it ran out of memory in the copy's own order, and ran out of time in that order."}
+	default:
 		return err
 	}
 	s.writtenOrder = WrittenOrderForgotten
 	if w.forget(key) {
-		s.logger.Info("pgshim: a statement shape remembered as needing the order written ran out of memory in that order too; it is forgotten, and this statement goes on as one that ran out of memory in both orders",
-			"shape", Fingerprint(text))
+		line, _, _ := strings.Cut(err.Error(), "\n")
+		s.logger.Info("pgshim: a statement shape remembered as needing the order written ran out of memory or time in that order; it is forgotten, and this statement goes on as one that ran out of memory in both orders",
+			"shape", Fingerprint(text), "error", line)
 	}
-	marked := *qe
 	marked.WrittenOrderRetry = sqlsandbox.WrittenOrderRetryFailed
-	marked.Message += " It ran with its joins in the order written, which this statement shape needed before, and ran out of memory in that order too."
 	return &marked
 }

@@ -83,8 +83,8 @@ type pgRouterServerNumbers struct {
 	// memory of shapes that needed the order written did (pgshim
 	// writtenorder.go): written_order_remembered (the statement ran in the
 	// order written from the start, with no retry and no join check) and,
-	// among those, written_order_forgotten (it ran out of memory in that
-	// order too: the shape was forgotten, and under Reasons it is
+	// among those, written_order_forgotten (it ran out of memory or time in
+	// that order: the shape was forgotten, and under Reasons it is
 	// copy_refused_after_written_order when the source answered). Absent
 	// until one is counted.
 	JoinChecks map[string]uint64 `json:"join_checks,omitempty"`

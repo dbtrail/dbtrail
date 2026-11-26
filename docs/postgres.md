@@ -2332,11 +2332,13 @@ again, a cancel, a time-out or any other error leaves the memory as it was.
 The answer does not change, only the plan: the order written turns off the
 engine's join order optimizer and nothing else. A remembered statement skips
 the join check, which plans the statement in the engine's own order, the one
-that ran out of memory; the second run skips it too. When a remembered
-statement runs out of memory in the order written as well, the shape is
+that ran out of memory; the second run skips it too, so a remembered shape
+is never refused as `join_too_big`. When a remembered statement runs out of
+memory or out of the copy's time in the order written, the shape is
 forgotten and the statement goes to the source as
-`copy_refused_after_written_order`, without a third run; any other error is
-answered as that error, and the shape stays remembered. Each shape is
+`copy_refused_after_written_order`, without a third run, as when the second
+run fails; any other error is answered as that error, and the shape stays
+remembered. Each shape is
 remembered for 24 hours from when it was learned, however often it is used,
 so the engine's own order is tried again once a day: as the data changes it
 may fit again, and it is usually the faster one when it does. A new snapshot
@@ -2345,10 +2347,11 @@ order is that it has no statistics of the copy's columns, which a new
 snapshot does not give it. A server remembers at most 4,096 shapes, after
 which it forgets them all and learns them again. The memory is per server,
 shared by all its connections, kept in memory only: a restart of the port
-forgets it. `/status` counts it under `join_checks`, on either side:
+forgets it (opening the port again after a password change does not).
+`/status` counts it under `join_checks`, on either side:
 `written_order_remembered` for each statement run in the order written from
 the start, and, among those, `written_order_forgotten` for one that ran out of
-memory there too. The log has one `INFO` line when a shape is learned and one
+memory or time there. The log has one `INFO` line when a shape is learned and one
 when it is forgotten, not one per statement.
 
 **The copy does not cache a subplan a statement reads twice.** On this port

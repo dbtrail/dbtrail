@@ -645,8 +645,8 @@ type pgRouterPort struct {
 	// (pgrouter_fastlane.go); nil keeps none.
 	lanes *pgCopyLanes
 	// writtenOrders is each server's statement shapes that needed the order
-	// written on the copy (pgshim writtenorder.go); nil: the port's login
-	// makes its own.
+	// written on the copy (pgshim writtenorder.go); nil: serve makes one,
+	// kept however many times the port is opened again.
 	writtenOrders *pgWrittenOrders
 
 	mu    sync.Mutex
@@ -712,6 +712,12 @@ func (p *pgRouterPort) serve(ctx context.Context) error {
 	if sources == nil {
 		sources = newPGSourceSlots(defaultPGRouterMaxSourceConns)
 	}
+	// The shapes that needed the order written, kept while the port is
+	// opened again, as the budget and the source slots are.
+	orders := p.writtenOrders
+	if orders == nil {
+		orders = &pgWrittenOrders{}
+	}
 	opened, waiting, saidRebind := false, false, false
 	for ctx.Err() == nil {
 		if !p.open() {
@@ -750,7 +756,7 @@ func (p *pgRouterPort) serve(ctx context.Context) error {
 		p.bound, p.stop, p.passwords = ln.Addr().String(), cancel, passwords
 		p.mu.Unlock()
 		slog.Info("PostgreSQL router: the port is open", "listen", ln.Addr().String())
-		err = servePGPortRouted(child, p.srv, ln, p.maxConns, budget, p.tls, sources, p.routes, p.cost, p.lanes, p.writtenOrders)
+		err = servePGPortRouted(child, p.srv, ln, p.maxConns, budget, p.tls, sources, p.routes, p.cost, p.lanes, orders)
 		cancel()
 		p.mu.Lock()
 		p.bound, p.stop, p.passwords = "", nil, nil
