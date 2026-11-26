@@ -105,7 +105,17 @@ func TestOracleTailKeyTypes(t *testing.T) {
 			if res.Applied["tail"] == 0 {
 				t.Fatalf("no tail step applied in %d steps: %v", steps, res.Applied)
 			}
-			t.Logf("seed %d: %d steps, %d ops, applied %v, chains up to %d files, in %s", seed, res.Steps, res.Ops, res.Applied, chains.longest, res.Wall.Round(time.Millisecond))
+			// Not only "no read went wrong": a read laid a tail over every
+			// table of the new key types, so each was compared WITH one.
+			for _, tb := range oracle.KeyTypeTables() {
+				if _, ok := chains.last[tb.Name]; !ok {
+					t.Errorf("%s: no read laid a tail over it in %d steps (applied %v)", tb.Name, res.Steps, res.Applied)
+				}
+			}
+			if _, ok := chains.last["t_text"]; ok {
+				t.Error("t_text, keyed by text under the default collation, was read with a tail")
+			}
+			t.Logf("seed %d: %d steps, %d ops, applied %v, chains up to %d files, tails over %d tables, in %s", seed, res.Steps, res.Ops, res.Applied, chains.longest, len(chains.last), res.Wall.Round(time.Millisecond))
 		})
 	}
 }
