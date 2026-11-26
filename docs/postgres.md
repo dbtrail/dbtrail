@@ -2251,8 +2251,8 @@ the joined columns (`pg_stats.n_distinct`). The engine's own row estimates
 fall far short over a table read with its recent changes (fresh mode) or
 with rows deleted since its snapshot (stock, 20 million rows, estimated at
 844,417), so the check takes those back to the table's rows first. A join
-estimated at more than 100 times its larger input (a cross product: also more
-than 10 billion rows) has the statement planned again in the order written;
+estimated at more than 100 times its larger input and at more than 3 billion
+rows (a cross product: more than 10 billion rows) has the statement planned again in the order written;
 it runs in that order when that plan has no such join, and when it has one
 too, the copy does not run it at all and the source answers it at once
 (`join_too_big` in `/status`). The counts are read from the source as the

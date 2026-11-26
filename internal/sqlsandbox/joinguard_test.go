@@ -155,6 +155,7 @@ func TestPlanJoinDanger_edges(t *testing.T) {
 		"w_id": 200, "o_w_id": 200, "s_w_id": 200, "c_w_id": 200,
 		"i_id": 100000, "s_i_id": 100000, "id": 20000000, "o_id": 3000,
 		"mixed_case": 200, "quoted col": 200, "amount": 1,
+		"no_w_id": 200, "no_d_id": 10, "c_d_id": 10,
 	}
 	big, mid := "20000000", "240698"
 	for _, tc := range []struct {
@@ -168,7 +169,20 @@ func TestPlanJoinDanger_edges(t *testing.T) {
 		// Every amount is 1, joined to a key: each row meets one, whatever
 		// few values the column has.
 		{"a column of one value joined to a key", planOf(t, joinNode("HASH_JOIN", "INNER", "amount = id", "20000", "20000")), false},
-		{"a column of few values joined to a column of few values", planOf(t, joinNode("HASH_JOIN", "INNER", "amount = s_w_id", "50000", "50000")), true},
+		{"a column of few values joined to a column of few values", planOf(t, joinNode("HASH_JOIN", "INNER", "amount = s_w_id", "2000000", "2000000")), true},
+		// Past 100 times its larger side but under joinFloor: 1.25e7 rows,
+		// which DuckDB streams through.
+		{"the same at 50,000 rows a side: under the floor", planOf(t, joinNode("HASH_JOIN", "INNER", "amount = s_w_id", "50000", "50000")), false},
+		// Q3 as DuckDB ordered it on a live copy: new_order with the
+		// filtered customers on warehouse and district, 1.0e9 rows. It
+		// answers in about 6 s on the copy in that order.
+		{"Q3's order on a live copy: under the floor", planOf(t, joinNode("HASH_JOIN", "INNER", []any{"no_w_id = c_w_id", "no_d_id = c_d_id"}, "1686128", "1237764")), false},
+		// The same join ten times larger on each side: past the floor, so
+		// the case above is the floor's doing, not a missing statistic.
+		{"Q3's join ten times larger a side: flagged", planOf(t, joinNode("HASH_JOIN", "INNER", []any{"no_w_id = c_w_id", "no_d_id = c_d_id"}, "16861280", "12377640")), true},
+		// The floor's edges: 200 values, 1e9 rows a side less or more.
+		{"just under the floor", planOf(t, joinNode("HASH_JOIN", "INNER", "s_w_id = c_w_id", "999000", "600000")), false},
+		{"just over the floor", planOf(t, joinNode("HASH_JOIN", "INNER", "s_w_id = c_w_id", "1001000", "600000")), true},
 		{"two equalities whose values multiply past the larger side", planOf(t, joinNode("HASH_JOIN", "INNER", []any{"s_w_id = c_w_id", "s_i_id = i_id"}, big, mid)), false},
 		{"no equality, only a range", planOf(t, joinNode("NESTED_LOOP_JOIN", "INNER", "s_w_id < c_w_id", big, mid)), false},
 		{"an equality of an expression: the copy's MOD", planOf(t, joinNode("HASH_JOIN", "INNER", "mod((s_w_id * s_i_id), 10000) = c_w_id", big, mid)), false},
