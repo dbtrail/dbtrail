@@ -579,6 +579,8 @@ type costLogin struct {
 	// statement asked.
 	olderThanSeen atomic.Bool
 	noOlderTails  []bool
+	// olderKind, when set, is Binding.OlderKind.
+	olderKind func(note string) string
 	// fastLane records RunOptions.FastLane of each statement the copy was
 	// given (fastlane.go).
 	fastLane []bool
@@ -750,6 +752,7 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 		b.CopyWait = l.wait
 	}
 	b.NotCaptured = l.notCaptured
+	b.OlderKind = l.olderKind
 	return b, nil
 }
 

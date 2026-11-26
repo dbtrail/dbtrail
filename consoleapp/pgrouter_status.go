@@ -89,6 +89,14 @@ type pgRouterServerNumbers struct {
 	// Reasons it is copy_refused_after_written_order when the source
 	// answered). Absent until one is counted.
 	JoinChecks map[string]uint64 `json:"join_checks,omitempty"`
+	// HeavyOlderOnCopy counts the heavy statements the copy answered with
+	// older data in fresh mode, where a light one would have gone to the
+	// source (#3116), by kind: tails_not_ready (from the snapshot alone, a
+	// table's newest captured changes not ready) and older_than_earlier
+	// (with captured changes older than an earlier answer of the copy on
+	// the connection read). Each is also counted under Reasons by the side
+	// that answered it. Absent until one is counted.
+	HeavyOlderOnCopy map[string]uint64 `json:"heavy_older_on_copy,omitempty"`
 	// Answers is what each side ("copy", "source", "refused") finished:
 	// counts, errors and times.
 	Answers map[string]console.RouteAnswers `json:"answers"`
@@ -170,6 +178,7 @@ type pgRouteTally struct {
 	copy, source, refused uint64
 	reasons               map[string]uint64
 	joinChecks            map[string]uint64
+	heavyOlder            map[string]uint64
 	answers               map[string]*pgRouteAnswers
 	rows                  map[pgShapeKey]*pgShapeRow
 	notCounted            uint64
@@ -319,6 +328,12 @@ func (r *pgRouteStats) note(id string, n pgshim.RouteNote) {
 		if n.WrittenOrder == pgshim.WrittenOrderForgotten {
 			t.joinChecks[pgWrittenOrderForgotten]++
 		}
+	}
+	if n.HeavyOlder != "" {
+		if t.heavyOlder == nil {
+			t.heavyOlder = map[string]uint64{}
+		}
+		t.heavyOlder[n.HeavyOlder]++
 	}
 	a := t.answers[n.Side]
 	if a == nil {
@@ -491,7 +506,7 @@ func (r *pgRouteStats) counts(listen string) pgRouterStatusDoc {
 		Servers: map[string]pgRouterServerNumbers{}}
 	for id, t := range r.perServer {
 		n := pgRouterServerNumbers{Copy: t.copy, Source: t.source, Refused: t.refused,
-			Reasons: maps.Clone(t.reasons), JoinChecks: maps.Clone(t.joinChecks), Answers: map[string]console.RouteAnswers{}, ForwardingOff: t.barred}
+			Reasons: maps.Clone(t.reasons), JoinChecks: maps.Clone(t.joinChecks), HeavyOlderOnCopy: maps.Clone(t.heavyOlder), Answers: map[string]console.RouteAnswers{}, ForwardingOff: t.barred}
 		switch {
 		case t.ageWhy != "":
 			n.DataAgeUnknownReason = t.ageWhy

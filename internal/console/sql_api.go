@@ -1440,6 +1440,11 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 				parent.TailsRan = true
 				allTailed = tailsSayTheInstant(statement, allTailed)
 			}
+			if missing == "" && tails != nil && pgPortStatement(ctx) {
+				// The PostgreSQL port's statement read without tails for
+				// no reason a client is told (#3116): one now.
+				missing = pgTailsUnsaid(tailsKnown, tailTables, readTables, allTailed, statement)
+			}
 			if missing != "" {
 				if ctx.Err() != nil {
 					// The client left, or the statement's time ran out,

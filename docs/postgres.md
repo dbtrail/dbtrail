@@ -1257,9 +1257,25 @@ listener, its own workers, its own memory.
   exception is the rule below for a table the source already answered the
   connection about. On a connection with nowhere else to send the statement
   (a server that hides tables or columns sends nothing to its source) the
-  copy answers every statement that way. A NOTICE comes with the answer;
-  drivers that drop notices, or `client_min_messages` above `notice`, hide
-  it. The recent changes can be missing in these cases:
+  copy answers every statement that way, and so it does for a light one
+  the source cannot take right now: the source cannot be reached
+  (`source_unreachable`), or the capture account's gate keeps the statement
+  from it (`capture_gate`). A NOTICE comes with the answer; drivers that
+  drop notices, or `client_min_messages` above `notice`, hide it. `/status`
+  counts the heavy statements answered this way under
+  `heavy_older_on_copy`, by kind: `tails_not_ready` (from the snapshot
+  alone) and `older_than_earlier` (older than an earlier answer on the
+  connection); the router's log says it at info level once a minute, and
+  says the same of the light statements sent to the source for it, which
+  `/status` counts under `copy_too_old`. A table that cannot have recent
+  changes laid over it at all (capture does not record it, its key is of a
+  type they do not take, they stopped over their memory budget until the
+  next snapshot), and a statement whose tables cannot be told from its text
+  (a name with a letter outside ASCII, say), are treated the same way: the
+  source answers a light statement, and a heavy one is answered from the
+  snapshot with a NOTICE that says why. The MySQL port answers those from
+  the snapshot with nothing said. The recent changes can be missing in
+  these cases:
   - **Right after a snapshot update**, each table's recent changes are
     gathered again from the new snapshot on, which takes a few seconds; until
     then light statements on that table go to the source.

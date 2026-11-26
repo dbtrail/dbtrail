@@ -127,6 +127,11 @@ type Binding struct {
 	// copy (copyOlderThanSource); nil: the copy's answers are given as they
 	// are.
 	RunAge func() CopyAge
+	// OlderKind, when set, says what kind of older data a note of the
+	// copy's answer says it holds (console.PGOlderKind), "" for none: a
+	// heavy statement answered with older data is counted under it in the
+	// port's status (RouteNote.HeavyOlder, #3116).
+	OlderKind func(note string) string
 	// CopyWait, when set, waits within ctx until the copy holds every commit
 	// of the source before lsn, a WAL position, and says whether it does, or
 	// why not (waitForCopy). nil: nothing waits, and RunAge alone decides.
@@ -464,7 +469,10 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		res, err = s.bound.Run(run, text, opts)
 		var changed *sqlsandbox.MayHaveChangedError
 		if (opts.NeedTails || opts.NoOlderTails) && errors.As(err, &changed) {
-			s.logger.Debug("pgshim: the copy's recent changes for a statement were not ready, or older than an earlier answer of the copy on this connection; it did not run there, and the source answers it", "why", changed.Reason)
+			// Said at info once a minute for the process (#3116): every
+			// such statement costs the source a run the copy was meant to
+			// take, and /status counts them only as copy_too_old.
+			logEveryMinute(s.logger, "copy_too_old", "pgshim: a statement went to the source in fresh mode: the copy's recent changes for it were not ready, or older than an earlier answer of the copy on its connection (said once a minute)", "why", changed.Reason)
 		}
 		s.joinCheck = rememberedJoinCheck(remembered, s.noteJoinCheck(res, err, opts.JoinNDV != nil, want))
 		s.oomRetry = sqlsandbox.WrittenOrderRetryOf(res, err)
@@ -548,10 +556,14 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		return nil, nil, nil, "", refusal
 	}
 	if res.Note != "" {
-		if s.costHeavy() {
+		if s.costHeavy() && s.bound.OlderKind != nil {
 			// The copy's note is about how old what it read is: a light
 			// statement would have gone to the source for it (freshRefusals).
-			s.logger.Debug("pgshim: answered by the copy with older data, because the statement is expensive on the source", "note", res.Note)
+			// Counted in /status, said at info once a minute (#3116).
+			if kind := s.bound.OlderKind(res.Note); kind != "" {
+				s.heavyOlder = kind
+				logEveryMinute(s.logger, "heavy_older_on_copy", "pgshim: a heavy statement was answered by the copy with older data, where a light one would go to the source (said once a minute)", "kind", kind, "note", res.Note)
+			}
 		}
 		s.notice(res.Note)
 	}

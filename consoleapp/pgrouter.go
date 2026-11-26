@@ -1200,6 +1200,9 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		// names resolved where PostgreSQL resolves them, and a column the
 		// statement did not name headed as PostgreSQL heads it (#2803).
 		bound.Answered = copySQL.NoteAnswered
+		// The kind of older data a heavy statement's answer holds, for
+		// /status (#3116).
+		bound.OlderKind = console.PGOlderKind
 		// How far the copy's last answer on this connection reaches, so one
 		// older than what the source already answered it is not given
 		// (#2985): the instant of its tails when every table it read had
@@ -1345,6 +1348,11 @@ func pgRunContext(ctx context.Context, opts pgshim.RunOptions) context.Context {
 	}
 	if opts.NoOlderTails {
 		ctx = console.WithPGNoOlderTails(ctx)
+	}
+	if !opts.Probe {
+		// An answer to the client: never read without its recent changes
+		// with nothing said (#3116).
+		ctx = console.WithPGPortStatement(ctx)
 	}
 	// The char(n) columns the screen took as read without their padding,
 	// checked against the snapshot the statement reads (#3219).

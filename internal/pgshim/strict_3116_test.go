@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +21,14 @@ const (
 	olderThanSeenReason = "the copy's newest version is older than an earlier answer of the copy on this connection"
 	olderThanSeenNote   = "Answered from captured changes older than an earlier answer of the copy on this connection: the copy's newest version is behind it."
 )
+
+// strictOlderKind is the host's Binding.OlderKind for the fake copy's note.
+func strictOlderKind(note string) string {
+	if strings.HasPrefix(note, "Answered from captured changes older than an earlier answer") {
+		return "older_than_earlier"
+	}
+	return ""
+}
 
 // strictConn is a connection to l's port that keeps the notices it is sent.
 func strictConn(t *testing.T, ctx context.Context, l *costLogin) (*pgconn.PgConn, func() []string) {
@@ -96,6 +105,9 @@ func strictPorts(t *testing.T) []struct {
 	heavy := newTablesPort(t)
 	light := newTablesPort(t)
 	light.l.cost = &CostPolicy{}
+	for _, p := range []*tablesPort{heavy, light} {
+		p.l.olderKind = strictOlderKind
+	}
 	return []struct {
 		name  string
 		heavy bool
@@ -128,6 +140,9 @@ func TestStrict_3116_olderThanAnEarlierAnswer(t *testing.T) {
 					t.Errorf("the copy was asked NoOlderTails=%v", !port.heavy)
 				}
 				n := notices()
+				if want := map[bool]string{true: "older_than_earlier", false: ""}[port.heavy]; p.l.last().HeavyOlder != want {
+					t.Errorf("counted as heavy and older %q, want %q", p.l.last().HeavyOlder, want)
+				}
 				if port.heavy {
 					if got != tablesOnCopy {
 						t.Errorf("%+v, want the copy's %+v", got, tablesOnCopy)
@@ -347,4 +362,75 @@ func TestStrict_3116_theSourcesEarlierAnswerStillHoldsBack(t *testing.T) {
 	if d := p.l.runs.Load() - runs; d != 1 {
 		t.Errorf("the copy ran %d statements, want 1 (held back after it ran)", d)
 	}
+}
+
+// A light statement the copy answers because nothing can be sent to the
+// source for it stays on the copy with its notice, in both cases: refused
+// for its recent changes, it would reach a source that refuses it or is
+// down, and the client would get an error where the copy answers (#3116
+// review). The capture account's gate keeps a statement over a table the
+// copy does not list from the source (capture_gate); a source that cannot
+// be reached leaves the copy alone (source_unreachable).
+func TestStrict_3116_aStatementThatCannotReachTheSourceStaysOnTheCopy(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	gate := newTablesPort(t)
+	gate.l.captureAccount = true
+	gate.l.names = func() [][2]string { return [][2]string{{"public", "big"}} }
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	t.Cleanup(func() { _ = ln.Close() })
+	down := &costLogin{src: &fakeSource{addr: ln.Addr().String()}}
+	for _, tc := range []struct {
+		name, stmt, reason string
+		l                  *costLogin
+		protocols          []string
+	}{
+		{"capture gate", "SELECT n FROM t WHERE id = 1", ReasonCaptureGate, gate.l, strictProtocols},
+		{"source unreachable", "SELECT sum(n) FROM big", ReasonSourceUnreachable, down, []string{"simple"}},
+	} {
+		for _, how := range tc.protocols {
+			for _, knob := range []string{"older", "not ready"} {
+				t.Run(tc.name+"/"+how+"/"+knob, func(t *testing.T) {
+					c, notices := strictConn(t, ctx, tc.l)
+					set := &tc.l.olderThanSeen
+					if knob == "not ready" {
+						set = &tc.l.tailsPending
+					}
+					set.Store(true)
+					got := strictRun(ctx, c, tc.l, how, tc.stmt)
+					set.Store(false)
+					if got.answer != "7" || got.code != "" || got.side != RouteCopy || got.reason != tc.reason {
+						t.Errorf("%+v, want the copy's 7 under %s", got, tc.reason)
+					}
+					if tc.l.lastNeedTails() || tc.l.lastNoOlderTails() {
+						t.Error("the copy was told to refuse a statement nothing else can answer")
+					}
+					if n := notices(); knob == "older" && !slicesContain(n, "older than an earlier answer of the copy on this connection") {
+						t.Errorf("notices %q, want the copy's note", n)
+					}
+				})
+			}
+		}
+	}
+}
+
+func slicesContain(notices []string, part string) bool {
+	for _, n := range notices {
+		if strings.Contains(n, part) {
+			return true
+		}
+	}
+	return false
 }
