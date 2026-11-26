@@ -418,7 +418,7 @@ func TestTailKeyValues_byKind(t *testing.T) {
 	}{
 		{"0xFFFE", []keyCol{bin}, "[[255 254]]"},
 		{`a\|b`, []keyCol{bin}, "[[97 124 98]]"},
-		{"", []keyCol{bin}, ""}, // the empty value
+		{"", []keyCol{bin}, ""},   // the empty value
 		{"0x", []keyCol{bin}, ""}, // hex of nothing: the empty value again
 		{"0xZZ", []keyCol{bin}, ""},
 		{"0xFF", []keyCol{fixed}, ""}, // shorter than BINARY(2)

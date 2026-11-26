@@ -103,7 +103,7 @@ const (
 var tailKeyTypes = map[string]keyKind{
 	"tinyint": keyInteger, "smallint": keyInteger, "mediumint": keyInteger, "int": keyInteger, "integer": keyInteger, "bigint": keyInteger,
 	"decimal": keyDecimal, "numeric": keyDecimal,
-	"date":     keyDate,
+	"date":      keyDate,
 	"datetime":  keyDatetime,
 	"varbinary": keyBinary,
 	"binary":    keyFixedBinary,

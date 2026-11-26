@@ -290,7 +290,7 @@ func RefusedKeyTables() []Table {
 			// The source prints the zeros; the view reads the number. Both
 			// as the number: CAST(x + 0) is MySQL's, without the padding.
 			Render: map[string]Render{"x": {Source: "CAST(%[1]s + 0 AS CHAR)", View: "CAST(%[1]s AS VARCHAR)"}},
-			key: func(k int) []string { return []string{strconv.FormatFloat(float64(k)*1.25+0.5, 'f', -1, 64)} },
+			key:    func(k int) []string { return []string{strconv.FormatFloat(float64(k)*1.25+0.5, 'f', -1, 64)} },
 		},
 	}
 }
