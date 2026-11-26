@@ -948,8 +948,12 @@ func sqlWithMemoryHint(err error, memory string) error {
 	if !errors.As(err, &qerr) || !strings.Contains(qerr.Message, "Out of Memory Error") {
 		return err
 	}
-	return &sqlsandbox.QueryError{Message: qerr.Message + " SQL on the copy runs with " + sqlMemoryWords(memory) + " of memory on the host that captures changes, " +
-		"for quick looks. For heavier reads use your own DuckDB (the web interface has the file for it: Snapshots, Download, Use it where it lives)."}
+	// A copy, so what the sandbox says of the error beside its text (its
+	// retry in the order written) reaches the PostgreSQL port.
+	hinted := *qerr
+	hinted.Message = qerr.Message + " SQL on the copy runs with " + sqlMemoryWords(memory) + " of memory on the host that captures changes, " +
+		"for quick looks. For heavier reads use your own DuckDB (the web interface has the file for it: Snapshots, Download, Use it where it lives)."
+	return &hinted
 }
 
 // sqlOutcome is a statement that ran.
@@ -1612,7 +1616,10 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			}
 		}
 		if in.Hidden != nil && qerr != nil && sqlHiddenNameMissing.MatchString(qerr.Message) {
-			return sqlOutcome{}, &sqlsandbox.QueryError{Message: qerr.Message + sqlHiddenHint}
+			// A copy, so what the sandbox says beside the text is kept.
+			hinted := *qerr
+			hinted.Message = qerr.Message + sqlHiddenHint
+			return sqlOutcome{}, &hinted
 		}
 		return sqlOutcome{}, sqlWithMemoryHint(err, memory)
 	}

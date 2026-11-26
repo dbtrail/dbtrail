@@ -283,6 +283,14 @@ type Session struct {
 	// A pointer, so Session stays comparable (its callers compare sessions
 	// with ==): two sessions are the same only with the same counts.
 	JoinNDV *JoinCounts
+	// RetryOutOfMemoryInWrittenOrder runs a statement that failed with the
+	// engine's out of memory error in the copy's own join order once more
+	// in the order written, in the same slot and within what is left of its
+	// time, before the error is returned (oomretry.go): Result says so with
+	// WrittenOrderRetry, and an error of both attempts is the first's
+	// QueryError with WrittenOrderRetry set. Only the PostgreSQL port sets
+	// it; the MySQL port and the SQL page get the engine's error as before.
+	RetryOutOfMemoryInWrittenOrder bool
 	// SkipCommonSubplan runs the statement with DuckDB's common_subplan
 	// optimizer off. That optimizer materializes a subplan a statement reads
 	// twice; over a view of the copy it wrote the whole view to disk: the
@@ -482,6 +490,10 @@ type Result struct {
 	// would without it.
 	JoinOrderWritten bool   `json:"-"`
 	JoinCheckSkipped string `json:"-"`
+	// WrittenOrderRetry is WrittenOrderRetryOK when the statement ran out of
+	// memory in the copy's join order and this is its answer in the order
+	// written (Session.RetryOutOfMemoryInWrittenOrder), "" otherwise.
+	WrittenOrderRetry string `json:"-"`
 	// Note is a sentence the caller adds for the reader, set by the parent
 	// and never by the worker (#2210: the answer came from an earlier copy).
 	Note string `json:"-"`
@@ -631,9 +643,29 @@ func (e *BehindSourceError) Error() string { return e.Reason }
 // and failed. Message is DuckDB's own text: a Permission Error for a path
 // outside the copy, an Out of Memory Error past the cap, a Binder Error for
 // an unknown column.
-type QueryError struct{ Message string }
+type QueryError struct {
+	Message string
+	// WrittenOrderRetry is what the retry in the order written
+	// (Session.RetryOutOfMemoryInWrittenOrder) did with an out-of-memory
+	// error: WrittenOrderRetryFailed when the second run ran out of memory
+	// or time too (Message is the first run's, with a sentence that says
+	// so), or one of the WrittenOrderRetrySkipped* names when it was not run
+	// again. "" otherwise.
+	WrittenOrderRetry string
+	// ranWrittenOrder: the join check ran the statement in the order
+	// written, as the worker's answer said, or its stderr when the kernel
+	// stopped it. For writtenOrderRetryWanted.
+	ranWrittenOrder bool
+}
 
 func (e *QueryError) Error() string { return e.Message }
+
+// engineError is the QueryError of a worker's answer whose error is the
+// engine's (errQuery): its text, and the join order it ran in, which the
+// retry in the order written reads (oomretry.go).
+func engineError(out wireResult, spill spillSpec, noSpill error) *QueryError {
+	return &QueryError{Message: spillCapMessage(out.Error.Message, spill, noSpill), ranWrittenOrder: out.JoinOrder == joinOrderWritten}
+}
 
 // TimeoutError: the worker ran past Limits.Timeout and was killed.
 type TimeoutError struct {
@@ -923,6 +955,10 @@ type Runner struct {
 	// afterSpoolDir is a test hook that receives a statement's result-file
 	// folder once it is made, before the job is written.
 	afterSpoolDir func(dir string)
+	// beforeWrittenOrderRetry is a test hook called once a first attempt of
+	// a statement that asked for the retry in the order written failed,
+	// before the retry is decided (oomretry.go).
+	beforeWrittenOrderRetry func()
 }
 
 // New builds a Runner.
@@ -1468,7 +1504,9 @@ func (s *Slot) Run(ctx context.Context, job Job) (Result, error) {
 	}
 	start := time.Now()
 	ran = true
-	res, err := s.r.spawn(ctx, job, job.Limits.withDefaults(s.r.limits))
+	// Run again in the order written, in this slot, when it ran out of
+	// memory in the copy's own (Session.RetryOutOfMemoryInWrittenOrder).
+	res, err := s.r.runWithWrittenOrderRetry(ctx, job, job.Limits.withDefaults(s.r.limits))
 	if err == nil {
 		res.Phases.Total = time.Since(start)
 	}
@@ -1999,7 +2037,9 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 		if w.oomKilled {
 			// The kernel stopped the worker at its own ceiling (#2226): the
 			// statement ran out of memory, the worker did not fail.
-			return Result{}, &QueryError{Message: oomFenceMessage}
+			// The worker said on stderr whether the join check had it run
+			// in the order written (joinOrderWrittenLine).
+			return Result{}, &QueryError{Message: oomFenceMessage, ranWrittenOrder: strings.Contains(w.stderr.text(), joinOrderWrittenLine)}
 		}
 		if waitErr != nil {
 			err = fmt.Errorf("%w (no result: %v)", waitErr, err)
@@ -2013,7 +2053,7 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 		case errRefused:
 			return Result{}, &RefusedError{Reason: out.Error.Message}
 		case errQuery:
-			return Result{}, &QueryError{Message: spillCapMessage(out.Error.Message, spill, noSpill)}
+			return Result{}, engineError(out, spill, noSpill)
 		case errTooLarge:
 			return Result{}, ErrResultTooLarge
 		case errJoinTooBig:

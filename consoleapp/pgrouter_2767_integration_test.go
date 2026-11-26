@@ -128,6 +128,9 @@ type pgPortFixture struct {
 	// statements; otherwise it has one more, kept for them, as the
 	// pg-router does (pgrouter_fastlane.go, pgCopySlots).
 	noFastLane bool
+	// sqlMemory, when set, is each copy worker's memory (the router's
+	// --sql-memory, "<n>MiB").
+	sqlMemory string
 }
 
 func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx pgPortFixture) pgExtEnv {
@@ -207,6 +210,9 @@ func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx
 	}
 	f.savePortFile(t, true, "tok")
 	settings, workers := f.settings(""), 2
+	if fx.sqlMemory != "" {
+		settings.SQLMemory = fx.sqlMemory
+	}
 	if fx.maxWait != 0 {
 		settings.MaxWait = fx.maxWait
 	}

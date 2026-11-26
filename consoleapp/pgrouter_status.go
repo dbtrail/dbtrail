@@ -72,7 +72,14 @@ type pgRouterServerNumbers struct {
 	// JoinChecks counts what the copy's join check did with the statements
 	// the copy answered (pgshim JoinCheck* names: planned, written_order,
 	// no_statistics, could_not_run); one it refused is under Reasons,
-	// join_too_big. Absent until one is counted.
+	// join_too_big. It also counts, on either side, what the retry in the
+	// order written did with a statement that ran out of memory in the
+	// copy's join order: oom_retry_written_order_ok (the copy answered),
+	// _failed (out of memory or time again: under Reasons as
+	// copy_refused_after_written_order when the source answered),
+	// _other_error (the second run's own error, answered as that error) and
+	// _skipped_forced_order, _skipped_check_chose_written_order,
+	// _skipped_no_time (not run again). Absent until one is counted.
 	JoinChecks map[string]uint64 `json:"join_checks,omitempty"`
 	// Answers is what each side ("copy", "source", "refused") finished:
 	// counts, errors and times.
@@ -288,6 +295,14 @@ func (r *pgRouteStats) note(id string, n pgshim.RouteNote) {
 		}
 		t.joinChecks[n.JoinCheck]++
 	}
+	if n.OOMRetry != "" {
+		// Whichever side answered: a retry that failed sent it to the
+		// source.
+		if t.joinChecks == nil {
+			t.joinChecks = map[string]uint64{}
+		}
+		t.joinChecks[pgOOMRetryPrefix+n.OOMRetry]++
+	}
 	a := t.answers[n.Side]
 	if a == nil {
 		a = &pgRouteAnswers{}
@@ -395,6 +410,11 @@ func (c *pgConnAges) routed() func(pgshim.RouteNote) {
 		}
 	}
 }
+
+// pgOOMRetryPrefix names, under join_checks, what the copy's retry in the
+// order written did (RouteNote.OOMRetry): oom_retry_written_order_ok,
+// _failed, _other_error and _skipped_<why> (sqlsandbox oomretry.go).
+const pgOOMRetryPrefix = "oom_retry_written_order_"
 
 // doc is the status document now: the counts, then each server's mode,
 // asked of the console outside the tally's lock, which every statement takes.

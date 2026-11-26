@@ -74,6 +74,11 @@ const (
 	ReasonCopyWaitTimeout = "copy_wait_timeout" // for the copy, it waited for a worker as long as it may (#3109)
 )
 
+// ReasonCopyRefusedAfterWrittenOrder: the source answered a statement that
+// ran out of memory on the copy in the copy's join order and again when run
+// in the order written (sqlsandbox.Session.RetryOutOfMemoryInWrittenOrder).
+const ReasonCopyRefusedAfterWrittenOrder = "copy_refused_after_written_order"
+
 // ReasonCaptureGate: the server forwards with the account DBTrail captures
 // with (#3054), and the statement did not pass that account's gate
 // (capture_gate.go), so the copy answered it without the source's plan.
@@ -93,6 +98,10 @@ type RouteNote struct {
 	// JoinCheck is what the copy's join check did with a statement the copy
 	// answered (JoinCheck* names), "" when there was nothing to count.
 	JoinCheck string
+	// OOMRetry is what the copy's retry in the order written did with the
+	// statement's run there, whichever side then answered it
+	// (sqlsandbox.WrittenOrderRetry* names), "" when it did nothing.
+	OOMRetry string
 }
 
 // routeDecision is which side answers a statement, and why.
@@ -365,6 +374,13 @@ func (s *session) copyFallback(err error, perr *pgErr) string {
 		return ""
 	case perr.code == "42P01":
 		return ReasonTableNotOnCopy
+	}
+	var qerr *sqlsandbox.QueryError
+	if errors.As(err, &qerr) && qerr.WrittenOrderRetry == sqlsandbox.WrittenOrderRetryFailed {
+		// Out of memory in the copy's join order, and again run in the
+		// order written: the statement's, as copy_refused, under its own
+		// name so /status tells the two apart.
+		return ReasonCopyRefusedAfterWrittenOrder
 	}
 	return ReasonCopyRefused
 }
@@ -1843,13 +1859,15 @@ func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, fa
 	s.settleCostSide(stmt, d, failed)
 	joinCheck := s.joinCheck
 	s.joinCheck = ""
+	oomRetry := s.oomRetry
+	s.oomRetry = ""
 	if s.bound == nil || s.bound.Routed == nil || d.side == "" {
 		return
 	}
 	if d.side != RouteCopy {
 		joinCheck = ""
 	}
-	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed, JoinCheck: joinCheck})
+	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed, JoinCheck: joinCheck, OOMRetry: oomRetry})
 }
 
 // fieldName reports whether the token at j is the field a date_trunc or a
