@@ -644,6 +644,10 @@ type pgRouterPort struct {
 	// lanes keeps one of the copy's workers for short statements
 	// (pgrouter_fastlane.go); nil keeps none.
 	lanes *pgCopyLanes
+	// writtenOrders is each server's statement shapes that needed the order
+	// written on the copy (pgshim writtenorder.go); nil: the port's login
+	// makes its own.
+	writtenOrders *pgWrittenOrders
 
 	mu    sync.Mutex
 	bound string
@@ -746,7 +750,7 @@ func (p *pgRouterPort) serve(ctx context.Context) error {
 		p.bound, p.stop, p.passwords = ln.Addr().String(), cancel, passwords
 		p.mu.Unlock()
 		slog.Info("PostgreSQL router: the port is open", "listen", ln.Addr().String())
-		err = servePGPortRouted(child, p.srv, ln, p.maxConns, budget, p.tls, sources, p.routes, p.cost, p.lanes)
+		err = servePGPortRouted(child, p.srv, ln, p.maxConns, budget, p.tls, sources, p.routes, p.cost, p.lanes, p.writtenOrders)
 		cancel()
 		p.mu.Lock()
 		p.bound, p.stop, p.passwords = "", nil, nil
@@ -941,15 +945,16 @@ func (p *pgSourceSlots) acquire(ctx context.Context) (release func(), ok bool) {
 // servePGPortWith is servePGPortWithin with the bound on connections to the
 // sources (#2771).
 func servePGPortWith(ctx context.Context, srv *console.Server, ln net.Listener, maxConns int, budget *pgshim.ResultBudget, tlsConfig *tls.Config, sources *pgSourceSlots) error {
-	return servePGPortRouted(ctx, srv, ln, maxConns, budget, tlsConfig, sources, nil, nil, nil)
+	return servePGPortRouted(ctx, srv, ln, maxConns, budget, tlsConfig, sources, nil, nil, nil, nil)
 }
 
 // servePGPortRouted is servePGPortWith with the tally of which side answered
 // each statement (#2770), nil counting nothing, when a statement the copy
 // can answer goes there rather than to the source, nil for pgshim's default,
-// and the copy's lanes (pgrouter_fastlane.go), nil keeping no worker for
-// short statements.
-func servePGPortRouted(ctx context.Context, srv *console.Server, ln net.Listener, maxConns int, budget *pgshim.ResultBudget, tlsConfig *tls.Config, sources *pgSourceSlots, routes *pgRouteStats, cost *pgshim.CostPolicy, lanes *pgCopyLanes) error {
+// the copy's lanes (pgrouter_fastlane.go), nil keeping no worker for
+// short statements, and the shapes that needed the order written, nil for
+// the login's own.
+func servePGPortRouted(ctx context.Context, srv *console.Server, ln net.Listener, maxConns int, budget *pgshim.ResultBudget, tlsConfig *tls.Config, sources *pgSourceSlots, routes *pgRouteStats, cost *pgshim.CostPolicy, lanes *pgCopyLanes, orders *pgWrittenOrders) error {
 	logger := slog.Default()
 	// Accept returns when the listener is closed; the connections end with
 	// ctx (pgshim closes each one's socket), and Serve waits for them.
@@ -961,7 +966,7 @@ func servePGPortRouted(ctx context.Context, srv *console.Server, ln net.Listener
 	// travel is refused on this wire, so nothing waits on it; the engine
 	// asks for it all the same.
 	gate := shim.NewGate(defaultFlashbackMaxFullTable)
-	return pgshim.Serve(ctx, ln, pgshim.Config{Login: pgPortLogin(srv, pgRouterQueryTimeout, gate, logger, sources, routes, cost, lanes), Logger: logger, MaxConns: maxConns, ResultBudget: budget, TLS: tlsConfig})
+	return pgshim.Serve(ctx, ln, pgshim.Config{Login: pgPortLogin(srv, pgRouterQueryTimeout, gate, logger, sources, routes, cost, lanes, orders), Logger: logger, MaxConns: maxConns, ResultBudget: budget, TLS: tlsConfig})
 }
 
 // pgLoginOtherServer is the refusal of a connection opened with the
@@ -1001,10 +1006,16 @@ func pgLoginOtherServer(srv *console.Server, user, database, loginServer string)
 // sources bounds the connections to the servers' sources that the logins'
 // connections share (#2771), and routes counts which side answered each of
 // their statements (#2770; nil counts nothing).
-func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, logger *slog.Logger, sources *pgSourceSlots, routes *pgRouteStats, cost *pgshim.CostPolicy, lanes *pgCopyLanes) pgshim.LoginFunc {
+func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, logger *slog.Logger, sources *pgSourceSlots, routes *pgRouteStats, cost *pgshim.CostPolicy, lanes *pgCopyLanes, orders *pgWrittenOrders) pgshim.LoginFunc {
 	// The side each statement shape of a server was last sent to by its
 	// plan, for all the port's connections to it (#3045).
 	sides := &pgCostSides{}
+	// Each server's statement shapes that ran out of memory on the copy in
+	// its join order and answered in the order written, for all the port's
+	// connections to it (pgshim writtenorder.go).
+	if orders == nil {
+		orders = &pgWrittenOrders{}
+	}
 	// Each server's column statistics for the copy's join check, read from
 	// its source and shared by the port's connections to it.
 	joinStats := &pgJoinStats{}
@@ -1178,6 +1189,7 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			return bound, nil
 		}
 		copySQL := tgt.SQL
+		bound.WrittenOrders = orders.of(tgt.ID)
 		// A PostgreSQL source's copy answers by PostgreSQL's rules, with its
 		// names resolved where PostgreSQL resolves them, and a column the
 		// statement did not name headed as PostgreSQL heads it (#2803).
@@ -1247,8 +1259,10 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			// run once more in the order written before the port is told
 			// (sqlsandbox oomretry.go): the PostgreSQL port's statements only,
 			// not its catalog reads.
+			// And a statement of a shape that needed the order written runs
+			// that way from the start (pgshim writtenorder.go).
 			sess := sqlsandbox.Session{PostgresRules: true, TrimPadded: true, PostgresNames: true, TimeZone: opts.TimeZone, SkipCommonSubplan: true,
-				RetryOutOfMemoryInWrittenOrder: true}
+				RetryOutOfMemoryInWrittenOrder: true, KeepJoinOrder: opts.KeepJoinOrder}
 			if opts.JoinNDV != nil {
 				sess.JoinNDV = &sqlsandbox.JoinCounts{NDV: opts.JoinNDV}
 			}
@@ -1334,6 +1348,19 @@ type pgCostSides struct{ by sync.Map }
 func (p *pgCostSides) of(id string) *pgshim.CostSides {
 	v, _ := p.by.LoadOrStore(id, &pgshim.CostSides{})
 	return v.(*pgshim.CostSides)
+}
+
+// pgWrittenOrders is a port's pgshim.WrittenOrders, one per server: a
+// server's statement shapes are another server's only by name. remember is
+// each one's WrittenOrders.Remember (0 for pgshim's default).
+type pgWrittenOrders struct {
+	remember time.Duration
+	by       sync.Map
+}
+
+func (p *pgWrittenOrders) of(id string) *pgshim.WrittenOrders {
+	v, _ := p.by.LoadOrStore(id, &pgshim.WrittenOrders{Remember: p.remember})
+	return v.(*pgshim.WrittenOrders)
 }
 
 // pgHiddenBarred is why nothing is sent to the source of a server that hides

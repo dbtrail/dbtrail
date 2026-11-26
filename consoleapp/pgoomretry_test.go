@@ -34,3 +34,35 @@ func TestPGRouteStats_countsOOMRetry(t *testing.T) {
 		t.Errorf("reasons %v", n.Reasons)
 	}
 }
+
+// What the memory of shapes that needed the order written did is counted
+// under join_checks too, on either side: every statement it ran in the order
+// written from the start, and those of them that ran out of memory there.
+func TestPGRouteStats_countsRememberedWrittenOrder(t *testing.T) {
+	r := newPGRouteStats(time.Now(), false)
+	for _, n := range []pgshim.RouteNote{
+		{Side: pgshim.RouteCopy, Reason: pgshim.ReasonAnswersTheSame, WrittenOrder: pgshim.WrittenOrderRemembered},
+		{Side: pgshim.RouteCopy, Reason: pgshim.ReasonAnswersTheSame, WrittenOrder: pgshim.WrittenOrderRemembered},
+		{Side: pgshim.RouteSource, Reason: pgshim.ReasonCopyRefusedAfterWrittenOrder, WrittenOrder: pgshim.WrittenOrderForgotten},
+		{Side: pgshim.RouteCopy, Reason: pgshim.ReasonAnswersTheSame, OOMRetry: sqlsandbox.WrittenOrderRetryOK},
+	} {
+		r.note("p", n)
+	}
+	n := r.counts("").Servers["p"]
+	want := map[string]uint64{"written_order_remembered": 3, "written_order_forgotten": 1, "oom_retry_written_order_ok": 1}
+	if !maps.Equal(n.JoinChecks, want) {
+		t.Errorf("join_checks %v, want %v", n.JoinChecks, want)
+	}
+}
+
+// Each server has its own shapes, and the port's Remember reaches them.
+func TestPGWrittenOrders_perServer(t *testing.T) {
+	p := &pgWrittenOrders{remember: time.Minute}
+	a, b := p.of("a"), p.of("b")
+	if a == b || p.of("a") != a {
+		t.Error("not one per server")
+	}
+	if a.Remember != time.Minute {
+		t.Errorf("Remember %v", a.Remember)
+	}
+}

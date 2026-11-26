@@ -111,6 +111,12 @@ type Binding struct {
 	// not known to answer as PostgreSQL does (forward.go, route.go). Nil:
 	// those are answered as the port answers them without one.
 	Forward *Forward
+	// WrittenOrders, when set, is the statement shapes of the server that
+	// ran out of memory on the copy in its join order and answered in the
+	// order written, shared by its connections: their next statements run
+	// in the order written from the start (writtenorder.go). Nil remembers
+	// nothing.
+	WrittenOrders *WrittenOrders
 	// Routed, when set, is told which side answered each statement that
 	// reached the copy or the source, and why (route.go), for the port's
 	// status.
@@ -218,6 +224,10 @@ type RunOptions struct {
 	// tables the statement reads, and only for one that can join two inputs.
 	// Nil: no check.
 	JoinNDV map[string]float64
+	// KeepJoinOrder runs the statement with its joins in the order written
+	// (sqlsandbox.Session.KeepJoinOrder): its shape ran out of memory in the
+	// copy's own order before and answered in this one (writtenorder.go).
+	KeepJoinOrder bool
 }
 
 // TrimmedUnknown, among RunOptions.Trimmed, says which columns a statement
@@ -366,7 +376,7 @@ var loginTimeout = 30 * time.Second
 // runFree answers a statement that is not time travel on the copy.
 func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][][]byte, tag string, perr *pgErr) {
 	started := time.Now()
-	s.joinCheck, s.oomRetry = "", ""
+	s.joinCheck, s.oomRetry, s.writtenOrder = "", "", ""
 	// A session time zone the copy could not be asked about when it was set
 	// is asked about now (settings.go), before the statement's own context:
 	// the question has its own, and the statement's must stay the one a
@@ -429,6 +439,15 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		// tables only.
 		var want string
 		opts.JoinNDV, want = s.joinNDVFor(text)
+		// A shape that ran out of memory in the copy's join order and
+		// answered in the order written runs in the order written from the
+		// start, with nothing for the join check to count (writtenorder.go).
+		shape := s.writtenOrderKey(qstr)
+		remembered := shape != "" && s.bound.WrittenOrders.has(shape)
+		if remembered {
+			startInWrittenOrder(&opts)
+			want = ""
+		}
 		res, err = s.bound.Run(ctx, text, opts)
 		var changed *sqlsandbox.MayHaveChangedError
 		if opts.NeedTails && errors.As(err, &changed) {
@@ -436,6 +455,7 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		}
 		s.joinCheck = s.noteJoinCheck(res, err, opts.JoinNDV != nil, want)
 		s.oomRetry = sqlsandbox.WrittenOrderRetryOf(res, err)
+		err = s.settleWrittenOrder(qstr, shape, remembered, res, err)
 	}
 	if res.Spool != nil {
 		// Only a bug gets here: this port asks for no result in a file.

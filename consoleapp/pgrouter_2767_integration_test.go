@@ -131,6 +131,9 @@ type pgPortFixture struct {
 	// sqlMemory, when set, is each copy worker's memory (the router's
 	// --sql-memory, "<n>MiB").
 	sqlMemory string
+	// writtenOrderRemember, when set, is how long the port runs a statement
+	// shape that needed the order written that way (pgshim writtenorder.go).
+	writtenOrderRemember time.Duration
 }
 
 func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx pgPortFixture) pgExtEnv {
@@ -243,6 +246,9 @@ func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx
 		}
 	}
 	router.cost = fx.cost
+	if fx.writtenOrderRemember != 0 {
+		router.writtenOrders = &pgWrittenOrders{remember: fx.writtenOrderRemember}
+	}
 	if router.cost == nil {
 		router.cost = &pgshim.CostPolicy{}
 	}

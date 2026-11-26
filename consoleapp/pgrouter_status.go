@@ -79,7 +79,14 @@ type pgRouterServerNumbers struct {
 	// copy_refused_after_written_order when the source answered),
 	// _other_error (the second run's own error, answered as that error) and
 	// _skipped_forced_order, _skipped_check_chose_written_order,
-	// _skipped_no_time (not run again). Absent until one is counted.
+	// _skipped_no_time (not run again). And, on either side, what the port's
+	// memory of shapes that needed the order written did (pgshim
+	// writtenorder.go): written_order_remembered (the statement ran in the
+	// order written from the start, with no retry and no join check) and,
+	// among those, written_order_forgotten (it ran out of memory in that
+	// order too: the shape was forgotten, and under Reasons it is
+	// copy_refused_after_written_order when the source answered). Absent
+	// until one is counted.
 	JoinChecks map[string]uint64 `json:"join_checks,omitempty"`
 	// Answers is what each side ("copy", "source", "refused") finished:
 	// counts, errors and times.
@@ -303,6 +310,15 @@ func (r *pgRouteStats) note(id string, n pgshim.RouteNote) {
 		}
 		t.joinChecks[pgOOMRetryPrefix+n.OOMRetry]++
 	}
+	if n.WrittenOrder != "" {
+		if t.joinChecks == nil {
+			t.joinChecks = map[string]uint64{}
+		}
+		t.joinChecks[pgWrittenOrderRemembered]++
+		if n.WrittenOrder == pgshim.WrittenOrderForgotten {
+			t.joinChecks[pgWrittenOrderForgotten]++
+		}
+	}
 	a := t.answers[n.Side]
 	if a == nil {
 		a = &pgRouteAnswers{}
@@ -415,6 +431,14 @@ func (c *pgConnAges) routed() func(pgshim.RouteNote) {
 // order written did (RouteNote.OOMRetry): oom_retry_written_order_ok,
 // _failed, _other_error and _skipped_<why> (sqlsandbox oomretry.go).
 const pgOOMRetryPrefix = "oom_retry_written_order_"
+
+// Under join_checks, what the memory of shapes that needed the order written
+// did (RouteNote.WrittenOrder): every statement it ran in the order written
+// from the start, and those of them that ran out of memory there too.
+const (
+	pgWrittenOrderRemembered = "written_order_remembered"
+	pgWrittenOrderForgotten  = "written_order_forgotten"
+)
 
 // doc is the status document now: the counts, then each server's mode,
 // asked of the console outside the tally's lock, which every statement takes.
