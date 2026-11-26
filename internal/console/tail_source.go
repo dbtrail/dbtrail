@@ -465,8 +465,9 @@ func samePrimaryKey(createTableSQL string, pk []metadata.ColumnMeta) bool {
 }
 
 // primaryKeyRE is the column list of a CREATE TABLE's PRIMARY KEY, as SHOW
-// CREATE TABLE prints it: backquoted names, no prefix lengths for an
-// integer key (a list it cannot read refuses the tail).
+// CREATE TABLE prints it: backquoted names. A key with a prefix length (the
+// first bytes of a VARBINARY or a BLOB) does not match, and a list it cannot
+// read refuses the tail.
 var primaryKeyRE = regexp.MustCompile("(?i)PRIMARY KEY \\(((?:`(?:[^`]|``)*`\\s*,?\\s*)+)\\)")
 
 var _ tailSource = (*indexTailSource)(nil)

@@ -318,26 +318,31 @@ func TestTail_compositeIntegerKey(t *testing.T) {
 	}
 }
 
-// Which tables have a tail: only integer keys, a definition on record, no
-// system versioning.
+// Which tables have a tail: keys of integers, DECIMAL, dates and times and
+// binary types (#3159), a definition on record, no system versioning. Text
+// stays out under any collation, _bin included.
 func TestNewTail_refusals(t *testing.T) {
 	ddl := func(idType string) string {
 		return "CREATE TABLE `t` (\n  `id` " + idType + " NOT NULL,\n  `v` int DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n"
 	}
 	pk := []metadata.ColumnMeta{{Name: "id", IsPK: true}}
 	dir := t.TempDir()
-	for _, ok := range []string{"tinyint", "tinyint(1)", "smallint unsigned", "mediumint", "int", "int unsigned", "bigint", "bigint unsigned"} {
+	for _, ok := range []string{"tinyint", "tinyint(1)", "smallint unsigned", "mediumint", "int", "int unsigned", "bigint", "bigint unsigned",
+		"decimal(10,0)", "decimal(10,2)", "date", "datetime", "datetime(6)", "timestamp", "timestamp(3)", "binary(16)", "varbinary(20)"} {
 		base := writeTailBase(t, dir, strings.ReplaceAll(ok, " ", "_")+".parquet", ddl(ok))
 		if _, err := NewTail("s", "t", ddl(ok), base, pk); err != nil {
 			t.Errorf("%s: refused: %v", ok, err)
 		}
 	}
 	for _, c := range []struct{ name, ddl, why string }{
-		{"text key", ddl("varchar(10)"), "only integer keys"},
-		{"decimal key", ddl("decimal(10,0)"), "only integer keys"},
-		{"year key", ddl("year"), "only integer keys"},
-		{"bit key", ddl("bit(8)"), "only integer keys"},
-		{"binary key", ddl("binary(16)"), "only integer keys"},
+		{"text key", ddl("varchar(10)"), "only keys of integers"},
+		{"text key under a binary collation", ddl("varchar(10) COLLATE utf8mb4_bin"), "only keys of integers"},
+		{"char key", ddl("char(10)"), "only keys of integers"},
+		{"year key", ddl("year"), "only keys of integers"},
+		{"bit key", ddl("bit(8)"), "only keys of integers"},
+		{"time key", ddl("time"), "only keys of integers"},
+		{"float key", ddl("double"), "only keys of integers"},
+		{"blob key", ddl("blob"), "only keys of integers"},
 		{"no definition", "", "does not record"},
 		{"system versioned", strings.TrimSuffix(ddl("int"), ";\n") + " WITH SYSTEM VERSIONING;\n", "system-versioned"},
 	} {
@@ -390,7 +395,11 @@ func TestTailKeyValues(t *testing.T) {
 		{"5", 1, true}, {"-5", 1, true}, {"0", 1, true}, {"18446744073709551615", 1, true}, {"1|-2", 2, true},
 		{"", 1, false}, {"-", 1, false}, {"-0", 1, false}, {"05", 1, false}, {"-0x1", 1, false}, {"1.0", 1, false}, {"1|2", 1, false}, {"1", 2, false}, {`1\|2`, 2, false},
 	} {
-		_, err := tailKeyValues(c.key, c.n)
+		keys := make([]keyCol, c.n)
+		for i := range keys {
+			keys[i] = keyCol{name: fmt.Sprint("k", i), kind: keyInteger}
+		}
+		_, err := tailKeyValues(c.key, keys)
 		if (err == nil) != c.ok {
 			t.Errorf("%q/%d: err %v, want ok=%v", c.key, c.n, err, c.ok)
 		}
@@ -665,15 +674,15 @@ func TestTail_bytes(t *testing.T) {
 
 // TestTailKeyRefusal: the rule on a table's key, as NewTail applies it and
 // as the oracle over the port's tails asks it: integer keys pass (named as
-// the copy spells them), any other type refuses naming the column and its
-// type, a key column the copy lacks refuses.
+// the copy spells them), a type outside the list refuses naming the column
+// and its type, a key column the copy lacks refuses.
 func TestTailKeyRefusal(t *testing.T) {
 	cols := []baseline.Column{{Name: "ID", MySQLType: "int"}, {Name: "code", MySQLType: "varchar(16)"}, {Name: "b", MySQLType: "bigint"}}
 	names, why := TailKeyRefusal("s.t", cols, []string{"id"})
 	if why != "" || len(names) != 1 || names[0] != "ID" {
 		t.Fatalf("int key: names=%v why=%q", names, why)
 	}
-	if _, why = TailKeyRefusal("s.t", cols, []string{"id", "code"}); why != "s.t: its key column code is varchar(16), and only integer keys have a tail" {
+	if _, why = TailKeyRefusal("s.t", cols, []string{"id", "code"}); why != "s.t: its key column code is varchar(16), and only keys of integers, DECIMAL, DATE, DATETIME, TIMESTAMP, BINARY or VARBINARY have a tail" {
 		t.Fatalf("varchar in a composite key: %q", why)
 	}
 	if names, why = TailKeyRefusal("s.t", cols, []string{"b", "id"}); why != "" || len(names) != 2 || names[1] != "ID" {

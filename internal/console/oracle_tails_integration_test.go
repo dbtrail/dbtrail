@@ -37,9 +37,8 @@ import (
 //
 // A table the port answers as of the published cut (no tail) is compared
 // with the rows read at that cut, AND the step asserts why there is no
-// tail: a key the tail does not support (only integer keys have one, the
-// product's own rule: t_text's VARCHAR key), or no change to the table since
-// the cut. Any other reason fails the run naming it: that is the detector
+// tail: a key the tail does not support (the product's own rule: t_text's
+// VARCHAR key), or no change to the table since the cut. Any other reason fails the run naming it: that is the detector
 // for tails silently off.
 
 func TestOracleTails(t *testing.T) {
@@ -82,6 +81,33 @@ func TestOracleTails(t *testing.T) {
 		}
 		t.Logf("chain: %d steps, applied %v, longest chain %d files, merged", res.Steps, res.Applied, chains.longest)
 	})
+}
+
+// TestOracleTailKeyTypes is the mixed scenario over the tables keyed by the
+// types a tail takes besides integers (#3159: BINARY(16), VARBINARY, DATE,
+// DATETIME, DATETIME(6), TIMESTAMP(6) written in another zone, DECIMAL, and
+// a composite of an integer, a VARBINARY and a DATE), beside t_text, whose
+// VARCHAR key under the default collation must stay without one: every
+// read must equal the source, and every table but t_text must have a tail
+// whenever ops changed it since the cut (whyNoTail).
+func TestOracleTailKeyTypes(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	if os.Getenv("BINTRAIL_ORACLE_REQUIRE") == "" && os.Getenv("BINTRAIL_ORACLE_SEEDS") == "" {
+		t.Skip("the tails oracle runs on request: BINTRAIL_ORACLE_SEEDS=N or BINTRAIL_ORACLE_REQUIRE=1")
+	}
+	seeds := oracleEnvInt(t, "BINTRAIL_ORACLE_SEEDS", 2)
+	steps := oracleEnvInt(t, "BINTRAIL_ORACLE_STEPS", 12)
+	first := uint64(oracleEnvInt(t, "BINTRAIL_ORACLE_SEED", 1))
+	tables := append(oracle.KeyTypeTables(), oracle.TableByName("t_text"))
+	for seed := first; seed < first+uint64(seeds); seed++ {
+		t.Run("seed="+strconv.FormatUint(seed, 10), func(t *testing.T) {
+			res, chains := runTailSeed(t, seed, steps, tables, 1, 3, 4)
+			if res.Applied["tail"] == 0 {
+				t.Fatalf("no tail step applied in %d steps: %v", steps, res.Applied)
+			}
+			t.Logf("seed %d: %d steps, %d ops, applied %v, chains up to %d files, in %s", seed, res.Steps, res.Ops, res.Applied, chains.longest, res.Wall.Round(time.Millisecond))
+		})
+	}
 }
 
 func oracleEnvInt(t *testing.T, name string, def int) int {

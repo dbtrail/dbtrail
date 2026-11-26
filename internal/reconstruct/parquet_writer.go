@@ -757,6 +757,12 @@ func renderBaselineValue(col baseline.Column, v any) (text string, isNull bool, 
 
 	case []byte:
 		if baseline.IsBinaryType(col.MySQLType) {
+			if len(t) == 0 {
+				// An empty value. "0x" alone is not decoded (decodeBinaryLiteral
+				// wants at least one digit), so it would be stored as the two
+				// bytes "0x"; the empty text is stored as the empty value.
+				return "", false, nil
+			}
 			// The 0x<hex> form convertValue's decodeBinaryLiteral decodes. Always
 			// hex — never the raw bytes — so bytes that happen to spell "0x1234"
 			// round-trip as themselves rather than being decoded as a literal.

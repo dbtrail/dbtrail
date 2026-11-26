@@ -285,7 +285,8 @@ const freshTailsWait = 3 * time.Second
 // (routing) or answers from the snapshot with it as a warning. An answer
 // from the snapshot alone there would read as fresh and be minutes old.
 //
-// Cannot have one now (its key is not made of integers, its definition
+// Cannot have one now (its key is of a type a tail does not take, such as
+// text, reconstruct.TailKeyRefusal; its definition
 // changed, capture does not record it, the index holds no captured change,
 // tails at two instants after one stopped over its budget): no wait brings
 // it, and the statement reads the snapshot as without fresh mode, ok false

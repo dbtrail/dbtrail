@@ -1,11 +1,15 @@
 package reconstruct
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/event"
@@ -23,8 +27,12 @@ import (
 // "last in the binary log wins") over the events after the cut, without the
 // refresh's base lookup: the published rows a tail replaces are dropped by
 // key when the view is read, so the tail never needs their positions. That
-// is only exact where a key compares the same on both sides whatever the
-// collation, so only a table whose key is integers has a tail.
+// is only exact where the tail's key and the copy's are stored as the same
+// value and compared without a collation: integers, DECIMAL (its fixed-scale
+// text), DATE, DATETIME and TIMESTAMP (days and microseconds), and BINARY and
+// VARBINARY (their bytes), #3159. Text is left out whatever its collation:
+// the anti-join runs under the sandbox's case-folding default, so a tail key
+// 'A' would drop a published 'a' that a _bin column keeps apart.
 
 // TailRefusal says why a table has no tail. Its statements read the
 // published copy, as they did before tails existed.
@@ -44,7 +52,10 @@ type Tail struct {
 	// looks a value up by: a tombstone filed under another case of the name
 	// would write a NULL key, and the deleted row would come back.
 	pkNames []string
-	fold    foldResult
+	// keys is how each key column's value is checked and spelled (keyCol),
+	// in key order.
+	keys []keyCol
+	fold foldResult
 	// dirty holds the keys changed since the last file was written (#2495):
 	// what WriteDelta writes. Marked on every key a page touches, also when
 	// the fold kept an older change, which only rewrites the same row.
@@ -56,9 +67,53 @@ type Tail struct {
 	needFull bool
 }
 
-// tailKeyTypes are the MySQL types a tail key may have: the integers. Not
-// DECIMAL(n,0), YEAR or BIT, which Parquet may store as integers too.
-var tailKeyTypes = map[string]bool{"tinyint": true, "smallint": true, "mediumint": true, "int": true, "integer": true, "bigint": true}
+// keyKind is how a tail compares a key column's values with the copy's.
+type keyKind int
+
+const (
+	keyNone keyKind = iota
+	// keyInteger: stored as an integer on both sides.
+	keyInteger
+	// keyDecimal: stored as text, MySQL's own with the column's scale on
+	// both sides (go-mysql prints it the server's way, a dump has the
+	// server's text), so 1.5 is "1.50" in both.
+	keyDecimal
+	// keyDate: days since the epoch on both sides.
+	keyDate
+	// keyDatetime: DATETIME and TIMESTAMP, microseconds since the epoch on
+	// both sides. A TIMESTAMP is captured in UTC (the parser pins it) and a
+	// dump is read in UTC (mydumper's default --tz-utc, the assumption every
+	// TIMESTAMP in the copy already rests on).
+	keyDatetime
+	// keyBinary: VARBINARY, its bytes; a trailing 0x00 is data.
+	keyBinary
+	// keyFixedBinary: BINARY(n). A dump holds the n bytes MySQL stores,
+	// right-padded with 0x00, while the binary log carries the value with
+	// its trailing 0x00 bytes cut, and so does a row a refresh rewrote. A
+	// value of exactly n bytes is the same in all three; a shorter one is
+	// refused (checkKeyValue).
+	keyFixedBinary
+)
+
+// tailKeyTypes are the MySQL types a tail key may have, by kind. Not YEAR or
+// BIT, which Parquet may store as integers too, and no text type.
+var tailKeyTypes = map[string]keyKind{
+	"tinyint": keyInteger, "smallint": keyInteger, "mediumint": keyInteger, "int": keyInteger, "integer": keyInteger, "bigint": keyInteger,
+	"decimal": keyDecimal, "numeric": keyDecimal,
+	"date":     keyDate,
+	"datetime": keyDatetime, "timestamp": keyDatetime,
+	"varbinary": keyBinary,
+	"binary":    keyFixedBinary,
+}
+
+// keyCol is one key column of a tail: its name as the copy spells it, its
+// name in the events' images (the schema snapshot's), and its kind; width
+// is n of a BINARY(n).
+type keyCol struct {
+	name, image string
+	kind        keyKind
+	width       int
+}
 
 // NewTail starts an empty tail for schema.table. createTableSQL is the
 // CREATE TABLE in the footer of the file the table's view reads, basePath
@@ -85,9 +140,32 @@ func NewTail(schema, table, createTableSQL, basePath string, pkCols []metadata.C
 	for i, c := range pkCols {
 		pk[i] = c.Name
 	}
-	pkNames, why := TailKeyRefusal(name, cols, pk)
+	keys, why := tailKeyColumns(name, cols, pk)
 	if why != "" {
 		return nil, &TailRefusal{why}
+	}
+	pkNames := make([]string, len(keys))
+	var typed []string
+	for i := range keys {
+		pkNames[i] = keys[i].name
+		keys[i].image = pkCols[i].Name
+		if keys[i].kind != keyInteger {
+			typed = append(typed, keys[i].name)
+		}
+	}
+	// The anti-join compares the key as the copy stores it with the key as
+	// the tail writes it, so they must be stored as one type: a DATE another
+	// producer wrote as text, or a DECIMAL as an integer, would match no
+	// value written here. Integers are left as they were: an INT stored as
+	// a wider integer still compares equal.
+	if len(typed) > 0 {
+		other, err := baseline.ColumnsStoredOtherwise(basePath, cols, typed)
+		if err != nil {
+			return nil, &TailRefusal{fmt.Sprintf("%s: the column types of its copy could not be read (%v)", name, err)}
+		}
+		if len(other) > 0 {
+			return nil, &TailRefusal{fmt.Sprintf("%s: its copy stores key column(s) %s as another type than this version writes", name, strings.Join(other, ", "))}
+		}
 	}
 	// A copy written before a type joined the binary list (VECTOR) stores
 	// that column as text, and the tail would store bytes: UNION ALL BY NAME
@@ -100,38 +178,139 @@ func NewTail(schema, table, createTableSQL, basePath string, pkCols []metadata.C
 	if len(mixed) > 0 {
 		return nil, &TailRefusal{fmt.Sprintf("%s: its copy stores %s as text, which the next refresh rewrites as bytes", name, strings.Join(mixed, ", "))}
 	}
-	return &Tail{schema: schema, table: table, cols: cols, pkCols: pkCols, pkNames: pkNames,
+	return &Tail{schema: schema, table: table, cols: cols, pkCols: pkCols, pkNames: pkNames, keys: keys,
 		fold: foldResult{Changes: map[string]*query.ResultRow{}}, dirty: map[string]struct{}{}}, nil
 }
 
 // TailKeyRefusal is the rule on a table's key for a tail: every key column
-// (pk, by name, in key order) must be in cols and of an integer type. It
-// returns the key's column names as cols spell them, or why the table has
-// no tail. Exported so a check over the port's tails can tell this refusal,
-// the product's own rule, from one it did not cause.
+// (pk, by name, in key order) must be in cols and of a type tailKeyTypes
+// holds, a BINARY of a width its definition says. It returns the key's
+// column names as cols spell them, or why the table has no tail. Exported
+// so a check over the port's tails can tell this refusal, the product's own
+// rule, from one it did not cause.
 func TailKeyRefusal(name string, cols []baseline.Column, pk []string) (pkNames []string, why string) {
+	keys, why := tailKeyColumns(name, cols, pk)
+	if why != "" {
+		return nil, why
+	}
+	pkNames = make([]string, len(keys))
+	for i := range keys {
+		pkNames[i] = keys[i].name
+	}
+	return pkNames, ""
+}
+
+func tailKeyColumns(name string, cols []baseline.Column, pk []string) ([]keyCol, string) {
 	byName := make(map[string]baseline.Column, len(cols))
 	for _, c := range cols {
 		byName[strings.ToLower(c.Name)] = c
 	}
-	pkNames = make([]string, len(pk))
+	keys := make([]keyCol, len(pk))
 	for i, p := range pk {
 		c, ok := byName[strings.ToLower(p)]
 		if !ok {
 			return nil, fmt.Sprintf("%s: its key column %s is not in its copy", name, p)
 		}
-		if !tailIntegerColumn(c) {
-			return nil, fmt.Sprintf("%s: its key column %s is %s, and only integer keys have a tail", name, c.Name, c.MySQLType)
+		kind := tailKeyTypes[strings.ToLower(strings.TrimSpace(c.MySQLType))]
+		if kind == keyNone {
+			return nil, fmt.Sprintf("%s: its key column %s is %s, and only keys of integers, DECIMAL, DATE, DATETIME, TIMESTAMP, BINARY or VARBINARY have a tail", name, c.Name, c.MySQLType)
 		}
-		pkNames[i] = c.Name
+		k := keyCol{name: c.Name, kind: kind}
+		if kind == keyFixedBinary {
+			if k.width = FixedBinaryWidth(c.DeclaredType); k.width == 0 {
+				return nil, fmt.Sprintf("%s: its key column %s is BINARY of a width its definition does not say", name, c.Name)
+			}
+		}
+		keys[i] = k
 	}
-	return pkNames, ""
+	return keys, ""
 }
 
-// tailIntegerColumn: an integer type by name. The copy stores each as an
-// integer (TINYINT(1) included), which is what the anti-join compares.
-func tailIntegerColumn(c baseline.Column) bool {
-	return tailKeyTypes[strings.ToLower(strings.TrimSpace(c.MySQLType))]
+// checkKeyValue says why v, a key column's value in a decoded image, cannot
+// be a tail's key, or "" when it can: the value must be the one the copy
+// stores under that key, spelled so its tombstone can be read back
+// (tailKeyValues).
+func checkKeyValue(k keyCol, v any) string {
+	switch k.kind {
+	case keyInteger:
+		// As before #3159: the tombstone's split checks it.
+		return ""
+	case keyDecimal:
+		s, ok := v.(string)
+		if !ok || !decimalText(s) {
+			return fmt.Sprintf("its DECIMAL key %s holds %v, which is not MySQL's text of a number", k.name, v)
+		}
+		if s[0] == '-' && strings.Trim(s[1:], "0.") == "" {
+			// A negative zero: MySQL prints a stored zero without its sign,
+			// and a tail key that kept one would match no row.
+			return fmt.Sprintf("its DECIMAL key %s holds %s", k.name, s)
+		}
+	case keyDate, keyDatetime:
+		s, ok := v.(string)
+		if !ok || !dateText(s, k.kind == keyDate) {
+			// The zero date among them: the copy stores it as NULL, which
+			// an anti-join never matches, so the deleted row would stay.
+			return fmt.Sprintf("its key %s holds %v, which is not a date the copy can store", k.name, v)
+		}
+	case keyBinary, keyFixedBinary:
+		b, ok := v.([]byte)
+		if !ok {
+			// Left as the index stores it (base64): no schema snapshot
+			// said the column is binary when the event was captured.
+			return fmt.Sprintf("its binary key %s was not decoded to its bytes", k.name)
+		}
+		if utf8.Valid(b) && bytes.HasPrefix(b, []byte(hexPKPrefix)) {
+			// pk_values spells a value that is not UTF-8 as 0x and its hex,
+			// so a value whose own text starts 0x can share a key with
+			// another value: the fold would keep one of the two rows.
+			return fmt.Sprintf("its binary key %s holds a value that starts with the text %s", k.name, hexPKPrefix)
+		}
+		if k.kind == keyFixedBinary && len(b) != k.width {
+			return fmt.Sprintf("its BINARY(%d) key %s holds a value that ends in 0x00 bytes, which the binary log does not carry", k.width, k.name)
+		}
+	}
+	return ""
+}
+
+// hexPKPrefix is event.formatPKValue's mark of a component spelled in hex.
+const hexPKPrefix = "0x"
+
+// decimalText: an optional '-', digits, and an optional '.' and digits, as
+// MySQL prints a DECIMAL.
+func decimalText(s string) bool {
+	if s != "" && s[0] == '-' {
+		s = s[1:]
+	}
+	whole, frac, dot := strings.Cut(s, ".")
+	return digits(whole) && (!dot || digits(frac))
+}
+
+func digits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := range len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// dateText: s parses as the copy's writer parses a DATE (date) or a DATETIME
+// or TIMESTAMP (baseline's parseDateToDays and parseDatetimeToMicros), which
+// a zero date does not.
+func dateText(s string, date bool) bool {
+	layout := "2006-01-02"
+	switch {
+	case date:
+	case strings.Contains(s, "."):
+		layout = "2006-01-02 15:04:05.999999"
+	default:
+		layout = "2006-01-02 15:04:05"
+	}
+	_, err := time.ParseInLocation(layout, s, time.UTC)
+	return err == nil && strings.TrimSpace(s) == s
 }
 
 // Apply folds one page of the table's events, decoded as the refresh decodes
@@ -153,6 +332,21 @@ func (t *Tail) Apply(page []query.ResultRow) error {
 		case event.EventInsert, event.EventUpdate, event.EventDelete:
 		default:
 			return fmt.Errorf("internal: a %v event handed to the tail of %s.%s", page[i].EventType, t.schema, t.table)
+		}
+	}
+	// Every key value the page carries, in every image (a key change has
+	// two), must be one the copy stores the same way (#3159). Refused before
+	// the fold: a key it filed could not be taken back.
+	for i := range page {
+		for _, img := range []map[string]any{page[i].RowBefore, page[i].RowAfter} {
+			if img == nil {
+				continue
+			}
+			for _, k := range t.keys {
+				if why := checkKeyValue(k, img[k.image]); why != "" {
+					return &TailRefusal{fmt.Sprintf("%s.%s: event %d: %s", t.schema, t.table, page[i].EventID, why)}
+				}
+			}
 		}
 	}
 	// The keys changed come from the fold, not from the page's own pk_values:
@@ -340,7 +534,7 @@ func (t *Tail) write(path string, keys []string) (rows int64, retErr error) {
 func (t *Tail) tailRow(key string, ev *query.ResultRow) (map[string]any, error) {
 	row := make(map[string]any, len(t.cols)+2)
 	if ev.EventType == event.EventDelete {
-		vals, err := tailKeyValues(key, len(t.pkCols))
+		vals, err := tailKeyValues(key, t.keys)
 		if err != nil {
 			return nil, fmt.Errorf("%s.%s: %w", t.schema, t.table, err)
 		}
@@ -364,22 +558,43 @@ func (t *Tail) tailRow(key string, ev *query.ResultRow) (map[string]any, error) 
 	return row, nil
 }
 
-// tailKeyValues splits an integer key as pk_values spells it
-// (event.BuildPKValues: the values joined by '|'; an integer needs no
-// escape) into n values, each an integer exactly as %v writes one
-// (plainInteger), so a tombstone carries the key it deletes. Anything else
-// is refused: a guessed key would let the deleted row come back.
-func tailKeyValues(key string, n int) ([]string, error) {
-	parts := strings.Split(key, "|")
-	if len(parts) != n {
-		return nil, fmt.Errorf("the key %q does not have %d integer parts", key, n)
+// tailKeyValues splits a key as pk_values spells it (event.BuildPKValues:
+// each value escaped, joined by '|') into one value per key column, each as
+// the writer takes it, so a tombstone carries the key it deletes: an
+// integer exactly as %v writes one (plainInteger), a DECIMAL, DATE,
+// DATETIME or TIMESTAMP as its text, and a binary value as its bytes, read
+// back from hex where formatPKValue spelled it so (Apply refused every value
+// whose own text starts that way). Anything else is refused: a guessed key
+// would let the deleted row come back.
+func tailKeyValues(key string, keys []keyCol) ([]any, error) {
+	parts := event.SplitPKValues(key)
+	if len(parts) != len(keys) {
+		return nil, fmt.Errorf("the key %q does not have %d parts", key, len(keys))
 	}
-	for _, p := range parts {
-		if !plainInteger(p) {
-			return nil, fmt.Errorf("the key %q is not made of integers", key)
+	vals := make([]any, len(parts))
+	for i, p := range parts {
+		var v any = p
+		switch keys[i].kind {
+		case keyInteger:
+			if !plainInteger(p) {
+				return nil, fmt.Errorf("the key %q is not made of integers where its key is", key)
+			}
+		case keyBinary, keyFixedBinary:
+			b := []byte(p)
+			if strings.HasPrefix(p, hexPKPrefix) {
+				var err error
+				if b, err = hex.DecodeString(p[len(hexPKPrefix):]); err != nil {
+					return nil, fmt.Errorf("the key %q has a binary part that is not hex: %v", key, err)
+				}
+			}
+			v = b
 		}
+		if why := checkKeyValue(keys[i], v); why != "" {
+			return nil, fmt.Errorf("the key %q: %s", key, why)
+		}
+		vals[i] = v
 	}
-	return parts, nil
+	return vals, nil
 }
 
 // NewTailDecoder decodes a page of schema.table's events as the refresh does
