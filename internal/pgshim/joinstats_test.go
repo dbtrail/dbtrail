@@ -304,9 +304,10 @@ func TestRoute_joinTooBigGoesToTheSource(t *testing.T) {
 }
 
 // A prepared statement: its Describe (NULL arguments, LIMIT 0) is not
-// checked, so it neither fails nor keeps the statement on the source; each
+// checked, so it neither fails nor keeps the statement on the source; its
 // Execute is checked with its values, and one the copy refuses goes to the
-// source, the next one tried on the copy again.
+// source, which then answers the statement's later executions, as for any
+// statement the copy refused with its own values.
 func TestRoute_joinCheckOnAPreparedStatement(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -329,8 +330,11 @@ func TestRoute_joinCheckOnAPreparedStatement(t *testing.T) {
 		if res.Err != nil || len(res.Rows) != 1 || string(res.Rows[0][0]) != "42" {
 			t.Fatalf("execute %d: %v %v", i, res.Err, res.Rows)
 		}
-		if l.runs.Load() == before {
-			t.Errorf("execute %d: not tried on the copy: %+v, plans asked %q", i, l.last(), src.explained())
+		if got := l.last(); got.Side != RouteSource || got.Reason != ReasonJoinTooBig {
+			t.Errorf("execute %d: %+v", i, got)
+		}
+		if tried := l.runs.Load() != before; tried != (i == 0) {
+			t.Errorf("execute %d: tried on the copy %v", i, tried)
 		}
 	}
 	for _, r := range l.joinRuns() {
