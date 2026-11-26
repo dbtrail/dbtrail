@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/dbtrail/dbtrail/internal/pgshim"
 )
 
@@ -35,7 +37,7 @@ func TestIntegrationPGRouterOOMRetryInWrittenOrder(t *testing.T) {
 		if got := one(ctx, c, pgOOMWithoutWrittenOrder); got != "0" {
 			t.Fatalf("simple protocol: %q, want the copy's 0", got)
 		}
-		conn := pgxConn(t, ctx, env.portDSN(), 0)
+		conn := pgxConn(t, ctx, env.portDSN(), pgx.QueryExecModeCacheStatement)
 		if got := pgxAnswer(ctx, conn, pgOOMWithoutWrittenOrder); got != `[n] ["0"]` {
 			t.Errorf("extended protocol: %s", got)
 		}
