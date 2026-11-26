@@ -31,8 +31,9 @@ import (
 //     source's own count of distinct values of the column (PostgreSQL's
 //     pg_stats.n_distinct), which the copy does not have.
 //  3. A join is dangerous when that estimate passes joinBlowup times its
-//     larger input; a cross product (no condition at all) when it passes
-//     both that and crossProductFloor rows.
+//     larger input and joinFloor rows; a cross product (no condition at
+//     all) when it passes joinBlowup times its larger input and
+//     crossProductFloor rows.
 //  4. A dangerous plan is planned again in the order written
 //     (disabled_optimizers = 'join_order'); the statement runs in that order
 //     when that plan has no dangerous join, and is refused before it runs
@@ -62,11 +63,22 @@ import (
 // side DuckDB takes for small. A cross product needs the floor because a ratio
 // alone cannot tell Q21's from Q8's in the order written (1e5 x 1e4, which
 // answers): both are 1e4 times their larger input.
+//
+// A join with conditions needs a floor too, for the same reason. On a live
+// copy, under a write load that keeps new_order changing, DuckDB sometimes
+// ordered Q3 as new_order joined with the filtered customers on warehouse
+// and district: 1,686,128 x 1,237,764 estimated rows over 2,000 values,
+// 1.0e9, past 100 times either side. Q3 answers in about 6 s on the copy in
+// that order too, and it went to the source (60 s) instead. The joins that
+// did not answer were estimated at 7.2e9 (Q8, over plain views), 2.4e10
+// (Q5) and 1.2e11 (Q21); joinFloor sits between.
 
 const (
 	// joinBlowup is how many times its larger input a join's estimated
 	// output may be before it is dangerous.
 	joinBlowup = 100
+	// joinFloor is the fewest rows a dangerous join with conditions gives.
+	joinFloor = 3e9
 	// crossProductFloor is the fewest rows a dangerous cross product gives.
 	crossProductFloor = 1e10
 )
@@ -234,7 +246,7 @@ func judgeJoin(n *planNode, ndv map[string]float64) dangerJoin {
 		return dangerJoin{}
 	}
 	combo = math.Min(combo, larger)
-	if out := left * right / combo; out > joinBlowup*larger {
+	if out := left * right / combo; out > joinBlowup*larger && out > joinFloor {
 		return dangerJoin{fmt.Sprintf("%s on %s of %.0f x %.0f estimated rows over %.0f distinct values gives %.1e rows",
 			n.Name, strings.Join(conds, " AND "), left, right, combo, out), out}
 	}
