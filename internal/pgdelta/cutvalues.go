@@ -151,9 +151,16 @@ func CutValuesOf(ctx context.Context, db *sql.DB, basePath string, dead, rows []
 	if len(rest) == 0 {
 		return found, nil
 	}
-	positions, err := BasePositionsOf(ctx, db, basePath, keyColumns, rest)
-	if err != nil {
-		return nil, err
+	// Through the key index, the rows are read once, with their values; the
+	// rows the delta takes away are asked of the positions before any value
+	// is used, as without it.
+	positions, base, ok := lookupByKeyIndex(ctx, db, basePath, keyColumns, rest, columns, textLimit(maxBytes, held))
+	if !ok {
+		var err error
+		if positions, err = basePositionsByJoin(ctx, db, basePath, keyColumns, rest); err != nil {
+			return nil, err
+		}
+		base = nil
 	}
 	if len(positions) == 0 {
 		return found, nil
@@ -179,9 +186,11 @@ func CutValuesOf(ctx context.Context, db *sql.DB, basePath string, dead, rows []
 			return nil, fmt.Errorf("%w: the table delta of %s takes away row %d of it and holds no row of that row's key", ErrBrokenChain, basePath, gone.Int64)
 		}
 	}
-	base, err := baseValuesAt(ctx, db, basePath, positions, columns, textLimit(maxBytes, held))
-	if err != nil {
-		return nil, err
+	if base == nil {
+		var err error
+		if base, err = baseValuesAt(ctx, db, basePath, positions, columns, textLimit(maxBytes, held), nil); err != nil {
+			return nil, err
+		}
 	}
 	for k, row := range base {
 		found[k] = row

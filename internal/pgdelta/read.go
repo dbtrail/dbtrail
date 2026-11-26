@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
@@ -108,9 +109,15 @@ func BasePositions(ctx context.Context, db *sql.DB, basePath string, keyColumns 
 // this process already found to hold no NULL in those columns (nullmemo.go
 // says how a file is told from another, and what is never remembered).
 func BasePositionsOf(ctx context.Context, db *sql.DB, basePath string, keyColumns []string, keys []string) (map[string]int64, error) {
-	if found, ok := positionsByKeyIndex(ctx, db, basePath, keyColumns, keys); ok {
+	if found, _, ok := lookupByKeyIndex(ctx, db, basePath, keyColumns, keys, nil, -1); ok {
 		return found, nil
 	}
+	return basePositionsByJoin(ctx, db, basePath, keyColumns, keys)
+}
+
+// basePositionsByJoin is BasePositionsOf without the key index: the file's
+// key columns read by the engine.
+func basePositionsByJoin(ctx context.Context, db *sql.DB, basePath string, keyColumns []string, keys []string) (map[string]int64, error) {
 	found, moved, err := basePositionsOf(ctx, db, basePath, keyColumns, keys, true)
 	if moved {
 		// The file changed under a call that took it for one with no NULL:
@@ -246,8 +253,10 @@ var ErrBaseValuesTooLarge = errors.New("the values to read from the table file a
 // file's own bytes: a PostgreSQL table's file holds PostgreSQL's text for
 // every column.
 //
-// Two reads: the key columns, for the rows, then the named columns of those
-// rows by their number, so no other column and no key is spelled twice.
+// Without a key index, two reads: the key columns, for the rows, then the
+// named columns of those rows by their number, so no other column and no key
+// is spelled twice. With one, one read of the rows it names, which checks
+// their keys and gives the values.
 // maxBytes (0: no limit) is how much text the answer may hold; past it the
 // answer is ErrBaseValuesTooLarge.
 func BaseValuesOf(ctx context.Context, db *sql.DB, basePath string, keyColumns, keys, columns []string, maxBytes int64) (map[string]map[string]*string, error) {
@@ -267,11 +276,16 @@ func BaseValuesOf(ctx context.Context, db *sql.DB, basePath string, keyColumns, 
 			return nil, fmt.Errorf("%s has no column %s", basePath, c)
 		}
 	}
-	positions, err := BasePositionsOf(ctx, db, basePath, keyColumns, keys)
+	// Through the key index: its rows read once, the keys checked in the
+	// same read that gives the values.
+	if _, vals, ok := lookupByKeyIndex(ctx, db, basePath, keyColumns, keys, columns, textLimit(maxBytes, 0)); ok {
+		return vals, nil
+	}
+	positions, err := basePositionsByJoin(ctx, db, basePath, keyColumns, keys)
 	if err != nil {
 		return nil, err
 	}
-	return baseValuesAt(ctx, db, basePath, positions, columns, textLimit(maxBytes, 0))
+	return baseValuesAt(ctx, db, basePath, positions, columns, textLimit(maxBytes, 0), nil)
 }
 
 // baseColumnsOf is the columns a table file has, as a set.
@@ -301,15 +315,21 @@ func textLimit(maxBytes, held int64) int64 {
 	return max(maxBytes-held, 0)
 }
 
+// rowReads counts baseValuesAt's reads of rows by their number, for the
+// tests that hold a call to one read.
+var rowReads atomic.Uint64
+
 // baseValuesAt is the second read of BaseValuesOf: the text of columns in
 // the rows of the base file at positions (key by row number). The columns
 // must be the file's. limit is how much text the answer may hold (textLimit:
-// below 0 for no limit).
-func baseValuesAt(ctx context.Context, db *sql.DB, basePath string, positions map[string]int64, columns []string, limit int64) (map[string]map[string]*string, error) {
+// below 0 for no limit), counted over every column but those in free (nil:
+// every one counts).
+func baseValuesAt(ctx context.Context, db *sql.DB, basePath string, positions map[string]int64, columns []string, limit int64, free map[string]bool) (map[string]map[string]*string, error) {
 	found := map[string]map[string]*string{}
 	if len(positions) == 0 {
 		return found, nil
 	}
+	rowReads.Add(1)
 	src := "read_parquet(" + file(basePath) + ", file_row_number=true" + noHive + ")"
 	sel := make([]string, len(columns))
 	for i, c := range columns {
@@ -358,7 +378,9 @@ func baseValuesAt(ctx context.Context, db *sql.DB, basePath string, positions ma
 			if vals[i] != nil {
 				text := string(vals[i])
 				row[c] = &text
-				held += int64(len(text))
+				if !free[c] {
+					held += int64(len(text))
+				}
 			} else {
 				row[c] = nil
 			}

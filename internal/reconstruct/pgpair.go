@@ -298,6 +298,9 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 	}
 	sort.Strings(keys)
 	stepAt := time.Now()
+	// The file's key index, built here when it has none (#3085): this
+	// update pays for it once, and says so (lookup_index_built_ms).
+	steps.indexBuilt = pgdelta.EnsureKeyIndex(ctx, in.Schema, in.Table, src, keyCols, in.DuckDBTuning)
 	positions, err := pgdelta.BasePositionsOf(ctx, duck, src, keyCols, keys)
 	steps.positions = time.Since(stepAt)
 	if err != nil {
@@ -560,7 +563,8 @@ func pgKeyNames(pk []metadata.ColumnMeta) []string {
 //   - fetch: reading the window's changes from the index (and its archives);
 //   - fold: folding them into one change per key, in this process;
 //   - positions: finding the changed keys' rows in the table file
-//     (pgdelta.BasePositionsOf: a pass over the file's key columns for a
+//     (pgdelta.BasePositionsOf: through the file's key index, built first
+//     when the file has none, or a pass over the file's key columns for a
 //     NULL, unless the file is remembered, and the join);
 //   - pair_write: writing the window's pair;
 //   - carry: linking the pairs before into the new folder;
@@ -572,7 +576,10 @@ type pgPairSteps struct {
 	fold  time.Duration
 
 	positions time.Duration
-	pairWrite time.Duration
+	// indexBuilt is the part of positions spent building the file's key
+	// index, on the update that built it; zero on every other.
+	indexBuilt time.Duration
+	pairWrite  time.Duration
 	carry     time.Duration
 	foldPair  time.Duration
 }
@@ -585,6 +592,9 @@ func (s pgPairSteps) attrs(ending bool) []any {
 		"fetch_ms", s.fetch.Milliseconds(), "fold_ms", s.fold.Milliseconds(),
 		"positions_ms", s.positions.Milliseconds(), "pair_write_ms", s.pairWrite.Milliseconds(),
 		"carry_ms", s.carry.Milliseconds(),
+	}
+	if s.indexBuilt > 0 {
+		a = append(a, "lookup_index_built_ms", s.indexBuilt.Milliseconds())
 	}
 	if ending {
 		a = append(a, "fold_pair_ms", s.foldPair.Milliseconds())

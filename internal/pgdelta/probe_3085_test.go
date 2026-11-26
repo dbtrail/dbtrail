@@ -175,7 +175,7 @@ func TestProbeKeyPasses3085(t *testing.T) {
 		}
 	}))
 	report("the check of the rows found against the file", timed(3, func() {
-		if got, err := baseValuesAt(ctx, db, base, found, []string{"id"}, -1); err != nil || len(got) != len(keys) {
+		if got, err := baseValuesAt(ctx, db, base, found, []string{"id"}, -1, nil); err != nil || len(got) != len(keys) {
 			t.Fatal(err, len(got))
 		}
 	}))
@@ -216,7 +216,7 @@ func TestProbeKeyPasses3085(t *testing.T) {
 			positions[fmt.Sprint(i)] = p
 		}
 		report("baseValuesAt itself, "+c.name, timed(3, func() {
-			if got, err := baseValuesAt(ctx, db, base, positions, []string{"note"}, -1); err != nil || len(got) != len(c.rows) {
+			if got, err := baseValuesAt(ctx, db, base, positions, []string{"note"}, -1, nil); err != nil || len(got) != len(c.rows) {
 				t.Fatal(err, len(got))
 			}
 		}))

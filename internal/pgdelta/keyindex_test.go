@@ -600,3 +600,244 @@ func TestKeyIndexSwitchOff(t *testing.T) {
 		t.Fatalf("switched off, an index was written: %+v", res)
 	}
 }
+
+// freshNoKeyIndexMemo empties the memo of files no index is built beside,
+// for the test and after it.
+func freshNoKeyIndexMemo(t *testing.T) {
+	t.Helper()
+	clearMemo := func() {
+		noKeyIndexMu.Lock()
+		defer noKeyIndexMu.Unlock()
+		clear(noKeyIndexFor)
+	}
+	clearMemo()
+	t.Cleanup(clearMemo)
+}
+
+// countBuilds counts the builds EnsureKeyIndex runs, for the test.
+func countBuilds(t *testing.T) *int {
+	t.Helper()
+	n := new(int)
+	was := keyIndexBuild
+	keyIndexBuild = func(ctx context.Context, schema, table, basePath string, keyColumns []string, tuning duckdbutil.Tuning) KeyIndexResult {
+		*n++
+		return was(ctx, schema, table, basePath, keyColumns, tuning)
+	}
+	t.Cleanup(func() { keyIndexBuild = was })
+	return n
+}
+
+// A file with no index gets one at its first lookup, and the update that
+// built it is told how long it took; the next lookup builds nothing.
+func TestEnsureKeyIndexBuildsWhereThereIsNone(t *testing.T) {
+	freshNoNullMemo(t)
+	freshNoKeyIndexMemo(t)
+	builds := countBuilds(t)
+	db := duck(t)
+	ctx := context.Background()
+	base := filepath.Join(t.TempDir(), "t.parquet")
+	writeBase(t, base, []string{"id", "val"}, []cell{v("a"), v("1")}, []cell{v("b"), v("2")})
+	if took := EnsureKeyIndex(ctx, "s", "t", base, []string{"id"}, duckdbutil.Tuning{}); took <= 0 || *builds != 1 || !exists(KeyIndexPath(base)) {
+		t.Fatalf("first lookup: took %s, %d builds", took, *builds)
+	}
+	if took := EnsureKeyIndex(ctx, "s", "t", base, []string{"id"}, duckdbutil.Tuning{}); took != 0 || *builds != 1 {
+		t.Fatalf("second lookup: took %s, %d builds", took, *builds)
+	}
+	var got map[string]int64
+	var err error
+	if n := lookupsOf(func() { got, err = BasePositionsOf(ctx, db, base, []string{"id"}, []string{"b"}) }); n != 1 || err != nil || got["b"] != 1 {
+		t.Fatalf("after the build: %d lookups, %v, %v", n, got, err)
+	}
+}
+
+// An index that is there and not usable (damaged, on other key columns,
+// bound to another version of the file) is rebuilt in the same lookup.
+func TestEnsureKeyIndexRebuildsAnUnusableOne(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		spoil func(t *testing.T, base string)
+	}{
+		{"damaged", func(t *testing.T, base string) {
+			b, err := os.ReadFile(KeyIndexPath(base))
+			if err != nil {
+				t.Fatal(err)
+			}
+			b[len(b)-1] ^= 1
+			if err := os.WriteFile(KeyIndexPath(base), b, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"other key columns", func(t *testing.T, base string) { buildIndex(t, base, []string{"val"}) }},
+		{"another version of the file", func(t *testing.T, base string) {
+			rewriteKeyIndexHeader(t, KeyIndexPath(base), func(hdr []byte) { hdr[55]++ })
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			freshNoKeyIndexMemo(t)
+			base := filepath.Join(t.TempDir(), "t.parquet")
+			writeBase(t, base, []string{"id", "val"}, []cell{v("a"), v("1")}, []cell{v("b"), v("2")})
+			buildIndex(t, base, []string{"id"})
+			c.spoil(t, base)
+			builds := countBuilds(t)
+			if took := EnsureKeyIndex(context.Background(), "s", "t", base, []string{"id"}, duckdbutil.Tuning{}); took <= 0 || *builds != 1 {
+				t.Fatalf("took %s, %d builds", took, *builds)
+			}
+			if _, verdict, err := openUsableKeyIndex(base, []string{"id"}); verdict != keyIndexUsable {
+				t.Fatalf("after the rebuild: %v", err)
+			}
+		})
+	}
+}
+
+// A build that ends in no index (a NULL key here) is not tried again while
+// the file keeps its identity; a file rewritten gets a new attempt.
+func TestEnsureKeyIndexDoesNotRetryTheSameFile(t *testing.T) {
+	freshNoKeyIndexMemo(t)
+	builds := countBuilds(t)
+	ctx := context.Background()
+	base := filepath.Join(t.TempDir(), "t.parquet")
+	writeBase(t, base, []string{"id", "val"}, []cell{v("a"), v("1")}, []cell{null, v("2")})
+	EnsureKeyIndex(ctx, "s", "t", base, []string{"id"}, duckdbutil.Tuning{})
+	EnsureKeyIndex(ctx, "s", "t", base, []string{"id"}, duckdbutil.Tuning{})
+	if *builds != 1 || exists(KeyIndexPath(base)) {
+		t.Fatalf("%d builds over one version of a file with a NULL key", *builds)
+	}
+	writeBase(t, base, []string{"id", "val"}, []cell{v("a"), v("1")}, []cell{v("b"), v("2")}, []cell{v("c"), v("3")})
+	if took := EnsureKeyIndex(ctx, "s", "t", base, []string{"id"}, duckdbutil.Tuning{}); *builds != 2 || took <= 0 || !exists(KeyIndexPath(base)) {
+		t.Fatalf("the rewritten file: %d builds", *builds)
+	}
+}
+
+// A file carried forward by copy has a new identity at every update: no
+// index is built beside it.
+func TestEnsureKeyIndexBuildsNoneBesideACopy(t *testing.T) {
+	freshNoKeyIndexMemo(t)
+	builds := countBuilds(t)
+	src := filepath.Join(t.TempDir(), "t.parquet")
+	writeBase(t, src, []string{"id", "val"}, []cell{v("a"), v("1")})
+	copied := filepath.Join(t.TempDir(), "t.parquet")
+	writeBase(t, copied, []string{"id", "val"}, []cell{v("a"), v("1")})
+	CarryKeyIndex(src, copied, false, "s", "t")
+	if took := EnsureKeyIndex(context.Background(), "s", "t", copied, []string{"id"}, duckdbutil.Tuning{}); took != 0 || *builds != 0 || exists(KeyIndexPath(copied)) {
+		t.Fatalf("beside a copy: took %s, %d builds", took, *builds)
+	}
+}
+
+// A folder short on space skips the build with a warning and writes
+// nothing; the caller (a publish) is not failed, and the file is not tried
+// again while it keeps its identity.
+func TestKeyIndexSkippedForDisk(t *testing.T) {
+	freshNoKeyIndexMemo(t)
+	was := keyIndexDiskSpace
+	keyIndexDiskSpace = func(string) (uint64, uint64, error) { return 1 << 20, 1 << 40, nil }
+	t.Cleanup(func() { keyIndexDiskSpace = was })
+	base := filepath.Join(t.TempDir(), "t.parquet")
+	writeBase(t, base, []string{"id", "val"}, []cell{v("a"), v("1")})
+	res := WriteKeyIndexBeside(context.Background(), "s", "t", base, []string{"id"}, duckdbutil.Tuning{})
+	if res.Skipped == "" || !res.Warn || exists(KeyIndexPath(base)) || exists(KeyIndexPath(base)+".tmp") {
+		t.Fatalf("short on space: %+v", res)
+	}
+	builds := countBuilds(t)
+	EnsureKeyIndex(context.Background(), "s", "t", base, []string{"id"}, duckdbutil.Tuning{})
+	EnsureKeyIndex(context.Background(), "s", "t", base, []string{"id"}, duckdbutil.Tuning{})
+	if *builds != 1 {
+		t.Fatalf("%d builds over a file whose folder is short on space", *builds)
+	}
+}
+
+// rowReadsOf is how many reads of rows by their number f made.
+func rowReadsOf(f func()) uint64 {
+	before := rowReads.Load()
+	f()
+	return rowReads.Load() - before
+}
+
+// Through the index, BaseValuesOf reads the rows once: the read that checks
+// their keys gives the values, a key column asked for among them. The key
+// columns read only for the check do not count against the limit.
+func TestBaseValuesOfReadsTheRowsOnce(t *testing.T) {
+	freshNoNullMemo(t)
+	db := duck(t)
+	ctx := context.Background()
+	base := filepath.Join(t.TempDir(), "t.parquet")
+	long := strings.Repeat("k", 500)
+	writeBase(t, base, []string{"id", "val", "note"}, []cell{v(long), v("1"), null}, []cell{v("b"), v("2"), v("x")}, []cell{v("c"), v("3"), v("y")})
+	buildIndex(t, base, []string{"id"})
+	var got map[string]map[string]*string
+	var err error
+	reads := rowReadsOf(func() {
+		if n := lookupsOf(func() { got, err = BaseValuesOf(ctx, db, base, []string{"id"}, []string{long, "c", "z"}, []string{"val", "note"}, 3) }); n != 1 {
+			t.Errorf("answered from the index %d times", n)
+		}
+	})
+	if err != nil || reads != 1 {
+		t.Fatalf("%d reads of the rows: %v", reads, err)
+	}
+	if g := cutRows(got, "val", "note", "id"); !reflect.DeepEqual(g, map[string]string{long: "val=[1] note=∅ id not read", "c": "val=[3] note=[y] id not read"}) {
+		t.Fatalf("values: %q", g)
+	}
+	// A key column asked for comes back, and counts.
+	got, err = BaseValuesOf(ctx, db, base, []string{"id"}, []string{"b"}, []string{"id", "val"}, 0)
+	if err != nil || *got["b"]["id"] != "b" || *got["b"]["val"] != "2" {
+		t.Fatalf("a key column asked for: %v, %v", got, err)
+	}
+	if _, err := BaseValuesOf(ctx, db, base, []string{"id"}, []string{long}, []string{"id"}, 10); !errors.Is(err, ErrBaseValuesTooLarge) {
+		t.Fatalf("a key column asked for past the limit: %v", err)
+	}
+}
+
+// Rows that disagree with their keys discard the index for the whole call:
+// the values are the file's, read as before.
+func TestBaseValuesOfWhoseIndexDisagrees(t *testing.T) {
+	freshNoNullMemo(t)
+	db := duck(t)
+	ctx := context.Background()
+	base := filepath.Join(t.TempDir(), "t.parquet")
+	writeBase(t, base, []string{"id", "val"}, []cell{v("a"), v("1")}, []cell{v("b"), v("2")})
+	bind, err := bindingOf(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeKeyIndexFile(ctx, KeyIndexPath(base), bind, []string{"id"}, recordsOf([]byte("a"), 1, []byte("b"), 0)); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]map[string]*string
+	if n := lookupsOf(func() { got, err = BaseValuesOf(ctx, db, base, []string{"id"}, []string{"a", "b"}, []string{"val"}, 0) }); n != 0 {
+		t.Fatal("answered from an index whose rows disagree")
+	}
+	if err != nil || *got["a"]["val"] != "1" || *got["b"]["val"] != "2" || exists(KeyIndexPath(base)) {
+		t.Fatalf("the file's values: %v, %v", cutRows(got, "val"), err)
+	}
+}
+
+// CutValuesOf answers alike with and without the index, and with it reads
+// the base's rows once.
+func TestCutValuesOfThroughTheKeyIndex(t *testing.T) {
+	freshNoNullMemo(t)
+	db := duck(t)
+	ctx := context.Background()
+	base := filepath.Join(t.TempDir(), "t.parquet")
+	cols := []string{"id", "big"}
+	writeBase(t, base, cols, []cell{v("a"), v("A")}, []cell{v("b"), v("B")}, []cell{v("c"), null}, []cell{v("d"), v("D")})
+	dead, rows := pair(t, db, base, 0, cols, cols[:1],
+		change{key: "b", row: []cell{v("b"), v("P")}},
+		change{key: "d", del: true},
+	)
+	keys := []string{"a", "b", "c", "d", "z"}
+	without, err := CutValuesOf(ctx, db, base, []string{dead}, []string{rows}, cols[:1], keys, []string{"big"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buildIndex(t, base, cols[:1])
+	var with map[string]map[string]*string
+	reads := rowReadsOf(func() {
+		if n := lookupsOf(func() {
+			with, err = CutValuesOf(ctx, db, base, []string{dead}, []string{rows}, cols[:1], keys, []string{"big"}, 0)
+		}); n != 1 {
+			t.Errorf("answered from the index %d times", n)
+		}
+	})
+	if err != nil || reads != 1 || !reflect.DeepEqual(cutRows(with, "big"), cutRows(without, "big")) {
+		t.Fatalf("%d reads: with the index %q, without %q, %v", reads, cutRows(with, "big"), cutRows(without, "big"), err)
+	}
+}

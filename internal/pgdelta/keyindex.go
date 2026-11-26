@@ -751,40 +751,92 @@ func (ix *keyIndex) scanBlock(b int, want []string, found map[string]int64) erro
 	return nil
 }
 
-// positionsByKeyIndex is BasePositionsOf answered from the key index beside
-// basePath, and true; false when there is none to use, or the one there
-// does not hold up, and the caller reads the file. See the file's comment
-// for what is checked.
-func positionsByKeyIndex(ctx context.Context, db *sql.DB, basePath string, keyColumns, keys []string) (map[string]int64, bool) {
-	if strings.Contains(basePath, "://") || len(keyColumns) == 0 || len(keys) == 0 || !keyIndexOn() {
-		return nil, false
-	}
-	path := KeyIndexPath(basePath)
+// keyIndexVerdict is what openUsableKeyIndex found beside a file.
+type keyIndexVerdict int
+
+const (
+	keyIndexUsable keyIndexVerdict = iota
+	// keyIndexAbsent: no index beside the file.
+	keyIndexAbsent
+	// keyIndexUnusable: an index the lookup must not use: damaged, built on
+	// other key columns, or bound to another version of the file. The error
+	// says which.
+	keyIndexUnusable
+	// keyIndexUnchecked: the index or the file could not be read (a
+	// permission, an I/O error): nothing is known of the index.
+	keyIndexUnchecked
+)
+
+// errKeyIndexOther is an index built on other key columns, or bound to
+// another version of its file.
+var errKeyIndexOther = errors.New("the key index is not this file's")
+
+// openUsableKeyIndex opens the index beside basePath when it is usable for
+// a lookup on keyColumns: its own checks pass, it is built on those columns
+// in that order, and it is bound to the file as it is now. Otherwise the
+// verdict says why, with the cause.
+func openUsableKeyIndex(basePath string, keyColumns []string) (*keyIndex, keyIndexVerdict, error) {
 	ix, err := openKeyIndex(basePath)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		return nil, false
+		return nil, keyIndexAbsent, err
 	case errors.Is(err, errKeyIndexDamaged):
-		dropKeyIndex(path, "the PostgreSQL key index beside the table file is damaged; it is removed and the file's key columns are read instead", err)
-		return nil, false
+		return nil, keyIndexUnusable, err
 	case err != nil:
-		slog.Warn("the PostgreSQL key index beside the table file cannot be read; the file's key columns are read instead", "path", path, "error", err)
-		return nil, false
+		return nil, keyIndexUnchecked, err
 	}
-	defer ix.Close()
 	if !slicesEqual(ix.names, keyColumns) {
-		slog.Debug("the PostgreSQL key index is built on other key columns; the file's key columns are read instead", "path", path, "index", ix.names, "key", keyColumns)
-		return nil, false
+		ix.Close()
+		return nil, keyIndexUnusable, fmt.Errorf("%w: it is built on the key columns %v, and the table's are %v", errKeyIndexOther, ix.names, keyColumns)
 	}
 	bind, err := bindingOf(basePath)
 	if err != nil {
-		slog.Debug("the PostgreSQL key index is not used: the table file cannot be told from another", "path", path, "error", err)
-		return nil, false
+		ix.Close()
+		return nil, keyIndexUnchecked, err
 	}
 	if bind != ix.bind {
-		slog.Debug("the PostgreSQL key index was built on another version of the table file; the file's key columns are read instead", "path", path)
-		return nil, false
+		ix.Close()
+		return nil, keyIndexUnusable, fmt.Errorf("%w: it was built on another version of the table file", errKeyIndexOther)
 	}
+	return ix, keyIndexUsable, nil
+}
+
+// lookupByKeyIndex answers keys from the key index beside basePath: the row
+// of each key the file holds and, for each, the text of columns in it (nil
+// for a NULL; columns may be none, and a key column among them is read
+// once). The rows found are read ONCE, with the key columns among what is
+// read: every row must hold the key the index names it for, and the values
+// handed back are the ones that read found, so no row is read twice. limit
+// bounds the text of columns (textLimit: below 0 for none); the key columns
+// read for the check count only when asked for.
+//
+// false when there is no index to use, or the one there does not hold up,
+// and the caller reads the file as before, for the whole call: an index
+// damaged, or whose rows do not check out, is removed with a warning; one
+// on other key columns or another version of the file is left (a debug
+// line); text past limit is false too, and the caller's own read says so.
+// See the file's comment for what is checked.
+func lookupByKeyIndex(ctx context.Context, db *sql.DB, basePath string, keyColumns, keys, columns []string, limit int64) (map[string]int64, map[string]map[string]*string, bool) {
+	if strings.Contains(basePath, "://") || len(keyColumns) == 0 || len(keys) == 0 || !keyIndexOn() {
+		return nil, nil, false
+	}
+	path := KeyIndexPath(basePath)
+	ix, verdict, err := openUsableKeyIndex(basePath, keyColumns)
+	switch verdict {
+	case keyIndexAbsent:
+		return nil, nil, false
+	case keyIndexUnusable:
+		if errors.Is(err, errKeyIndexDamaged) {
+			dropKeyIndex(path, "the PostgreSQL key index beside the table file is damaged; it is removed and the file's key columns are read instead", err)
+		} else {
+			slog.Debug("the PostgreSQL key index is not used; the file's key columns are read instead", "path", path, "reason", err)
+		}
+		return nil, nil, false
+	case keyIndexUnchecked:
+		slog.Warn("the PostgreSQL key index beside the table file cannot be checked; the file's key columns are read instead", "path", path, "error", err)
+		return nil, nil, false
+	}
+	defer ix.Close()
 	uniq := append([]string(nil), keys...)
 	sort.Strings(uniq)
 	uniq = compactStrings(uniq)
@@ -795,20 +847,35 @@ func positionsByKeyIndex(ctx context.Context, db *sql.DB, basePath string, keyCo
 		} else {
 			slog.Warn("the PostgreSQL key index beside the table file cannot be read; the file's key columns are read instead", "path", path, "error", err)
 		}
-		return nil, false
+		return nil, nil, false
 	}
 	afterKeyIndexFind(basePath)
-	// Every key found, against the file: the row it names holds it.
+	values := map[string]map[string]*string{}
 	if len(found) > 0 {
-		vals, err := baseValuesAt(ctx, db, basePath, found, keyColumns, -1)
-		if err != nil {
+		asked := make(map[string]bool, len(columns))
+		read := append([]string(nil), columns...)
+		for _, c := range columns {
+			asked[c] = true
+		}
+		free := map[string]bool{}
+		for _, c := range keyColumns {
+			if !asked[c] {
+				read = append(read, c)
+				free[c] = true
+			}
+		}
+		vals, err := baseValuesAt(ctx, db, basePath, found, read, limit, free)
+		switch {
+		case errors.Is(err, ErrBaseValuesTooLarge):
+			return nil, nil, false
+		case err != nil:
 			// Removed, unless the lookup was cancelled: an index whose rows
 			// cannot be read back (two keys at one row among the causes) would
 			// say so again at every update.
 			if ctx.Err() == nil {
 				dropKeyIndex(path, "the rows the PostgreSQL key index names could not be checked against the table file; the index is removed and the file's key columns are read instead", err)
 			}
-			return nil, false
+			return nil, nil, false
 		}
 		parts := make([]string, len(keyColumns))
 		for key, row := range vals {
@@ -823,17 +890,21 @@ func positionsByKeyIndex(ctx context.Context, db *sql.DB, basePath string, keyCo
 			if !ok || KeyOf(parts) != key {
 				dropKeyIndex(path, "a row the PostgreSQL key index names does not hold the key it names it for; the index is removed and the file's key columns are read instead",
 					fmt.Errorf("key %q at row %d", key, found[key]))
-				return nil, false
+				return nil, nil, false
 			}
+			for c := range free {
+				delete(row, c)
+			}
+			values[key] = row
 		}
 	}
 	// The file the rows were read from is the one the index is bound to.
 	if now, err := bindingOf(basePath); err != nil || now != ix.bind {
 		slog.Debug("the table file changed during the PostgreSQL key index's lookup; the file's key columns are read instead", "path", path)
-		return nil, false
+		return nil, nil, false
 	}
 	keyIndexLookups.Add(1)
-	return found, true
+	return found, values, true
 }
 
 // dropKeyIndex warns why the index at path is not used and removes it, so
@@ -901,13 +972,17 @@ func WriteKeyIndexBeside(ctx context.Context, schema, table, basePath string, ke
 // was carried by a hard link (linked), which keeps the inode and the time
 // the index is bound to, and only an index bound to srcBase. Whatever was
 // beside dstBase under the index's name is removed first. Nothing here
-// fails the carry: a file with no index beside it is read as before.
+// fails the carry: a file with no index beside it is read as before. A
+// copied file is remembered as one no index is built beside.
 func CarryKeyIndex(srcBase, dstBase string, linked bool, schema, table string) {
 	src, out := KeyIndexPath(srcBase), KeyIndexPath(dstBase)
 	if err := os.Remove(out); err != nil && !os.IsNotExist(err) {
 		slog.Debug("carry forward: could not remove a PostgreSQL key index beside the destination", "path", out, "error", err)
 	}
 	if !linked {
+		// A copy: a new identity at every update, so no index is built
+		// beside it either (EnsureKeyIndex asks the memo).
+		rememberNoKeyIndex(dstBase)
 		return
 	}
 	ix, err := openKeyIndex(srcBase)
@@ -926,4 +1001,123 @@ func CarryKeyIndex(srcBase, dstBase string, linked bool, schema, table string) {
 	if err := os.Link(src, out); err != nil {
 		slog.Debug("carry forward: could not link the PostgreSQL key index beside the carried file", "schema", schema, "table", table, "src", src, "dst", out, "error", err)
 	}
+}
+
+// noKeyIndexFor remembers, per version of a table file (keyidx.FileIdentity:
+// size, time of last write, inode), that an index beside it is not to be
+// built again: a build there ended in none (a NULL key, a key twice, too
+// little disk, a failure), an index rebuilt there was unusable again, a
+// stale one could not be removed, or the file is a copy carried forward
+// (CarryKeyIndex), whose identity is new at every update, so a build beside
+// it would be paid at every update. A file rewritten is a new identity and
+// gets one new attempt; one carried by hard link keeps its identity, and
+// the memory follows it. A build cut short by the context leaves no entry.
+// Process-wide, bounded by noKeyIndexCap: past it the memo is emptied, and
+// the cost is one more attempt per file. The value is the path the entry
+// was made under, for the debug line.
+var (
+	noKeyIndexMu  sync.Mutex
+	noKeyIndexFor = map[keyidx.FileIdentity]string{}
+	noKeyIndexCap = 4096
+)
+
+func rememberNoKeyIndex(basePath string) {
+	id, err := keyidx.StatIdentity(basePath)
+	if err != nil {
+		return
+	}
+	noKeyIndexMu.Lock()
+	defer noKeyIndexMu.Unlock()
+	if _, known := noKeyIndexFor[id]; !known && len(noKeyIndexFor) >= noKeyIndexCap {
+		clear(noKeyIndexFor)
+	}
+	noKeyIndexFor[id] = basePath
+}
+
+func noKeyIndexEntry(basePath string) (string, bool) {
+	id, err := keyidx.StatIdentity(basePath)
+	if err != nil {
+		return "", false
+	}
+	noKeyIndexMu.Lock()
+	defer noKeyIndexMu.Unlock()
+	under, ok := noKeyIndexFor[id]
+	return under, ok
+}
+
+// keyIndexBuild is WriteKeyIndexBeside; a seam so a test can count the
+// builds EnsureKeyIndex runs.
+var keyIndexBuild = WriteKeyIndexBeside
+
+// EnsureKeyIndex makes sure the local table file at basePath has a key
+// index a lookup on keyColumns can use, building one where there is none
+// or the one there is not usable, and returns how long a build took (zero
+// when none ran): the refresh that paid for it reports it. The MySQL
+// lookup's rules (#2496, slice 4), for the PostgreSQL index:
+//
+//   - a usable index: nothing done;
+//   - none: built (a debug line first), unless the memo says this version
+//     of the file produced none;
+//   - one that is not usable (damaged, built on other key columns, bound to
+//     another version of the file): one warning with its cause and that it
+//     is rebuilt now, the file removed, and built again; a removal that
+//     fails is a warning and the version is remembered;
+//   - one that cannot be checked (the index or the file could not be read):
+//     a warning, nothing touched, nothing remembered;
+//   - after a build, an index that is still not there or not usable:
+//     remembered, so the next update does not try again on the same file;
+//     one that is there and not usable is a warning, and removed.
+//
+// The switch off, a file on S3 or a table with no key: nothing.
+func EnsureKeyIndex(ctx context.Context, schema, table, basePath string, keyColumns []string, tuning duckdbutil.Tuning) time.Duration {
+	if !keyIndexOn() || strings.Contains(basePath, "://") || len(keyColumns) == 0 {
+		return 0
+	}
+	path := KeyIndexPath(basePath)
+	ix, verdict, err := openUsableKeyIndex(basePath, keyColumns)
+	switch verdict {
+	case keyIndexUsable:
+		ix.Close()
+		return 0
+	case keyIndexUnchecked:
+		slog.Warn("the PostgreSQL key index beside the table file cannot be checked; it is left as it is and the file's key columns are read",
+			"schema", schema, "table", table, "path", path, "error", err)
+		return 0
+	}
+	if under, memo := noKeyIndexEntry(basePath); memo {
+		slog.Debug("no usable PostgreSQL key index beside the table file, and none is built for this version of the file; the file's key columns are read",
+			"schema", schema, "table", table, "path", path, "tried_under", under)
+		return 0
+	}
+	if verdict == keyIndexAbsent {
+		slog.Debug("no PostgreSQL key index beside the table file; building it now", "schema", schema, "table", table, "path", path)
+	} else {
+		slog.Warn("the PostgreSQL key index beside the table file is not usable; rebuilding it now", "schema", schema, "table", table, "path", path, "error", err)
+		if rerr := os.Remove(path); rerr != nil && !os.IsNotExist(rerr) {
+			slog.Warn("the PostgreSQL key index that is not usable could not be removed, so it is not rebuilt; the file's key columns are read, and the index is not tried again until the table's file is rewritten or DBTrail restarts",
+				"schema", schema, "table", table, "path", path, "error", rerr)
+			rememberNoKeyIndex(basePath)
+			return 0
+		}
+	}
+	start := time.Now()
+	keyIndexBuild(ctx, schema, table, basePath, keyColumns, tuning)
+	built := time.Since(start)
+	if ctx.Err() != nil {
+		return built
+	}
+	ix, verdict, err = openUsableKeyIndex(basePath, keyColumns)
+	switch verdict {
+	case keyIndexUsable:
+		ix.Close()
+	case keyIndexAbsent:
+		// Skipped or failed: the build said which, and at which level.
+		rememberNoKeyIndex(basePath)
+	default:
+		rememberNoKeyIndex(basePath)
+		slog.Warn("the PostgreSQL key index just built is not usable; the file's key columns are read, and the index is not built again until the table's file is rewritten or DBTrail restarts",
+			"schema", schema, "table", table, "path", path, "error", err)
+		os.Remove(path)
+	}
+	return built
 }
