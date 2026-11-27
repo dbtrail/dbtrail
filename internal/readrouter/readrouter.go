@@ -324,6 +324,12 @@ func HasLike(stmt string) bool {
 // send inside the copy's macros keeps the statement on MySQL (dateAddVeto,
 // #2800).
 func VetoOpts(stmt string, o CopyOptions) string {
+	return vetoOpts(stmt, o, false)
+}
+
+// vetoOpts is VetoOpts; heavy leaves out the vetoes an expensive statement
+// is let past (HardVetoOpts, heavy.go).
+func vetoOpts(stmt string, o CopyOptions, heavy bool) string {
 	if hintComment.MatchString(stmt) {
 		return vetoHintComment
 	}
@@ -337,6 +343,9 @@ func VetoOpts(stmt string, o CopyOptions) string {
 		return vetoSpaceOutsideASCII
 	}
 	for _, v := range vetoes {
+		if heavy && heavyRelaxes[v.name] {
+			continue
+		}
 		re := v.re
 		if v.name == vetoNowKeyword && sc.clockKeyword && !o.MySQLClockKeywords {
 			// The copy would be sent the keyword, and read it as its own.
@@ -382,13 +391,15 @@ func VetoOpts(stmt string, o CopyOptions) string {
 		// MySQL and the table's second column, named alpha, on the copy.
 		return vetoHash
 	}
-	if nullArgCall.MatchString(sc.blankedCopy) {
+	// From here on, all but the AVG one is only how the copy computes a
+	// value (heavyRelaxes): an expensive statement is not held to them.
+	if !heavy && nullArgCall.MatchString(sc.blankedCopy) {
 		return vetoNullArg
 	}
-	if !substringsAgree(sc.blankedCopy) {
+	if !heavy && !substringsAgree(sc.blankedCopy) {
 		return vetoSubstring
 	}
-	if !leftRightAgree(sc.blankedCopy) {
+	if !heavy && !leftRightAgree(sc.blankedCopy) {
 		return vetoLeftRight
 	}
 	if o.MySQLAvg && avgOpen.MatchString(sc.blankedCopy) {
@@ -397,6 +408,9 @@ func VetoOpts(stmt string, o CopyOptions) string {
 		if _, why := ForCopyOpts(stmt, o); why == VetoAvgLeft {
 			return VetoAvgLeft
 		}
+	}
+	if heavy {
+		return ""
 	}
 	if why := divisionVeto(sc.blankedCopy, o.MySQLAvg); why != "" {
 		return why
