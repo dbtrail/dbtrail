@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"slices"
@@ -290,31 +291,11 @@ func TestRunner_connectedOrder(t *testing.T) {
 	if res.JoinOrderConnected != "tl, ta, tb" || res.JoinOrderWritten {
 		t.Errorf("connected %q, written %v", res.JoinOrderConnected, res.JoinOrderWritten)
 	}
-	if !reflect.DeepEqual(normalizeRows(res.Rows), normalizeRows(want)) {
+	// The parent's numbers come through JSON, the reference's from the
+	// worker itself: compared as printed.
+	if fmt.Sprint(res.Rows) != fmt.Sprint(want) {
 		t.Errorf("rows %v, want %v", res.Rows, want)
 	}
-}
-
-// normalizeRows is rows with every number as a float64: the worker's answer
-// is JSON through the parent, the reference the worker's own values.
-func normalizeRows(rows [][]any) [][]any {
-	out := make([][]any, len(rows))
-	for i, r := range rows {
-		out[i] = make([]any, len(r))
-		for j, v := range r {
-			switch n := v.(type) {
-			case int64:
-				out[i][j] = float64(n)
-			case int32:
-				out[i][j] = float64(n)
-			case float64:
-				out[i][j] = n
-			default:
-				out[i][j] = v
-			}
-		}
-	}
-	return out
 }
 
 // A connected order that runs out of memory ran in the order written: the
