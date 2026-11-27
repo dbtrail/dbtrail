@@ -3,6 +3,8 @@
 package consoleapp
 
 import (
+	"database/sql"
+	"slices"
 	"strings"
 	"testing"
 
@@ -38,10 +40,55 @@ func heavyMark(t *testing.T, srv *console.Server, entID string) func() string {
 // copy's side is in got. It logs the copy's answer beside MySQL's.
 func heavyOnCopy(t *testing.T, added, who, stmt, got, want string) bool {
 	t.Helper()
-	if added != "heavy_on_copy" || (who != "live" && who != "") || !(strings.Contains(got, "copy|") || strings.Contains(got, "(copy,")) {
+	if !slices.Contains(strings.Split(added, "+"), "heavy_on_copy") || (who != "live" && who != "") || !(strings.Contains(got, "copy|") || strings.Contains(got, "(copy,")) {
 		return false
 	}
 	same := strings.ReplaceAll(strings.ReplaceAll(got, "copy|", "live|"), "(copy,", "(live,") == want
 	t.Logf("heavy_on_copy: %q is the copy's for its cost; the same as MySQL's: %v\n  copy  %.400s\n  mysql %.400s", stmt, same, got, want)
 	return true
+}
+
+// txAnswerText is answerText inside a transaction on db, where every
+// statement is MySQL's whatever its plan: the way to MySQL's own answer to an
+// expensive statement the copy would answer otherwise.
+func txAnswerText(t *testing.T, db *sql.DB, stmt string) string {
+	t.Helper()
+	conn, err := db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(t.Context(), "BEGIN"); err != nil {
+		t.Fatal(err)
+	}
+	defer conn.ExecContext(t.Context(), "ROLLBACK") //nolint:errcheck
+	rows, err := conn.QueryContext(t.Context(), stmt)
+	if err != nil {
+		return "ERROR " + err.Error()
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return "ERROR " + err.Error()
+	}
+	var out []string
+	for rows.Next() {
+		cells := make([]sql.RawBytes, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range cells {
+			ptrs[i] = &cells[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return "ERROR " + err.Error()
+		}
+		parts := make([]string, len(cells))
+		for i, c := range cells {
+			parts[i] = string(c)
+		}
+		out = append(out, strings.Join(parts, "|"))
+	}
+	if err := rows.Err(); err != nil {
+		return "ERROR " + err.Error()
+	}
+	return strings.Join(out, " / ")
 }

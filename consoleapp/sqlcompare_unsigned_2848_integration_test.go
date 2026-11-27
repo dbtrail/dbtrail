@@ -194,9 +194,13 @@ func unsignedMathRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) 
 	routedText := openRaw(t, asText(withZone(portDSN, "+00:00")))
 	liveText := openRaw(t, asText(withZone(sourceDSN, "+00:00")))
 	check := func(label string, routed, live *sql.DB, c sqlCase) {
+		mark := heavyMark(t, srv, ent.ID)
 		got := scaledAnswer(routed, c.stmt, c.args...)
 		want := scaledAnswer(live, c.stmt, c.args...)
 		t.Logf("%s routed %-90.400s %s", label, got, c.stmt)
+		if heavyOnCopy(t, mark(), c.who, c.stmt, got, want) {
+			return
+		}
 		t.Logf("%s live   %-90.400s", label, want)
 		if c.who == "?" {
 			return

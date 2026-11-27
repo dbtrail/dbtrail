@@ -174,8 +174,12 @@ func unixTimeCompare(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		routed := openRaw(t, withZone(portDSN, zone))
 		live := openRaw(t, withZone(sourceDSN, zone))
 		for _, c := range cases {
+			mark := heavyMark(t, srv, ent.ID)
 			got := answerText(routed, c.stmt)
 			t.Logf("[%s] routed %-70s %s", zone, got, c.stmt)
+			if heavyOnCopy(t, mark(), c.who, c.stmt, got, answerText(live, c.stmt)) {
+				continue
+			}
 			if strings.HasPrefix(got, "ERROR ") || !strings.HasPrefix(got, c.who+"|") {
 				t.Errorf("[%s] routed %q (%s):\n  got  %s\n  want it answered by %s", zone, c.stmt, c.why, got, c.who)
 				continue

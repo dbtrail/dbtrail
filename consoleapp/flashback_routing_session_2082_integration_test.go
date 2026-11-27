@@ -684,11 +684,11 @@ func TestIntegrationFlashbackRoutedSessionSettings(t *testing.T) {
 	copyN, mysqlN, reasons := rig.tally(t)
 	var sum uint64
 	for reason, n := range reasons {
-		if reason != "expensive_plan" {
+		if reason != "expensive_plan" && reason != "heavy_on_copy" {
 			sum += n
 		}
 	}
-	if mysqlN != sum || copyN != reasons["expensive_plan"] {
+	if mysqlN != sum || copyN != reasons["expensive_plan"]+reasons["heavy_on_copy"] {
 		t.Errorf("tally = copy %d, mysql %d; reasons %v: the port's own read of the session was counted as a statement", copyN, mysqlN, reasons)
 	}
 	if reasons["session_differs"] == 0 || reasons["connection_pinned"] == 0 || reasons["expensive_plan"] == 0 {
