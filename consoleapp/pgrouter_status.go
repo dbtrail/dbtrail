@@ -88,7 +88,16 @@ type pgRouterServerNumbers struct {
 	// part of it, not beside it), written_order_forgotten (it ran out of
 	// memory or time in that order: the shape was forgotten, and under
 	// Reasons it is copy_refused_after_written_order when the source
-	// answered). Absent until one is counted.
+	// answered). And what slowness did (pgshim writtenorder_slow.go):
+	// written_order_slow_marked (the statement answered slowly in the copy's
+	// own order, and its shape's next statement is tried in the order
+	// written), written_order_trial (a statement run in the order written on
+	// trial) and, parts of it, written_order_learned_slow (clearly faster:
+	// the shape is remembered, and its next statements count as
+	// written_order_remembered) and written_order_own_order_kept (not
+	// clearly faster, or it failed in the order written and ran again in the
+	// copy's own order: that order is kept for a day). Absent until one is
+	// counted.
 	JoinChecks map[string]uint64 `json:"join_checks,omitempty"`
 	// HeavyOlderOnCopy counts the heavy statements the copy answered with
 	// older data in fresh mode, where a light one would have gone to the
@@ -347,9 +356,26 @@ func (r *pgRouteStats) note(id string, n pgshim.RouteNote) {
 		if t.joinChecks == nil {
 			t.joinChecks = map[string]uint64{}
 		}
-		t.joinChecks[pgWrittenOrderRemembered]++
-		if n.WrittenOrder == pgshim.WrittenOrderForgotten {
+		switch n.WrittenOrder {
+		case pgshim.WrittenOrderRemembered:
+			t.joinChecks[pgWrittenOrderRemembered]++
+		case pgshim.WrittenOrderForgotten:
+			t.joinChecks[pgWrittenOrderRemembered]++
 			t.joinChecks[pgWrittenOrderForgotten]++
+		case pgshim.WrittenOrderSlowMarked:
+			t.joinChecks[pgWrittenOrderSlowMarked]++
+		case pgshim.WrittenOrderTrial:
+			t.joinChecks[pgWrittenOrderTrial]++
+		case pgshim.WrittenOrderLearnedSlow:
+			t.joinChecks[pgWrittenOrderTrial]++
+			t.joinChecks[pgWrittenOrderLearnedSlow]++
+		case pgshim.WrittenOrderOwnOrderKept:
+			t.joinChecks[pgWrittenOrderTrial]++
+			t.joinChecks[pgWrittenOrderOwnOrderKept]++
+		default:
+			// A value this build does not know: counted under its own name,
+			// not taken for another.
+			t.joinChecks["written_order_"+n.WrittenOrder]++
 		}
 	}
 	if n.HeavyOlder != "" {
@@ -485,10 +511,17 @@ const pgOOMRetryPrefix = "oom_retry_written_order_"
 
 // Under join_checks, what the memory of shapes that needed the order written
 // did (RouteNote.WrittenOrder): every statement it ran in the order written
-// from the start, and those of them that ran out of memory there too.
+// from the start, and those of them that ran out of memory there too; and
+// what slowness did (pgshim writtenorder_slow.go): every statement that
+// marked its shape for a trial, every trial, and among the trials those that
+// taught the shape and those after which the copy's own order was kept.
 const (
-	pgWrittenOrderRemembered = "written_order_remembered"
-	pgWrittenOrderForgotten  = "written_order_forgotten"
+	pgWrittenOrderRemembered   = "written_order_remembered"
+	pgWrittenOrderForgotten    = "written_order_forgotten"
+	pgWrittenOrderSlowMarked   = "written_order_slow_marked"
+	pgWrittenOrderTrial        = "written_order_trial"
+	pgWrittenOrderLearnedSlow  = "written_order_learned_slow"
+	pgWrittenOrderOwnOrderKept = "written_order_own_order_kept"
 )
 
 // doc is the status document now: the counts, then each server's mode,

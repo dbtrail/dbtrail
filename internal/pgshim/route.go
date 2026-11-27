@@ -107,7 +107,9 @@ type RouteNote struct {
 	OOMRetry string
 	// WrittenOrder is what the memory of shapes that needed the order
 	// written did with the statement's run (WrittenOrderRemembered,
-	// WrittenOrderForgotten, writtenorder.go), "" when it did nothing.
+	// WrittenOrderForgotten, writtenorder.go; WrittenOrderSlowMarked,
+	// WrittenOrderTrial, WrittenOrderLearnedSlow, WrittenOrderOwnOrderKept,
+	// writtenorder_slow.go), "" when it did nothing.
 	WrittenOrder string
 	// HeavyOlder is the kind of older data the copy answered a heavy
 	// statement with (Binding.OlderKind: tails_not_ready,
