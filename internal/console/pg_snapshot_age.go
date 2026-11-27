@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -28,12 +29,14 @@ import (
 // from (pgTailSource.cut), read the same way.
 //
 // It errs OLD, with one limit named under "The clocks":
-//   - it is the bound of each file the statement read, the oldest of them,
-//     never a bound of the folder: a table with no change is published again
-//     as the file it was (pgCarryForwardEligible), with the bound of the
-//     update that last wrote it, and nothing in a footer says through which
-//     LSN a later update found it unchanged. Such a table reads as old as
-//     that update, for as long as it is carried;
+//   - it is the bound of each file the statement read, the oldest of them.
+//     A table with no change is published again as the file it was
+//     (pgCarryForwardEligible), with the bound of the update that last wrote
+//     it in its footer; the folder's record of where its update ended
+//     (reconstruct.PGRunCutFile) says the update found it unchanged through
+//     the update's own bound, and that bound is taken (pgHeldThrough). A
+//     folder with no record, or a record from before it named the bound,
+//     leaves such a table as old as the update that last wrote its file;
 //   - the bound sits PGDeltaMargin (a minute) before the moment it was taken
 //     at, so an answer from a snapshot just taken reads a minute old;
 //   - a source with no write since the snapshot makes the age grow though
@@ -139,7 +142,42 @@ func (s *Server) pgTableThrough(t views.BaselineTable, loss pgLossOf) (time.Time
 	if written.Before(through) {
 		through = written
 	}
+	// A table the folder's update brought to its end, carried unchanged:
+	// the update's bound, never newer than the folder.
+	if held := s.pgHeldThrough(dir, dirAt, t); held.After(through) {
+		through = held
+	}
 	return through, ""
+}
+
+// pgAgeRunCuts remembers the snapshot folders' records of where their update
+// ended, for the age of a statement's answer (pgHeldThrough). A published
+// folder is never written again.
+var pgAgeRunCuts pgRunCutMemo
+
+// pgHeldThrough is the bound the update that published dir brought t to,
+// capped at the folder's time dirAt; zero when dir's record does not hold t,
+// names no bound (written before it did), is for another folder, or cannot be
+// read, and for a folder reached through a link or the pointer to the newest
+// snapshot. The record is written only for a table the update read over its
+// whole window with no loss of captured changes (pgHoldThroughRun), and its
+// bound is the one every file the update wrote records.
+func (s *Server) pgHeldThrough(dir string, dirAt time.Time, t views.BaselineTable) time.Time {
+	clean := filepath.Clean(dir)
+	if fi, err := os.Lstat(clean); err != nil || fi.Mode()&os.ModeSymlink != 0 {
+		return time.Time{}
+	}
+	run, ok := pgAgeRunCuts.of(dir, func(err error) {
+		s.copyFaults.warn(dir, "Engine Routing: a snapshot folder's record of where its update ended could not be read; the age of an answer that reads one of its PostgreSQL tables unchanged is the age of that table's file",
+			"dir", dir, "error", err)
+	})
+	if !ok || !run.At.Equal(dirAt) || !run.Holds(t.Schema, t.Table) || run.Since.IsZero() {
+		return time.Time{}
+	}
+	if run.Since.After(dirAt) {
+		return dirAt
+	}
+	return run.Since
 }
 
 // pgReadThroughWith is the oldest pgTableThrough of the tables a statement

@@ -449,6 +449,20 @@ func (r pgRunEnd) foldedDeltaSince(b pgFoldBounds, floor uint64, prevSince time.
 	return since.UTC().Truncate(time.Second)
 }
 
+// heldSince is the bound every table the run brought to its end holds: what
+// a file the run folded records (foldedDeltaSince for a fold that took
+// changes up to until, Next past any floor). A table carried forward was
+// read over the same window and found unchanged, so its rows hold every
+// change committed before it as well as a file the run wrote. Zero for a
+// run over an index with no change, which writes no record.
+func (r pgRunEnd) heldSince() time.Time {
+	if r.none {
+		return time.Time{}
+	}
+	next := r.until + 1
+	return r.foldedDeltaSince(pgFoldBounds{Next: next}, next-1, time.Time{})
+}
+
 // foldFrom is the bounds of a fold from floor through until: nothing to fold
 // when until is below floor, and the next fold starts at the floor again,
 // never below it (a Next below the floor would apply again changes the
