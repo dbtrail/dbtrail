@@ -2109,8 +2109,10 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 			return Result{}, &RefusedError{Reason: out.Error.Message}
 		case errQuery:
 			if out.JoinOrder == joinOrderConnected {
+				// Not the engine's text: even its first line can quote a
+				// row's value (a failed cast). The caller gets the error.
 				slog.Info("sql on the copy: a statement run with its tables in a connected order failed in the engine",
-					"order", out.JoinOrderTables, "error", out.Error.Message)
+					"order", out.JoinOrderTables)
 			}
 			return Result{}, engineError(out, spill, noSpill)
 		case errTooLarge:
