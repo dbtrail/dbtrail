@@ -345,7 +345,17 @@ func TestCaptureStale_3202_theNoticeWaitsForTheCopysAnswer(t *testing.T) {
 			if note := p.l.last(); note.CaptureState != "" {
 				t.Errorf("counted as %q on the copy, though the source answered", note.CaptureState)
 			}
+			// The withheld notice is not sent later with another answer of
+			// the copy on the same connection.
 			fail.Store(false)
+			k.set(CaptureState{}, nil)
+			if got := strictRun(ctx, c, p.l, how, "SELECT sum(n) FROM wide"); got.answer != "7" || got.side != RouteCopy {
+				t.Errorf("a later statement on the copy: %+v", got)
+			}
+			if n := strings.Join(notices(), "|"); strings.Contains(n, "could not check") {
+				t.Errorf("notices %q: the withheld notice came with a later answer", n)
+			}
+			k.set(CaptureState{Kind: CaptureUnchecked, Why: "your PostgreSQL did not answer within 2s"}, nil)
 			d, notices := strictConn(t, ctx, p.l)
 			if got := strictRun(ctx, d, p.l, how, "SELECT sum(n) FROM big"); got.answer != "7" || got.side != RouteCopy {
 				t.Errorf("the copy answered: %+v", got)
