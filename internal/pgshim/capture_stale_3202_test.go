@@ -68,7 +68,9 @@ func TestCaptureStale_3202_aStatementOnTheCopyGoesToTheSource(t *testing.T) {
 				if got := strictRun(ctx, c, port.p.l, how, stmt); got != staleOnSrc {
 					t.Errorf("stale: %+v, want %+v", got, staleOnSrc)
 				}
-				if d := port.p.l.runs.Load() - runs; d != 0 {
+				if d := port.p.l.runs.Load() - runs; d != 0 && how != "prepared" {
+					// A prepared statement is described on the copy
+					// (dbtrail_describe) when it is made: its columns, no row.
 					t.Errorf("the copy ran %d statements, want none", d)
 				}
 				if n := notices(); len(n) != 0 {
@@ -77,10 +79,14 @@ func TestCaptureStale_3202_aStatementOnTheCopyGoesToTheSource(t *testing.T) {
 				if n := port.p.l.last(); n.CaptureState != "" {
 					t.Errorf("a statement the source answered is counted as %q on the copy", n.CaptureState)
 				}
+				// Once capture saves again, a new connection is the copy's.
+				// (This one stays held back on the tables the source
+				// answered it about until the copy reaches that answer,
+				// #2985, as for any statement the source answered.)
 				k.set(CaptureState{}, nil)
-				want := tablesOnCopy
-				if got := strictRun(ctx, c, port.p.l, how, stmt); got.answer != want.answer || got.side != RouteCopy || got.code != "" {
-					t.Errorf("capture saves again: %+v, want the copy's %s", got, want.answer)
+				d, _ := strictConn(t, ctx, port.p.l)
+				if got := strictRun(ctx, d, port.p.l, how, stmt); got.answer != "7" || got.side != RouteCopy || got.code != "" {
+					t.Errorf("capture saves again, a new connection: %+v, want the copy's 7", got)
 				}
 			})
 		}
@@ -115,9 +121,19 @@ func TestCaptureStale_3202_aPreparedStatementComesBack(t *testing.T) {
 			t.Errorf("run %d while stale: %s %s/%s, want the source's 42", i, got, n.Side, n.Reason)
 		}
 	}
+	// Nothing keeps it on the source: on this connection it is held back by
+	// #2985's rule (the source answered it about big), as any statement the
+	// source answered; on a new one it is the copy's.
 	k.set(CaptureState{}, nil)
-	if got, n := exec(); got != "7" || n.Side != RouteCopy {
-		t.Errorf("after capture saved again: %s %s/%s, want the copy's 7", got, n.Side, n.Reason)
+	if got, n := exec(); got != "42" || n.Side != RouteSource || n.Reason != ReasonCopyTooOld {
+		t.Errorf("after capture saved again, the same connection: %s %s/%s, want copy_too_old", got, n.Side, n.Reason)
+	}
+	d := costPortConn(t, ctx, p.l)
+	if _, err := d.Prepare(ctx, "report", "SELECT sum(n) FROM big", nil); err != nil {
+		t.Fatal(err)
+	}
+	if res := d.ExecPrepared(ctx, "report", nil, nil, nil).Read(); res.Err != nil || len(res.Rows) != 1 || string(res.Rows[0][0]) != "7" {
+		t.Errorf("after capture saved again, a new connection: %v %q, want the copy's 7", res.Err, res.Rows)
 	}
 }
 
