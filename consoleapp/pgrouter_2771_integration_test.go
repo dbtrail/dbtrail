@@ -777,8 +777,15 @@ func TestIntegrationPGRouterForward(t *testing.T) {
 			if cl.TxStatus() != 'I' {
 				t.Errorf("%s: status %c after a BEGIN that failed", c.name, cl.TxStatus())
 			}
-			if got := one(ctx, cl, count); got != "2" {
-				t.Errorf("%s: the copy still answers: %q", c.name, got)
+			// A statement that reads a table is refused, not answered by the
+			// copy: its columns there cannot be compared with the source's
+			// (#3251, copy_shape_unchecked). The connection stays open, and
+			// one that reads no table is still the copy's.
+			if got := one(ctx, cl, count); !strings.HasPrefix(got, "error 55000") || !strings.Contains(got, "could not check") || strings.Contains(got, "wrong-pw") {
+				t.Errorf("%s: a statement on a table with the source unreachable: %q, want 55000", c.name, got)
+			}
+			if got := one(ctx, cl, "SELECT 1 + 1 AS two"); got != "2" {
+				t.Errorf("%s: a statement that reads no table: %q, want the copy's 2", c.name, got)
 			}
 		}
 	})
