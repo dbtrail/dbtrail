@@ -186,12 +186,23 @@ func TestPGRunCutFile_3084(t *testing.T) {
 func TestPGHoldThroughRun_3084(t *testing.T) {
 	run := &pgRunEnd{until: 1, held: &pgRunHeld{}}
 	cfg := FullTableConfig{pgRun: run}
-	pgHoldThroughRun(cfg, "public", "lost", &CaptureGap{}, false)
-	pgHoldThroughRun(cfg, "public", "dropped", nil, true)
-	pgHoldThroughRun(cfg, "public", "whole", nil, false)
-	pgHoldThroughRun(FullTableConfig{}, "public", "mysql", nil, false) // no run: nothing, no panic
+	pgHoldThroughRun(cfg, "public", "lost", &CaptureGap{}, false, false)
+	pgHoldThroughRun(cfg, "public", "dropped", nil, true, false)
+	pgHoldThroughRun(cfg, "public", "whole", nil, false, false)
+	pgHoldThroughRun(cfg, "public", "late", nil, false, true)
+	pgHoldThroughRun(FullTableConfig{}, "public", "mysql", nil, false, false) // no run: nothing, no panic
 	if run.held.tables[[2]string{"public", "lost"}] || run.held.tables[[2]string{"public", "dropped"}] {
 		t.Fatal("a table with a loss in its window is held through the run")
+	}
+	if run.held.tables[[2]string{"public", "late"}] {
+		t.Fatal("a table the index records entering capture after its file's floor is held through the run")
+	}
+	// A run told to go on over gaps holds nothing: finding nothing proves
+	// nothing there.
+	gaps := &pgRunEnd{until: 1, held: &pgRunHeld{}}
+	pgHoldThroughRun(FullTableConfig{pgRun: gaps, AllowGaps: true}, "public", "whole", nil, false, false)
+	if len(gaps.held.tables) != 0 {
+		t.Fatal("a run over gaps held a table through its end")
 	}
 	if !run.held.tables[[2]string{"public", "whole"}] {
 		t.Fatal("a whole table is not held through the run")

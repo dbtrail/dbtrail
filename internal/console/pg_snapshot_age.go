@@ -155,8 +155,9 @@ func (s *Server) pgTableThrough(t views.BaselineTable, loss pgLossOf) (time.Time
 // folder is never written again.
 var pgAgeRunCuts pgRunCutMemo
 
-// pgHeldThrough is the bound the update that published dir brought t to,
-// capped at the folder's time dirAt; zero when dir's record does not hold t,
+// pgHeldThrough is the bound the update that published dir brought t to;
+// zero when it is later than an update's bound can be (past the folder's
+// time dirAt less PGDeltaMargin), when dir's record does not hold t,
 // names no bound (written before it did), is for another folder, or cannot be
 // read, and for a folder reached through a link or the pointer to the newest
 // snapshot. The record is written only for a table the update read over its
@@ -174,8 +175,11 @@ func (s *Server) pgHeldThrough(dir string, dirAt time.Time, t views.BaselineTabl
 	if !ok || !run.At.Equal(dirAt) || !run.Holds(t.Schema, t.Table) || run.Since.IsZero() {
 		return time.Time{}
 	}
-	if run.Since.After(dirAt) {
-		return dirAt
+	// An update's bound sits PGDeltaMargin before its own time at the
+	// latest (foldedDeltaSince); one past that is a record that is wrong,
+	// and its word is not taken.
+	if run.Since.After(dirAt.Add(-reconstruct.PGDeltaMargin)) {
+		return time.Time{}
 	}
 	return run.Since
 }

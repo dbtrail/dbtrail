@@ -355,7 +355,7 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 		rep.CarriedForward, rep.CarriedByLink = true, linked
 		rep.Files = append([]string{filepath.Join(schema, table+".parquet")}, delta...)
 		rep.Duration = time.Since(start)
-		pgHoldThroughRun(cfg, schema, table, capGap, notCovered)
+		pgHoldThroughRun(cfg, schema, table, capGap, notCovered, pgEnteredCaptureLate(db, bmeta, schema, table))
 		slog.Info("table carried forward unchanged", "schema", schema, "table", table,
 			"reason", "no events in the window", "linked", linked,
 			"lsn", lsnText(bmeta.LSN), "reads_from", fileSince.UTC().Format(time.RFC3339),
@@ -440,7 +440,7 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 		}
 		if written {
 			rep.Duration = time.Since(start)
-			pgHoldThroughRun(cfg, schema, table, capGap, notCovered)
+			pgHoldThroughRun(cfg, schema, table, capGap, notCovered, pgEnteredCaptureLate(db, bmeta, schema, table))
 			return rep, "", nil
 		}
 		if prev != nil && fromPair == "" {
@@ -491,7 +491,7 @@ func reconstructPGTableWindow(ctx context.Context, cfg FullTableConfig, p pgTabl
 		return nil, "", err
 	}
 	rep.Duration = time.Since(start)
-	pgHoldThroughRun(cfg, schema, table, capGap, notCovered)
+	pgHoldThroughRun(cfg, schema, table, capGap, notCovered, pgEnteredCaptureLate(db, bmeta, schema, table))
 	slog.Info("table reconstructed",
 		"schema", schema, "table", table,
 		"lsn", lsnText(b.Next),

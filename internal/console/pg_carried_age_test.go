@@ -57,12 +57,24 @@ func TestPGCarriedTableAgeIsTheRunsBound(t *testing.T) {
 			t.Errorf("with a table the run did not hold: %s", got)
 		}
 	})
-	t.Run("never newer than the folder", func(t *testing.T) {
+	// An update's bound is at least a minute before its folder's time: a
+	// record past that is wrong, and the file's own bound is used.
+	for _, since := range []string{"2026-11-20T13:00:00Z", "2026-11-20T12:00:00Z", "2026-11-20T11:59:30Z"} {
+		t.Run("a bound an update cannot record: "+since, func(t *testing.T) {
+			root := t.TempDir()
+			carried := pgAgeTable(t, root, pgAgeDir, "countries", 40, "2026-11-17T09:00:00Z")
+			record(t, root, `{"version":1,"lsn":300,"at":"2026-11-20T12:00:00Z","tables":[["public","countries"]],"since":"`+since+`"}`)
+			if got := read(t, &Server{}, carried); got != "2026-11-17T09:00:00Z" {
+				t.Errorf("%s, want the file's own bound", got)
+			}
+		})
+	}
+	t.Run("a bound a minute before the folder is taken", func(t *testing.T) {
 		root := t.TempDir()
 		carried := pgAgeTable(t, root, pgAgeDir, "countries", 40, "2026-11-17T09:00:00Z")
-		record(t, root, `{"version":1,"lsn":300,"at":"2026-11-20T12:00:00Z","tables":[["public","countries"]],"since":"2026-11-20T13:00:00Z"}`)
-		if got := read(t, &Server{}, carried); got != "2026-11-20T12:00:00Z" {
-			t.Errorf("%s, want the folder's time", got)
+		record(t, root, `{"version":1,"lsn":300,"at":"2026-11-20T12:00:00Z","tables":[["public","countries"]],"since":"2026-11-20T11:59:00Z"}`)
+		if got := read(t, &Server{}, carried); got != "2026-11-20T11:59:00Z" {
+			t.Errorf("%s", got)
 		}
 	})
 	for name, body := range map[string]string{

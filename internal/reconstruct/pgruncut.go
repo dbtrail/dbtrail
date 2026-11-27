@@ -2,6 +2,7 @@ package reconstruct
 
 import (
 	"cmp"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/snapshotdir"
 )
 
@@ -180,11 +182,25 @@ func ReadPGRunCut(dir string) (cut PGRunCut, found bool, err error) {
 // pgHoldThroughRun records, at a table's successful end, that the table holds
 // through the run's end: not when the window had a known loss of captured
 // changes, or capture dropped changes of the table and the fold went on
-// without them (notCovered). Its file then records the loss itself, and a
-// reader that moved its start to the run's end would ask over less.
-func pgHoldThroughRun(cfg FullTableConfig, schema, table string, capGap *CaptureGap, notCovered bool) {
-	if capGap != nil || notCovered {
+// without them (notCovered); not for a run told to go on over gaps
+// (cfg.AllowGaps: hours rotated away unarchived, archives that could not be
+// listed, a file older than capture's start all go on with a warning, and
+// finding nothing in the window then proves nothing, MySQL's rule for its
+// fold cut too); and not when the index records the table entering capture
+// after its file's floor (lateEntry, #2862: what it had in between was never
+// captured). Its file then says what it holds, and a reader that moved its
+// start, or its age, to the run's end would claim more.
+func pgHoldThroughRun(cfg FullTableConfig, schema, table string, capGap *CaptureGap, notCovered, lateEntry bool) {
+	if cfg.AllowGaps || capGap != nil || notCovered || lateEntry {
 		return
 	}
 	cfg.pgRun.holdThrough(schema, table)
+}
+
+// pgEnteredCaptureLate says whether the index records schema.table entering
+// capture after bmeta's floor, or cannot say (TableCaptureEntry): either way
+// the run does not hold the table through its end.
+func pgEnteredCaptureLate(db *sql.DB, bmeta baseline.DumpMetadata, schema, table string) bool {
+	e := TableCaptureEntry(db, "postgres", bmeta, schema, table)
+	return e.Late || e.Err != nil
 }
