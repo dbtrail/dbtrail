@@ -178,7 +178,7 @@ func TestPGMemoryVerdict_edges(t *testing.T) {
 		p := base()
 		p.In = console.PGMemoryInputs{MachineBytes: 8 * pgTestGiB, BudgetBytes: 4 * pgTestGiB, OwnCeiling: true, TailsBytes: int64(4 * pgTestGiB / 5)}
 		d := pgMemoryVerdict(p)
-		if d.ComparedWith != "own_ceiling" || d.AvailableBytes != 4*pgTestGiB || d.IndexPoolBytes != 0 || d.Verdict != "over" {
+		if d.ComparedWith != "own_ceiling" || d.AvailableBytes != 4*pgTestGiB || d.NeedBytes != 3*(5*pgTestGiB/2)+uint64(p.In.TailsBytes)+256<<20 || d.Verdict != "over" {
 			t.Fatalf("%+v", d)
 		}
 		lines := pgMemoryLines(d)
@@ -262,9 +262,10 @@ func TestPGMemoryLimitFor(t *testing.T) {
 		{int64(pgTestGiB), 768 << 20},
 		{512 << 20, 0},
 		// Under the 512 MiB floor the router refuses at start: none.
-		{1000 << 20, 512 << 20},
+		{1000 << 20, 640 << 20},
 		{900 << 20, 640 << 20},
-		{800 << 20, 0},
+		{800 << 20, 512 << 20},
+		{700 << 20, 0},
 		{400 << 20, 0},
 		{0, 0},
 	} {
@@ -345,11 +346,11 @@ func TestPGMemoryWatch(t *testing.T) {
 
 func TestPGDSNKind(t *testing.T) {
 	for dsn, want := range map[string]string{
-		"u:p@tcp(index-mysql:3306)/b":   "bundled",
-		"u:p@tcp(127.0.0.1:3306)/b":     "loopback",
-		"u:p@unix(/run/m.sock)/b":       "loopback",
+		"u:p@tcp(index-mysql:3306)/b":    "bundled",
+		"u:p@tcp(127.0.0.1:3306)/b":      "loopback",
+		"u:p@unix(/run/m.sock)/b":        "loopback",
 		"u:p@tcp(db.example.com:3306)/b": "remote",
-		"not a dsn":                     "",
+		"not a dsn":                      "",
 	} {
 		if got := pgDSNKind(dsn); got != want {
 			t.Errorf("pgDSNKind(%q) = %q, want %q", dsn, got, want)
