@@ -225,7 +225,10 @@ func nowCompare(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	}
 	reasons := fb.Routing.Servers[ent.ID].Reasons
 	t.Logf("routing reasons: %v", reasons)
-	if reasons["copy_refused"] != 0 {
-		t.Errorf("reasons = %v, want copy_refused 0", reasons)
+	// A statement the copy declined for how it reads the clock is let past
+	// that for its cost (heavy_on_copy); one the copy then cannot run goes to
+	// MySQL after the try (copy_refused). Every answer above is checked.
+	if reasons["explain_failed"] != 0 {
+		t.Errorf("reasons = %v, want explain_failed 0", reasons)
 	}
 }

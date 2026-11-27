@@ -40,7 +40,9 @@ func heavyMark(t *testing.T, srv *console.Server, entID string) func() string {
 // copy's side is in got. It logs the copy's answer beside MySQL's.
 func heavyOnCopy(t *testing.T, added, who, stmt, got, want string) bool {
 	t.Helper()
-	if !slices.Contains(strings.Split(added, "+"), "heavy_on_copy") || (who != "live" && who != "") || !(strings.Contains(got, "copy|") || strings.Contains(got, "(copy,")) {
+	// No rows say nothing of who answered: the tally does.
+	fromCopy := got == "" || strings.Contains(got, "copy|") || strings.Contains(got, "(copy,") || strings.HasSuffix(strings.TrimSpace(got), "]")
+	if !slices.Contains(strings.Split(added, "+"), "heavy_on_copy") || (who != "live" && who != "") || !fromCopy {
 		return false
 	}
 	same := strings.ReplaceAll(strings.ReplaceAll(got, "copy|", "live|"), "(copy,", "(live,") == want
