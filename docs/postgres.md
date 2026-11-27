@@ -2183,6 +2183,12 @@ The source answers a cheap statement for:
   - The source's answer for a table is kept for one second, so a burst of
     statements asks once. A statement within that second of an `ALTER TABLE`
     can still be answered by the copy.
+  - The question uses a short connection of its own, as the forwarding
+    user, about once a second per server while statements arrive. It is not
+    counted in the port's bound on its connections to the source, so leave
+    room for it in the forwarding user's `CONNECTION LIMIT` and in
+    `max_connections`: a question the source refuses refuses the statement
+    (see below).
   - A name without a schema is checked in every schema the copy holds it in:
     a change of `public.t` also sends an unqualified read of `t` to the
     source when the `search_path` points at `other.t`.
