@@ -1330,9 +1330,12 @@ listener, its own workers, its own memory.
     snapshot just taken reads about a minute behind. A limit under that
     sends every such statement to the source.
   - A table with no change is published in the next snapshot as the file it
-    was, with the instant of the update that last wrote it. A statement
-    that reads it is as old as that update, however new the snapshot is,
-    until the table is written again.
+    was, with the instant of the update that last wrote it. The update
+    records, beside the snapshot, that it found the table unchanged through
+    its own instant, and a statement that reads the table is placed by that
+    instant: as old as the update that carried it. A snapshot published by a
+    DBTrail from before this record named the instant, or by a full read,
+    leaves such a table as old as the update that last wrote its file.
   - A source with no write since the snapshot makes the lag grow though
     nothing is missing, and so does a capture that stopped: capture's state
     is not asked for this number.
@@ -2952,8 +2955,8 @@ an answer the client got counts, never a statement the source answered or one
 that ended in an error. An answer that read a table without its newest
 changes (fast mode, among others) is as old as the oldest instant its
 snapshot files record, the one a lag limit is measured by (see the lag limit
-above): a minute or more for a snapshot just taken, and as old as the update
-that last wrote the file for a table with no change. When a file it read
+above): a minute or more for a snapshot just taken, and, for a table with no
+change, as old as the update that carried it unchanged. When a file it read
 records none, the answer has no age: `data_age_unknown` counts them,
 so with any the worst is a floor, and `data_age_unknown_reason` says why the
 last one has none. On a source with no write since, the age grows though
