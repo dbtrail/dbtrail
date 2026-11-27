@@ -60,6 +60,10 @@ type pgRouterStatusDoc struct {
 	// (pgrouter_fastlane.go): how many workers are kept for them, and the
 	// long statements that run and wait. Absent when the router keeps none.
 	CopyLanes *pgCopyLanesDoc `json:"copy_lanes,omitempty"`
+	// Memory says whether the statements on the copy, the tails, the
+	// results held for clients and the index MySQL on this machine fit its
+	// memory (#3296). Absent when nothing set it (a test).
+	Memory *pgMemoryDoc `json:"memory,omitempty"`
 }
 
 // pgRouterServerNumbers is one server's decisions.
@@ -197,7 +201,10 @@ type pgRouteStats struct {
 	modes pgModes
 	// lanes, when set, gives the document the copy's lane for short
 	// statements (pgrouter_fastlane.go).
-	lanes      *pgCopyLanes
+	lanes *pgCopyLanes
+	// memory, when set, gives the document whether the router's memory fits
+	// the machine (#3296, pgrouter_memory_3296.go).
+	memory     *pgMemoryWatch
 	mu         sync.Mutex
 	since      time.Time
 	statements bool
@@ -562,6 +569,8 @@ func (r *pgRouteStats) doc(listen string) pgRouterStatusDoc {
 		n := r.lanes.numbers()
 		d.CopyLanes = &n
 	}
+	// The last minute's reading (pgMemoryWatch.follow): no index is asked here.
+	d.Memory = r.memory.doc()
 	if r.modes != nil {
 		forced, _ := console.SQLModeSetting()
 		fresh := forced == console.SQLModeForcedFresh

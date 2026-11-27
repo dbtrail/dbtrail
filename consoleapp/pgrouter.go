@@ -549,12 +549,18 @@ func runPGRouter(cmd *cobra.Command, _ []string) error {
 	fmt.Fprint(os.Stderr, awsKeysLine)
 	forced, read := console.SQLModeSetting()
 	fmt.Fprint(os.Stderr, pgRouterFreshLines(forced, read, srv.FreshPostgresServerNames()))
+	// Whether the statements, the tails and an index MySQL on this machine
+	// fit its memory (#3296): said once here, and in /status as it is now.
+	memWatch := newPGMemoryWatch(pgMemoryPlanFor(st.Workers, memory, srv))
+	fmt.Fprint(os.Stderr, pgMemoryLines(*memWatch.read(ctx)))
+	go memWatch.follow(ctx)
 	if p := st.TLS.ValidityProblemFor(time.Now(), pgVerifying); p != "" {
 		// In the log as well: the startup lines are plain text on stderr.
 		slog.Warn("PostgreSQL router: " + p)
 	}
 	routes := newPGRouteStats(time.Now(), st.StatusStatements && st.StatusAddr != "")
 	routes.modes = srv
+	routes.memory = memWatch
 	// One of the copy's workers kept for short statements, for the port
 	// and the status document (pgrouter_fastlane.go).
 	lanes := newPGCopyLanes(runner)
