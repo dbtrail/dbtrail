@@ -598,7 +598,7 @@ type costLogin struct {
 	// port refuses the execution after the copy ran it (#3251).
 	wideExec bool
 	// shapes, when set, is Binding.SourceShapes (#3251).
-	shapes func(context.Context, [][2]string) (map[[2]string]SourceShape, error)
+	shapes func(context.Context, []uint32) (map[uint32]SourceShape, error)
 	// joinStats, when set, is the server's Forward.JoinStats; joinNDV
 	// records RunOptions.JoinNDV of each statement the copy was given.
 	joinStats *JoinStats

@@ -21,14 +21,14 @@ import (
 // by OID, kept a moment per table from when it was asked, so a burst of
 // statements asks once and a change is seen within that moment.
 
-// fakeClock is a clock a test moves.
-type fakeClock struct {
+// shapeClock is a clock a test moves.
+type shapeClock struct {
 	mu sync.Mutex
 	at time.Time
 }
 
-func (c *fakeClock) now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.at }
-func (c *fakeClock) add(d time.Duration) {
+func (c *shapeClock) now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.at }
+func (c *shapeClock) add(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.at = c.at.Add(d)
@@ -67,7 +67,7 @@ func (a *shapeAskLog) log() [][]uint32 {
 func (a *shapeAskLog) set(f func()) { a.mu.Lock(); defer a.mu.Unlock(); f() }
 
 func TestPGShapeCache_3251(t *testing.T) {
-	clock := &fakeClock{at: time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)}
+	clock := &shapeClock{at: time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)}
 	src := &shapeAskLog{now: map[uint32]pgshim.SourceShape{
 		1: {Schema: "public", Name: "a", OID: 1, Columns: []baseline.PGColumn{{Name: "id", TypeOID: 23, TypeMod: -1, Ordinal: 1}}},
 		2: {Schema: "public", Name: "b", OID: 2},
@@ -167,7 +167,7 @@ func TestPGShapeCache_concurrentQuestionsAskOnce_3251(t *testing.T) {
 // P1's old b, coming back last, does not overwrite P2's: answers are dated
 // by when they were asked.
 func TestPGShapeCache_aLateOldAnswerDoesNotOverwrite_3251(t *testing.T) {
-	clock := &fakeClock{at: time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)}
+	clock := &shapeClock{at: time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)}
 	oldB := pgshim.SourceShape{Schema: "public", Name: "b", OID: 2, Columns: []baseline.PGColumn{{Name: "x", TypeOID: 25, TypeMod: -1, Ordinal: 1}}}
 	newB := pgshim.SourceShape{Schema: "public", Name: "b", OID: 2, Columns: []baseline.PGColumn{{Name: "x", TypeOID: 1042, TypeMod: 7, Ordinal: 1}}}
 	p1 := make(chan struct{})
@@ -201,7 +201,7 @@ func TestPGShapeCache_aLateOldAnswerDoesNotOverwrite_3251(t *testing.T) {
 // waits for one question, never for a line of them). A failure is dated when
 // it came: a source slower than failTTL is not asked by every statement.
 func TestPGShapeCache_slowSource_3251(t *testing.T) {
-	clock := &fakeClock{at: time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)}
+	clock := &shapeClock{at: time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)}
 	var mu sync.Mutex
 	asked := 0
 	var fail error
