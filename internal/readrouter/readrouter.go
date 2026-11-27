@@ -271,6 +271,9 @@ const likeVeto = "LIKE/REGEXP (case-sensitive on the copy, case-insensitive on M
 
 var regexpOnly = regexp.MustCompile(`(?i)\b(regexp|rlike)\b`)
 
+// soundsLike is SOUNDS LIKE, which the copy does not have.
+var soundsLike = regexp.MustCompile(`(?i)\bsounds\s+like\b`)
+
 var likeWord = regexp.MustCompile(`(?i)(^|[^.\w"\x60])like\b`)
 
 // likeThenPattern is a LIKE and what follows it; likeWritten is a pattern
@@ -359,6 +362,10 @@ func vetoOpts(stmt string, o CopyOptions, heavy bool) string {
 			if !heavy && !likePatternsWritten(sc.blankedCopy) {
 				return v.name
 			}
+			if heavy && soundsLike.MatchString(sc.blankedCopy) {
+				// The copy has no SOUNDS LIKE: it could only refuse it.
+				return v.name
+			}
 			re = regexpOnly
 		}
 		if v.name == vetoDateDiff {
@@ -413,13 +420,19 @@ func vetoOpts(stmt string, o CopyOptions, heavy bool) string {
 			return VetoAvgLeft
 		}
 	}
-	if heavy {
-		return ""
+	// Relaxed too: a / or an AVG or a MEDIAN typed otherwise, a whole
+	// number from 2^63 up typed otherwise, arithmetic on an UNSIGNED call.
+	// A check added below them is held to only if it is added without
+	// !heavy (heavy.go).
+	if !heavy {
+		if why := divisionVeto(sc.blankedCopy, o.MySQLAvg); why != "" {
+			return why
+		}
+		if why := unsignedCallVeto(sc.blankedCopy); why != "" {
+			return why
+		}
 	}
-	if why := divisionVeto(sc.blankedCopy, o.MySQLAvg); why != "" {
-		return why
-	}
-	return unsignedCallVeto(sc.blankedCopy)
+	return ""
 }
 
 // vetoSpaceOutsideASCII keeps on MySQL a statement with a character outside

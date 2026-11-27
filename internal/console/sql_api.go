@@ -1857,30 +1857,6 @@ func sqlStarRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs) string {
 //     as a constant of a type called that (sqlWordsRefusalFor, #2131).
 //
 // types is sqlsandbox.Session.Types.
-// sqlStrictHeavyRefusalFor is the part of sqlStrictRefusalFor an expensive
-// routed statement is still held to (sqlsandbox.Session.HeavyOnCopy): what
-// changes which table it reads (a twin by letter case), which columns a
-// star returns, what a name it writes means on the copy, and a name the
-// copy would read as a type. Each is another question on the copy, not
-// another computation of the same one.
-func sqlStrictHeavyRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, statement string, types sqlsandbox.ColumnTypes) string {
-	if table, twin := narrowed.SelectedCaseTwin(); table != "" {
-		return fmt.Sprintf("the copy does not answer this statement: %s and %s differ only by letter case, "+
-			"which the copy does not tell apart, so it could read the other table", table, twin)
-	}
-	if msg := sqlStarRefusalFor(in, narrowed, refs); msg != "" {
-		return msg
-	}
-	if msg := sqlNamesRefusalFor(narrowed, statement); msg != "" {
-		return msg
-	}
-	return sqlWordsRefusalFor(narrowed, types)
-}
-
-// sqlTextGuardsWaived is what an expensive routed statement whose text
-// columns would have been guarded is noted with: the guards are not run.
-const sqlTextGuardsWaived = "the copy may compare or sort the text columns it reads another way than MySQL's collation"
-
 func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, statement string, types sqlsandbox.ColumnTypes) string {
 	if table, twin := narrowed.SelectedCaseTwin(); table != "" {
 		return fmt.Sprintf("the copy does not answer this statement: %s and %s differ only by letter case, "+
@@ -1915,6 +1891,30 @@ func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, stateme
 	}
 	return sqlWordsRefusalFor(narrowed, types)
 }
+
+// sqlStrictHeavyRefusalFor is the part of sqlStrictRefusalFor an expensive
+// routed statement is still held to (sqlsandbox.Session.HeavyOnCopy): what
+// changes which table it reads (a twin by letter case), which columns a
+// star returns, what a name it writes means on the copy, and a name the
+// copy would read as a type. Each is another question on the copy, not
+// another computation of the same one.
+func sqlStrictHeavyRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, statement string, types sqlsandbox.ColumnTypes) string {
+	if table, twin := narrowed.SelectedCaseTwin(); table != "" {
+		return fmt.Sprintf("the copy does not answer this statement: %s and %s differ only by letter case, "+
+			"which the copy does not tell apart, so it could read the other table", table, twin)
+	}
+	if msg := sqlStarRefusalFor(in, narrowed, refs); msg != "" {
+		return msg
+	}
+	if msg := sqlNamesRefusalFor(narrowed, statement); msg != "" {
+		return msg
+	}
+	return sqlWordsRefusalFor(narrowed, types)
+}
+
+// sqlTextGuardsWaived is what an expensive routed statement whose text
+// columns would have been guarded is noted with: the guards are not run.
+const sqlTextGuardsWaived = "the copy may compare or sort the text columns it reads another way than MySQL's collation"
 
 // ilikeWord is ILIKE as a word, wherever it is in the statement, a quoted
 // name glued to it included ("code"ILIKE, which is how the copy is sent

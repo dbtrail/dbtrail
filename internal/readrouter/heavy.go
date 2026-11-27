@@ -14,7 +14,8 @@ package readrouter
 // name written otherwise, ||, ^, --, $...$, #, a word the copy reserves), or
 // one that needs what only the live server has (a variable, the session's
 // user, database or clock, FOUND_ROWS, a locking read, INTO, the system
-// schemas), or that the copy cannot run as MySQL means it (REGEXP, a recursion
+// schemas), or that the copy cannot run as MySQL means it (REGEXP, SOUNDS
+// LIKE, GROUP_CONCAT, whose second argument the copy reads as a separator, a recursion
 // MySQL stops and the copy may not, JSON, MATCH, BINARY, COLLATE, a CAST to
 // SIGNED or UNSIGNED, DIV, a date read from text, a DATEDIFF or
 // TIMESTAMPDIFF the copy is not sent as its macro, a DATE_ADD or an AVG the
@@ -22,14 +23,14 @@ package readrouter
 // by default: it is relaxed only once it is named here.
 
 // heavyRelaxes are the names on the veto list (vetoes) an expensive
-// statement is let past. A LIKE is let past in vetoOpts, where REGEXP and
-// RLIKE, under the same name, are not: the copy does not have them. The
-// other relaxed vetoes (CONCAT/LEAST/GREATEST, SUBSTRING, LEFT/RIGHT,
-// division, UNSIGNED arithmetic) are checks of their own in vetoOpts,
-// skipped there.
+// statement is let past. A LIKE is let past in vetoOpts, where REGEXP,
+// RLIKE and SOUNDS LIKE, under the same name, are not: the copy does not
+// have them. The other relaxed vetoes are checks of their own in vetoOpts,
+// skipped there under !heavy: CONCAT/LEAST/GREATEST with a NULL, SUBSTRING
+// and LEFT/RIGHT with a position or length the copy reads otherwise, a /,
+// an AVG or a MEDIAN typed otherwise, a whole number from 2^63 up typed
+// otherwise, and arithmetic on an UNSIGNED call.
 var heavyRelaxes = map[string]bool{
-	// MySQL cuts the text at group_concat_max_len.
-	"GROUP_CONCAT": true,
 	// Other week numbers.
 	"WEEK/YEARWEEK": true,
 	// The same.

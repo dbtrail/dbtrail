@@ -952,9 +952,9 @@ The decision, in order, for every statement:
    where MySQL answers a number, a `DOUBLE` where it answers a `DECIMAL`), text
    sorted or compared by bytes instead of the column's collation (and, under
    `LIMIT`, other rows), a `LIKE` that tells letter case apart, rows that tie
-   in another order, a `CONCAT` that skips a `NULL`, other week numbers, a
-   `GROUP_CONCAT` not cut at `group_concat_max_len`, duplicates a `UNION`
-   removes by other rules. The port counts these as `heavy_on_copy`.
+   in another order, a `CONCAT` that skips a `NULL`, a `SUBSTRING`, `LEFT` or
+   `RIGHT` that cuts from the other end for a position or length of 0 or
+   less, other week numbers, duplicates a `UNION` removes by other rules. The port counts these as `heavy_on_copy`.
 
    Decided as before, whatever the plan: a statement whose plan is cheap or
    cannot be had (MySQL, counted as `veto`), a prepared statement, a
@@ -964,7 +964,8 @@ The decision, in order, for every statement:
    string, a backslash in a string, `||`, `^`, `--`, `#`, `$...$`, a word the
    copy reserves, a variable, `USER()` and the other session functions,
    `FOUND_ROWS`, the clock forms above, `RAND`, a locking read, `INTO`, the
-   system schemas, `WITH RECURSIVE`, JSON, `MATCH`, `REGEXP`, `BINARY`,
+   system schemas, `WITH RECURSIVE`, JSON, `MATCH`, `REGEXP`, `SOUNDS LIKE`,
+   `GROUP_CONCAT` (the copy reads a second argument as a separator), `BINARY`,
    `COLLATE`, `CAST AS UNSIGNED`, `DIV`, `STR_TO_DATE` and the date
    functions the copy is not sent as its own. So are the copy's refusals of
    what it would read: a star or a `NATURAL JOIN` over a table whose columns

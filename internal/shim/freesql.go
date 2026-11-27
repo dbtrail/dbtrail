@@ -815,9 +815,11 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	d, err := ops.decide()
 	if err != nil {
 		if h.heavy.relaxed != "" {
-			// Vetoed, as it was before its plan was asked for.
-			h.logger.Debug("Engine Routing: could not explain a vetoed statement, forwarded", "err", err)
-			return ops.forward(RouteReasonVeto, "veto: "+h.heavy.relaxed)
+			// Vetoed, as it was before its plan was asked for; said, or a plan
+			// that always fails would keep the copy from every such statement
+			// with nothing to show for it.
+			h.routeWarn("explain-heavy", "Engine Routing: could not explain a vetoed statement the copy could have taken for its cost, forwarded under its veto", err)
+			return ops.forward(RouteReasonVeto, "veto: "+h.heavy.relaxed+"; could not explain: "+err.Error())
 		}
 		h.routeWarn("explain", "Engine Routing: could not explain, statement forwarded", err)
 		return ops.forward(RouteReasonExplainFailed, "could not explain: "+err.Error())
@@ -979,7 +981,13 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 		// The slow path is always right: whatever the copy could not do
 		// (a construct DuckDB lacks, a missing table, a timeout, a result
 		// over the cap), MySQL does.
-		h.routeWarn("copy", "Engine Routing: copy refused an expensive statement, forwarded to mysql", err)
+		if h.heavy.why() != "" {
+			// Its own warning: a statement let past a veto the copy may not
+			// read must not use up the one a fault of the copy gets.
+			h.routeWarn("copy-heavy", "Engine Routing: copy refused an expensive statement it was let past a veto or a refusal for, forwarded to mysql", err)
+		} else {
+			h.routeWarn("copy", "Engine Routing: copy refused an expensive statement, forwarded to mysql", err)
+		}
 		return ops.forward(RouteReasonCopyRefused, "copy refused: "+shortErr(err))
 	}
 	// The copy's side of the trace: forwarded statements log their reason,
