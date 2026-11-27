@@ -666,8 +666,17 @@ func TestCopyShape_3251_noNoticeBeforeAFormatRefusalOnDescribe(t *testing.T) {
 	if !slices.Contains(got, "Error 08P01") || notices(got) != 0 {
 		t.Errorf("a portal refused for its formats at its Describe: %v, want 08P01 and no notice", got)
 	}
+	// No Describe of the portal: refused at its Execute.
+	got = r.send(&pgproto3.Bind{PreparedStatement: "s", ResultFormatCodes: []int16{0, 0, 0}}, &pgproto3.Execute{}, &pgproto3.Sync{})
+	if !slices.Contains(got, "Error 08P01") || notices(got) != 0 {
+		t.Errorf("a portal refused for its formats at its Execute: %v, want 08P01 and no notice", got)
+	}
 	got = r.send(&pgproto3.Bind{PreparedStatement: "s"}, &pgproto3.Describe{ObjectType: 'P'}, &pgproto3.Execute{}, &pgproto3.Sync{})
 	if notices(got) != 1 {
 		t.Errorf("a portal described and run: %v, want one notice", got)
+	}
+	got = r.send(&pgproto3.Bind{PreparedStatement: "s"}, &pgproto3.Execute{}, &pgproto3.Sync{})
+	if notices(got) != 1 {
+		t.Errorf("a portal run without a Describe: %v, want one notice", got)
 	}
 }
