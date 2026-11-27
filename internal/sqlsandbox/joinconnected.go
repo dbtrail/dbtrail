@@ -300,9 +300,12 @@ func connectedShape(doc map[string]any) (map[string]any, string) {
 		return nil, "a SAMPLE"
 	}
 	// Anywhere in the statement, outside its subqueries: the select list,
-	// WHERE, GROUP BY, HAVING, QUALIFY, ORDER BY.
-	if fromOrdered(node) {
-		return nil, "a *, COLUMNS(...) or #n, which depend on the order of the FROM"
+	// WHERE, GROUP BY, HAVING, QUALIFY, ORDER BY. The FROM is judged on its
+	// own (fromTables).
+	for k, v := range node {
+		if k != "from_table" && fromOrdered(v) {
+			return nil, "a *, COLUMNS(...) or #n, which depend on the order of the FROM"
+		}
 	}
 	return node, ""
 }
