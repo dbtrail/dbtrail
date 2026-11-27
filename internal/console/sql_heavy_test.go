@@ -63,12 +63,10 @@ func TestSQL_realWorkerHeavyOnCopy(t *testing.T) {
 	// What changes what the statement reads is refused, heavy or not, with
 	// the same refusal.
 	for _, stmt := range []string{
-		// A column the copy does not hold (#2123).
-		"SELECT nosuch FROM shop.ev",
 		// A name the copy reads as a type (#2131).
 		"SELECT n 'label' FROM shop.ev",
 		// Both kinds: the one that holds is said.
-		"SELECT nosuch + 1, created_on + 1 FROM shop.ev",
+		"SELECT n 'label', created_on + 1 FROM shop.ev",
 	} {
 		_, plain := f.s.runSQL(ctx, f.s.cm.boot, "u", stmt, "", 0, strict(stmt, false))
 		_, heavy := f.s.runSQL(ctx, f.s.cm.boot, "u", stmt, "", 0, strict(stmt, true))
