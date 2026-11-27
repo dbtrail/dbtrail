@@ -14,7 +14,7 @@ package readrouter
 // name written otherwise, ||, ^, --, $...$, #, a word the copy reserves), or
 // one that needs what only the live server has (a variable, the session's
 // user, database or clock, FOUND_ROWS, a locking read, INTO, the system
-// schemas), or that the copy cannot run as MySQL means it (a recursion
+// schemas), or that the copy cannot run as MySQL means it (REGEXP, a recursion
 // MySQL stops and the copy may not, JSON, MATCH, BINARY, COLLATE, a CAST to
 // SIGNED or UNSIGNED, DIV, a date read from text, a DATEDIFF or
 // TIMESTAMPDIFF the copy is not sent as its macro, a DATE_ADD or an AVG the
@@ -22,9 +22,11 @@ package readrouter
 // by default: it is relaxed only once it is named here.
 
 // heavyRelaxes are the names on the veto list (vetoes) an expensive
-// statement is let past. The other relaxed vetoes (CONCAT/LEAST/GREATEST,
-// SUBSTRING, LEFT/RIGHT, division, UNSIGNED arithmetic) are checks of their
-// own in vetoOpts, skipped there.
+// statement is let past. A LIKE is let past in vetoOpts, where REGEXP and
+// RLIKE, under the same name, are not: the copy does not have them. The
+// other relaxed vetoes (CONCAT/LEAST/GREATEST, SUBSTRING, LEFT/RIGHT,
+// division, UNSIGNED arithmetic) are checks of their own in vetoOpts,
+// skipped there.
 var heavyRelaxes = map[string]bool{
 	// MySQL cuts the text at group_concat_max_len.
 	"GROUP_CONCAT": true,
@@ -32,8 +34,6 @@ var heavyRelaxes = map[string]bool{
 	"WEEK/YEARWEEK": true,
 	// The same.
 	"EXTRACT(WEEK ...)": true,
-	// The copy tells letter case apart.
-	likeVeto: true,
 	// The same.
 	"INSTR/LOCATE/POSITION/STRCMP (case-sensitive on the copy)": true,
 	// Duplicates removed by bytes or by the copy's case folding.

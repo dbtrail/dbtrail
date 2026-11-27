@@ -20,8 +20,10 @@ func likeHandler(t *testing.T, on bool) (*Handler, *fakeFreeSQL) {
 	return h, f
 }
 
-// The server's switch decides where a statement with LIKE goes: off, MySQL
-// (the copy would compare with case); on, the copy, which is sent ILIKE.
+// The server's switch decides how the copy is sent a statement with LIKE:
+// off, as written, and only because its plan is expensive (heavy.go: the
+// copy compares with case, so its answer may differ; a cheap one is MySQL's,
+// TestRouter_heavyOnCopy_vetoStands); on, as ILIKE.
 func TestRouter_likeFollowsTheServersSwitch(t *testing.T) {
 	const stmt = "SELECT count(*) FROM `items` WHERE `name` LIKE 'PR%'"
 	h, f := likeHandler(t, false)
@@ -29,8 +31,11 @@ func TestRouter_likeFollowsTheServersSwitch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := firstCell(t, res); got != "mysql" || f.calls != 0 {
-		t.Errorf("switch off: answered by %s with %d copy calls, want MySQL and none", got, f.calls)
+	if got := firstCell(t, res); got != "copy" || f.calls != 1 {
+		t.Errorf("switch off: answered by %s with %d copy calls, want the copy once", got, f.calls)
+	}
+	if want := `SELECT count(*) FROM "items" WHERE "name" LIKE 'PR%'`; f.gotStmt != want {
+		t.Errorf("switch off: the copy got %q, want %q", f.gotStmt, want)
 	}
 
 	h, f = likeHandler(t, true)

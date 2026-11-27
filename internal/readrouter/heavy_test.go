@@ -13,7 +13,7 @@ func TestHardVetoOpts_relaxed(t *testing.T) {
 		"SELECT a FROM t WHERE b LIKE 'x%'",
 		"SELECT a FROM t WHERE b like 'x%'",
 		"SELECT a FROM t WHERE b NOT LIKE '%x'",
-		"SELECT a FROM t WHERE b REGEXP 'x'",
+		"SELECT a FROM t WHERE b LIKE c",
 		"SELECT GROUP_CONCAT(a) FROM t",
 		"SELECT WEEK(d) FROM t",
 		"SELECT YEARWEEK(d) FROM t",
@@ -75,6 +75,8 @@ func TestHardVetoOpts_held(t *testing.T) {
 		"SELECT j->'$.a' FROM t",
 		"WITH RECURSIVE r AS (SELECT 1 n UNION ALL SELECT n + 1 FROM r) SELECT n FROM r",
 		"SELECT a FROM t WHERE MATCH(b) AGAINST ('x')",
+		"SELECT a FROM t WHERE b REGEXP 'x'",
+		"SELECT a FROM t WHERE b RLIKE 'x' AND c LIKE 'y%'",
 		"SELECT a FROM t WHERE BINARY a = 'x'",
 		"SELECT a FROM t WHERE a COLLATE utf8mb4_bin = 'x'",
 		"SELECT CAST(a AS UNSIGNED) FROM t",
@@ -134,6 +136,9 @@ func TestHardVetoOpts_noneAndLikeSwitch(t *testing.T) {
 	}
 	if hard := HardVetoOpts("SELECT a FROM t WHERE b LIKE c", on); hard != "" {
 		t.Errorf("a LIKE with its pattern from a column under the switch: held to %q, want it let past", hard)
+	}
+	if hard := HardVetoOpts("SELECT a FROM t WHERE b REGEXP 'x'", on); hard != likeVeto {
+		t.Errorf("REGEXP under the switch: held to %q, want %q", hard, likeVeto)
 	}
 }
 

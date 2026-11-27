@@ -351,8 +351,12 @@ func vetoOpts(stmt string, o CopyOptions, heavy bool) string {
 			// The copy would be sent the keyword, and read it as its own.
 			return v.name
 		}
-		if v.name == likeVeto && o.LikeIgnoresCase {
-			if !likePatternsWritten(sc.blankedCopy) {
+		if v.name == likeVeto && (o.LikeIgnoresCase || heavy) {
+			// An expensive statement is let past a LIKE (heavy.go), and
+			// past one whose pattern is not written in it: a backslash it
+			// holds escapes on MySQL alone. Not past REGEXP and RLIKE,
+			// which the copy does not have.
+			if !heavy && !likePatternsWritten(sc.blankedCopy) {
 				return v.name
 			}
 			re = regexpOnly
