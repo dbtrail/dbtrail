@@ -144,17 +144,18 @@ type Binding struct {
 	// Where nothing can go to the source the copy answers, with a NOTICE that
 	// names the table. nil: nothing is asked.
 	NotCaptured func(ctx context.Context) ([]TableNotCaptured, error)
-	// SourceShapes, when set, says what the source's catalog says of each
-	// table named (schema and name, as the copy's catalog writes them) now:
-	// its OID and the columns a snapshot would store. A table the source
-	// does not have is absent from the answer. Asked before a statement runs
+	// SourceShapes, when set, says what the source's catalog says now of
+	// each table by its OID (the one its snapshot recorded): its schema and
+	// name there, and the columns a snapshot would store. An OID the source
+	// does not have (the table dropped, or dropped and created again) is
+	// absent from the answer. Asked before a statement runs
 	// on the copy, for the tables it reads (shape_3251.go): one whose shape
 	// is not its snapshot's is answered by the source
 	// (ReasonCopyShapeDiffers), or refused where nothing can go there. On
 	// an error the copy answers, with a NOTICE (RouteNote.ShapeUnchecked);
 	// a *ShapeCheckError says what the client may be told of its cause.
 	// nil: nothing is asked.
-	SourceShapes func(ctx context.Context, tables [][2]string) (map[[2]string]SourceShape, error)
+	SourceShapes func(ctx context.Context, oids []uint32) (map[uint32]SourceShape, error)
 	// Status, when set, answers SHOW dbtrail.router_status on this
 	// connection (portstatus.go): name and value pairs, in the order to
 	// show them. last is the connection's last answer, whose rows

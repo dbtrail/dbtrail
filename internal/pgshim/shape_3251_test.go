@@ -32,18 +32,28 @@ type shapeKnob struct {
 	last  [][2]string
 }
 
-func (k *shapeKnob) shapes(_ context.Context, tables [][2]string) (map[[2]string]SourceShape, error) {
+// shapes answers by OID, as a source does: each table of now under the name
+// it is kept by, which is its name on the source.
+func (k *shapeKnob) shapes(_ context.Context, oids []uint32) (map[uint32]SourceShape, error) {
 	k.asked.Add(1)
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	k.last = append([][2]string(nil), tables...)
+	k.last = nil
+	for _, o := range oids {
+		for name, sh := range k.now {
+			if sh.OID == o {
+				k.last = append(k.last, name)
+			}
+		}
+	}
 	if k.err != nil {
 		return nil, k.err
 	}
-	out := map[[2]string]SourceShape{}
-	for _, t := range tables {
-		if s, ok := k.now[t]; ok {
-			out[t] = s
+	out := map[uint32]SourceShape{}
+	for name, sh := range k.now {
+		if slices.Contains(oids, sh.OID) {
+			sh.Schema, sh.Name = name[0], name[1]
+			out[sh.OID] = sh
 		}
 	}
 	return out, nil
@@ -86,7 +96,7 @@ func shapedCatalogOf(names ...string) []CatalogTable {
 func sameShapes(tables []CatalogTable) map[[2]string]SourceShape {
 	out := map[[2]string]SourceShape{}
 	for _, t := range tables {
-		out[[2]string{t.Schema, t.Name}] = SourceShape{OID: t.Recorded.OID, Columns: slices.Clone(t.Recorded.Columns)}
+		out[[2]string{t.Schema, t.Name}] = SourceShape{Schema: t.Schema, Name: t.Name, OID: t.Recorded.OID, Columns: slices.Clone(t.Recorded.Columns)}
 	}
 	return out
 }
@@ -198,9 +208,15 @@ func TestCopyShape_3251_simple(t *testing.T) {
 			s.OID++
 			now[[2]string{"public", "wide"}] = s
 		}},
-		{"dropped or renamed", func(now map[[2]string]SourceShape) { delete(now, [2]string{"public", "wide"}) }},
+		{"dropped", func(now map[[2]string]SourceShape) { delete(now, [2]string{"public", "wide"}) }},
+		// The same table, by its OID, under another name on the source.
+		{"renamed", func(now map[[2]string]SourceShape) {
+			now[[2]string{"public", "wide2"}] = now[[2]string{"public", "wide"}]
+			delete(now, [2]string{"public", "wide"})
+		}},
 	} {
 		k.edit(func(now map[[2]string]SourceShape) {
+			delete(now, [2]string{"public", "wide2"})
 			now[[2]string{"public", "wide"}] = sameShapes(shapedCatalogOf(shapePortTables...))[[2]string{"public", "wide"}]
 		})
 		expect(tc.name+", before", "SELECT sum(n) FROM wide", tablesOnCopy, 1)
@@ -448,8 +464,13 @@ func TestCopyShapeWhy_3251(t *testing.T) {
 		found bool
 		want  string
 	}{
-		{"not on the source", nil, nil, false, "public.t is not on your PostgreSQL under that name"},
-		{"another OID", nil, func(s SourceShape) SourceShape { s.OID = 1; return s }, true, "dropped and created again"},
+		{"not on the source", nil, nil, false, "public.t on your PostgreSQL is no longer the table the copy's snapshot was read from"},
+		{"renamed", nil, func(s SourceShape) SourceShape { s.Name = "t2"; return s }, true, "public.t was renamed or moved on your PostgreSQL"},
+		// Names are exact on PostgreSQL: "T" is another name than t.
+		{"renamed in case alone", nil, func(s SourceShape) SourceShape { s.Name = "T"; return s }, true, "was renamed or moved"},
+		// The copy matches names without regard to case: what counts is the
+		// name the snapshot recorded on the source.
+		{"the copy's spelling differs, the recorded one does not", func(c CatalogTable) CatalogTable { c.Name = "T"; c.RecordedAs = [2]string{"public", "t"}; return c }, nil, true, ""},
 		{"a column added", nil, func(s SourceShape) SourceShape {
 			s.Columns = append(slices.Clone(s.Columns), baseline.PGColumn{Name: "e", TypeOID: 25, TypeMod: -1, Ordinal: 3})
 			return s
@@ -462,7 +483,7 @@ func TestCopyShapeWhy_3251(t *testing.T) {
 		if tc.now != nil {
 			nn = tc.now(nn)
 		}
-		if got, _ := copyShapeWhy(&tt, nn, tc.found); !strings.Contains(got, tc.want) {
+		if got, _ := copyShapeWhy(&tt, nn, tc.found); tc.want == "" && got != "" || !strings.Contains(got, tc.want) {
 			t.Errorf("%s: %q, want it to say %q", tc.name, got, tc.want)
 		}
 	}
@@ -589,5 +610,34 @@ func TestCopyShape_3251_noNoticeForARefusedExecution(t *testing.T) {
 	}
 	if len(*notices) != 0 || p.l.last().ShapeUnchecked != "" {
 		t.Errorf("a refused execution: notices %q, noted %q, want neither", *notices, p.l.last().ShapeUnchecked)
+	}
+}
+
+// An execution whose result formats the port refuses after the copy ran it
+// (more formats than columns): no notice that the copy answered.
+func TestCopyShape_3251_noNoticeBeforeAFormatRefusal(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	p, k := newShapePort(t)
+	c, notices := noticeConn(t, ctx, p.l)
+	if _, err := c.Prepare(ctx, "s", "SELECT sum(n) FROM public.big", nil); err != nil {
+		t.Fatal(err)
+	}
+	k.fail(errors.New("dial tcp 10.0.3.7:5432: connect: connection refused"))
+	*notices = nil
+	r := c.ExecPrepared(ctx, "s", nil, nil, []int16{0, 0, 0}).Read()
+	var pe *pgconn.PgError
+	if !errors.As(r.Err, &pe) || pe.Code != "08P01" {
+		t.Fatalf("execute: %v, want 08P01 (the premise)", r.Err)
+	}
+	if len(*notices) != 0 {
+		t.Errorf("a refused execution: notices %q, want none", *notices)
+	}
+	// A good one gets it.
+	if r := c.ExecPrepared(ctx, "s", nil, nil, nil).Read(); r.Err != nil {
+		t.Fatal(r.Err)
+	}
+	if len(*notices) != 1 {
+		t.Errorf("an answered execution: notices %q, want one", *notices)
 	}
 }

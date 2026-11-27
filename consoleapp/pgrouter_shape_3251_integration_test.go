@@ -4,6 +4,7 @@ package consoleapp
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -23,7 +24,7 @@ import (
 
 // pgShapeTables are the fixture's tables: one per change, one that does not
 // change, and a partitioned table whose one partition the copy holds.
-const pgShapeTables = "shp_char, shp_num, shp_ts, shp_int, shp_ren, shp_add, shp_drop, shp_move, shp_same, shp_part"
+const pgShapeTables = `shp_char, shp_num, shp_ts, shp_int, shp_ren, shp_add, shp_drop, shp_move, shp_same, shp_part, "MixedCase", "MixedChanged"`
 
 func pgShapeSetup() []string {
 	var out []string
@@ -53,6 +54,12 @@ func pgShapeSetup() []string {
 		"CREATE TABLE shp_part (id int PRIMARY KEY, c text) PARTITION BY RANGE (id)",
 		"CREATE TABLE shp_part_1 PARTITION OF shp_part FOR VALUES FROM (0) TO (100)",
 		"INSERT INTO shp_part VALUES (1, 'x'), (2, 'y')",
+		// Names PostgreSQL keeps in mixed case: one that does not change
+		// stays on the copy, one that does goes to the source.
+		`CREATE TABLE "MixedCase" (id int PRIMARY KEY, c text)`,
+		`INSERT INTO "MixedCase" VALUES (1, 'x'), (2, 'y')`,
+		`CREATE TABLE "MixedChanged" (id int PRIMARY KEY, c text)`,
+		`INSERT INTO "MixedChanged" VALUES (1, 'x'), (2, 'y')`,
 	)
 }
 
@@ -72,6 +79,7 @@ var pgShapeAlters = []string{
 	"ALTER TABLE shp_move ADD COLUMN c text",
 	// A change of the parent reaches its partition.
 	"ALTER TABLE shp_part ADD COLUMN e int DEFAULT 5",
+	`ALTER TABLE "MixedChanged" ADD COLUMN e int DEFAULT 5`,
 }
 
 // pgShapeChanged are statements that read a changed table, each answered on
@@ -91,6 +99,7 @@ var pgShapeChanged = []string{
 	"SELECT id, c FROM public.shp_move ORDER BY id",
 	"SELECT * FROM shp_part_1 ORDER BY id",
 	"SELECT count(*) FROM shp_same JOIN shp_add ON shp_add.id = shp_same.id",
+	`SELECT * FROM "MixedChanged" ORDER BY id`,
 }
 
 // pgShapeTTLSlack is past the time the port keeps the source's answer
@@ -108,7 +117,7 @@ func TestIntegrationPGRouterShape_3251(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() {
-			_, _ = source.Exec(context.Background(), "DROP TABLE IF EXISTS shp_part").ReadAll()
+			_, _ = source.Exec(context.Background(), `DROP TABLE IF EXISTS shp_part, "MixedCase", "MixedChanged"`).ReadAll()
 			source.Close(context.Background())
 		})
 		c := pgClient(t, ctx, env.portDSN(), nil)
@@ -172,6 +181,13 @@ func TestIntegrationPGRouterShape_3251(t *testing.T) {
 			if got, why := answered(c, gone, extended); !strings.HasPrefix(got, "error 42703") || why != pgshim.ReasonCopyShapeDiffers {
 				t.Errorf("extended=%v: %s: %q (%s), want PostgreSQL's 42703 from the source", extended, gone, got, why)
 			}
+			// A table in mixed case that did not change: on the copy, not
+			// taken for one the source no longer has.
+			const mixed = `SELECT * FROM "MixedCase" ORDER BY id`
+			wantMixed := pgUserRows(t, ctx, source, mixed, extended)
+			if got, why := answered(pgClient(t, ctx, env.portDSN(), nil), mixed, extended); got != wantMixed || why != pgshim.ReasonAnswersTheSame {
+				t.Errorf("extended=%v: %s: %q (%s), want the copy's %q", extended, mixed, got, why, wantMixed)
+			}
 			// The table that did not change stays on the copy, on a
 			// connection the source did not answer about it (on this one the
 			// join above did, and the rule of #2985 holds a snapshot's answer
@@ -195,16 +211,28 @@ func TestIntegrationPGRouterShape_3251(t *testing.T) {
 			t.Errorf("a new connection: %q (%s), want the source", got, why)
 		}
 		// The source's columns, read as the forwarding user, catalog only.
+		var oids []uint32
+		for _, name := range []string{"shp_add", `"MixedCase"`} {
+			cell := pgRows(t, source, "SELECT '"+strings.ReplaceAll(name, "'", "''")+"'::regclass::oid")
+			var oid uint32
+			if _, err := fmt.Sscan(cell, &oid); err != nil {
+				t.Fatalf("the OID of %s: %q", name, cell)
+			}
+			oids = append(oids, oid)
+		}
 		ask := pgPortSourceShapes(withAccount(t, pgFwdSourceDSN(t), pgFixtureRole, pgFixturePass), "test", newPGSourceSlots(2))
-		got, err := ask(ctx, [][2]string{{"public", "shp_add"}, {"public", "shp_absent"}})
+		got, err := ask(ctx, append(oids, 1))
 		if err != nil {
 			t.Fatalf("the source's shapes: %v", err)
 		}
-		if s, ok := got[[2]string{"public", "shp_add"}]; !ok || s.OID == 0 || len(s.Columns) != 3 || s.Columns[2].Name != "e" || s.Columns[2].Ordinal != 3 {
+		if s, ok := got[oids[0]]; !ok || s.Schema != "public" || s.Name != "shp_add" || len(s.Columns) != 3 || s.Columns[2].Name != "e" || s.Columns[2].Ordinal != 3 {
 			t.Errorf("shp_add on the source: %+v", s)
 		}
-		if _, ok := got[[2]string{"public", "shp_absent"}]; ok {
-			t.Error("a table the source does not have was answered")
+		if s := got[oids[1]]; s.Name != "MixedCase" {
+			t.Errorf("a name in mixed case on the source: %+v, want it exactly", s)
+		}
+		if _, ok := got[1]; ok {
+			t.Error("an OID the source does not have was answered")
 		}
 	})
 

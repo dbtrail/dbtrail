@@ -471,13 +471,16 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 			return
 		}
 		if p.cols == nil {
+			s.commitShapeNote()
 			s.be.Send(&pgproto3.NoData{})
 			return
 		}
 		if perr := checkResultFormats(p); perr != nil {
+			s.dropShapeNote()
 			s.extFail(perr)
 			return
 		}
+		s.commitShapeNote()
 		s.rowDescription(p.cols, p.types, p.resultFormats)
 	default:
 		s.extFail(&pgErr{"08P01", fmt.Sprintf("invalid DESCRIBE message subtype %d", m.ObjectType)})
@@ -800,12 +803,11 @@ func (s *session) runPortal(p *portal) (perr *pgErr) {
 	s.fastLane = fastLaneFor(p.stmt, p.route)
 	s.portalHeavy, s.copyReason = s.expensive(p.route), p.route.reason
 	defer func() {
-		// The copy's answer is the portal's to hand over only when nothing
-		// below refused it: then, and only then, its notice of tables not
-		// compared with the source's (shape_3251.go).
-		if perr == nil {
-			s.commitShapeNote()
-		} else {
+		// Refused after the copy ran it: its notice of tables not compared
+		// with the source's (shape_3251.go) goes with it. Kept, it is sent
+		// by the message that hands the answer over, once the answer passed
+		// every check (handleExecute, handleDescribe).
+		if perr != nil {
 			s.dropShapeNote()
 		}
 	}()
@@ -1053,13 +1055,17 @@ func (s *session) handleExecute(m *pgproto3.Execute) {
 		s.be.Send(&pgproto3.EmptyQueryResponse{})
 		return
 	case p.cols == nil:
+		s.commitShapeNote()
 		s.commandComplete(p.tag)
 		return
 	}
 	if perr := checkResultFormats(p); perr != nil {
+		s.dropShapeNote()
 		s.extFail(perr)
 		return
 	}
+	// The copy's answer is the client's from here on (shape_3251.go).
+	s.commitShapeNote()
 	left := len(p.rows) - p.sent
 	n := left
 	if m.MaxRows > 0 && uint64(m.MaxRows) < uint64(left) {

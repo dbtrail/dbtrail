@@ -2170,8 +2170,9 @@ The source answers a cheap statement for:
   keeps its decimals, a column added is missing from `SELECT *`. So before
   the copy answers a statement, the port reads from the source's catalog
   (`pg_class` and `pg_attribute`, never a row of a table), as the account it
-  forwards with, each table's OID and its columns (name, type, type modifier
-  and position), and compares them with what the table's snapshot recorded.
+  forwards with, each table by the OID its snapshot recorded: its schema and
+  name there and its columns (name, type, type modifier and position), and
+  compares them with what the snapshot recorded.
   Any difference in a table the statement reads sends the whole statement to
   the source (`copy_shape_differs` in `/status`), whatever columns it names
   and however expensive it is there. This is the one case where a heavy
@@ -2179,9 +2180,12 @@ The source answers a cheap statement for:
   written a little otherwise, but rows of a table that no longer exists in
   that form. A statement that reads only tables that did not change stays on
   the copy. In detail:
-  - The source's answer for a table is kept for one second, so a burst of
-    statements asks once. A statement within that second of an `ALTER TABLE`
-    can still be answered by the copy.
+  - The source's answer for a table is kept for one second from when it was
+    asked, so a burst of statements asks once: a statement is decided by a
+    read of the catalog asked at most a second before it (or by the read it
+    waited for), so an `ALTER TABLE` committed more than a second before a
+    statement starts is always seen by it. Of two reads that overlap, the
+    one asked later wins, whichever comes back first.
   - The question uses a short connection of its own, as the forwarding
     user, about once a second per server while statements arrive. It takes
     one of the port's connections to its sources while it lasts, as a
@@ -2192,8 +2196,10 @@ The source answers a cheap statement for:
   - A name without a schema is checked in every schema the copy holds it in:
     a change of `public.t` also sends an unqualified read of `t` to the
     source when the `search_path` points at `other.t`.
-  - A table dropped or renamed on the source, or dropped and created again
-    (another OID), counts as changed.
+  - A table dropped on the source, dropped and created again (another OID),
+    or renamed or moved to another schema counts as changed. Names are
+    compared as PostgreSQL holds them, exactly: a table created as
+    `"MixedCase"` is found as itself.
   - When the source cannot be asked, the copy answers as it would without
     the check, with a NOTICE that names the tables and the cause: `DBTrail
     could not check whether <table> changed on your PostgreSQL (<cause>;

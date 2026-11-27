@@ -50,11 +50,13 @@ import (
 // column, so the shape is the snapshot's.
 
 // SourceShape is a table's shape on the source now (Binding.SourceShapes):
-// its pg_class OID and the columns a snapshot would store (not dropped, not
-// generated), with Name, TypeOID, TypeMod and Ordinal set.
+// its pg_class OID, its schema and name there, exactly as pg_namespace and
+// pg_class hold them, and the columns a snapshot would store (not dropped,
+// not generated), with Name, TypeOID, TypeMod and Ordinal set.
 type SourceShape struct {
-	OID     uint32
-	Columns []baseline.PGColumn
+	Schema, Name string
+	OID          uint32
+	Columns      []baseline.PGColumn
 }
 
 // ShapeCheckError is a failure of Binding.SourceShapes with what the client
@@ -122,11 +124,13 @@ func (s *session) copyShapeDiffers(ctx context.Context, text string) (c shapeChe
 	}
 	var notes []string
 	if len(asked) > 0 {
-		names := make([][2]string, len(asked))
+		// By OID: a name is resolved by the source with its own rules
+		// (case, search_path), the OID is the table the snapshot read.
+		oids := make([]uint32, len(asked))
 		for i, t := range asked {
-			names[i] = [2]string{t.Schema, t.Name}
+			oids[i] = t.Recorded.OID
 		}
-		now, err := s.bound.SourceShapes(ctx, names)
+		now, err := s.bound.SourceShapes(ctx, oids)
 		if perr := notCapturedStopped(ctx); perr != nil {
 			return c, perr
 		}
@@ -144,7 +148,7 @@ func (s *session) copyShapeDiffers(ctx context.Context, text string) (c shapeChe
 			c.unchecked = ShapeUncheckedSourceNotAsked
 		} else {
 			for _, t := range asked {
-				sh, found := now[[2]string{t.Schema, t.Name}]
+				sh, found := now[t.Recorded.OID]
 				if why, detail := copyShapeWhy(t, sh, found); why != "" {
 					// Which columns changed is the operator's, in the log: a
 					// column the server hides from this client is in the
@@ -242,7 +246,7 @@ func shapeCopyOnlyError(why string) *pgErr {
 
 // copyShapeWhy says why the copy's table t, whose snapshot recorded its
 // shape, is not that table on the source (now, found false when the source
-// has no table of that name), "" when it is. why is for the client and names
+// has no table of its OID), "" when it is. why is for the client and names
 // the table alone, never a column: the snapshot's shape holds the columns
 // the server hides too. The table may be named: a table the server hides
 // from the connection is not in its catalog, so never among t. detail says
@@ -251,11 +255,17 @@ func copyShapeWhy(t *CatalogTable, now SourceShape, found bool) (why, detail str
 	name := t.Schema + "." + t.Name
 	switch {
 	case !found:
-		why = name + " is not on your PostgreSQL under that name any more (dropped, or renamed), and the copy still holds it as its snapshot read it"
-		return why, "not on the source"
-	case now.OID != t.Recorded.OID:
-		why = name + " on your PostgreSQL is not the table the copy's snapshot was read from: it was dropped and created again"
-		return why, fmt.Sprintf("OID %d on the source, %d in the snapshot", now.OID, t.Recorded.OID)
+		why = name + " on your PostgreSQL is no longer the table the copy's snapshot was read from (dropped, or dropped and created again), and the copy still holds it as its snapshot read it"
+		return why, fmt.Sprintf("OID %d not on the source", t.Recorded.OID)
+	}
+	as := t.RecordedAs
+	if as == ([2]string{}) {
+		as = [2]string{t.Schema, t.Name}
+	}
+	if now.Schema != as[0] || now.Name != as[1] {
+		// PostgreSQL's names are exact: another spelling is another name.
+		why = name + " was renamed or moved on your PostgreSQL since the copy's snapshot, so a statement that names it there reads another table, or none"
+		return why, fmt.Sprintf("now %s.%s", now.Schema, now.Name)
 	}
 	if diff := baseline.PGColumnsDiff(t.Recorded.Columns, now.Columns); diff != "" {
 		why = "the columns of " + name + " on your PostgreSQL are not the ones of the copy's snapshot: PostgreSQL does not announce an ALTER TABLE to capture, so the copy keeps the old columns until the table's next snapshot"

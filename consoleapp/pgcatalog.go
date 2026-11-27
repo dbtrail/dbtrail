@@ -89,6 +89,7 @@ func pgCopyCatalog(ctx context.Context, copySQL pgCatalogSource, run func(contex
 		// source's shape is compared with before the copy answers.
 		recorded := *rec.Relation
 		t.Recorded = &recorded
+		t.RecordedAs = [2]string{rec.Schema, rec.Table}
 		have := map[string]bool{}
 		for _, c := range t.Columns {
 			have[strings.ToLower(c.Name)] = true
