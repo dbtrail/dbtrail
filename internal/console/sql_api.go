@@ -1321,6 +1321,9 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	// printNote is the warning the MySQL port without routing sends with
 	// the answer (sqlFixedPrintNote, #2829); "" when none.
 	var printNote string
+	// waived is the first refusal an expensive routed statement was let past
+	// (sqlsandbox.Session.HeavyOnCopy), "" when none.
+	var waived string
 	// freshNote says a fresh-mode answer came from the snapshot alone, and
 	// why (statementTailsFresh); "" when it did not.
 	var freshNote string
@@ -1367,6 +1370,20 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			narrowed := in
 			narrowed.OnlyViews = sqlWantedViews(in, refs)
 			textDecline := ""
+			waived = ""
+			// relaxed says whether a refusal over how the copy computes or
+			// prints a value is let past (sqlsandbox.Session.HeavyOnCopy),
+			// noting the first; otherwise it is the statement's refusal.
+			relaxed := func(msg string) bool {
+				if !sess.HeavyOnCopy {
+					viewsRefusal = &sqlStarRefusal{msg}
+					return false
+				}
+				if waived == "" {
+					waived = msg
+				}
+				return true
+			}
 			if sess.UnchangedWithin > 0 {
 				// Before anything else: a statement that is not vouched for
 				// is MySQL's, whatever its stars or its zone.
@@ -1508,42 +1525,50 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 				// is not what MySQL returns, a caller that asked for MySQL's
 				// answer gets a refusal and sends the statement there (#2111).
 				if msg := sqlStrictRefusalFor(in, narrowed, refs, statement, sess.Types); msg != "" {
-					viewsRefusal = &sqlStarRefusal{msg}
+					// An expensive statement is let past what is only how the
+					// copy computes, never past what changes which table,
+					// columns or names it reads (sqlStrictHeavyRefusalFor).
+					if !sess.HeavyOnCopy {
+						viewsRefusal = &sqlStarRefusal{msg}
+						return "", viewsRefusal
+					}
+					if hard := sqlStrictHeavyRefusalFor(in, narrowed, refs, statement, sess.Types); hard != "" {
+						viewsRefusal = &sqlStarRefusal{hard}
+						return "", viewsRefusal
+					}
+					relaxed(msg)
+				}
+				if msg := sqlUnixTimeRefusalFor(narrowed, statement, sess.Types, sess.TimeZone); msg != "" && !relaxed(msg) {
 					return "", viewsRefusal
 				}
-				if msg := sqlUnixTimeRefusalFor(narrowed, statement, sess.Types, sess.TimeZone); msg != "" {
-					viewsRefusal = &sqlStarRefusal{msg}
+				if msg := sqlNowRefusalFor(narrowed, statement, sess.Types, sess.TimeZone); msg != "" && !relaxed(msg) {
 					return "", viewsRefusal
 				}
-				if msg := sqlNowRefusalFor(narrowed, statement, sess.Types, sess.TimeZone); msg != "" {
-					viewsRefusal = &sqlStarRefusal{msg}
+				if msg := sqlDateFunctionRefusalFor(narrowed, statement, sess.Types); msg != "" && !relaxed(msg) {
 					return "", viewsRefusal
 				}
-				if msg := sqlDateFunctionRefusalFor(narrowed, statement, sess.Types); msg != "" {
-					viewsRefusal = &sqlStarRefusal{msg}
+				if msg := sqlDateSubRefusalFor(narrowed, statement, sess.Types, sess.TimeZone); msg != "" && !relaxed(msg) {
 					return "", viewsRefusal
 				}
-				if msg := sqlDateSubRefusalFor(narrowed, statement, sess.Types, sess.TimeZone); msg != "" {
-					viewsRefusal = &sqlStarRefusal{msg}
+				if msg := sqlTimestampDiffRefusalFor(narrowed, statement, sess.Types, sess.TimeZone); msg != "" && !relaxed(msg) {
 					return "", viewsRefusal
 				}
-				if msg := sqlTimestampDiffRefusalFor(narrowed, statement, sess.Types, sess.TimeZone); msg != "" {
-					viewsRefusal = &sqlStarRefusal{msg}
-					return "", viewsRefusal
-				}
-				if msg := sqlAvgRefusalFor(narrowed, statement, sess.Types); msg != "" {
-					viewsRefusal = &sqlStarRefusal{msg}
+				if msg := sqlAvgRefusalFor(narrowed, statement, sess.Types); msg != "" && !relaxed(msg) {
 					return "", viewsRefusal
 				}
 				// The text the statement compares (#2533): refused here
 				// when no value could make the copy's answer MySQL's,
 				// guarded at the end of the script when the values decide.
 				msg, guards := sqlTextCheck(narrowed, refs)
-				if msg != "" {
-					viewsRefusal = &sqlStarRefusal{msg}
+				if msg != "" && !relaxed(msg) {
 					return "", viewsRefusal
 				}
-				textDecline = sqlTextDeclineSQL(guards)
+				if !sess.HeavyOnCopy {
+					textDecline = sqlTextDeclineSQL(guards)
+				} else if len(guards) > 0 {
+					// Not run: whatever the values, the copy answers.
+					relaxed(sqlTextGuardsWaived)
+				}
 			}
 			// What the MySQL port sends is read as MySQL's text (#2829).
 			// Under routing a statement the copy cannot print as MySQL is
@@ -1552,8 +1577,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			printNote = ""
 			switch {
 			case sess.StrictStar:
-				if msg := sqlFixedPrintRefusalFor(narrowed, statement); msg != "" {
-					viewsRefusal = &sqlStarRefusal{msg}
+				if msg := sqlFixedPrintRefusalFor(narrowed, statement); msg != "" && !relaxed(msg) {
 					return "", viewsRefusal
 				}
 			case sess.MySQLText:
@@ -1649,6 +1673,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 		s.notePGSnapshotThrough(ctx, b, readTables)
 	}
 	res.DateScales = dateScales
+	res.Waived = waived
 	return sqlOutcome{Result: res, CopyUpdatedAt: copyUpdatedAt, Phases: parent,
 		ReadFrom: readFrom, ReadFromOK: readFromOK, TailThrough: tailThrough, TailThroughID: tailThroughID, AllTailed: allTailed,
 		ReadCopyTables: len(readTables) > 0, PrintNote: printNote, OlderCopyNote: freshNote}, nil
@@ -1832,6 +1857,30 @@ func sqlStarRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs) string {
 //     as a constant of a type called that (sqlWordsRefusalFor, #2131).
 //
 // types is sqlsandbox.Session.Types.
+// sqlStrictHeavyRefusalFor is the part of sqlStrictRefusalFor an expensive
+// routed statement is still held to (sqlsandbox.Session.HeavyOnCopy): what
+// changes which table it reads (a twin by letter case), which columns a
+// star returns, what a name it writes means on the copy, and a name the
+// copy would read as a type. Each is another question on the copy, not
+// another computation of the same one.
+func sqlStrictHeavyRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, statement string, types sqlsandbox.ColumnTypes) string {
+	if table, twin := narrowed.SelectedCaseTwin(); table != "" {
+		return fmt.Sprintf("the copy does not answer this statement: %s and %s differ only by letter case, "+
+			"which the copy does not tell apart, so it could read the other table", table, twin)
+	}
+	if msg := sqlStarRefusalFor(in, narrowed, refs); msg != "" {
+		return msg
+	}
+	if msg := sqlNamesRefusalFor(narrowed, statement); msg != "" {
+		return msg
+	}
+	return sqlWordsRefusalFor(narrowed, types)
+}
+
+// sqlTextGuardsWaived is what an expensive routed statement whose text
+// columns would have been guarded is noted with: the guards are not run.
+const sqlTextGuardsWaived = "the copy may compare or sort the text columns it reads another way than MySQL's collation"
+
 func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, statement string, types sqlsandbox.ColumnTypes) string {
 	if table, twin := narrowed.SelectedCaseTwin(); table != "" {
 		return fmt.Sprintf("the copy does not answer this statement: %s and %s differ only by letter case, "+

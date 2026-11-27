@@ -165,6 +165,10 @@ type Handler struct {
 	// sent once the ladder has settled who answers (sendSpooled, #2575).
 	// Read and written on the connection's own goroutine.
 	spooled *spooledAnswer
+	// heavy is what the routing ladder decided of the statement it is on,
+	// for an expensive one sent as text (heavy.go). Read and written on the
+	// connection's own goroutine.
+	heavy heavyState
 
 	// actor is the authenticated MySQL user this connection handshook as,
 	// set by BindActor. It is the audit identity for every time-travel
