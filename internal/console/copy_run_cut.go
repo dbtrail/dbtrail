@@ -57,6 +57,16 @@ func runCutIn(md baseline.DumpMetadata, dirAt time.Time) (runCut, bool) {
 // lookup to find between the two. The time the lookup starts from is then
 // the run's mark's (sinceMark, see copyLookupSince), on the source's clock.
 //
+// A table whose own cut IS the run's takes the run's mark the same way. A
+// refresh that ends delta chains for age rewrites every table at its cut,
+// one with no change since its last full read too, and that file's own
+// lookup would start from that read (no last event on record) or from its
+// last event, carried forward from however long ago it was written. Once
+// rotation has dropped that hour, the lookup refuses and the table has no
+// tail until the next refresh. The mark is as good a start as the table's
+// own last event: every event positioned after the cut committed after
+// both.
+//
 // Only the lookup moves. sourceRead and lastEventID stay the table's own,
 // so the guards that ask what happened since its rows were last read from
 // the source (a capture loss, the source server changing, a schema change:
@@ -64,7 +74,7 @@ func runCutIn(md baseline.DumpMetadata, dirAt time.Time) (runCut, bool) {
 func promoteToRunCut(cut copyCut, run runCut) copyCut {
 	if cut.refusal != "" || run.mark.ID == 0 ||
 		reconstruct.BinlogBaseName(cut.anchor.File) != reconstruct.BinlogBaseName(run.at.File) ||
-		run.at.AtOrBefore(cut.anchor) {
+		!cut.anchor.AtOrBefore(run.at) {
 		return cut
 	}
 	cut.anchor, cut.mark, cut.stamp = run.at, run.mark, run.stamp
