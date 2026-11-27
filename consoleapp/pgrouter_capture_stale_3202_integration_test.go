@@ -97,7 +97,9 @@ func TestIntegrationPGRouterCaptureStateStaleGoesToTheSource(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = idx.Close() })
 	// A save with a trusted sent-through position, then capture stopped: no
-	// save from here on but the test's.
+	// save from here on but the test's. A first run saves a position once a
+	// transaction ends: one that changes nothing the copy shows.
+	exec1("UPDATE " + table + " SET counter = 10 WHERE id = 1")
 	pgTestWait(t, "a checkpoint with its sent-through position", time.Minute, func() (bool, string) {
 		var sent sql.NullInt64
 		err := idx.QueryRowContext(ctx, "SELECT IF(pg_sent_through_at <=> last_checkpoint, pg_sent_through_lsn, NULL) FROM stream_state WHERE id = 1 AND binlog_position > 0").Scan(&sent)
