@@ -260,7 +260,7 @@ func (s *session) runRemembering(ctx context.Context, qstr, text string, opts Ru
 // markIfSlow marks shape for a trial when the run of qstr in opts answered
 // in the copy's own order and took the threshold or more.
 func (s *session) markIfSlow(qstr, shape string, opts RunOptions, res sqlsandbox.Result, err error) {
-	if shape == "" || err != nil || opts.KeepJoinOrder || res.WrittenOrderRetry != "" || res.JoinOrderWritten {
+	if shape == "" || err != nil || opts.KeepJoinOrder || res.WrittenOrderRetry != "" || res.JoinOrderWritten || res.JoinOrderConnected != "" {
 		return
 	}
 	w := s.bound.WrittenOrders

@@ -81,6 +81,10 @@ const (
 const (
 	JoinCheckPlanned      = "planned"       // checked: run in the copy's own join order
 	JoinCheckWrittenOrder = "written_order" // checked: run in the order written
+	// checked: dangerous in the copy's order and in the order written, run
+	// with its tables in a connected order (sqlsandbox
+	// Session.TryConnectedJoinOrder)
+	JoinCheckConnectedOrder = "connected_order"
 	JoinCheckNoStatistics = "no_statistics" // not checked: the server has no counts now (not read yet, failed, none readable, too old)
 	JoinCheckCouldNotRun  = "could_not_run" // not checked: the copy's plan could not be had or read
 )
@@ -363,6 +367,8 @@ func (s *session) noteJoinCheck(res sqlsandbox.Result, err error, asked bool, wa
 		return ""
 	case err != nil:
 		return ""
+	case res.JoinOrderConnected != "":
+		return JoinCheckConnectedOrder
 	case res.JoinOrderWritten:
 		s.logger.Debug("pgshim: the copy ran a statement with its joins in the order written: in the copy's own order one was estimated far past its inputs")
 		return JoinCheckWrittenOrder

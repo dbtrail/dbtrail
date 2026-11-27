@@ -284,6 +284,17 @@ type Session struct {
 	// A pointer, so Session stays comparable (its callers compare sessions
 	// with ==): two sessions are the same only with the same counts.
 	JoinNDV *JoinCounts
+	// TryConnectedJoinOrder has the join check (JoinNDV) try one more order
+	// before it refuses a statement whose plan is dangerous in both the
+	// copy's order and the order written: the statement written again with
+	// its tables in a connected order, the largest first and each next one
+	// joined to those before it by a condition (joinconnected.go). It runs in
+	// that order when the check finds no dangerous join there, and is refused
+	// as before otherwise. Only a SELECT whose FROM is a list of tables
+	// (FROM a, b, c) and whose WHERE is an AND is written again; the text is
+	// the worker's alone. Only the PostgreSQL port sets it; off, nothing
+	// changes.
+	TryConnectedJoinOrder bool
 	// RetryOutOfMemoryInWrittenOrder runs a statement that failed with the
 	// engine's out of memory error in the copy's own join order once more
 	// in the order written, in the same slot and within what is left of its
@@ -500,6 +511,10 @@ type Result struct {
 	// would without it.
 	JoinOrderWritten bool   `json:"-"`
 	JoinCheckSkipped string `json:"-"`
+	// JoinOrderConnected: the join check ran the statement in a connected
+	// order of its tables (Session.TryConnectedJoinOrder), this one, by the
+	// names that qualify them; "" otherwise. JoinOrderWritten is false then.
+	JoinOrderConnected string `json:"-"`
 	// WrittenOrderRetry is WrittenOrderRetryOK when the statement ran out of
 	// memory in the copy's join order and this is its answer in the order
 	// written (Session.RetryOutOfMemoryInWrittenOrder), "" otherwise.
@@ -674,11 +689,18 @@ type QueryError struct {
 
 func (e *QueryError) Error() string { return e.Message }
 
+// ranWrittenOrder reports whether joinOrder, a worker's wireResult.JoinOrder,
+// is one of the order written: as written, or in a connected order of the
+// statement's tables, which runs in the order written too.
+func ranWrittenOrder(joinOrder string) bool {
+	return joinOrder == joinOrderWritten || joinOrder == joinOrderConnected
+}
+
 // engineError is the QueryError of a worker's answer whose error is the
 // engine's (errQuery): its text, and the join order it ran in, which the
 // retry in the order written reads (oomretry.go).
 func engineError(out wireResult, spill spillSpec, noSpill error) *QueryError {
-	return &QueryError{Message: spillCapMessage(out.Error.Message, spill, noSpill), ranWrittenOrder: out.JoinOrder == joinOrderWritten}
+	return &QueryError{Message: spillCapMessage(out.Error.Message, spill, noSpill), ranWrittenOrder: ranWrittenOrder(out.JoinOrder)}
 }
 
 // TimeoutError: the worker ran past Limits.Timeout and was killed.
@@ -1765,7 +1787,7 @@ func marshalJob(job Job, limits Limits, spill spillSpec, spool string, more bool
 	return json.Marshal(wireJob{
 		CopyDirs: allowedDirs(job.CopyDirs), ViewsSQL: viewsSQL, AskViews: asking, SQL: job.SQL, NoFileReaders: job.NoFileReaders, Schema: job.Schema,
 		TimeZone: job.Session.TimeZone, MySQLClock: job.Session.MySQLClock, SelectLimit: job.Session.SelectLimit, KeepJoinOrder: job.Session.KeepJoinOrder, PostgresRules: job.Session.PostgresRules, PostgresNames: job.Session.PostgresNames,
-		JoinNDV: job.Session.joinNDV(), SkipCommonSubplan: job.Session.SkipCommonSubplan,
+		JoinNDV: job.Session.joinNDV(), SkipCommonSubplan: job.Session.SkipCommonSubplan, TryConnectedJoinOrder: job.Session.TryConnectedJoinOrder,
 		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
 		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes, More: more,
@@ -2090,6 +2112,11 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 			Views: time.Duration(out.ViewsNS), Query: time.Duration(out.ElapsedNS),
 			Spawn: spawnTook, Decode: time.Since(decodeStart),
 		}}
+	if out.JoinOrder == joinOrderConnected {
+		res.JoinOrderConnected = out.JoinOrderTables
+		slog.Info("sql on the copy: a statement whose joins were estimated far past their inputs in the copy's order and in the order written ran with its tables in a connected order",
+			"order", out.JoinOrderTables)
+	}
 	if out.Spooled {
 		res.spooled, res.spoolRows, res.Rows = true, out.SpoolRows, nil
 	} else if res.Rows == nil {
