@@ -192,6 +192,9 @@ func lengthFunctions(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 					t.Errorf("the source refused %q: %s", c.stmt, want)
 					continue
 				}
+				if heavyOnCopy(t, reason, c.who, c.stmt, got, want) {
+					continue
+				}
 				if c.who != "" && !strings.Contains(got, "("+c.who+",") {
 					t.Errorf("%q (%s) answered %s [%s], want it answered by %s", c.stmt, c.why, got, reason, c.who)
 					continue

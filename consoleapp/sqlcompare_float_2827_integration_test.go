@@ -131,7 +131,11 @@ func TestIntegrationSQLCompareFloatRouted(t *testing.T) {
 	for _, tb := range []string{"fl", "fx"} {
 		for _, c := range cases {
 			stmt := fmt.Sprintf(c.stmt, tb)
+			mark := heavyMark(t, srv, ent.ID)
 			got := answerText(routed, stmt, c.args...)
+			if heavyOnCopy(t, mark(), c.who, stmt, got, answerText(live, stmt, c.args...)) {
+				continue
+			}
 			t.Logf("routed %-60s %s", got, stmt)
 			if strings.HasPrefix(got, "ERROR ") || !strings.HasPrefix(got, c.who+"|") {
 				t.Errorf("routed %q (%s):\n  got  %s\n  want it answered by %s", stmt, c.why, got, c.who)

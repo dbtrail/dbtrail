@@ -244,7 +244,11 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{stmt: "SELECT MIN(side), COUNT(DISTINCT n + 1) FROM ev", who: "live", why: "DISTINCT over an expression"},
 		{stmt: "SELECT MIN(side), COUNT(DISTINCT n) FROM (SELECT side, side AS n FROM ev) q", who: "live", why: "DISTINCT over a name a subquery defines"},
 	} {
+		mark := heavyMark(t, srv, ent.ID)
 		got := answerText(routed, c.stmt, c.args...)
+		if heavyOnCopy(t, mark(), c.who, c.stmt, got, answerText(src, c.stmt, c.args...)) {
+			continue
+		}
 		t.Logf("routed  %-60s %s", got, c.stmt)
 		if strings.HasPrefix(got, "ERROR ") || !strings.HasPrefix(got, c.who+"|") {
 			t.Errorf("routed %q (%s):\n  got  %s\n  want it answered by %s", c.stmt, c.why, got, c.who)

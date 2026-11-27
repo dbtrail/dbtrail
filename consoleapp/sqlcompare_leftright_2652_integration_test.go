@@ -101,8 +101,12 @@ func TestIntegrationSQLCompareLeftRight(t *testing.T) {
 	routed := openRaw(t, portDSN)
 	live := openRaw(t, sourceDSN)
 	for _, c := range cases {
+		mark := heavyMark(t, srv, ent.ID)
 		got := answerText(routed, c.stmt)
 		want := answerText(live, c.stmt)
+		if heavyOnCopy(t, mark(), c.who, c.stmt, got, want) {
+			continue
+		}
 		t.Logf("routed %-50s %q", got, c.stmt)
 		if strings.HasPrefix(got, "ERROR ") || !strings.HasPrefix(got, c.who+"|") {
 			t.Errorf("routed %q (%s):\n  got  %s\n  want it answered by %s", c.stmt, c.why, got, c.who)

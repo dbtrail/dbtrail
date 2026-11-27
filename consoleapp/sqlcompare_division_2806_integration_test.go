@@ -225,8 +225,12 @@ func divisionRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	routedText := openRaw(t, asText(withZone(portDSN, "+00:00")))
 	liveText := openRaw(t, asText(withZone(sourceDSN, "+00:00")))
 	for _, c := range cases {
+		mark := heavyMark(t, srv, ent.ID)
 		got := scaledAnswer(routedText, c.stmt, c.args...)
 		want := scaledAnswer(liveText, c.stmt, c.args...)
+		if heavyOnCopy(t, mark(), c.who, c.stmt, got, want) {
+			continue
+		}
 		t.Logf("routed %-90.400s %s", got, c.stmt)
 		t.Logf("live   %-90.400s", want)
 		if c.who == "?" {

@@ -221,7 +221,11 @@ func dateSubRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 			if len(c.args) > 0 {
 				routed, live = routedBin, liveBin
 			}
+			mark := heavyMark(t, srv, ent.ID)
 			got := typedAnswer(routed, c.stmt, c.args...)
+			if heavyOnCopy(t, mark(), c.who, c.stmt, got, typedAnswer(live, c.stmt, c.args...)) {
+				continue
+			}
 			t.Logf("[%s] routed %-60.300s %s", zone, got, c.stmt)
 			if strings.HasPrefix(got, "ERROR ") || !strings.Contains(got, "("+c.who+",") {
 				t.Errorf("[%s] routed %q (%s):\n  got  %s\n  want it answered by %s", zone, c.stmt, c.why, got, c.who)
