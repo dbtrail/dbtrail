@@ -222,6 +222,7 @@ func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string, sess sqls
 		return sqlsandbox.Result{}, err
 	}
 	q.noteCopyAnswerMark(out.ReadFrom, out.ReadFromOK, time.Now(), out.TailThrough, out.TailThroughID, out.AllTailed)
+	q.s.routing.joinOrderByShape(q.id, out.Result.JoinOrderByShape)
 	q.last.mu.Lock()
 	if q.last.pending != nil {
 		q.last.pending.readCopy = out.ReadCopyTables

@@ -295,6 +295,24 @@ type Session struct {
 	// the worker's alone. Only the PostgreSQL port sets it; off, nothing
 	// changes.
 	TryConnectedJoinOrder bool
+	// JoinOrderByShape picks the statement's join order before it runs from
+	// the shape of its FROM alone, with no estimate (shapeorder.go): a
+	// SELECT whose FROM is a list of tables (FROM a, b, c) runs with the
+	// copy's join reordering off, in the order written when that order is
+	// connected already (each table has a condition with one before it),
+	// and otherwise written again in a connected order (joinconnected.go),
+	// the largest table first and each next one the smallest a condition
+	// joins to those before it. Any other statement, or one whose rewrite
+	// cannot be made, runs as without it. A statement that fails in the
+	// order picked fails as it would have: it is never run again in
+	// another order. Result.JoinOrderByShape says which order ran.
+	//
+	// KeepJoinOrder rules over it (the order written is asked for already),
+	// and so does JoinNDV: the join check, which reads the source's counts,
+	// picks the order when it is on, and this is not consulted. Only the
+	// MySQL port sets it, for the statements its read router sends to the
+	// copy; off, nothing changes.
+	JoinOrderByShape bool
 	// RetryOutOfMemoryInWrittenOrder runs a statement that failed with the
 	// engine's out of memory error in the copy's own join order once more
 	// in the order written, in the same slot and within what is left of its
@@ -530,6 +548,10 @@ type Result struct {
 	// memory in the copy's join order and this is its answer in the order
 	// written (Session.RetryOutOfMemoryInWrittenOrder), "" otherwise.
 	WrittenOrderRetry string `json:"-"`
+	// JoinOrderByShape is the order Session.JoinOrderByShape ran the
+	// statement in: JoinOrderByShapeWritten or JoinOrderByShapeConnected,
+	// "" when it left it to the copy's own order or was off.
+	JoinOrderByShape string `json:"-"`
 	// Note is a sentence the caller adds for the reader, set by the parent
 	// and never by the worker (#2210: the answer came from an earlier copy).
 	Note string `json:"-"`
@@ -1814,6 +1836,7 @@ func marshalJob(job Job, limits Limits, spill spillSpec, spool string, more bool
 		TimeZone: job.Session.TimeZone, MySQLClock: job.Session.MySQLClock, SelectLimit: job.Session.SelectLimit, KeepJoinOrder: job.Session.KeepJoinOrder, PostgresRules: job.Session.PostgresRules, PostgresNames: job.Session.PostgresNames,
 		MaxCells: job.Session.MaxCells, CellsFloorRows: job.Session.CellsFloorRows,
 		JoinNDV: job.Session.joinNDV(), SkipCommonSubplan: job.Session.SkipCommonSubplan, TryConnectedJoinOrder: job.Session.TryConnectedJoinOrder,
+		JoinOrderByShape: job.Session.JoinOrderByShape,
 		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
 		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes, More: more,
@@ -2115,6 +2138,7 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 		}
 		return Result{}, &WorkerError{Err: err, PID: pid, Stderr: w.stderr.text()}
 	}
+	logJoinOrderByShapeNote(out)
 	if out.Error != nil {
 		switch out.Error.Kind {
 		case errRefused:
@@ -2150,6 +2174,11 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 			Views: time.Duration(out.ViewsNS), Query: time.Duration(out.ElapsedNS),
 			Spawn: spawnTook, Decode: time.Since(decodeStart),
 		}}
+	res.JoinOrderByShape = out.JoinOrderByShape
+	if out.JoinOrderByShape == JoinOrderByShapeConnected {
+		slog.Info("sql on the copy: a statement whose FROM is a list of tables ran with its tables in a connected order, picked by the shape of its FROM before it ran",
+			"order", out.JoinOrderTables)
+	}
 	if out.JoinOrder == joinOrderConnected {
 		res.JoinOrderConnected = out.JoinOrderTables
 		slog.Info("sql on the copy: a statement whose joins were estimated far past their inputs in the copy's order and in the order written ran with its tables in a connected order",

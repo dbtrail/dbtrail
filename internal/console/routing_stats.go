@@ -48,6 +48,12 @@ type routingStats struct {
 	// Kept apart from perServer, whose counts are routing decisions: a
 	// statement with nothing to decide must not show up as one.
 	alone map[string]*routingAnswers
+	// joinOrders counts, per server id, the statements the copy answered in
+	// a join order picked by the shape of their FROM
+	// (sqlsandbox.Session.JoinOrderByShape), by that order: "written" or
+	// "connected". Kept apart from perServer's reasons, whose counts are
+	// routing decisions.
+	joinOrders map[string]map[string]uint64
 }
 
 // routingTally is one server's counts.
@@ -108,6 +114,25 @@ func (r *routingStats) answeredAlone(serverID string, took time.Duration, refuse
 	}
 	a.total += took
 	a.slowest = max(a.slowest, took)
+}
+
+// joinOrderByShape counts one statement the copy answered in order, a
+// sqlsandbox.Result.JoinOrderByShape; "" counts nothing.
+func (r *routingStats) joinOrderByShape(serverID, order string) {
+	if order == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.joinOrders == nil {
+		r.joinOrders = map[string]map[string]uint64{}
+	}
+	m := r.joinOrders[serverID]
+	if m == nil {
+		m = map[string]uint64{}
+		r.joinOrders[serverID] = m
+	}
+	m[order]++
 }
 
 // aloneSnapshot copies the counts of answeredAlone.
@@ -285,6 +310,9 @@ func (r *routingStats) snapshotLocked() map[string]routingServerDTO {
 	}
 	for id, why := range r.sessionUntracked {
 		note(id, func(d *routingServerDTO) { d.SessionUntracked = why })
+	}
+	for id, orders := range r.joinOrders {
+		note(id, func(d *routingServerDTO) { d.JoinOrders = maps.Clone(orders) })
 	}
 	return out
 }

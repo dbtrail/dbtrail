@@ -433,6 +433,32 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 		case check.skipped != "":
 			res.JoinCheckSkipped = check.skipped
 		}
+	} else if job.JoinOrderByShape && !job.KeepJoinOrder {
+		// The join order by shape (shapeorder.go, Session.JoinOrderByShape),
+		// when neither the client (KeepJoinOrder) nor the join check above
+		// picks the order. Picked with the copy's own optimizers in place,
+		// then the reordering turned off for the order picked.
+		pick := pickShapeOrder(ctx, conn, job.SQL)
+		if pick.order != "" {
+			if _, err := conn.ExecContext(ctx, disabledOptimizersSQL(true, job.SkipCommonSubplan)); err != nil {
+				pick = shapeOrder{note: shapeOrderFailedNote}
+			}
+		}
+		switch pick.order {
+		case JoinOrderByShapeWritten:
+			res.JoinOrderByShape = JoinOrderByShapeWritten
+			ranOrder = joinOrderWritten
+			// As the join check says it: a worker the kernel stops leaves
+			// no answer, and the parent reads this line (oomretry.go).
+			fmt.Fprintln(stderr, joinOrderWrittenLine)
+		case JoinOrderByShapeConnected:
+			runSQL = pick.text
+			res.JoinOrderByShape, res.JoinOrderTables = JoinOrderByShapeConnected, strings.Join(pick.tables, ", ")
+			ranOrder, ranTables = joinOrderConnected, res.JoinOrderTables
+			fmt.Fprintln(stderr, joinOrderConnectedLine+res.JoinOrderTables)
+		default:
+			res.JoinOrderByShapeNote = pick.note
+		}
 	}
 	if _, err := conn.ExecContext(ctx, lockLast); err != nil {
 		return sessionErr("%s: %v", lockLast, err)

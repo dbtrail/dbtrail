@@ -233,6 +233,12 @@ type RouterServerNumbers struct {
 	// Answers is what each side ("copy", "mysql") finished: counts and
 	// times. Absent until a statement finishes.
 	Answers map[string]RouteAnswers `json:"answers,omitempty"`
+	// JoinOrders counts the statements the copy answered for this server in
+	// a join order picked before they ran by the shape of their FROM (a
+	// list of tables): "written", the order written, which was connected
+	// already; "connected", the tables written again in a connected order.
+	// Absent until one is.
+	JoinOrders map[string]uint64 `json:"join_orders,omitempty"`
 	// Unrouted is what the copy finished on connections that do not route
 	// (Engine Routing off, or a server that cannot route): nothing was
 	// decided for them, so they are in none of the counts above. Errors are
@@ -278,6 +284,7 @@ func (s *Server) RouterNumbers() RouterNumbers {
 			}
 		}
 		n.Answers = t.Answers
+		n.JoinOrders = t.JoinOrders
 		if s.routing.statementsOn {
 			n.Statements = tables[id]
 			if n.Statements == nil {

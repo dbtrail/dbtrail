@@ -96,7 +96,15 @@ type connectedNote struct {
 	why    string
 	failed bool
 	err    error
+	// writtenConnected: why is that the order written is connected
+	// already (whyWrittenConnected), which the join order by shape
+	// (shapeorder.go) runs as written.
+	writtenConnected bool
 }
+
+// whyWrittenConnected is connectedOrder's why for a FROM whose order
+// written is connected already.
+const whyWrittenConnected = "the order written is connected already"
 
 // connectedRewrite is a statement written again in a connected order: its
 // text, and the order, by the names that qualify its tables.
@@ -126,6 +134,10 @@ func connectedOrderSQL(ctx context.Context, conn *sql.Conn, statement string, fa
 	if why != "" {
 		return shape(why)
 	}
+	if len(tables) < 2 {
+		// connectedOrder's own answer, without reading the table first.
+		return shape("one table")
+	}
 	conjuncts, why := whereConjuncts(node["where_clause"])
 	if why != "" {
 		return shape(why)
@@ -152,7 +164,9 @@ func connectedOrderSQL(ctx context.Context, conn *sql.Conn, statement string, fa
 	}
 	order, why := connectedOrder(rows, conds)
 	if why != "" {
-		return shape(why)
+		rw, note := shape(why)
+		note.writtenConnected = why == whyWrittenConnected
+		return rw, note
 	}
 	node["from_table"] = crossChain(node["from_table"].(map[string]any), tables, order)
 	want, err := json.Marshal(doc)
@@ -559,7 +573,7 @@ func connectedOrder(rows []float64, conds [][]int) ([]int, string) {
 		written[t] = true
 	}
 	if connected {
-		return nil, "the order written is connected already"
+		return nil, whyWrittenConnected
 	}
 	first := 0
 	for i := 1; i < n; i++ {
