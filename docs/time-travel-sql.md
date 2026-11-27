@@ -945,7 +945,9 @@ The decision, in order, for every statement:
    too (step 5). When the plan is expensive, the copy answers it. The same
    holds for the copy's own refusals of that kind, counted
    `copy_columns_differ` before: a date, time or year column read another
-   way, text compared or sorted, `AVG`, `ROUND`, `LENGTH`, `DISTINCT`,
+   way, a string written in the statement that is compared or sorted (a
+   column whose values turn out to hold more than plain ASCII still sends
+   the statement to MySQL, as before), `AVG`, `ROUND`, `LENGTH`, `DISTINCT`,
    arithmetic on an `UNSIGNED` column, a `FLOAT` or `DOUBLE` printed with
    fixed decimals, a date function. Such an answer can differ from MySQL's:
    other decimals for a `/` or an `AVG`, another type for a column (a date

@@ -1563,12 +1563,10 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 				if msg != "" && !relaxed(msg) {
 					return "", viewsRefusal
 				}
-				if !sess.HeavyOnCopy {
-					textDecline = sqlTextDeclineSQL(guards)
-				} else if len(guards) > 0 {
-					// Not run: whatever the values, the copy answers.
-					relaxed(sqlTextGuardsWaived)
-				}
+				// The guards run for an expensive statement too: they cost a
+				// scan, and an answer they let through is MySQL's, which
+				// heavy_on_copy must not count as one that may differ.
+				textDecline = sqlTextDeclineSQL(guards)
 			}
 			// What the MySQL port sends is read as MySQL's text (#2829).
 			// Under routing a statement the copy cannot print as MySQL is
@@ -1912,9 +1910,6 @@ func sqlStrictHeavyRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, st
 	return sqlWordsRefusalFor(narrowed, types)
 }
 
-// sqlTextGuardsWaived is what an expensive routed statement whose text
-// columns would have been guarded is noted with: the guards are not run.
-const sqlTextGuardsWaived = "the copy may compare or sort the text columns it reads another way than MySQL's collation"
 
 // ilikeWord is ILIKE as a word, wherever it is in the statement, a quoted
 // name glued to it included ("code"ILIKE, which is how the copy is sent
