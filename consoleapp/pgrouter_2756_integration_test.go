@@ -177,9 +177,13 @@ func TestIntegrationPGRouterFreshMode_2756(t *testing.T) {
 	// the snapshot's.
 	mode(true)
 	var last string
+	// Waited for on the copy's own answer (pgAnsweredByCopy): the source
+	// holds the changes too.
+	reasons := func() map[string]uint64 { return ages.doc("").Servers[e.ID].Reasons }
 	pgTestWait(t, "the changes after the snapshot in fresh mode", 90*time.Second, func() (bool, string) {
-		last = read()
-		return last == current, last
+		var byCopy bool
+		last, byCopy = pgAnsweredByCopy(reasons, read)
+		return last == current && byCopy, fmt.Sprintf("%s by the copy=%v", last, byCopy)
 	})
 	if snaps := pgUpdSnapshots(t, snapshots); len(snaps) != 1 {
 		t.Fatalf("snapshots = %v: the answer must come from the tail, not a new snapshot", snaps)
@@ -233,8 +237,9 @@ func TestIntegrationPGRouterFreshMode_2756(t *testing.T) {
 	// Fresh saved, and BINTRAIL_SQL_TAILS=off where the router runs: fast.
 	mode(true)
 	pgTestWait(t, "fresh mode again", 90*time.Second, func() (bool, string) {
-		last = read()
-		return last == current, last
+		var byCopy bool
+		last, byCopy = pgAnsweredByCopy(reasons, read)
+		return last == current && byCopy, fmt.Sprintf("%s by the copy=%v", last, byCopy)
 	})
 	t.Setenv("BINTRAIL_SQL_TAILS", "off")
 	srv.RefreshFollowedFiles()

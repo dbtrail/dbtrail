@@ -121,16 +121,20 @@ func TestIntegrationPGRouterNoReadGoesBack_2985(t *testing.T) {
 	// The copy's tail is up: a connection the source never answered reads a
 	// change made after the snapshot from the copy.
 	exec1("UPDATE " + pgMonoTable + " SET counter = 1 WHERE id = 1")
+	// Waited for on the copy's own answer (pgAnsweredByCopy): the source
+	// holds the change too.
 	pgTestWait(t, "the copy's tail to show the change", 90*time.Second, func() (bool, string) {
 		c := pgClient(t, ctx, dsn, nil)
 		defer c.Close(context.Background())
-		n := counter(c, copyRead)
-		return n == 1, strconv.Itoa(n)
+		var n int
+		_, byCopy := pgAnsweredByCopy(reasons, func() string { n = counter(c, copyRead); return "" })
+		return n == 1 && byCopy, fmt.Sprintf("%d by the copy=%v", n, byCopy)
 	})
 
 	c := pgClient(t, ctx, dsn, nil)
-	if n := counter(c, copyRead); n != 1 {
-		t.Fatalf("before the source answered: %d, want the copy's 1", n)
+	var first int
+	if _, byCopy := pgAnsweredByCopy(reasons, func() string { first = counter(c, copyRead); return "" }); first != 1 || !byCopy {
+		t.Fatalf("before the source answered: %d (by the copy: %v), want the copy's 1", first, byCopy)
 	}
 	// Constant writes: the counter goes up every 20 ms on the source while
 	// the connection reads it from the source and then from the copy, a
@@ -195,7 +199,8 @@ func TestIntegrationPGRouterNoReadGoesBack_2985(t *testing.T) {
 	// A connection the source never answered reads the copy, fresh.
 	d := pgClient(t, ctx, dsn, nil)
 	pgTestWait(t, "another connection to read the copy's newest value", 60*time.Second, func() (bool, string) {
-		n := counter(d, copyRead)
-		return n == final, strconv.Itoa(n)
+		var n int
+		_, byCopy := pgAnsweredByCopy(reasons, func() string { n = counter(d, copyRead); return "" })
+		return n == final && byCopy, fmt.Sprintf("%d by the copy=%v", n, byCopy)
 	})
 }

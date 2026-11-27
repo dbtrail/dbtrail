@@ -170,9 +170,11 @@ func TestIntegrationPGRouterTableNotCapturedGoesToTheSource(t *testing.T) {
 	// The captured table, in fresh mode: the copy, with its change, once its
 	// tail is built.
 	readB := "SELECT counter FROM " + pgLostB + " WHERE id = 1"
+	// Waited for on the copy's own answer (pgAnsweredByCopy): the source
+	// holds the change too.
 	pgTestWait(t, "b's change from the copy", 90*time.Second, func() (bool, string) {
-		got := oneOn(readB)
-		return got == "21", got
+		got, byCopy := pgAnsweredByCopy(reasons, func() string { return oneOn(readB) })
+		return got == "21" && byCopy, fmt.Sprintf("%s by the copy=%v", got, byCopy)
 	})
 	before := reasons()
 	if got := oneOn(readB); got != "21" {
