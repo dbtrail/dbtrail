@@ -47,6 +47,8 @@ type wireJob struct {
 	SkipCommonSubplan bool `json:"skip_common_subplan,omitempty"`
 	// JoinNDV: see Session.JoinNDV. Nil: no join check.
 	JoinNDV map[string]float64 `json:"join_ndv,omitempty"`
+	// TryConnectedJoinOrder: see Session.TryConnectedJoinOrder.
+	TryConnectedJoinOrder bool `json:"try_connected_join_order,omitempty"`
 	// The worker's caps.
 	Threads     int    `json:"threads"`
 	MemoryLimit string `json:"memory_limit"`
@@ -104,10 +106,20 @@ type wireResult struct {
 	ViewsNS    int64      `json:"views_ns,omitempty"`
 	Error      *wireError `json:"error,omitempty"`
 	// JoinOrder is joinOrderWritten when the join check ran the statement
-	// in the order written, "" otherwise; JoinCheckSkipped why the check
-	// could not be made, when it could not (joinguard.go).
+	// in the order written, joinOrderConnected when it ran it in the order
+	// written of a connected order of its tables (JoinOrderTables, the
+	// names that qualify them, joinconnected.go), "" otherwise;
+	// JoinCheckSkipped why the check could not be made, when it could not
+	// (joinguard.go).
 	JoinOrder        string `json:"join_order,omitempty"`
+	JoinOrderTables  string `json:"join_order_tables,omitempty"`
 	JoinCheckSkipped string `json:"join_check_skipped,omitempty"`
+	// ConnectedOrderNote is why the join check tried a connected order
+	// (TryConnectedJoinOrder) for a statement it refused and did not use
+	// it; ConnectedOrderFailed when that is a step that did not work, not
+	// a statement of another shape.
+	ConnectedOrderNote   string `json:"connected_order_note,omitempty"`
+	ConnectedOrderFailed bool   `json:"connected_order_failed,omitempty"`
 	// ResidentBytes is the memory the worker holds after the statement, its
 	// DuckDB closed; 0 where the platform does not say. Sent by a worker that
 	// stays for another job (wireJob.More).

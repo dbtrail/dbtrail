@@ -38,6 +38,10 @@ import (
 //     (disabled_optimizers = 'join_order'); the statement runs in that order
 //     when that plan has no dangerous join, and is refused before it runs
 //     (JoinTooBigError) when it has one too.
+//  5. For the PostgreSQL port (Session.TryConnectedJoinOrder), before that
+//     refusal: a statement of a narrow shape is written again with its
+//     tables in a connected order and planned in the order written
+//     (joinconnected.go); it runs so when that plan has no dangerous join.
 //
 // What the check cannot read it leaves alone: a condition that is not a
 // plain column = column (an expression, a range) is not counted, and a join
@@ -327,6 +331,16 @@ func lastName(qualified string) string {
 type joinCheck struct {
 	// written: run it in the order written.
 	written bool
+	// connected: run it in the order written, as this text, the statement
+	// written again in a connected order of its tables (joinconnected.go),
+	// whose order is order. Set with written.
+	connected *connectedRewrite
+	// connectedNote: why the connected order was tried and not used, with
+	// a refusal.
+	connectedNote connectedNote
+	// err: the statement's context ended while the check ran; it is that
+	// error, not a refusal.
+	err error
 	// refusal: do not run it, and why.
 	refusal string
 	// skipped: the check could not be made, and why; the statement runs as
@@ -337,8 +351,10 @@ type joinCheck struct {
 // checkJoins runs the check on conn, the statement's session with its views
 // and settings in place and not yet locked (the order written is a SET).
 // skipCommonSubplan is the session's own (Session.SkipCommonSubplan), kept in
-// the list the order written replaces.
-func checkJoins(ctx context.Context, conn *sql.Conn, statement string, ndv map[string]float64, skipCommonSubplan bool) joinCheck {
+// the list the order written replaces. tryConnected is
+// Session.TryConnectedJoinOrder: a statement dangerous in both orders is
+// tried in a connected order of its tables before it is refused.
+func checkJoins(ctx context.Context, conn *sql.Conn, statement string, ndv map[string]float64, skipCommonSubplan, tryConnected bool) joinCheck {
 	plan, err := explainJSON(ctx, conn, statement)
 	if err != nil {
 		return joinCheck{skipped: "the copy's plan could not be had: " + firstLine(err.Error())}
@@ -368,9 +384,58 @@ func checkJoins(ctx context.Context, conn *sql.Conn, statement string, ndv map[s
 	case err != nil:
 		return refuse(err.Error())
 	case second != "":
+		if tryConnected {
+			rw, note := checkConnected(ctx, conn, statement, ndv, skipCommonSubplan)
+			switch {
+			case note.err != nil:
+				// The statement's time is over: not a refusal of its joins.
+				return joinCheck{err: note.err}
+			case note.why == "":
+				return joinCheck{written: true, connected: &rw}
+			}
+			refused := refuse(second)
+			refused.connectedNote = note
+			return refused
+		}
 		return refuse(second)
 	}
 	return joinCheck{written: true}
+}
+
+// checkConnected is the third order of checkJoins: the statement written
+// again in a connected order of its tables (joinconnected.go), and planned in
+// the order written, which is in place when it is called and when it
+// returns. ok only when there is such an order and its plan has no dangerous
+// join; otherwise nothing changes.
+func checkConnected(ctx context.Context, conn *sql.Conn, statement string, ndv map[string]float64, skipCommonSubplan bool) (connectedRewrite, connectedNote) {
+	failed := func(what string, err error) connectedNote {
+		return connectedNote{why: what + ": " + firstLine(err.Error()), failed: true, err: ctx.Err()}
+	}
+	// The tables' estimates in the session's own order, then the order
+	// written back in place for the plan of the new text and its run.
+	if _, err := conn.ExecContext(ctx, ownOptimizersSQL(skipCommonSubplan)); err != nil {
+		return connectedRewrite{}, failed("the session's own optimizers could not be set", err)
+	}
+	rw, note := connectedOrderSQL(ctx, conn, statement, sessionTableFacts(ctx, conn))
+	if _, err := conn.ExecContext(ctx, disabledOptimizersSQL(true, skipCommonSubplan)); err != nil {
+		return connectedRewrite{}, failed("the order written could not be set again", err)
+	}
+	if note.why != "" {
+		note.err = ctx.Err()
+		return connectedRewrite{}, note
+	}
+	plan, err := explainJSON(ctx, conn, rw.text)
+	if err != nil {
+		return connectedRewrite{}, failed("the statement in a connected order could not be planned", err)
+	}
+	third, err := joinDanger(plan, ndv)
+	switch {
+	case err != nil:
+		return connectedRewrite{}, failed("the plan in a connected order could not be read", err)
+	case third != "":
+		return connectedRewrite{}, connectedNote{why: "a join is estimated far past its inputs in the connected order " + strings.Join(rw.order, ", ") + " too (" + third + ")"}
+	}
+	return rw, connectedNote{}
 }
 
 // checkJoinsWritten is checkJoins for a statement that runs in the order
