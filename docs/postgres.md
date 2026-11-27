@@ -2847,6 +2847,70 @@ answered by the source; after the first such refusal, the next statements of
 that connection do not wait their turn among the reports to be refused, until
 the copy answers one.
 
+#### Whether its memory fits the machine
+
+The router's statements on the copy, the recent changes it keeps for fresh
+mode, and the index MySQL's buffer pool are each sized on their own, and on a
+machine they share they can together pass what it has. The router adds them
+up when it starts and once a minute after, and says the sum in its start-up
+lines and in `/status` as `memory` (which shows the last minute's reading).
+It changes nothing and never refuses to start.
+
+What it adds up is each part's ceiling, not what it uses now:
+
+- the statements that can run on the copy at once (`--workers` plus the one
+  kept for short statements), each at its SQL memory plus the headroom DuckDB
+  takes outside that limit (a quarter of it, at least 256 MiB);
+- what the recent changes may hold, once for each PostgreSQL server listed:
+  each server has its own budget (`BINTRAIL_SQL_TAIL_MAX_BYTES`, a fifth of
+  the memory the router plans with unless set), and any of them can be
+  switched to fresh mode while the router runs. Not counted with
+  `BINTRAIL_SQL_TAILS=off`;
+- the results held for clients that have not read them (256 MiB);
+- the buffer pool of each index MySQL on the same machine: compose's
+  `index-mysql`, or a MySQL on loopback whose host name is this machine's.
+  An index on another machine is not asked. One that may be on this machine
+  and does not answer is not counted: when the rest fits, the verdict is then
+  `unknown`, not `fits`, until it answers.
+
+With no ceiling of its own the router shares the machine with capture and the
+index MySQL, and the sum is compared with the machine's memory. Past it, under
+heavy reports, the machine swaps and the kernel stops processes for memory,
+and it can stop the index MySQL. The router then warns, in its start-up lines
+and in its log (once each time it goes over), with what fits: fewer
+`PG_ROUTER_WORKERS` at the same SQL memory, or, when not even one fits, one
+worker and the SQL memory that fits it. With a ceiling of its own
+(`PG_ROUTER_MEMORY`, the container's limit) the statements, recent changes
+and results are compared with that ceiling first: past it, the router's own
+statements are the ones stopped, and raising the ceiling is advised only as
+far as the machine holds it beside the buffer pool. When they fit it, what
+the router can take (its parts, within the ceiling) plus the buffer pool is
+still compared with the machine, because a ceiling as big as the machine
+keeps nothing from running out; the advice then says the `PG_ROUTER_MEMORY`
+that fits. `PG_ROUTER_MEMORY_SHARE` is not a ceiling:
+nothing enforces it, so with it alone the router compares with the machine as
+without it (the share still sizes the recent changes' budget). The
+`SQL_MEMORY` of the compose `.env` is also the web interface's and the MySQL
+router's; `--sql-memory` sets this service's alone.
+
+While no PostgreSQL server is listed nothing runs on the copy, and nothing is
+said (`verdict` is `idle`).
+
+The factory settings (four workers at 2 GB) can ask for more than a 16 GB
+machine has with the index MySQL's default buffer pool on it, so the router
+warns there. Two workers fit it with one PostgreSQL server; each more server
+adds its recent changes' budget.
+
+In `/status`, `memory` has `verdict` (`fits`, `over`, `idle`, or `unknown`
+with `why` when the machine's memory or the SQL memory cannot be read),
+`compared_with` (`machine` or `own_ceiling`), `available_bytes`,
+`need_bytes`, `own_ceiling_bytes` when there is one, and the parts: `slots`,
+`statement_bytes` (each, headroom included), `sql_memory_bytes`, `servers` and
+`tails_bytes` (every server's together; or `tails_unbounded`),
+`results_bytes`, `index_pool_bytes`, `index_pool` (`bundled`, `this_machine`,
+`elsewhere`, `unread` or `none`) and `index_pool_unread`. `advice` says what fits
+when it is over. The SQL memory and the workers are the ones applied at start.
+
 #### The port's status
 
 ```bash
