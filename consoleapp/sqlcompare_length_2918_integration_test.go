@@ -206,11 +206,12 @@ func lengthFunctions(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 			// AVG of an expression is declined by the copy whatever the
 			// collation (AvgVeto, #2920): the report of #2918 is that rule,
 			// not the collation. Expensive here, so the copy answers it even
-			// so (heavy_on_copy).
+			// so (heavy_on_copy), unless a refusal of the copy's that holds
+			// whatever the plan comes first, as it does on MariaDB.
 			before := lengthReasons(t, srv, ent.ID)
 			connTypedAnswer(port, avgReport)
-			if r := reasonAdded(before, lengthReasons(t, srv, ent.ID)); r != "heavy_on_copy" {
-				t.Errorf("AVG(LENGTH(cf)) under %s was counted %q, want heavy_on_copy", session, r)
+			if r := reasonAdded(before, lengthReasons(t, srv, ent.ID)); r != "heavy_on_copy" && r != "copy_columns_differ" {
+				t.Errorf("AVG(LENGTH(cf)) under %s was counted %q, want heavy_on_copy or copy_columns_differ", session, r)
 			}
 		})
 	}

@@ -135,8 +135,12 @@ func collationFree(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	reproduced := sessionCollation == "utf8mb4_uca1400_ai_ci" || sessionCollation == "utf8mb4_0900_ai_ci" || sessionCollation == "utf8mb4_unicode_ci"
 	for _, c := range cases {
 		anyone := reproduced && c.who == "live"
+		mark := heavyMark(t, srv, ent.ID)
 		got, want := answerText(port, c.stmt), answerText(live, c.stmt)
 		t.Logf("%-5s port %-70.200s %s", c.who, got, c.stmt)
+		if heavyOnCopy(t, mark(), c.who, c.stmt, got, want) {
+			continue
+		}
 		if strings.HasPrefix(want, "ERROR ") {
 			t.Errorf("the source refused %q: %s", c.stmt, want)
 			continue
