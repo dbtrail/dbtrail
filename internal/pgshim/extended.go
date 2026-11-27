@@ -377,7 +377,7 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 			s.extFail(&pgErr{"26000", fmt.Sprintf("prepared statement %q does not exist", m.Name)})
 			return
 		}
-		s.busyRefused = ""
+		s.busyRefused, s.shapeDescribe = "", false
 		var perr *pgErr
 		lane := false
 		if s.abortedRefusal(st.query) == nil {
@@ -404,8 +404,10 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 			cols, types, held, perr = s.describeStatement(st)
 			s.fastLane = false
 		}
-		if perr == nil && st.fallback != "" && s.canFallBack() {
-			// The copy could not describe it (route.go): the source does.
+		if perr == nil && (st.fallback != "" || s.shapeDescribe) && s.canFallBack() {
+			// The copy could not describe it (route.go), or a table it reads
+			// changed on the source (shape_3251.go): the source does.
+			s.shapeDescribe = false
 			s.describeOnSource(st)
 			s.noteIfFailed(st)
 			return
@@ -469,13 +471,16 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 			return
 		}
 		if p.cols == nil {
+			s.commitShapeNote()
 			s.be.Send(&pgproto3.NoData{})
 			return
 		}
 		if perr := checkResultFormats(p); perr != nil {
+			s.dropShapeNote()
 			s.extFail(perr)
 			return
 		}
+		s.commitShapeNote()
 		s.rowDescription(p.cols, p.types, p.resultFormats)
 	default:
 		s.extFail(&pgErr{"08P01", fmt.Sprintf("invalid DESCRIBE message subtype %d", m.ObjectType)})
@@ -544,6 +549,29 @@ func (s *session) describeStatement(st *preparedStatement) (cols []string, types
 // error would name another statement than the client's. described returns
 // false then.
 func (s *session) describeFree(st *preparedStatement) (cols []string, types []colType, described bool, perr *pgErr) {
+	// A table whose columns on the source are not its snapshot's
+	// (shape_3251.go): the copy would describe the old ones. The source
+	// describes it (shapeDescribe), this Describe only: the reason is the
+	// moment's, and each execution is checked again, so once the table's
+	// next snapshot records its columns the copy answers it again, with the
+	// columns the source described. Where nothing goes to the source, the
+	// Describe is refused. Where the columns could not be compared, the copy
+	// describes it, and its executions say so (runFree).
+	ctx, done := s.statementContext()
+	shape, perr := s.copyShapeDiffers(ctx, RewriteForCopy(st.query))
+	done()
+	if perr != nil {
+		return nil, nil, false, perr
+	}
+	if shape.why != "" {
+		if s.canFallBack() {
+			s.logger.Debug("pgshim: a statement reads a table changed on the source since its snapshot; the source describes it", "why", shape.why)
+			s.shapeDescribe = true
+			return nil, nil, false, nil
+		}
+		s.busyRefused = ReasonCopyShapeDiffers
+		return nil, nil, false, shapeCopyOnlyError(shape.why)
+	}
 	got, perr, err := s.describeWith(st, "")
 	if perr != nil {
 		return nil, nil, false, perr
@@ -749,7 +777,7 @@ func columnNames(cols []sqlsandbox.Column) []string {
 
 // runPortal runs a portal's statement once, the way a simple query runs it,
 // and keeps its answer for the Executes that hand it over.
-func (s *session) runPortal(p *portal) *pgErr {
+func (s *session) runPortal(p *portal) (perr *pgErr) {
 	if p.ran {
 		return nil
 	}
@@ -774,6 +802,15 @@ func (s *session) runPortal(p *portal) *pgErr {
 	s.argsPadded = paddedArgument(p.stmt.paramOIDs)
 	s.fastLane = fastLaneFor(p.stmt, p.route)
 	s.portalHeavy, s.copyReason = s.expensive(p.route), p.route.reason
+	defer func() {
+		// Refused after the copy ran it: its notice of tables not compared
+		// with the source's (shape_3251.go) goes with it. Kept, it is sent
+		// by the message that hands the answer over, once the answer passed
+		// every check (handleExecute, handleDescribe).
+		if perr != nil {
+			s.dropShapeNote()
+		}
+	}()
 	cols, types, rows, tag, perr := s.run(p.text)
 	s.screened = ""
 	s.argsBound, s.argsPadded = false, false
@@ -1018,13 +1055,17 @@ func (s *session) handleExecute(m *pgproto3.Execute) {
 		s.be.Send(&pgproto3.EmptyQueryResponse{})
 		return
 	case p.cols == nil:
+		s.commitShapeNote()
 		s.commandComplete(p.tag)
 		return
 	}
 	if perr := checkResultFormats(p); perr != nil {
+		s.dropShapeNote()
 		s.extFail(perr)
 		return
 	}
+	// The copy's answer is the client's from here on (shape_3251.go).
+	s.commitShapeNote()
 	left := len(p.rows) - p.sent
 	n := left
 	if m.MaxRows > 0 && uint64(m.MaxRows) < uint64(left) {

@@ -65,6 +65,7 @@ const (
 	ReasonExplainFailed     = "explain_failed"      // the source's plan could not be had: EXPLAIN did not run, or was not asked
 	ReasonCopyTooOld        = "copy_too_old"        // the copy's answer was older than one the source already gave this connection
 	ReasonTableNotCaptured  = "table_not_captured"  // it reads a table whose capture lost or dropped changes since its snapshot (not_captured.go)
+	ReasonCopyShapeDiffers  = "copy_shape_differs"  // it reads a table whose columns on the source are not its snapshot's: an ALTER TABLE since (shape_3251.go)
 	ReasonResultOverRowCap  = "result_over_row_cap" // an expensive plan whose result is estimated over the copy's row cap: not tried on the copy (route_cost.go)
 	ReasonHeavyOnCopy       = "heavy_on_copy"       // expensive on the source, so the copy answers it, though it may answer otherwise than PostgreSQL (heavy.go)
 	ReasonJoinTooBig        = "join_too_big"        // the copy's plan of it has a join estimated far past its inputs in its own join order and in the order written: not run there (joinstats.go)
@@ -112,6 +113,11 @@ type RouteNote struct {
 	// older_than_earlier), where a light one would have gone to the source
 	// (freshRefusals, #3116); "" when it did not.
 	HeavyOlder string
+	// ShapeUnchecked is why the copy answered the statement without its
+	// tables' columns compared with the source's (ShapeUnchecked*,
+	// shape_3251.go), "" when they were or nothing needed it. Counted apart:
+	// Reason stays the one the statement was routed by.
+	ShapeUnchecked string
 }
 
 // routeDecision is which side answers a statement, and why.
@@ -780,6 +786,10 @@ func transientFallback(reason string) bool {
 		return true
 	case ReasonTableNotCaptured:
 		// The table's next snapshot read after its last drop heals it.
+		return true
+	case ReasonCopyShapeDiffers:
+		// The table's next snapshot, which records the source's columns,
+		// heals it.
 		return true
 	}
 	return false
@@ -1917,13 +1927,18 @@ func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, fa
 	s.writtenOrder = ""
 	heavyOlder := s.heavyOlder
 	s.heavyOlder = ""
+	shapeUnchecked := s.shapeUnchecked
+	s.shapeUnchecked = ""
+	if d.side != RouteCopy || failed {
+		shapeUnchecked = ""
+	}
 	if s.bound == nil || s.bound.Routed == nil || d.side == "" {
 		return
 	}
 	if d.side != RouteCopy {
 		joinCheck = ""
 	}
-	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed, JoinCheck: joinCheck, OOMRetry: oomRetry, WrittenOrder: writtenOrder, HeavyOlder: heavyOlder})
+	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed, JoinCheck: joinCheck, OOMRetry: oomRetry, WrittenOrder: writtenOrder, HeavyOlder: heavyOlder, ShapeUnchecked: shapeUnchecked})
 }
 
 // fieldName reports whether the token at j is the field a date_trunc or a

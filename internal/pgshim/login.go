@@ -144,6 +144,18 @@ type Binding struct {
 	// Where nothing can go to the source the copy answers, with a NOTICE that
 	// names the table. nil: nothing is asked.
 	NotCaptured func(ctx context.Context) ([]TableNotCaptured, error)
+	// SourceShapes, when set, says what the source's catalog says now of
+	// each table by its OID (the one its snapshot recorded): its schema and
+	// name there, and the columns a snapshot would store. An OID the source
+	// does not have (the table dropped, or dropped and created again) is
+	// absent from the answer. Asked before a statement runs
+	// on the copy, for the tables it reads (shape_3251.go): one whose shape
+	// is not its snapshot's is answered by the source
+	// (ReasonCopyShapeDiffers), or refused where nothing can go there. On
+	// an error the copy answers, with a NOTICE (RouteNote.ShapeUnchecked);
+	// a *ShapeCheckError says what the client may be told of its cause.
+	// nil: nothing is asked.
+	SourceShapes func(ctx context.Context, oids []uint32) (map[uint32]SourceShape, error)
 	// Status, when set, answers SHOW dbtrail.router_status on this
 	// connection (portstatus.go): name and value pairs, in the order to
 	// show them. last is the connection's last answer, whose rows
@@ -391,6 +403,9 @@ var loginTimeout = 30 * time.Second
 // runFree answers a statement that is not time travel on the copy.
 func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][][]byte, tag string, perr *pgErr) {
 	started := time.Now()
+	// The notice of tables not compared with the source's is the caller's
+	// to send once the copy's answer is the client's (commitShapeNote).
+	s.dropShapeNote()
 	s.joinCheck, s.oomRetry, s.writtenOrder = "", "", ""
 	// A session time zone the copy could not be asked about when it was set
 	// is asked about now (settings.go), before the statement's own context:
@@ -421,6 +436,13 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	waited, apart, named := false, false, 0
 	text, err := s.copyText(qstr)
 	if err == nil {
+		// A table whose columns on the source are not its snapshot's (an
+		// ALTER TABLE since, shape_3251.go): the source answers, before the
+		// copy does any work, heavy or not. First: what follows reads the
+		// snapshot's types.
+		if refusal := s.shapeRefusal(ctx, text); refusal != nil {
+			return nil, nil, nil, "", refusal
+		}
 		// A char(n) column used where the copy counts its padding (#3068):
 		// the source's, or refused where nothing is sent there.
 		if !s.heavy {

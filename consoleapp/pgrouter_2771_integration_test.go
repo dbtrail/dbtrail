@@ -769,7 +769,8 @@ func TestIntegrationPGRouterForward(t *testing.T) {
 				t.Fatal(err)
 			}
 			env.srv.RefreshFollowedFiles()
-			cl := pgClient(t, ctx, strings.Replace(env.portDSN(), "dbname=pgsrv", "dbname="+c.name, 1), nil)
+			var notices []string
+			cl := pgClient(t, ctx, strings.Replace(env.portDSN(), "dbname=pgsrv", "dbname="+c.name, 1), &notices)
 			got := one(ctx, cl, "BEGIN")
 			if !strings.HasPrefix(got, "error "+c.code) || !strings.Contains(got, c.says) || strings.Contains(got, "wrong-pw") {
 				t.Errorf("%s: %q", c.name, got)
@@ -777,8 +778,20 @@ func TestIntegrationPGRouterForward(t *testing.T) {
 			if cl.TxStatus() != 'I' {
 				t.Errorf("%s: status %c after a BEGIN that failed", c.name, cl.TxStatus())
 			}
+			// The copy still answers, and says it could not check whether
+			// the table changed on the source (#3251, copy_shape_unchecked).
+			notices = nil
 			if got := one(ctx, cl, count); got != "2" {
 				t.Errorf("%s: the copy still answers: %q", c.name, got)
+			}
+			said := 0
+			for _, n := range notices {
+				if strings.Contains(n, "could not check whether") && !strings.Contains(n, "wrong-pw") {
+					said++
+				}
+			}
+			if said != 1 {
+				t.Errorf("%s: notices %q, want one that says the table could not be checked", c.name, notices)
 			}
 		}
 	})

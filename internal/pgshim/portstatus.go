@@ -107,6 +107,7 @@ var reasonMeans = map[string]string{
 	ReasonExplainFailed:     "the source's plan for the statement could not be had, so the source answers it",
 	ReasonCopyTooOld:        "the copy could not show its answer was as new as it had to be: it had not caught up with what the source already answered this connection about a table the statement reads, or, in fresh mode, a table's newest captured changes were not ready, or were older than what an earlier answer of the copy on this connection read",
 	ReasonTableNotCaptured:  "the statement reads a table whose capture lost or dropped changes since its snapshot, so the copy holds old rows of it",
+	ReasonCopyShapeDiffers:  "the statement reads a table whose columns on the source are not the ones of its snapshot (an ALTER TABLE since, which PostgreSQL does not announce to capture), so the copy holds the table's old columns",
 	ReasonSourceUnreachable: "the source could not be asked for the statement's plan, so the copy answered as it does without one",
 	ReasonJoinTooBig:        "the copy's plan of the statement has a join estimated far larger than its inputs, in the copy's join order and in the order written, so it was not run there",
 

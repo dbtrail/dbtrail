@@ -3,7 +3,6 @@ package reconstruct
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 )
@@ -71,55 +70,9 @@ func checkPGSourceShape(ctx context.Context, schema, table string, rel baseline.
 		return fmt.Errorf("%s: the table on the source (OID %d) is not the one the snapshot was read from (OID %d): it was dropped and created again; %s",
 			name, now.OID, rel.OID, pgRebaseline)
 	}
-	if diff := pgSourceShapeDiff(rel.Columns, now.Columns); diff != "" {
+	if diff := baseline.PGColumnsDiff(rel.Columns, now.Columns); diff != "" {
 		return fmt.Errorf("%s: the table's columns on the source are not the snapshot's (%s); %s",
 			name, diff, pgRebaseline)
 	}
 	return nil
-}
-
-// pgSourceShapeDiff says how the source's columns differ from the file's, or
-// "" when they do not. Columns are matched by name and compared by type and
-// modifier, as pgShapeDiff compares a streamed shape, and by attnum where the
-// file recorded one (Ordinal 0: a file written before it was): a column
-// dropped and added again under the same name and type has another attnum,
-// and none of the values the file holds for it.
-func pgSourceShapeDiff(file, source []baseline.PGColumn) string {
-	want := make(map[string]baseline.PGColumn, len(file))
-	for _, c := range file {
-		want[c.Name] = c
-	}
-	got := map[string]bool{}
-	var added, dropped, retyped, recreated []string
-	for _, c := range source {
-		got[c.Name] = true
-		w, ok := want[c.Name]
-		switch {
-		case !ok:
-			added = append(added, c.Name)
-		case w.TypeOID != c.TypeOID || w.TypeMod != c.TypeMod:
-			retyped = append(retyped, c.Name)
-		case w.Ordinal != 0 && c.Ordinal != 0 && w.Ordinal != c.Ordinal:
-			recreated = append(recreated, c.Name)
-		}
-	}
-	for _, c := range file {
-		if !got[c.Name] {
-			dropped = append(dropped, c.Name)
-		}
-	}
-	var parts []string
-	if len(added) > 0 {
-		parts = append(parts, "added "+strings.Join(added, ", "))
-	}
-	if len(dropped) > 0 {
-		parts = append(parts, "dropped "+strings.Join(dropped, ", "))
-	}
-	if len(retyped) > 0 {
-		parts = append(parts, "retyped "+strings.Join(retyped, ", "))
-	}
-	if len(recreated) > 0 {
-		parts = append(parts, "dropped and added again "+strings.Join(recreated, ", "))
-	}
-	return strings.Join(parts, "; ")
 }

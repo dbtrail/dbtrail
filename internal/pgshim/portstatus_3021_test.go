@@ -442,7 +442,7 @@ func TestLastAnswer_everyReasonHasItsSentence(t *testing.T) {
 		ReasonAnswersTheSame, ReasonNoForwardAccount, ReasonHiddenRules, ReasonCopyCommand, ReasonInTransaction, ReasonVeto,
 		ReasonSessionDiffers, ReasonNotASelect, ReasonCopyRefused, ReasonTableNotOnCopy, ReasonCopyBehindSource, ReasonCopyAgeUnknown,
 		ReasonCopyQueueFull, ReasonCopyWaitTimeout, ReasonCopyColumnsDiffer, ReasonCatalogNotOnCopy, ReasonReadOnly,
-		ReasonTableNotCaptured, ReasonJoinTooBig,
+		ReasonTableNotCaptured, ReasonJoinTooBig, ReasonCopyShapeDiffers,
 	} {
 		rows := LastAnswer{Side: RouteSource, Reason: reason}.Rows()
 		if len(rows) != 4 || rows[2][0] != "last_answer_reason_means" || rows[2][1] == "" {

@@ -1234,6 +1234,11 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			}
 			return out, err
 		}
+		// A table changed on the source since its snapshot (an ALTER TABLE,
+		// which PostgreSQL does not announce to capture): the source answers
+		// a statement that reads one (copy_shape_differs, #3251). Read from
+		// the source's catalog, never from its rows.
+		bound.SourceShapes = pgPortSourceShapes(fwd.DSN, tgt.ID, sources)
 		// The copy waits for the source's position on a connection the
 		// source answered, then answers (#2985).
 		bound.CopyWait = func(ctx context.Context, lsn uint64) (pgshim.CopyWaitOutcome, string) {

@@ -85,8 +85,21 @@ type session struct {
 	// the one the screen read. copyText holds the portal's text to it.
 	screened string
 	// busyRefused is the busy reason the statement the copy just failed
-	// was refused for instead (copyFailed, #3109), "" when it was not.
+	// was refused for instead (copyFailed, #3109), "" when it was not. It is
+	// also the reason of a statement refused before the copy ran it because
+	// its tables' columns could not be compared with the source's, or
+	// differ from them where nothing goes to the source (shape_3251.go).
 	busyRefused string
+	// shapeNote is the notice of a statement the copy runs without its
+	// tables' columns compared with the source's (shape_3251.go), sent once
+	// the copy's answer is the client's (commitShapeNote); shapeUnchecked is
+	// its kind (ShapeUnchecked*), for the statement's note.
+	shapeNote      string
+	shapeUnchecked string
+	// shapeDescribe sends the Describe just made to the source: a table the
+	// statement reads changed there (shape_3251.go). Only that Describe:
+	// each execution is checked again.
+	shapeDescribe bool
 	// screenBusy is why the statement route just decided was not screened
 	// (routeFree): the copy was too busy to list its columns.
 	screenBusy string
@@ -309,6 +322,12 @@ func (s *session) handleSimpleQuery(qstr string) error {
 	s.copyReason = d.reason
 	cols, types, rows, tag, perr := s.run(qstr)
 	s.fastLane, s.copyReason = false, ""
+	if perr != nil {
+		s.dropShapeNote()
+	} else {
+		// The copy's answer is the client's from here on.
+		s.commitShapeNote()
+	}
 	if perr != nil {
 		if why := s.takeBusyRefused(); why != "" && d.side == RouteCopy {
 			// The copy was busy (#3109, route.go): refused, not sent to the

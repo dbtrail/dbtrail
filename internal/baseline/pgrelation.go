@@ -170,3 +170,51 @@ func ParsePGRelation(s string) (r PGRelation, ok bool, err error) {
 	}
 	return r, true, nil
 }
+
+// PGColumnsDiff says how the source's columns differ from the ones a
+// snapshot's file recorded, or "" when they do not: what a snapshot update
+// refuses a file for (#3112) and what sends a statement on the PostgreSQL
+// port to the source (#3251). Columns are matched by name and compared by
+// type and modifier, as a fold compares a streamed shape, and by attnum where
+// the file recorded one (Ordinal 0: a file written before it was): a column
+// dropped and added again under the same name and type has another attnum,
+// and none of the values the file holds for it.
+func PGColumnsDiff(file, source []PGColumn) string {
+	want := make(map[string]PGColumn, len(file))
+	for _, c := range file {
+		want[c.Name] = c
+	}
+	got := map[string]bool{}
+	var added, dropped, retyped, recreated []string
+	for _, c := range source {
+		got[c.Name] = true
+		w, ok := want[c.Name]
+		switch {
+		case !ok:
+			added = append(added, c.Name)
+		case w.TypeOID != c.TypeOID || w.TypeMod != c.TypeMod:
+			retyped = append(retyped, c.Name)
+		case w.Ordinal != 0 && c.Ordinal != 0 && w.Ordinal != c.Ordinal:
+			recreated = append(recreated, c.Name)
+		}
+	}
+	for _, c := range file {
+		if !got[c.Name] {
+			dropped = append(dropped, c.Name)
+		}
+	}
+	var parts []string
+	if len(added) > 0 {
+		parts = append(parts, "added "+strings.Join(added, ", "))
+	}
+	if len(dropped) > 0 {
+		parts = append(parts, "dropped "+strings.Join(dropped, ", "))
+	}
+	if len(retyped) > 0 {
+		parts = append(parts, "retyped "+strings.Join(retyped, ", "))
+	}
+	if len(recreated) > 0 {
+		parts = append(parts, "dropped and added again "+strings.Join(recreated, ", "))
+	}
+	return strings.Join(parts, "; ")
+}
