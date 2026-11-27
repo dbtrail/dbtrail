@@ -850,11 +850,16 @@ jobs:
       # tripwire below asserts the key MariaDB-source tests actually PASSED
       # (-v prints the --- PASS lines; pipefail keeps go test's exit code
       # through the tee), the same guard the MySQL job carries.
+      #
+      # -timeout: consoleapp's MariaDB batteries plan every statement as
+      # expensive, so the copy is tried for each one a veto used to keep on
+      # MariaDB (heavy_on_copy), and MariaDB answers the ones it cannot run:
+      # the package passed the 10-minute default.
       - name: MariaDB-source integration tests
         if: env.RUN == 'true'
         run: |
           set -o pipefail
-          go test -tags=integration -race -p 1 -count=1 -v -run 'MariaDB|Mariadb|mariadb|Flavor|FourColumns' ./... 2>&1 | tee /tmp/mariadb-it.out
+          go test -tags=integration -race -p 1 -count=1 -v -timeout 25m -run 'MariaDB|Mariadb|mariadb|Flavor|FourColumns' ./... 2>&1 | tee /tmp/mariadb-it.out
           for name in \
             TestStreamLoop_liveReplication_mariadb \
             TestStreamLoop_mariadbResumeDedupDoesNotDeleteIndexedRows \
