@@ -9,11 +9,11 @@ import (
 	"github.com/dbtrail/dbtrail/internal/console"
 )
 
-const gib = uint64(1) << 30
+const pgTestGiB = uint64(1) << 30
 
 // machine is a host with no ceiling of its own and tails at a fifth of it,
 // as the router plans by default.
-func machine(mem uint64) console.PGMemoryInputs {
+func pgTestMachine(mem uint64) console.PGMemoryInputs {
 	return console.PGMemoryInputs{MachineBytes: mem, BudgetBytes: mem, TailsBytes: int64(mem / 5)}
 }
 
@@ -23,18 +23,18 @@ func machine(mem uint64) console.PGMemoryInputs {
 // index-mysql.
 func TestPGMemoryVerdict_theTwoHostsOfTheIssue(t *testing.T) {
 	plan := func(mem uint64) pgMemoryPlan {
-		return pgMemoryPlan{Workers: 2, Memory: "2GB", ResultsBytes: defaultFlashbackResultBudget, In: machine(mem),
-			Pools: []pgIndexPool{{Bytes: 3 * gib, Place: pgPoolBundled}}}
+		return pgMemoryPlan{Workers: 2, Memory: "2GB", ResultsBytes: defaultFlashbackResultBudget, In: pgTestMachine(mem),
+			Pools: []pgIndexPool{{Bytes: 3 * pgTestGiB, Place: pgPoolBundled}}}
 	}
-	d := pgMemoryVerdict(plan(8 * gib))
+	d := pgMemoryVerdict(plan(8 * pgTestGiB))
 	if d.Verdict != "over" || d.ComparedWith != "machine" {
 		t.Fatalf("8 GB host: %+v, want over, compared with the machine", d)
 	}
 	// 3 statements x 2.5 GiB + 1.6 GiB tails + 0.25 GiB results + 3 GiB pool.
-	if want := 3*(2*gib+gib/2) + 8*gib/5 + 256<<20 + 3*gib; d.NeedBytes != want {
+	if want := 3*(2*pgTestGiB+pgTestGiB/2) + 8*pgTestGiB/5 + 256<<20 + 3*pgTestGiB; d.NeedBytes != want {
 		t.Errorf("8 GB host needs %d, want %d", d.NeedBytes, want)
 	}
-	if d := pgMemoryVerdict(plan(16 * gib)); d.Verdict != "fits" {
+	if d := pgMemoryVerdict(plan(16 * pgTestGiB)); d.Verdict != "fits" {
 		t.Errorf("16 GB host: %+v, want fits (it ran with 4 GB free)", d)
 	}
 }
@@ -44,21 +44,21 @@ func TestPGMemoryVerdict_theTwoHostsOfTheIssue(t *testing.T) {
 // 32 GB they do.
 func TestPGMemoryVerdict_factorySettings(t *testing.T) {
 	plan := func(mem uint64) pgMemoryPlan {
-		return pgMemoryPlan{Workers: defaultPGRouterWorkers, Memory: "2GB", ResultsBytes: defaultFlashbackResultBudget, In: machine(mem),
+		return pgMemoryPlan{Workers: defaultPGRouterWorkers, Memory: "2GB", ResultsBytes: defaultFlashbackResultBudget, In: pgTestMachine(mem),
 			Pools: []pgIndexPool{{Bytes: mem / 4, Place: pgPoolBundled}}}
 	}
-	if d := pgMemoryVerdict(plan(16 * gib)); d.Verdict != "over" {
+	if d := pgMemoryVerdict(plan(16 * pgTestGiB)); d.Verdict != "over" {
 		t.Errorf("factory settings on 16 GB: %+v, want over", d)
 	}
-	if d := pgMemoryVerdict(plan(32 * gib)); d.Verdict != "fits" {
+	if d := pgMemoryVerdict(plan(32 * pgTestGiB)); d.Verdict != "fits" {
 		t.Errorf("factory settings on 32 GB: %+v, want fits", d)
 	}
 }
 
 func TestPGMemoryVerdict_edges(t *testing.T) {
 	base := func() pgMemoryPlan {
-		return pgMemoryPlan{Workers: 2, Memory: "2GB", ResultsBytes: defaultFlashbackResultBudget, In: machine(8 * gib),
-			Pools: []pgIndexPool{{Bytes: 3 * gib, Place: pgPoolBundled}}}
+		return pgMemoryPlan{Workers: 2, Memory: "2GB", ResultsBytes: defaultFlashbackResultBudget, In: pgTestMachine(8 * pgTestGiB),
+			Pools: []pgIndexPool{{Bytes: 3 * pgTestGiB, Place: pgPoolBundled}}}
 	}
 	t.Run("memory unknown", func(t *testing.T) {
 		p := base()
@@ -78,7 +78,7 @@ func TestPGMemoryVerdict_edges(t *testing.T) {
 	})
 	t.Run("index elsewhere is not counted", func(t *testing.T) {
 		p := base()
-		p.Pools = []pgIndexPool{{Bytes: 3 * gib, Place: pgPoolElsewhere}}
+		p.Pools = []pgIndexPool{{Bytes: 3 * pgTestGiB, Place: pgPoolElsewhere}}
 		d := pgMemoryVerdict(p)
 		if d.IndexPoolBytes != 0 || d.IndexPool != "elsewhere" {
 			t.Errorf("%+v, want no pool counted, elsewhere", d)
@@ -94,9 +94,9 @@ func TestPGMemoryVerdict_edges(t *testing.T) {
 	})
 	t.Run("two indexes on this machine add up, one elsewhere does not", func(t *testing.T) {
 		p := base()
-		p.Pools = []pgIndexPool{{Bytes: gib, Place: pgPoolBundled}, {Bytes: 2 * gib, Place: pgPoolThisMachine}, {Bytes: 9 * gib, Place: pgPoolElsewhere}}
+		p.Pools = []pgIndexPool{{Bytes: pgTestGiB, Place: pgPoolBundled}, {Bytes: 2 * pgTestGiB, Place: pgPoolThisMachine}, {Bytes: 9 * pgTestGiB, Place: pgPoolElsewhere}}
 		d := pgMemoryVerdict(p)
-		if d.IndexPoolBytes != 3*gib || d.IndexPool != "bundled,this_machine,elsewhere" {
+		if d.IndexPoolBytes != 3*pgTestGiB || d.IndexPool != "bundled,this_machine,elsewhere" {
 			t.Errorf("%+v", d)
 		}
 	})
@@ -124,9 +124,9 @@ func TestPGMemoryVerdict_edges(t *testing.T) {
 	})
 	t.Run("own ceiling: compared with it, the pool left out", func(t *testing.T) {
 		p := base()
-		p.In = console.PGMemoryInputs{MachineBytes: 8 * gib, BudgetBytes: 4 * gib, OwnCeiling: true, TailsBytes: int64(4 * gib / 5)}
+		p.In = console.PGMemoryInputs{MachineBytes: 8 * pgTestGiB, BudgetBytes: 4 * pgTestGiB, OwnCeiling: true, TailsBytes: int64(4 * pgTestGiB / 5)}
 		d := pgMemoryVerdict(p)
-		if d.ComparedWith != "own_ceiling" || d.AvailableBytes != 4*gib || d.IndexPoolBytes != 0 || d.Verdict != "over" {
+		if d.ComparedWith != "own_ceiling" || d.AvailableBytes != 4*pgTestGiB || d.IndexPoolBytes != 0 || d.Verdict != "over" {
 			t.Fatalf("%+v", d)
 		}
 		lines := pgMemoryLines(d)
@@ -142,8 +142,8 @@ func TestPGMemoryVerdict_edges(t *testing.T) {
 func TestPGMemoryAdvice(t *testing.T) {
 	t.Run("fewer workers fit", func(t *testing.T) {
 		// 32 GB, 8 workers at 4 GB (5 GiB each with headroom): 9 x 5 = 45.
-		p := pgMemoryPlan{Workers: 8, Memory: "4GiB", ResultsBytes: defaultFlashbackResultBudget, In: machine(32 * gib),
-			Pools: []pgIndexPool{{Bytes: 8 * gib, Place: pgPoolBundled}}}
+		p := pgMemoryPlan{Workers: 8, Memory: "4GiB", ResultsBytes: defaultFlashbackResultBudget, In: pgTestMachine(32 * pgTestGiB),
+			Pools: []pgIndexPool{{Bytes: 8 * pgTestGiB, Place: pgPoolBundled}}}
 		d := pgMemoryVerdict(p)
 		// Room: 32 - 6.4 - 0.25 - 8 = 17.35 GiB, 3 slots of 5: 2 workers.
 		if !strings.Contains(d.Advice, "2 statements at once (PG_ROUTER_WORKERS=2") {
@@ -151,8 +151,8 @@ func TestPGMemoryAdvice(t *testing.T) {
 		}
 	})
 	t.Run("not one worker fits: less memory each", func(t *testing.T) {
-		p := pgMemoryPlan{Workers: 2, Memory: "2GB", ResultsBytes: defaultFlashbackResultBudget, In: machine(8 * gib),
-			Pools: []pgIndexPool{{Bytes: 3 * gib, Place: pgPoolBundled}}}
+		p := pgMemoryPlan{Workers: 2, Memory: "2GB", ResultsBytes: defaultFlashbackResultBudget, In: pgTestMachine(8 * pgTestGiB),
+			Pools: []pgIndexPool{{Bytes: 3 * pgTestGiB, Place: pgPoolBundled}}}
 		d := pgMemoryVerdict(p)
 		// Room: 8 - 1.6 - 0.25 - 3 = 3.15 GiB, two slots of 1.575 GiB:
 		// 1.25 GiB of SQL memory (1.25 + 0.3125 headroom = 1.5625).
@@ -161,8 +161,8 @@ func TestPGMemoryAdvice(t *testing.T) {
 		}
 	})
 	t.Run("the rest alone is over", func(t *testing.T) {
-		p := pgMemoryPlan{Workers: 1, Memory: "1GB", ResultsBytes: defaultFlashbackResultBudget, In: machine(4 * gib),
-			Pools: []pgIndexPool{{Bytes: 4 * gib, Place: pgPoolThisMachine}}}
+		p := pgMemoryPlan{Workers: 1, Memory: "1GB", ResultsBytes: defaultFlashbackResultBudget, In: pgTestMachine(4 * pgTestGiB),
+			Pools: []pgIndexPool{{Bytes: 4 * pgTestGiB, Place: pgPoolThisMachine}}}
 		d := pgMemoryVerdict(p)
 		if d.Verdict != "over" || !strings.Contains(d.Advice, "lower the index MySQL's buffer pool") {
 			t.Errorf("%+v", d)
@@ -170,8 +170,8 @@ func TestPGMemoryAdvice(t *testing.T) {
 	})
 	t.Run("advice never asks for more workers than set", func(t *testing.T) {
 		// 1 worker, too much memory each: lowering workers is no help.
-		p := pgMemoryPlan{Workers: 1, Memory: "4GiB", ResultsBytes: defaultFlashbackResultBudget, In: machine(8 * gib),
-			Pools: []pgIndexPool{{Bytes: 2 * gib, Place: pgPoolBundled}}}
+		p := pgMemoryPlan{Workers: 1, Memory: "4GiB", ResultsBytes: defaultFlashbackResultBudget, In: pgTestMachine(8 * pgTestGiB),
+			Pools: []pgIndexPool{{Bytes: 2 * pgTestGiB, Place: pgPoolBundled}}}
 		d := pgMemoryVerdict(p)
 		if strings.Contains(d.Advice, "PG_ROUTER_WORKERS=2") || strings.Contains(d.Advice, "PG_ROUTER_WORKERS=0") {
 			t.Errorf("advice %q", d.Advice)
@@ -183,10 +183,14 @@ func TestPGMemoryLimitFor(t *testing.T) {
 	for _, c := range []struct {
 		per, want int64
 	}{
-		{int64(5 * gib / 2), 2 << 30},   // 2 GiB + 512 MiB
-		{int64(gib), 768 << 20},          // 768 + 256 = 1024
-		{512 << 20, 256 << 20},           // 256 + 256
-		{400 << 20, 0},                   // nothing of 256 MiB fits
+		// 2 GiB + 512 MiB.
+		{int64(5 * pgTestGiB / 2), 2 << 30},
+		// 768 + 256 = 1024.
+		{int64(pgTestGiB), 768 << 20},
+		// 256 + 256.
+		{512 << 20, 256 << 20},
+		// Nothing of 256 MiB fits.
+		{400 << 20, 0},
 		{0, 0},
 	} {
 		if got := pgMemoryLimitFor(c.per); got != c.want {
@@ -225,10 +229,10 @@ func TestPGPoolPlaceOf(t *testing.T) {
 // The lines are generated from real numbers and printed, so the wording is
 // read before it ships.
 func TestPGMemoryLines_text(t *testing.T) {
-	over := pgMemoryVerdict(pgMemoryPlan{Workers: 2, Memory: "2GB", ResultsBytes: defaultFlashbackResultBudget, In: machine(8 * gib),
-		Pools: []pgIndexPool{{Bytes: 3 * gib, Place: pgPoolBundled}}})
-	fits := pgMemoryVerdict(pgMemoryPlan{Workers: 2, Memory: "2GB", ResultsBytes: defaultFlashbackResultBudget, In: machine(16 * gib),
-		Pools: []pgIndexPool{{Bytes: 3 * gib, Place: pgPoolBundled}}})
+	over := pgMemoryVerdict(pgMemoryPlan{Workers: 2, Memory: "2GB", ResultsBytes: defaultFlashbackResultBudget, In: pgTestMachine(8 * pgTestGiB),
+		Pools: []pgIndexPool{{Bytes: 3 * pgTestGiB, Place: pgPoolBundled}}})
+	fits := pgMemoryVerdict(pgMemoryPlan{Workers: 2, Memory: "2GB", ResultsBytes: defaultFlashbackResultBudget, In: pgTestMachine(16 * pgTestGiB),
+		Pools: []pgIndexPool{{Bytes: 3 * pgTestGiB, Place: pgPoolBundled}}})
 	for name, d := range map[string]pgMemoryDoc{"over": over, "fits": fits} {
 		lines := pgMemoryLines(d)
 		t.Logf("%s:\n%s", name, lines)
@@ -246,7 +250,7 @@ func TestPGMemoryWatch_readsAgainAfterAMinute(t *testing.T) {
 	now := time.Unix(1000, 0)
 	w := newPGMemoryWatch(func(context.Context) pgMemoryPlan {
 		calls++
-		return pgMemoryPlan{Workers: 1, Memory: "1GB", In: machine(8 * gib)}
+		return pgMemoryPlan{Workers: 1, Memory: "1GB", In: pgTestMachine(8 * pgTestGiB)}
 	})
 	w.now = func() time.Time { return now }
 	first := w.doc()
