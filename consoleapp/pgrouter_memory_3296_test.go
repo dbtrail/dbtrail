@@ -146,7 +146,7 @@ func TestPGMemoryAdvice(t *testing.T) {
 			Pools: []pgIndexPool{{Bytes: 8 * pgTestGiB, Place: pgPoolBundled}}}
 		d := pgMemoryVerdict(p)
 		// Room: 32 - 6.4 - 0.25 - 8 = 17.35 GiB, 3 slots of 5: 2 workers.
-		if !strings.Contains(d.Advice, "2 statements at once (PG_ROUTER_WORKERS=2") {
+		if !strings.Contains(d.Advice, "2 workers fit (PG_ROUTER_WORKERS=2") {
 			t.Errorf("advice %q", d.Advice)
 		}
 	})

@@ -194,8 +194,10 @@ type pgMemoryDoc struct {
 	// NeedBytes is the sum of the parts below.
 	NeedBytes uint64 `json:"need_bytes,omitempty"`
 	// Statements: Slots at once, StatementBytes each, headroom included.
+	// SQLMemoryBytes is the SQL memory each is given, before the headroom.
 	Slots          int    `json:"slots,omitempty"`
 	StatementBytes uint64 `json:"statement_bytes,omitempty"`
+	SQLMemoryBytes uint64 `json:"sql_memory_bytes,omitempty"`
 	TailsBytes     uint64 `json:"tails_bytes,omitempty"`
 	// TailsUnbounded: BINTRAIL_SQL_TAIL_MAX_BYTES=0; the tails are not in
 	// NeedBytes, and may take more.
@@ -220,6 +222,9 @@ func pgMemoryVerdict(p pgMemoryPlan) pgMemoryDoc {
 		return d
 	}
 	d.StatementBytes = uint64(per)
+	if mem, err := cliutil.ParseByteSize(p.Memory); err == nil {
+		d.SQLMemoryBytes = uint64(mem)
+	}
 	d.ResultsBytes = uint64(max(p.ResultsBytes, 0))
 	d.TailsUnbounded = p.In.TailsUnbounded
 	if p.In.TailsBytes > 0 {
@@ -266,8 +271,8 @@ func pgMemoryAdvice(d pgMemoryDoc, workers int, others uint64) string {
 	}
 	room := d.AvailableBytes - others
 	if fit := int(room / d.StatementBytes); fit >= 2 && fit-1 < workers {
-		return fmt.Sprintf("at %s of SQL memory each, %s fit (PG_ROUTER_WORKERS=%d in .env, or --workers %d), or give the machine %s more",
-			pgGiB(d.StatementBytes), countOfStatementsAtOnce(fit-1), fit-1, fit-1, pgGiB(d.NeedBytes-d.AvailableBytes))
+		return fmt.Sprintf("with the SQL memory as it is, %d workers fit (PG_ROUTER_WORKERS=%d in .env, or --workers %d), %s with the one kept for short statements, or give the machine %s more",
+			fit-1, fit-1, fit-1, countOfStatementsAtOnce(fit), pgGiB(d.NeedBytes-d.AvailableBytes))
 	}
 	if limit := pgMemoryLimitFor(int64(room / 2)); limit > 0 {
 		return fmt.Sprintf("with 1 worker (PG_ROUTER_WORKERS=1 in .env, or --workers 1), each statement fits with at most %s of SQL memory (SQL_MEMORY=%s in .env, or --sql-memory %s), or give the machine %s more",
@@ -306,8 +311,11 @@ func pgPoolPlacesText(places map[pgPoolPlace]bool) string {
 	return strings.Join(out, ",")
 }
 
-// pgGiB writes bytes as GiB with one decimal.
+// pgGiB writes bytes as GiB with one decimal, or as whole MiB under 1 GiB.
 func pgGiB(b uint64) string {
+	if b < 1<<30 {
+		return fmt.Sprintf("%d MiB", b>>20)
+	}
 	return fmt.Sprintf("%.1f GiB", float64(b)/(1<<30))
 }
 
@@ -318,7 +326,7 @@ func pgMemoryLines(d pgMemoryDoc) string {
 		return "PostgreSQL router: whether its memory fits this machine is not said: " + d.Why + ".\n"
 	}
 	var parts []string
-	parts = append(parts, fmt.Sprintf("%d statements at %s each, headroom included", d.Slots, pgGiB(d.StatementBytes)))
+	parts = append(parts, fmt.Sprintf("%s at %s each (%s of SQL memory and its headroom)", countOfStatementsAtOnce(d.Slots), pgGiB(d.StatementBytes), pgGiB(d.SQLMemoryBytes)))
 	switch {
 	case d.TailsUnbounded:
 		parts = append(parts, "the tails, which have no bound (BINTRAIL_SQL_TAIL_MAX_BYTES=0) and are not counted")
