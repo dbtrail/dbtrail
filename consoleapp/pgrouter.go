@@ -146,7 +146,7 @@ func addPGRouterFlags(cmd *cobra.Command) {
 	f.Float64("cost-threshold", pgshim.DefaultCostThreshold, "With a server's forwarding user, a statement the copy answers as PostgreSQL does goes to the copy only when it is expensive on the source: when the Total Cost at the top of its plan (EXPLAIN on the source, before it runs) is at least this, or a sequential scan in the plan is estimated at --scan-rows rows or more; otherwise the source answers it, by its indexes (a read by a primary key costs about 1 to 12). 0 turns this rule off. Env BINTRAIL_PG_ROUTER_COST_THRESHOLD.")
 	f.Int64("scan-rows", pgshim.DefaultScanRows, "With a server's forwarding user, a statement the copy answers as PostgreSQL does goes to the copy when a sequential scan in its plan on the source (any Seq Scan node, at any depth) is estimated at this many rows or more, whatever its cost. 0 turns this rule off. Env BINTRAIL_PG_ROUTER_SCAN_ROWS.")
 	f.String("max-wait", "", "How long a statement waits for its turn when every worker is busy, e.g. 30s or 2m; past it the client gets an error (53000) to run it again, and the statement is not sent to the source. Empty or 0: no limit of its own, and the five minutes one statement may take, its wait included, is what ends it. Env BINTRAIL_PG_ROUTER_MAX_WAIT.")
-	f.Int("sql-port-max-rows", console.DefaultSQLPortMaxRows, "Most rows one statement returns; a result with more is refused, not cut. Env BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS.")
+	f.Int("sql-port-max-rows", defaultPGRouterMaxRows, "Most rows one statement returns; a result with more is refused, not cut. Env BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS.")
 }
 
 // pgRouterSettings is what pg-router starts with, flags and environment
@@ -788,6 +788,16 @@ func pgFastLaneLine(workers int) string {
 // pgCopySlots is how many statements the copy runs at once for --workers:
 // one more, kept for short statements.
 func pgCopySlots(workers int) int { return workers + 1 }
+
+// defaultPGRouterMaxRows is the PostgreSQL port's row cap (#3286): a report
+// is answered whole up to it, refused past it. The MySQL port's
+// (console.DefaultSQLPortMaxRows, 10,000) refused CH-benCHmark's Q16, about
+// 100,000 rows, on every run, where PostgreSQL alone answers it in seconds.
+// What one statement holds in memory stays bounded by its bytes
+// (sqlsandbox's MaxResultBytes, 64 MB) and the port's 256 MB for every
+// result at once, as before. BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS (compose's
+// SQL_PORT_MAX_ROWS) still sets both ports' cap when given.
+const defaultPGRouterMaxRows = 200_000
 
 // pgRouterQueryTimeout bounds each statement end to end, a wait for a worker
 // included: the same five minutes as the MySQL port's.

@@ -83,8 +83,8 @@ func TestPGRouterSettings(t *testing.T) {
 	if st.Listen != "127.0.0.1:5433" || st.Workers != 4 || st.Threads != 2 || st.MaxConns != 256 {
 		t.Fatalf("defaults: %+v", st)
 	}
-	if st.SQLPortMaxRows != console.DefaultSQLPortMaxRows {
-		t.Fatalf("default row cap %d, want the port's %d", st.SQLPortMaxRows, console.DefaultSQLPortMaxRows)
+	if st.SQLPortMaxRows != defaultPGRouterMaxRows || defaultPGRouterMaxRows != 200_000 {
+		t.Fatalf("default row cap %d, want the PostgreSQL port's 200,000 (#3286)", st.SQLPortMaxRows)
 	}
 
 	// The environment, then a flag over it.

@@ -517,6 +517,9 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	}
 	if err != nil {
 		perr := s.statementError(ctx, err)
+		if errors.Is(err, sqlsandbox.ErrResultTooLarge) {
+			s.tooLarge = TooLargeBytes
+		}
 		if ctx.Err() == nil {
 			// To the source, or refused when the copy was busy (route.go).
 			perr = s.copyFailed(err, perr)
@@ -534,6 +537,7 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	if res.Truncated {
 		// Refused, not returned short: a client would take the first rows
 		// for the whole answer.
+		s.tooLarge = TooLargeRows
 		return nil, nil, nil, "", &pgErr{"54000", fmt.Sprintf(
 			"the result has more than %d rows, the most one statement returns on this port, and is not returned cut; add a LIMIT or narrow the statement",
 			len(res.Rows))}

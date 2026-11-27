@@ -87,6 +87,12 @@ const ReasonCopyRefusedAfterWrittenOrder = "copy_refused_after_written_order"
 // (capture_gate.go), so the copy answered it without the source's plan.
 const ReasonCaptureGate = "capture_gate"
 
+// What a result refused for its size passed (RouteNote.TooLarge, #3286).
+const (
+	TooLargeRows  = "rows"
+	TooLargeBytes = "bytes"
+)
+
 // RouteNote is one statement's decision, for the port's status.
 type RouteNote struct {
 	// Statement is the text the client sent.
@@ -127,6 +133,10 @@ type RouteNote struct {
 	// current (capture_stale_3202.go); "" when it was, or the source
 	// answered. Counted apart, as ShapeUnchecked is.
 	CaptureState string
+	// TooLarge is which cap the copy's result passed when it was refused
+	// for its size (TooLargeRows: --sql-port-max-rows; TooLargeBytes: the
+	// bytes one statement returns), "" when it was not.
+	TooLarge string
 }
 
 // routeDecision is which side answers a statement, and why.
@@ -1946,6 +1956,11 @@ func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, fa
 	}
 	captureState := s.captureState
 	s.captureState = ""
+	tooLarge := s.tooLarge
+	s.tooLarge = ""
+	if d.side != RouteCopy || !failed {
+		tooLarge = ""
+	}
 	if d.side != RouteCopy || failed {
 		captureState = ""
 	}
@@ -1955,7 +1970,7 @@ func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, fa
 	if d.side != RouteCopy {
 		joinCheck = ""
 	}
-	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed, JoinCheck: joinCheck, OOMRetry: oomRetry, WrittenOrder: writtenOrder, HeavyOlder: heavyOlder, ShapeUnchecked: shapeUnchecked, CaptureState: captureState})
+	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed, JoinCheck: joinCheck, OOMRetry: oomRetry, WrittenOrder: writtenOrder, HeavyOlder: heavyOlder, ShapeUnchecked: shapeUnchecked, CaptureState: captureState, TooLarge: tooLarge})
 }
 
 // fieldName reports whether the token at j is the field a date_trunc or a

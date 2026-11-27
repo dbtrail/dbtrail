@@ -1569,7 +1569,7 @@ starts it.
 | `--max-connections` | `BINTRAIL_PG_ROUTER_MAX_CONNECTIONS` | 256 | Clients connected at once (1 to 1024). One more is refused with an error |
 | `--max-source-connections` | `BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS` | 16 | Connections to the servers' own PostgreSQL held at once, every server together (1 to 1024). A client holds one while a statement the source answers, its plan, or its transaction block runs there; past the limit the statement that needed one waits for one to be given back, up to 30 seconds, and is then refused (`53300`) |
 | `--max-wait` | `BINTRAIL_PG_ROUTER_MAX_WAIT` | none | How long a statement waits for its turn before it is refused (`53000`, `copy_wait_timeout`; it is not sent to the source) |
-| `--sql-port-max-rows` | `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS` | the port's row cap | Most rows one statement returns |
+| `--sql-port-max-rows` | `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS` | 200,000 | Most rows one statement returns; a result with more is refused with `54000`, not cut |
 | `--token` | `BINTRAIL_CONSOLE_TOKEN` | none | The access token, one more password. It does not open the port |
 | `--servers-file` | `BINTRAIL_CONSOLE_SERVERS` | `~/.config/bintrail/console-servers.yaml` | The servers file the web interface manages. Read, never written |
 
@@ -2325,8 +2325,12 @@ one rule off; both cannot be 0.
 
 An expensive statement the copy could not return is answered by the source
 too (`result_over_row_cap` in `/status`). The copy returns at most
-`--sql-port-max-rows` rows for one statement (10,000 by default) and refuses a
-larger result, it does not cut it. So when the plan says the statement
+`--sql-port-max-rows` rows for one statement (200,000 by default, where the
+MySQL port's default is 10,000: a report of 100,000 rows is not unusual) and
+refuses a larger result, it does not cut it. What one statement may hold in
+memory stays bounded by its bytes (64 MB) as well; a result past either is
+refused with `54000` and counted in `/status` under `result_too_large`, as
+`rows` or `bytes`. So when the plan says the statement
 returns more rows than that, the port does not run it on the copy only to
 refuse it: your PostgreSQL answers it, and sends every row. The plan's
 estimate is used for one kind of statement, the one where it can be trusted:
