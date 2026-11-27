@@ -26,11 +26,17 @@ package readrouter
 // SUBSTRING, LEFT/RIGHT, division, UNSIGNED arithmetic) are checks of their
 // own in vetoOpts, skipped there.
 var heavyRelaxes = map[string]bool{
-	"GROUP_CONCAT":      true, // MySQL cuts the text at group_concat_max_len
-	"WEEK/YEARWEEK":     true, // other week numbers
+	// MySQL cuts the text at group_concat_max_len.
+	"GROUP_CONCAT": true,
+	// Other week numbers.
+	"WEEK/YEARWEEK": true,
+	// The same.
 	"EXTRACT(WEEK ...)": true,
-	likeVeto:            true, // the copy tells letter case apart
-	"INSTR/LOCATE/POSITION/STRCMP (case-sensitive on the copy)":                                           true,
+	// The copy tells letter case apart.
+	likeVeto: true,
+	// The same.
+	"INSTR/LOCATE/POSITION/STRCMP (case-sensitive on the copy)": true,
+	// Duplicates removed by bytes or by the copy's case folding.
 	"UNION/INTERSECT/EXCEPT without ALL (duplicates removed by the copy's rules, not by MySQL's collation)": true,
 }
 
