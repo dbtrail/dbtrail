@@ -344,6 +344,15 @@ type Session struct {
 	// no routing leave it off and get the copy's answer. The worker never
 	// sees it: the caller's ViewsFor decides, from what the statement names.
 	StrictStar bool
+	// HeavyOnCopy is set by read routing, with StrictStar, for a statement
+	// sent as text whose plan on the source is expensive: the copy answers
+	// it even where it may compute, sort or print a value otherwise than
+	// MySQL (a type of a date column, a text compared or sorted, an AVG, a
+	// FLOAT printed, a ROUND, a LENGTH, a DISTINCT, an UNSIGNED, a date
+	// function), and Result.Waived says the first such refusal it was let
+	// past. What changes which table, columns or names the statement reads
+	// is refused as under StrictStar alone. Never sent to the worker.
+	HeavyOnCopy bool `json:"-"`
 	// Types answers, for the statement as the client sent it, whether the
 	// copy must not answer because of the type of a column it names (#2133):
 	// arithmetic on a date column, or a TIME or YEAR column named. Set with
@@ -502,6 +511,10 @@ type Result struct {
 	// routing prints without the decimals or zero padding MySQL gives it
 	// (#2829). Set by the parent, never by the worker.
 	PrintNote string `json:"-"`
+	// Waived is the first refusal the copy was let past for an expensive
+	// routed statement (Session.HeavyOnCopy), "" when none: its answer may
+	// differ from MySQL's.
+	Waived string `json:"-"`
 	// DateScales say how MySQL declares each column of the answer that is a
 	// date and time (#2849), one per column, read by the parent from the
 	// statement's select list and the tables' CREATE TABLE; nil when the

@@ -938,6 +938,47 @@ The decision, in order, for every statement:
      `DECIMAL` as MySQL types it.
    - On the port without routing nothing changes: `TIMESTAMPDIFF` there is
      refused, with `date_diff` as the copy's way to count.
+
+   **An expensive statement goes to the copy even where it may answer
+   otherwise.** A statement sent as text (not prepared) that this step keeps
+   on MySQL only for how the copy computes a value has its plan asked for
+   too (step 5). When the plan is expensive, the copy answers it. The same
+   holds for the copy's own refusals of that kind, counted
+   `copy_columns_differ` before: a date, time or year column read another
+   way, a string written in the statement that is compared or sorted (a
+   column whose values turn out to hold more than plain ASCII still sends
+   the statement to MySQL, as before), `AVG`, `ROUND`, `LENGTH`, `DISTINCT`,
+   arithmetic on an `UNSIGNED` column, a `FLOAT` or `DOUBLE` printed with
+   fixed decimals, a date function. Such an answer can differ from MySQL's:
+   other decimals for a `/` or an `AVG`, another type for a column (a date
+   where MySQL answers a number, a `DOUBLE` where it answers a `DECIMAL`), text
+   sorted or compared by bytes instead of the column's collation (and, under
+   `LIMIT`, other rows), a `LIKE` that tells letter case apart, rows that tie
+   in another order, a `CONCAT` that skips a `NULL`, a `SUBSTRING`, `LEFT` or
+   `RIGHT` that cuts from the other end for a position or length of 0 or
+   less, other week numbers, duplicates a `UNION` removes by other rules. The port counts these as `heavy_on_copy`.
+
+   Decided as before, whatever the plan: a statement whose plan is cheap or
+   cannot be had (MySQL, counted as `veto`), a prepared statement, a
+   statement inside a transaction, one under a session time zone other than
+   UTC, and one with a construct the copy would read as another statement
+   or that needs the live server: a comment MySQL executes, a double-quoted
+   string, a backslash in a string, `||`, `^`, `--`, `#`, `$...$`, a word the
+   copy reserves, a variable, `USER()` and the other session functions,
+   `FOUND_ROWS`, the clock forms above, `RAND`, a locking read, `INTO`, the
+   system schemas, `WITH RECURSIVE`, JSON, `MATCH`, `REGEXP`, `SOUNDS LIKE`,
+   `GROUP_CONCAT` (the copy reads a second argument as a separator), `BINARY`,
+   `COLLATE`, `CAST AS UNSIGNED`, `DIV`, `STR_TO_DATE` and the date
+   functions the copy is not sent as its own. So are the copy's refusals of
+   what it would read: a star or a `NATURAL JOIN` over a table whose columns
+   differ, a name it holds otherwise, a table that differs from another only
+   by letter case. A statement the copy fails on still goes to MySQL, and
+   the client never sees the copy's error. A prepared statement is left out
+   because a client may read the rows of each `EXECUTE` with the column
+   types its `PREPARE` was answered with, and a column the copy types
+   otherwise would then be read wrong. For MySQL's own answer to an
+   expensive statement, send it inside a transaction (`BEGIN; ...;
+   COMMIT;`) or as a prepared statement.
 4. The one shape that needs no plan: `SELECT <columns> FROM <one table>
    LIMIT <at most 1,000 rows, offset included>` with nothing else (no
    `WHERE`, join, `ORDER BY`, `GROUP BY`, subquery or function call):
@@ -3023,7 +3064,11 @@ The router does the counting, so the numbers are read from the router:
   `bintrail_read_routing_decisions_total{server, route, reason}`. `server`
   is the registry id, `route` is `copy`, `mysql` or `refused` (a statement
   nobody ran), and `reason` is one of
-  a closed set: `expensive_plan` (the copy answered), `cheap_plan`, `bounded_limit` (a small `LIMIT` MySQL answers
+  a closed set: `expensive_plan` (the copy answered), `heavy_on_copy` (the
+  copy answered an expensive statement sent as text that a veto, or one of
+  the copy's own refusals, would have kept on MySQL for how the copy
+  computes, sorts or prints a value: its answer may differ from MySQL's),
+  `cheap_plan`, `bounded_limit` (a small `LIMIT` MySQL answers
   without reading past it), `result_over_row_cap` (an expensive plan whose
   result is estimated above the copy's row cap while the router's temporary
   directory has no room for a result file: MySQL answered, and the copy was

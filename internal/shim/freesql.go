@@ -237,6 +237,13 @@ const RouteReasonCopyColumnsDiffer RouteReason = "copy_columns_differ"
 // expensive_plan, so the two can be told apart in the tally.
 const RouteReasonTablesUnchanged RouteReason = "tables_unchanged"
 
+// RouteReasonHeavyOnCopy: the copy answered an expensive statement sent as
+// text that a veto, or a refusal of the copy's, would have kept on MySQL
+// for how the copy computes, sorts or prints a value (heavy.go). Its answer
+// may differ from MySQL's. Apart from expensive_plan, so the tally shows how
+// many answers may.
+const RouteReasonHeavyOnCopy RouteReason = "heavy_on_copy"
+
 // RouteReasonCopyBehindSource: the server has a limit on how far behind the
 // source the copy may answer (#2777), and the data the statement would read
 // on the copy was further behind than that: MySQL answered. Its own reason,
@@ -470,6 +477,10 @@ type routeOps struct {
 	// file (sqlsandbox.Session.ResultToFile): the copy then has no row cap,
 	// so a plan's estimate is not held against one (resultOverRowCap).
 	toFile bool
+	// text says the statement was sent as text, not prepared: an expensive
+	// one is answered by the copy even where it may answer otherwise than
+	// MySQL (heavy.go).
+	text bool
 }
 
 // readWriteRefused is why a read-only port refuses a statement that would
@@ -500,6 +511,9 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 	toFile := h.conn != nil && !h.buffered
 	res, err := h.route(ctx, qstr, routeOps{
 		toFile: toFile,
+		// A prepared statement's EXECUTE written out as text
+		// (HandleStmtExecute) is answered in the binary protocol: not text.
+		text: !h.buffered,
 		forward: func(reason RouteReason, detail string) (*mysql.Result, error) {
 			return h.forward(ctx, qstr, reason, detail)
 		},
@@ -727,11 +741,7 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 			res, err := runCopy(reason, unchangedWithin)
 			if err == nil {
 				// The reason route observes for the copy's answer, below.
-				why := RouteReasonExpensivePlan
-				if unchangedWithin > 0 {
-					why = RouteReasonTablesUnchanged
-				}
-				answered(RouteCopy, why, qstr, time.Since(start), false, false)
+				answered(RouteCopy, h.copyReason(unchangedWithin), qstr, time.Since(start), false, false)
 			}
 			return res, err
 		}
@@ -783,8 +793,16 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	case h.routerCfg.MaxCopyAge <= 0 && !h.routerCfg.AnyCopyAge:
 		return ops.forward(RouteReasonRoutingOff, "routing to the copy is off (no max copy age)")
 	}
+	// A veto that is only how the copy computes a value does not keep an
+	// expensive statement sent as text off the copy (heavy.go): its plan is
+	// asked for, and a cheap one is MySQL's under the veto, as before.
+	h.heavy = heavyState{}
+	defer func() { h.heavy = heavyState{} }()
 	if v := readrouter.VetoOpts(qstr, h.copyOpts()); v != "" {
-		return ops.forward(RouteReasonVeto, "veto: "+v)
+		if !ops.text || readrouter.HardVetoOpts(qstr, h.copyOpts()) != "" {
+			return ops.forward(RouteReasonVeto, "veto: "+v)
+		}
+		h.heavy.relaxed = v
 	}
 	if ops.extraVeto != nil {
 		if v := ops.extraVeto(); v != "" {
@@ -796,8 +814,19 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	// this exists to keep fast must not pay it.
 	d, err := ops.decide()
 	if err != nil {
+		if h.heavy.relaxed != "" {
+			// Vetoed, as it was before its plan was asked for; said, or a plan
+			// that always fails would keep the copy from every such statement
+			// with nothing to show for it.
+			h.routeWarn("explain-heavy", "Engine Routing: could not explain a vetoed statement the copy could have taken for its cost, forwarded under its veto", err)
+			return ops.forward(RouteReasonVeto, "veto: "+h.heavy.relaxed+"; could not explain: "+err.Error())
+		}
 		h.routeWarn("explain", "Engine Routing: could not explain, statement forwarded", err)
 		return ops.forward(RouteReasonExplainFailed, "could not explain: "+err.Error())
+	}
+	if !d.ToCopy && h.heavy.relaxed != "" {
+		// Cheap: the veto stands, under its own reason.
+		return ops.forward(RouteReasonVeto, "veto: "+h.heavy.relaxed+"; "+d.Reason)
 	}
 	if !d.ToCopy {
 		reason := RouteReasonCheapPlan
@@ -855,6 +884,13 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	// the answer to the EXPLAIN that connection ran.
 	if h.router.InTransaction() {
 		return ops.forward(RouteReasonInTransaction, "in transaction")
+	}
+	// Under a session time zone other than UTC, a statement is decided as
+	// before (heavy.go): the veto stands, and the copy is held to every
+	// refusal.
+	h.heavy.on = ops.text && h.sessionInUTC()
+	if h.heavy.relaxed != "" && !h.heavy.on {
+		return ops.forward(RouteReasonVeto, "veto: "+h.heavy.relaxed+"; the session's time zone is not UTC")
 	}
 	res, err := ops.runCopy(d.Reason, unchangedWithin)
 	var changed *sqlsandbox.MayHaveChangedError
@@ -945,13 +981,23 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 		// The slow path is always right: whatever the copy could not do
 		// (a construct DuckDB lacks, a missing table, a timeout, a result
 		// over the cap), MySQL does.
-		h.routeWarn("copy", "Engine Routing: copy refused an expensive statement, forwarded to mysql", err)
+		if h.heavy.why() != "" {
+			// Its own warning: a statement let past a veto the copy may not
+			// read must not use up the one a fault of the copy gets.
+			h.routeWarn("copy-heavy", "Engine Routing: copy refused an expensive statement it was let past a veto or a refusal for, forwarded to mysql", err)
+		} else {
+			h.routeWarn("copy", "Engine Routing: copy refused an expensive statement, forwarded to mysql", err)
+		}
 		return ops.forward(RouteReasonCopyRefused, "copy refused: "+shortErr(err))
 	}
 	// The copy's side of the trace: forwarded statements log their reason,
 	// so a copy-served one must too, or the log reads as if nothing ever
 	// reached the copy.
-	if unchangedWithin > 0 {
+	if why := h.copyReason(unchangedWithin); why == RouteReasonHeavyOnCopy {
+		h.logger.Debug("Engine Routing: served by the copy, expensive on the source, though the copy may answer otherwise",
+			"reason", d.Reason, "construct", h.heavy.why())
+		h.observeRoute(RouteCopy, RouteReasonHeavyOnCopy)
+	} else if unchangedWithin > 0 {
 		// Its own reason: the copy answering past the limit has to show in
 		// the tally, or a snapshot that is never refreshed reads as fresh.
 		h.logger.Debug("Engine Routing: served by the copy", "reason", d.Reason+"; "+tooOld+", and the statement's tables are unchanged since their snapshot")
@@ -1361,6 +1407,9 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 	// Asked of the connection, not of the reason text: a routing connection
 	// only ever gets here from the ladder.
 	sess.StrictStar = h.router != nil
+	// An expensive statement sent as text, decided by the routing ladder
+	// (heavy.go).
+	sess.HeavyOnCopy = h.router != nil && h.heavy.on
 	sess.Types = types
 	// The client wrote STRAIGHT_JOIN, which qstr no longer holds (copyText
 	// rewrote it): the copy makes the joins in the order written, as MySQL.
@@ -1369,6 +1418,9 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 	sess.ResultToFile = toFile
 	sess.BinaryResult = toFile && binary // what it bounds is the file's
 	res, err := h.freeSQL.Run(ctx, stmt, schema, sess)
+	if err == nil && sess.HeavyOnCopy {
+		h.heavy.waived = res.Waived
+	}
 	if res.Spool != nil {
 		// The file is this statement's until it is handed to sendSpooled;
 		// every other way out of here removes it.

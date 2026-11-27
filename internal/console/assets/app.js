@@ -16901,6 +16901,7 @@ function sqlMemoryPanel(st, live, rt) {
 // unknown key (a newer daemon) is shown as is rather than dropped.
 const ROUTE_REASON_TEXT = {
   expensive_plan: "an expensive plan: the copy answered",
+  heavy_on_copy: "an expensive plan: the copy answered, though its answer may differ from MySQL's (decimals, an order of text, a type)",
   tables_unchanged: "an expensive plan over tables with no change since their snapshot: the copy answered, though it is older than the limit",
   cheap_plan: "a cheap plan (a lookup or a small read)",
   bounded_limit: "a small LIMIT MySQL answers without reading past it",

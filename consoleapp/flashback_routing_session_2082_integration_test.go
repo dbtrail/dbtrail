@@ -518,15 +518,18 @@ func TestIntegrationFlashbackRoutedSessionSettings(t *testing.T) {
 			t.Logf("%s: answered by %s", zone, sidesOf(got))
 		}
 	})
-	t.Run("week numbers and recursion stay on MySQL", func(t *testing.T) {
+	t.Run("week numbers go to the copy for their cost, recursion stays on MySQL", func(t *testing.T) {
 		c := rig.conn(t, "")
-		for _, stmt := range []string{
-			"SELECT side, EXTRACT(WEEK FROM seen_at), count(*) FROM visits GROUP BY side, seen_at ORDER BY seen_at",
-			"SELECT side, WEEK(seen_at), count(*) FROM visits GROUP BY side, seen_at ORDER BY seen_at",
-			"WITH RECURSIVE n AS (SELECT 1 AS i UNION ALL SELECT i + 1 FROM n WHERE i < 3) SELECT side, count(*) FROM visits, n GROUP BY side",
+		for _, tc := range []struct{ stmt, who string }{
+			// Other week numbers on the copy: an expensive statement is the
+			// copy's even so (heavy_on_copy, internal/shim/heavy.go).
+			{"SELECT side, EXTRACT(WEEK FROM seen_at), count(*) FROM visits GROUP BY side, seen_at ORDER BY seen_at", "copy"},
+			{"SELECT side, WEEK(seen_at), count(*) FROM visits GROUP BY side, seen_at ORDER BY seen_at", "copy"},
+			// A recursion MySQL stops and the copy may not, whatever the plan.
+			{"WITH RECURSIVE n AS (SELECT 1 AS i UNION ALL SELECT i + 1 FROM n WHERE i < 3) SELECT side, count(*) FROM visits, n GROUP BY side", "live"},
 		} {
-			if got := connStrings(t, c, stmt); sidesOf(got) != "live" {
-				t.Errorf("%s: answered by %q, want MySQL", stmt, sidesOf(got))
+			if got := connStrings(t, c, tc.stmt); sidesOf(got) != tc.who {
+				t.Errorf("%s: answered by %q, want %s", tc.stmt, sidesOf(got), tc.who)
 			}
 		}
 	})
@@ -681,11 +684,11 @@ func TestIntegrationFlashbackRoutedSessionSettings(t *testing.T) {
 	copyN, mysqlN, reasons := rig.tally(t)
 	var sum uint64
 	for reason, n := range reasons {
-		if reason != "expensive_plan" {
+		if reason != "expensive_plan" && reason != "heavy_on_copy" {
 			sum += n
 		}
 	}
-	if mysqlN != sum || copyN != reasons["expensive_plan"] {
+	if mysqlN != sum || copyN != reasons["expensive_plan"]+reasons["heavy_on_copy"] {
 		t.Errorf("tally = copy %d, mysql %d; reasons %v: the port's own read of the session was counted as a statement", copyN, mysqlN, reasons)
 	}
 	if reasons["session_differs"] == 0 || reasons["connection_pinned"] == 0 || reasons["expensive_plan"] == 0 {

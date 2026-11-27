@@ -189,7 +189,11 @@ func TestIntegrationSQLCompareFloatText(t *testing.T) {
 		// An infinity on the copy: MySQL's answer instead.
 		{"SELECT side, CAST('inf' AS DOUBLE) FROM ft WHERE d > 0 ORDER BY id", "live"},
 	} {
+		mark := heavyMark(t, srv, ent.ID)
 		want, got := rawText(t, live, c.stmt), rawText(t, routed, c.stmt)
+		if heavyOnCopy(t, mark(), c.who, c.stmt, got, want) {
+			continue
+		}
 		if !strings.HasPrefix(got, c.who+"|") {
 			t.Errorf("routed %q: %s, want it answered by %s", c.stmt, got, c.who)
 			continue

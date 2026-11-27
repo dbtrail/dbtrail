@@ -194,7 +194,11 @@ func textCompare(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	live := openRaw(t, sourceDSN)
 	lived := 0
 	for _, c := range cases {
+		mark := heavyMark(t, srv, ent.ID)
 		got := answerText(routed, c.stmt)
+		if heavyOnCopy(t, mark(), c.who, c.stmt, got, answerText(live, c.stmt)) {
+			continue
+		}
 		t.Logf("routed %-60s %s", got, c.stmt)
 		if strings.HasPrefix(got, "ERROR ") || !strings.HasPrefix(got, c.who+"|") {
 			t.Errorf("routed %q (%s):\n  got  %s\n  want it answered by %s", c.stmt, c.why, got, c.who)
@@ -228,8 +232,11 @@ func textCompare(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	reasons := fb.Routing.Servers[ent.ID].Reasons
 	t.Logf("routing reasons: %v", reasons)
 	// GREATEST and CONCAT are vetoed from the text since #2633, before the
-	// copy is asked: those two count as veto.
-	if reasons["copy_refused"] != 0 || reasons["veto"] != 2 || reasons["copy_columns_differ"]+reasons["veto"] < uint64(lived) {
-		t.Errorf("reasons = %v, want copy_refused 0, veto 2 (GREATEST, CONCAT) and copy_columns_differ plus veto at least %d (each statement the source answered)", reasons, lived)
+	// copy is asked; every statement here is expensive, so both are the
+	// copy's for their cost (heavy_on_copy), and so is each refusal of the
+	// copy's over how it compares text. What the source still answers is a
+	// guard that found a value the copy compares otherwise.
+	if reasons["copy_refused"] != 0 || reasons["veto"] != 0 || reasons["heavy_on_copy"] < 2 || reasons["copy_columns_differ"] < uint64(lived) {
+		t.Errorf("reasons = %v, want copy_refused 0, veto 0, heavy_on_copy at least 2 (GREATEST, CONCAT) and copy_columns_differ at least %d (each statement the source answered)", reasons, lived)
 	}
 }

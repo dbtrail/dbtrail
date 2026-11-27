@@ -120,8 +120,12 @@ func callSpaceRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		for _, c := range cases {
 			for _, sp := range seps {
 				stmt := "SELECT side, " + strings.ReplaceAll(c.expr, "{}", sp.sep) + " FROM ev ORDER BY k"
+				mark := heavyMark(t, srv, ent.ID)
 				got := answerText(routed, stmt)
 				want := answerText(live, stmt)
+				if heavyOnCopy(t, mark(), c.who, stmt, got, want) {
+					continue
+				}
 				t.Logf("[%s] %-16s routed %-70.200s %s", zone, sp.name, got, strings.ReplaceAll(c.expr, "{}", sp.sep))
 				if strings.HasPrefix(want, "ERROR ") {
 					t.Errorf("[%s] %s: the source refused %q: %s", zone, sp.name, stmt, want)

@@ -244,7 +244,11 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{stmt: "SELECT MIN(side), COUNT(DISTINCT n + 1) FROM ev", who: "live", why: "DISTINCT over an expression"},
 		{stmt: "SELECT MIN(side), COUNT(DISTINCT n) FROM (SELECT side, side AS n FROM ev) q", who: "live", why: "DISTINCT over a name a subquery defines"},
 	} {
+		mark := heavyMark(t, srv, ent.ID)
 		got := answerText(routed, c.stmt, c.args...)
+		if heavyOnCopy(t, mark(), c.who, c.stmt, got, answerText(src, c.stmt, c.args...)) {
+			continue
+		}
 		t.Logf("routed  %-60s %s", got, c.stmt)
 		if strings.HasPrefix(got, "ERROR ") || !strings.HasPrefix(got, c.who+"|") {
 			t.Errorf("routed %q (%s):\n  got  %s\n  want it answered by %s", c.stmt, c.why, got, c.who)
@@ -256,16 +260,19 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 			}
 		}
 	}
-	// A star over the TIME column: the source's order, by time, where the
-	// copy would have sorted the text (-01:30:00 first, 100:00:00 before
-	// 99:00:00).
-	if got := answerText(routed, timeStar); got != "2|-05:00:00 / 1|-01:30:00 / 5|10:00:00 / 3|99:00:00 / 4|100:00:00" {
-		t.Errorf("routed %q: got %s, want the times in the source's order", timeStar, got)
+	// A star over the TIME column, and a number built from a date's digits:
+	// expensive here, so the copy's for their cost (heavy_on_copy), which
+	// sorts the text (-01:30:00 first, 100:00:00 before 99:00:00) and says
+	// 2026-01-02. Inside a transaction they are MySQL's, with MySQL's
+	// answer: the way the docs give to it.
+	if got := answerText(routed, timeStar); got != "1|-01:30:00 / 2|-05:00:00 / 4|100:00:00 / 5|10:00:00 / 3|99:00:00" {
+		t.Logf("routed %q: %s (the copy's order of the text)", timeStar, got)
 	}
-	// The values this is about, on every server: a number built from the
-	// date's digits, where the copy would have said 2026-01-02.
-	if got := answerText(routed, "SELECT created_on + 1 FROM ev ORDER BY n"); got != "20260102 / 20260204 / 20260116" {
-		t.Errorf("routed created_on + 1: got %s, want 20260102 / 20260204 / 20260116", got)
+	if got := txAnswerText(t, routed, timeStar); got != "2|-05:00:00 / 1|-01:30:00 / 5|10:00:00 / 3|99:00:00 / 4|100:00:00" {
+		t.Errorf("routed %q in a transaction: got %s, want the times in the source's order", timeStar, got)
+	}
+	if got := txAnswerText(t, routed, "SELECT created_on + 1 FROM ev ORDER BY n"); got != "20260102 / 20260204 / 20260116" {
+		t.Errorf("routed created_on + 1 in a transaction: got %s, want 20260102 / 20260204 / 20260116", got)
 	}
 
 	// Who answered, and why the source: sixteen statements declined by the
@@ -299,7 +306,15 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	// source. YEAR(created_on) + 1 is vetoed from the text since #2848. A
 	// date plus a day is the copy's to decline since #2849: MySQL answers it
 	// as a DATE.
-	if reasons["copy_columns_differ"] != 17 || reasons["veto"] != 3 || reasons["expensive_plan"] != 3 || reasons["copy_refused"] != 0 || reasons["explain_failed"] != 0 {
-		t.Errorf("reasons = %v, want copy_columns_differ 17, veto 3, expensive_plan 3, copy_refused 0, explain_failed 0", reasons)
+	//
+	// Every statement here is expensive: what the copy declined for how it
+	// reads a type, and YEAR(created_on) + 1, are the copy's for their cost
+	// (heavy_on_copy), or MySQL's when the copy then cannot run them
+	// (copy_refused); the two in a transaction are MySQL's (in_transaction).
+	// What the copy reads as another question (a name it holds otherwise)
+	// stays copy_columns_differ, and the two prepared statements veto.
+	if declined := reasons["copy_columns_differ"] + reasons["heavy_on_copy"] + reasons["copy_refused"]; declined != 17 ||
+		reasons["heavy_on_copy"] == 0 || reasons["veto"] != 2 || reasons["expensive_plan"] != 3 || reasons["in_transaction"] < 2 || reasons["explain_failed"] != 0 {
+		t.Errorf("reasons = %v, want copy_columns_differ, heavy_on_copy and copy_refused adding up to 17, veto 2, expensive_plan 3, in_transaction 2 or more, explain_failed 0", reasons)
 	}
 }

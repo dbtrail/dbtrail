@@ -137,7 +137,11 @@ func nowCompare(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		routed := openRaw(t, withZone(portDSN, zone))
 		live := openRaw(t, withZone(sourceDSN, zone))
 		for _, c := range cases {
+			mark := heavyMark(t, srv, ent.ID)
 			got := answerText(routed, c.stmt)
+			if heavyOnCopy(t, mark(), c.who, c.stmt, got, answerText(live, c.stmt)) {
+				continue
+			}
 			t.Logf("[%s] routed %-40s %s", zone, got, c.stmt)
 			if strings.HasPrefix(got, "ERROR ") || !strings.HasPrefix(got, c.who+"|") {
 				t.Errorf("[%s] routed %q (%s):\n  got  %s\n  want it answered by %s", zone, c.stmt, c.why, got, c.who)
@@ -221,7 +225,10 @@ func nowCompare(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	}
 	reasons := fb.Routing.Servers[ent.ID].Reasons
 	t.Logf("routing reasons: %v", reasons)
-	if reasons["copy_refused"] != 0 {
-		t.Errorf("reasons = %v, want copy_refused 0", reasons)
+	// A statement the copy declined for how it reads the clock is let past
+	// that for its cost (heavy_on_copy); one the copy then cannot run goes to
+	// MySQL after the try (copy_refused). Every answer above is checked.
+	if reasons["explain_failed"] != 0 {
+		t.Errorf("reasons = %v, want explain_failed 0", reasons)
 	}
 }

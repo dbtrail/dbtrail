@@ -200,8 +200,12 @@ func timestampDiffRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string)
 			if readsClock.MatchString(c.stmt) {
 				before = ask()
 			}
+			mark := heavyMark(t, srv, ent.ID)
 			got := typedAnswer(routed, c.stmt, c.args...)
 			t.Logf("[%s] routed %-60.300s %s", zone, got, c.stmt)
+			if heavyOnCopy(t, mark(), c.who, c.stmt, got, ask()) {
+				continue
+			}
 			if strings.HasPrefix(got, "ERROR ") || !strings.Contains(got, "("+c.who+",") {
 				t.Errorf("[%s] routed %q (%s):\n  got  %s\n  want it answered by %s", zone, c.stmt, c.why, got, c.who)
 				continue

@@ -192,6 +192,9 @@ func lengthFunctions(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 					t.Errorf("the source refused %q: %s", c.stmt, want)
 					continue
 				}
+				if heavyOnCopy(t, reason, c.who, c.stmt, got, want) {
+					continue
+				}
 				if c.who != "" && !strings.Contains(got, "("+c.who+",") {
 					t.Errorf("%q (%s) answered %s [%s], want it answered by %s", c.stmt, c.why, got, reason, c.who)
 					continue
@@ -200,13 +203,15 @@ func lengthFunctions(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 					t.Errorf("%q (%s) through the port:\n  got  %s\n  want %s, the source's own answer", c.stmt, c.why, got, want)
 				}
 			}
-			// AVG of an expression stays on MySQL whatever the collation
-			// (AvgVeto, #2920, counted copy_columns_differ): the report of
-			// #2918 is that rule, not the collation.
+			// AVG of an expression is declined by the copy whatever the
+			// collation (AvgVeto, #2920): the report of #2918 is that rule,
+			// not the collation. Expensive here, so the copy answers it even
+			// so (heavy_on_copy), unless a refusal of the copy's that holds
+			// whatever the plan comes first, as it does on MariaDB.
 			before := lengthReasons(t, srv, ent.ID)
 			connTypedAnswer(port, avgReport)
-			if r := reasonAdded(before, lengthReasons(t, srv, ent.ID)); r != "copy_columns_differ" {
-				t.Errorf("AVG(LENGTH(cf)) under %s was forwarded as %q, want copy_columns_differ", session, r)
+			if r := reasonAdded(before, lengthReasons(t, srv, ent.ID)); r != "heavy_on_copy" && r != "copy_columns_differ" {
+				t.Errorf("AVG(LENGTH(cf)) under %s was counted %q, want heavy_on_copy or copy_columns_differ", session, r)
 			}
 		})
 	}
