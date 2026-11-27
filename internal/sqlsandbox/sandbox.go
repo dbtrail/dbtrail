@@ -2110,7 +2110,7 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 		case errQuery:
 			if out.JoinOrder == joinOrderConnected {
 				slog.Info("sql on the copy: a statement run with its tables in a connected order failed in the engine",
-					"order", out.JoinOrderTables, "error", firstLine(out.Error.Message))
+					"order", out.JoinOrderTables, "error", out.Error.Message)
 			}
 			return Result{}, engineError(out, spill, noSpill)
 		case errTooLarge:

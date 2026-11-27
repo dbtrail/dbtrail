@@ -113,13 +113,13 @@ type wireResult struct {
 	// (joinguard.go).
 	JoinOrder        string `json:"join_order,omitempty"`
 	JoinOrderTables  string `json:"join_order_tables,omitempty"`
+	JoinCheckSkipped string `json:"join_check_skipped,omitempty"`
 	// ConnectedOrderNote is why the join check tried a connected order
 	// (TryConnectedJoinOrder) for a statement it refused and did not use
 	// it; ConnectedOrderFailed when that is a step that did not work, not
 	// a statement of another shape.
 	ConnectedOrderNote   string `json:"connected_order_note,omitempty"`
 	ConnectedOrderFailed bool   `json:"connected_order_failed,omitempty"`
-	JoinCheckSkipped string `json:"join_check_skipped,omitempty"`
 	// ResidentBytes is the memory the worker holds after the statement, its
 	// DuckDB closed; 0 where the platform does not say. Sent by a worker that
 	// stays for another job (wireJob.More).
