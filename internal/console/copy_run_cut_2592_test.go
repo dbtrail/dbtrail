@@ -86,8 +86,11 @@ func TestPromoteToRunCut(t *testing.T) {
 		run  runCut
 	}{
 		{"refused stays refused", copyCut{refusal: "no"}, run},
+		{"refused at the run's own cut stays refused", copyCut{anchor: run.at, refusal: "no"}, run},
 		{"no run cut", own, runCut{}},
-		{"the table's cut is the run's", func() copyCut { c := own; c.anchor = run.at; return c }(), run},
+		{"a run cut with no mark", own, runCut{at: run.at, stamp: run.stamp}},
+		{"the table's cut is the run's, the run has no mark", func() copyCut { c := own; c.anchor = run.at; return c }(),
+			runCut{at: run.at, stamp: run.stamp}},
 		{"the table's cut is past the run's (a newer read)", func() copyCut {
 			c := own
 			c.anchor = query.BinlogPos{File: "binlog.000059", Pos: 4}
@@ -97,6 +100,43 @@ func TestPromoteToRunCut(t *testing.T) {
 	} {
 		if got := promoteToRunCut(c.own, c.run); got != c.own {
 			t.Errorf("%s: %+v, want the table's own cut", c.name, got)
+		}
+	}
+}
+
+// A refresh that ends delta chains for age rewrites every table in full,
+// one with no change since its last full read too: its file carries the
+// run's cut, no last event (a table nobody writes) or an old one carried
+// forward (a table written once, long ago), and its source read is still
+// that full read's. Its own lookup starts from that read or that event,
+// which rotation can have taken from the index, and then the table has no
+// tail. At the run's own cut, the lookup takes the run's mark, as a table
+// carried below it does.
+func TestPromoteToRunCut_atTheRunsOwnCut(t *testing.T) {
+	read := time.Date(2026, 11, 26, 9, 0, 0, 0, time.UTC)
+	run := runCut{at: query.BinlogPos{File: "binlog.000058", Pos: 1200}, mark: *mk(99000000, "binlog.000058", 1100),
+		stamp: read.Add(31 * time.Hour)}
+	// The table's own mark differs from the run's (a file carried from an
+	// earlier run that cut at the same position), so taking the run's is
+	// seen; its stamp is that earlier run's.
+	static := copyCut{anchor: run.at, stamp: read.Add(30 * time.Hour), sourceRead: read,
+		mark: *mk(98000000, "binlog.000058", 900), folded: true}
+	rare := static
+	rare.lastEventID = 41000000
+
+	for _, c := range []struct {
+		name string
+		own  copyCut
+	}{
+		{"a table nobody writes (no last event)", static},
+		{"a table written long ago (an old last event carried forward)", rare},
+	} {
+		got := promoteToRunCut(c.own, run)
+		if !got.sinceMark || got.mark != run.mark || got.anchor != run.at || !got.stamp.Equal(run.stamp) || !got.folded {
+			t.Errorf("%s: %+v, want the lookup to start at the run's mark", c.name, got)
+		}
+		if !got.sourceRead.Equal(c.own.sourceRead) || got.lastEventID != c.own.lastEventID {
+			t.Errorf("%s: the table's own read or event floor was replaced: %+v", c.name, got)
 		}
 	}
 }
