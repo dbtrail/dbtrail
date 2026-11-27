@@ -144,6 +144,14 @@ type Binding struct {
 	// Where nothing can go to the source the copy answers, with a NOTICE that
 	// names the table. nil: nothing is asked.
 	NotCaptured func(ctx context.Context) ([]TableNotCaptured, error)
+	// CaptureState, when set, says whether capture's record of the changes
+	// it dropped is current for the server (capture_stale_3202.go), asked
+	// before a statement that reads a table runs on the copy. Stale: on a
+	// connection that can fall back the source answers it
+	// (ReasonCaptureStateStale); elsewhere the copy does, with a NOTICE.
+	// Unchecked, or an error: the copy answers, with a NOTICE. nil: nothing
+	// is asked.
+	CaptureState func(ctx context.Context) (CaptureState, error)
 	// SourceShapes, when set, says what the source's catalog says now of
 	// each table by its OID (the one its snapshot recorded): its schema and
 	// name there, and the columns a snapshot would store. An OID the source
@@ -406,7 +414,7 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	// The notice of tables not compared with the source's is the caller's
 	// to send once the copy's answer is the client's (commitShapeNote).
 	s.dropShapeNote()
-	s.joinCheck, s.oomRetry, s.writtenOrder = "", "", ""
+	s.joinCheck, s.oomRetry, s.writtenOrder, s.captureState = "", "", "", ""
 	// A session time zone the copy could not be asked about when it was set
 	// is asked about now (settings.go), before the statement's own context:
 	// the question has its own, and the statement's must stay the one a
@@ -454,6 +462,13 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		// copy holds old rows of it, and the source answers, before the copy
 		// does any work or waits for anything.
 		if refusal := s.notCapturedRefusal(ctx, text); refusal != nil {
+			return nil, nil, nil, "", refusal
+		}
+		// A capture that stopped saving its state while the source kept
+		// writing (capture_stale_3202.go): its record of dropped changes is
+		// not current, and the source answers, before the copy waits for
+		// anything.
+		if refusal := s.captureStateRefusal(ctx, text); refusal != nil {
 			return nil, nil, nil, "", refusal
 		}
 		// On a connection the source answered, the copy first waits to

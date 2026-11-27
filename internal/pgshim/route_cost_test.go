@@ -593,6 +593,8 @@ type costLogin struct {
 	sides *CostSides
 	// notCaptured, when set, is Binding.NotCaptured.
 	notCaptured func(context.Context) ([]TableNotCaptured, error)
+	// captureState, when set, is Binding.CaptureState (#3202).
+	captureState func(context.Context) (CaptureState, error)
 	// wideExec makes the copy answer an execution with two columns where
 	// its Describe (the statement inside dbtrail_describe) has one, so the
 	// port refuses the execution after the copy ran it (#3251).
@@ -761,6 +763,7 @@ func (l *costLogin) login(_ context.Context, _, _ string, password *Password, _ 
 		b.CopyWait = l.wait
 	}
 	b.NotCaptured = l.notCaptured
+	b.CaptureState = l.captureState
 	b.SourceShapes = l.shapes
 	b.OlderKind = l.olderKind
 	return b, nil

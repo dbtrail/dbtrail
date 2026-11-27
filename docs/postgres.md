@@ -341,9 +341,10 @@ Instead:
   This rests on the capture's record of dropped changes, which is saved with
   its checkpoint. Until the next checkpoint (0.3 s on a healthy capture, in
   one measurement) a table can still read as current. A capture that has
-  saved its state and then cannot save it again leaves later drops
-  unrecorded, so the port can keep answering that table from its copy with
-  no notice ([#3202](https://github.com/dbtrail/dbtrail/issues/3202)).
+  saved its state and then cannot save it again keeps its later drops in
+  memory only, so the PostgreSQL port stops trusting the record once that
+  goes on for more than a minute while your PostgreSQL writes (see
+  [When capture stops saving its state](#when-capture-stops-saving-its-state)).
   Where the file cannot be published again as it is (a snapshot read from S3,
   or with `--baseline-carry-forward-unchanged` off), the update is refused for all the
   tables (`refused-gap`, naming the table). A full read brings the copy up to
@@ -2864,6 +2865,7 @@ The reasons, with the MySQL port's names where they mean the same:
 | source | `copy_columns_differ` | a column the copy writes otherwise (a `numeric` without precision) |
 | source | `copy_behind_source`, `copy_age_unknown` | the server's lag limit |
 | source | `table_not_captured` | a table whose capture lost or dropped changes since its snapshot was read (a table capture skips, a capture ledger that does not say which tables or cannot be read, a lost slot, a snapshot published over a known loss), in fresh and fast mode: the copy holds that table as of its snapshot only. Without a forwarding user, or on a server that hides tables, the copy answers it from that snapshot with a notice that says so |
+| source | `capture_state_stale` | capture has not saved its state for more than a minute while the source wrote past the last position it saved, so its record of the changes it dropped is not current and any table of the copy may miss changes, heavy statements included. Where the statement cannot go to the source (a server that hides tables, `source_unreachable`, `capture_gate`, `SUMMARIZE`) the copy answers it with a notice (see [When capture stops saving its state](#when-capture-stops-saving-its-state)) |
 | source | `copy_shape_differs` | a table whose columns on the source are not the ones its snapshot recorded (an `ALTER TABLE` since, which PostgreSQL does not announce to capture), heavy statements included. On a server that hides tables or columns the statement is refused instead, and counted as `refused` under this reason |
 | source | `join_too_big` | the copy's plan of it has a join estimated far larger than its inputs (from the source's `n_distinct`), in the copy's own join order and in the order written: the copy did not run it |
 | refused | `read_only` | not a read |
@@ -2872,6 +2874,80 @@ The reasons, with the MySQL port's names where they mean the same:
 
 Here `answers_the_same` counts the statements the copy answered: the ones it
 answers as PostgreSQL does and whose plan on the source is expensive.
+
+### When capture stops saving its state
+
+Whether a table's copy is current is decided from capture's record of the
+changes it dropped, which capture saves with its position. A capture that
+saved its state and then cannot save it again (the index refuses the write,
+the run fails before its save and starts again) keeps the drops it makes
+after that in memory only, and the record would still read as current.
+
+So the PostgreSQL port stops trusting the record of a server when both hold:
+
+- **capture's last save is more than a minute old**, by the index's own
+  clock (`stream_state.last_checkpoint` against the index server's time, in
+  one statement). A running capture saves at every checkpoint (every 10
+  seconds in `watch`, 5 in `bintrail-pg stream`) even when the source is
+  quiet, and within a fraction of a second of any change, so a save that
+  old means capture is not saving. A minute is the same bound the port uses
+  for a capture that has saved no state at all.
+- **your PostgreSQL's WAL is past the last position capture saved**: the
+  port reads `pg_current_wal_flush_lsn()` (on a standby,
+  `pg_last_wal_replay_lsn()`) as the server's forwarding user, only once the
+  save is past the minute, and compares positions, never clocks. A quiet
+  source is not past it, so its copy keeps answering. The question has a
+  short connection of its own, at most one per server at a time and one a
+  second, not one of the port's connections to its sources: statements sent
+  there while the server is stale can take all of those, and the question
+  must not wait behind them. If it gets no answer within 2 seconds while the
+  save is still old, a server that was stale stays stale.
+
+While both hold, a statement that reads any table of that server's copy is
+answered by your PostgreSQL, counted as `capture_state_stale`, heavy
+statements included: changes capture did not record can leave rows out of a
+table, or keep rows your PostgreSQL deleted. Over the simple and the
+extended protocol alike. Where the statement cannot go to your PostgreSQL (a
+server that hides tables or columns, a statement routed to the copy as
+`source_unreachable` or `capture_gate`, `SUMMARIZE`), the copy answers it
+with a NOTICE that says capture's record is not current and why. When the
+port cannot ask your PostgreSQL where its WAL stands, the copy answers with a
+NOTICE that says it could not check. The NOTICE is sent with the copy's
+answer only: a statement the copy fails, and the source then answers, gets
+none. Both are counted in `/status` under `capture_state_on_copy` (`stale`,
+`unchecked`), and `/status` shows the reason under `capture_state` for as
+long as it lasts. The router logs a `WARN` when it starts, naming how long
+ago capture saved and both positions, and an `INFO` when it ends, naming
+what ended it.
+
+The state is checked when a statement needs it and when `/status` is
+requested, at most once a second per server. With neither, nothing is
+checked: a capture that stops saving on a router nobody uses is warned about
+at the first statement or `/status` request after that.
+
+It ends by itself: once capture saves again, statements go where they went
+before, prepared ones included.
+
+What to know:
+
+- **The WAL belongs to the whole PostgreSQL cluster.** Another database, a
+  vacuum or a checkpoint of the cluster moves it too, so a stalled capture
+  on a cluster where anything writes is distrusted even if the captured
+  tables did not change. That sends more to the source, never less.
+- **A capture you stopped** makes its last save on the way out, and drops
+  nothing after that. The port cannot tell that stop from a capture that
+  failed to save, nor see a capture run by another process, so while the
+  source writes it sends the server's statements to the source until
+  capture runs again.
+- **Not covered**: a capture that has not saved a position yet (a first run
+  that has seen no committed transaction), and a row saved by a writer that
+  does not record the sent-through position (`bintrail-pg reset`, a capture
+  older than 0.132.0). On a busy cluster those cannot be told from a stall,
+  so the port keeps trusting the record there. A capture that never wrote
+  its row at all is the case described in
+  [`table_not_captured`](#which-side-answers-a-statement-on-the-postgresql-port).
+- **An index clock that steps back** past capture's last save makes that
+  save read as just made, until the clock passes it again.
 
 ### Listing schemas, tables and columns on the PostgreSQL port
 

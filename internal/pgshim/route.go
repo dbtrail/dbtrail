@@ -66,6 +66,7 @@ const (
 	ReasonCopyTooOld        = "copy_too_old"        // the copy's answer was older than one the source already gave this connection
 	ReasonTableNotCaptured  = "table_not_captured"  // it reads a table whose capture lost or dropped changes since its snapshot (not_captured.go)
 	ReasonCopyShapeDiffers  = "copy_shape_differs"  // it reads a table whose columns on the source are not its snapshot's: an ALTER TABLE since (shape_3251.go)
+	ReasonCaptureStateStale = "capture_state_stale" // capture has not saved its state for longer than its bound while the source wrote past it (capture_stale_3202.go)
 	ReasonResultOverRowCap  = "result_over_row_cap" // an expensive plan whose result is estimated over the copy's row cap: not tried on the copy (route_cost.go)
 	ReasonHeavyOnCopy       = "heavy_on_copy"       // expensive on the source, so the copy answers it, though it may answer otherwise than PostgreSQL (heavy.go)
 	ReasonJoinTooBig        = "join_too_big"        // the copy's plan of it has a join estimated far past its inputs in its own join order and in the order written: not run there (joinstats.go)
@@ -118,6 +119,12 @@ type RouteNote struct {
 	// shape_3251.go), "" when they were or nothing needed it. Counted apart:
 	// Reason stays the one the statement was routed by.
 	ShapeUnchecked string
+	// CaptureState is the kind of CaptureState (CaptureStale,
+	// CaptureUnchecked) the copy answered the statement under, with a
+	// notice, while capture's record of dropped changes was not known to be
+	// current (capture_stale_3202.go); "" when it was, or the source
+	// answered. Counted apart, as ShapeUnchecked is.
+	CaptureState string
 }
 
 // routeDecision is which side answers a statement, and why.
@@ -786,6 +793,9 @@ func transientFallback(reason string) bool {
 		return true
 	case ReasonTableNotCaptured:
 		// The table's next snapshot read after its last drop heals it.
+		return true
+	case ReasonCaptureStateStale:
+		// Capture's next save heals it.
 		return true
 	case ReasonCopyShapeDiffers:
 		// The table's next snapshot, which records the source's columns,
@@ -1932,13 +1942,18 @@ func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, fa
 	if d.side != RouteCopy || failed {
 		shapeUnchecked = ""
 	}
+	captureState := s.captureState
+	s.captureState = ""
+	if d.side != RouteCopy || failed {
+		captureState = ""
+	}
 	if s.bound == nil || s.bound.Routed == nil || d.side == "" {
 		return
 	}
 	if d.side != RouteCopy {
 		joinCheck = ""
 	}
-	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed, JoinCheck: joinCheck, OOMRetry: oomRetry, WrittenOrder: writtenOrder, HeavyOlder: heavyOlder, ShapeUnchecked: shapeUnchecked})
+	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed, JoinCheck: joinCheck, OOMRetry: oomRetry, WrittenOrder: writtenOrder, HeavyOlder: heavyOlder, ShapeUnchecked: shapeUnchecked, CaptureState: captureState})
 }
 
 // fieldName reports whether the token at j is the field a date_trunc or a

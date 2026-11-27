@@ -1239,6 +1239,13 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		// a statement that reads one (copy_shape_differs, #3251). Read from
 		// the source's catalog, never from its rows.
 		bound.SourceShapes = pgPortSourceShapes(fwd.DSN, tgt.ID, sources)
+		// A capture that stopped saving its state while the source kept
+		// writing (#3202): its record of dropped changes is not current, and
+		// the source answers. The index says how old the last save is; the
+		// source is asked where its WAL stands only once that is past the
+		// bound, as the forwarding account, on a connection outside the
+		// pool, never a row of a table.
+		bound.CaptureState = pgPortCaptureState(tgt.ID, tgt.IndexDB, fwd.DSN, logger)
 		// The copy waits for the source's position on a connection the
 		// source answered, then answers (#2985).
 		bound.CopyWait = func(ctx context.Context, lsn uint64) (pgshim.CopyWaitOutcome, string) {
