@@ -2882,19 +2882,24 @@ and in its log (once each time it goes over), with what fits: fewer
 worker and the SQL memory that fits it. With a ceiling of its own
 (`PG_ROUTER_MEMORY`, the container's limit) the statements, recent changes
 and results are compared with that ceiling first: past it, the router's own
-statements are the ones stopped. When they fit it, that ceiling's worth plus
-the buffer pool is still compared with the machine, because a ceiling as big
-as the machine keeps nothing from running out; the advice then says the
-`PG_ROUTER_MEMORY` that fits. `PG_ROUTER_MEMORY_SHARE` is not a ceiling:
+statements are the ones stopped, and raising the ceiling is advised only as
+far as the machine holds it beside the buffer pool. When they fit it, what
+the router can take (its parts, within the ceiling) plus the buffer pool is
+still compared with the machine, because a ceiling as big as the machine
+keeps nothing from running out; the advice then says the `PG_ROUTER_MEMORY`
+that fits. `PG_ROUTER_MEMORY_SHARE` is not a ceiling:
 nothing enforces it, so with it alone the router compares with the machine as
-without it.
+without it (the share still sizes the recent changes' budget). The
+`SQL_MEMORY` of the compose `.env` is also the web interface's and the MySQL
+router's; `--sql-memory` sets this service's alone.
 
 While no PostgreSQL server is listed nothing runs on the copy, and nothing is
 said (`verdict` is `idle`).
 
 The factory settings (four workers at 2 GB) can ask for more than a 16 GB
 machine has with the index MySQL's default buffer pool on it, so the router
-warns there. Two workers fit it.
+warns there. Two workers fit it with one PostgreSQL server; each more server
+adds its recent changes' budget.
 
 In `/status`, `memory` has `verdict` (`fits`, `over`, `idle`, or `unknown`
 with `why` when the machine's memory or the SQL memory cannot be read),

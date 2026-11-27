@@ -28,6 +28,9 @@ type PGMemoryInputs struct {
 	// enforces it, so past the machine's memory the index can still be
 	// stopped.
 	OwnCeiling bool
+	// CeilingBytes is that ceiling (HostMemoryBytes: the smallest cgroup
+	// limit), not BudgetBytes, which is the ceiling times the share.
+	CeilingBytes uint64
 	// TailsBytes is what the tails of ONE server may hold (0 with TailsOff
 	// or TailsUnbounded): each PostgreSQL server gets its own budget.
 	TailsBytes     int64
@@ -45,6 +48,9 @@ func PGMemoryInputsNow() PGMemoryInputs {
 		BudgetBytes:  memoryBudget(),
 		BudgetWords:  MemoryBudgetWords(),
 		OwnCeiling:   memoryCapped("/"),
+	}
+	if in.OwnCeiling {
+		in.CeilingBytes = HostMemoryBytes()
 	}
 	switch {
 	case tailsForcedOff():

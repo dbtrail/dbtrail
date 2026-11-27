@@ -569,7 +569,7 @@ func (r *pgRouteStats) doc(listen string) pgRouterStatusDoc {
 		n := r.lanes.numbers()
 		d.CopyLanes = &n
 	}
-	// Outside the tally's lock too: it can read the index servers.
+	// The last minute's reading (pgMemoryWatch.follow): no index is asked here.
 	d.Memory = r.memory.doc()
 	if r.modes != nil {
 		forced, _ := console.SQLModeSetting()

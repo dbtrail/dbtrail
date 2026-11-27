@@ -176,7 +176,7 @@ func TestPGMemoryVerdict_edges(t *testing.T) {
 	})
 	t.Run("own ceiling: compared with it, the pool left out", func(t *testing.T) {
 		p := base()
-		p.In = console.PGMemoryInputs{MachineBytes: 8 * pgTestGiB, BudgetBytes: 4 * pgTestGiB, OwnCeiling: true, TailsBytes: int64(4 * pgTestGiB / 5)}
+		p.In = console.PGMemoryInputs{MachineBytes: 8 * pgTestGiB, BudgetBytes: 4 * pgTestGiB, OwnCeiling: true, CeilingBytes: 4 * pgTestGiB, TailsBytes: int64(4 * pgTestGiB / 5)}
 		d := pgMemoryVerdict(p)
 		if d.ComparedWith != "own_ceiling" || d.AvailableBytes != 4*pgTestGiB || d.NeedBytes != 3*(5*pgTestGiB/2)+uint64(p.In.TailsBytes)+256<<20 || d.Verdict != "over" {
 			t.Fatalf("%+v", d)
@@ -185,15 +185,44 @@ func TestPGMemoryVerdict_edges(t *testing.T) {
 		if !strings.Contains(lines, "its own statements are stopped") || strings.Contains(lines, "index MySQL, which capture") {
 			t.Errorf("own ceiling says the wrong consequence: %q", lines)
 		}
-		if !strings.Contains(lines, "raise PG_ROUTER_MEMORY by") || strings.Contains(lines, "buffer pool") {
-			t.Errorf("own ceiling advice should raise the ceiling and leave the pool out: %q", lines)
+		// 8.6 GiB needed, and the machine holds 5 beside the 3 GiB pool:
+		// raising the ceiling is no advice.
+		if strings.Contains(lines, "raise PG_ROUTER_MEMORY") || !strings.Contains(lines, "give the machine more memory") || strings.Contains(lines, "buffer pool") {
+			t.Errorf("own ceiling advice: %q", lines)
+		}
+	})
+	t.Run("raising the ceiling is advised only as far as the machine holds it", func(t *testing.T) {
+		// 16 GiB, a 4 GiB pool, a 10 GiB ceiling; 3 workers at 2 GB (4 x
+		// 2.5 = 10), 1.25 GiB of tails, 256 MiB of results: 11.5 GiB.
+		p := base()
+		p.Workers = 3
+		p.In = console.PGMemoryInputs{MachineBytes: 16 * pgTestGiB, BudgetBytes: 10 * pgTestGiB, OwnCeiling: true, CeilingBytes: 10 * pgTestGiB, TailsBytes: int64(5 * pgTestGiB / 4)}
+		p.Pools = []pgIndexPool{{Bytes: 4 * pgTestGiB, Place: pgPoolBundled}}
+		d := pgMemoryVerdict(p)
+		if d.ComparedWith != "own_ceiling" || !strings.Contains(d.Advice, "raise PG_ROUTER_MEMORY to at least 11.5 GiB (at most 12.0 GiB") {
+			t.Errorf("%+v", d)
+		}
+	})
+	t.Run("the ceiling is the container's limit, not times the share", func(t *testing.T) {
+		// PG_ROUTER_MEMORY=8g with PG_ROUTER_MEMORY_SHARE=0.5: the kernel
+		// enforces 8, the router plans with 4.
+		p := base()
+		p.Workers, p.Memory = 1, "1GB"
+		p.In = console.PGMemoryInputs{MachineBytes: 32 * pgTestGiB, BudgetBytes: 4 * pgTestGiB, OwnCeiling: true, CeilingBytes: 8 * pgTestGiB, TailsBytes: int64(4 * pgTestGiB / 5)}
+		d := pgMemoryVerdict(p)
+		// 2 x 1.25 + 0.8 + 0.25 = 3.55, under either; with 2 workers 4.8,
+		// over 4 but under the real 8.
+		p.Workers = 2
+		d = pgMemoryVerdict(p)
+		if d.Verdict != "fits" || d.OwnCeilingBytes != 8*pgTestGiB {
+			t.Errorf("%+v", d)
 		}
 	})
 	t.Run("a ceiling as big as the machine does not hide the pool", func(t *testing.T) {
 		// PG_ROUTER_MEMORY=8g on 8 GB with a 3 GB pool, 1 worker at 1 GB.
 		p := base()
 		p.Workers, p.Memory = 1, "1GB"
-		p.In = console.PGMemoryInputs{MachineBytes: 8 * pgTestGiB, BudgetBytes: 8 * pgTestGiB, OwnCeiling: true, TailsBytes: int64(8 * pgTestGiB / 5)}
+		p.In = console.PGMemoryInputs{MachineBytes: 8 * pgTestGiB, BudgetBytes: 8 * pgTestGiB, OwnCeiling: true, CeilingBytes: 8 * pgTestGiB, TailsBytes: int64(8 * pgTestGiB / 5)}
 		d := pgMemoryVerdict(p)
 		// Own: 2 x 1.25 + 1.6 + 0.25 = 4.35 of 8 fits the ceiling; with the
 		// pool, 7.35 of 8 fits the machine.
@@ -330,12 +359,12 @@ func TestPGMemoryWatch(t *testing.T) {
 	if w.doc() != nil {
 		t.Fatal("a verdict before the first read")
 	}
-	first := w.read()
+	first := w.read(context.Background())
 	// /status takes the last one and never reads.
 	if w.doc() != first || w.doc() != first || calls != 1 {
 		t.Fatalf("doc() read the plan: %d reads", calls)
 	}
-	if w.read(); calls != 2 || w.doc() == first {
+	if w.read(context.Background()); calls != 2 || w.doc() == first {
 		t.Errorf("read() did not read again: %d reads", calls)
 	}
 	var none *pgMemoryWatch

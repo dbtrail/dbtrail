@@ -252,8 +252,10 @@ type pgMemoryDoc struct {
 	AvailableBytes uint64 `json:"available_bytes,omitempty"`
 	// NeedBytes is the sum of the parts below that are compared.
 	NeedBytes uint64 `json:"need_bytes,omitempty"`
-	// OwnCeilingBytes: the container's limit, when there is one.
+	// OwnCeilingBytes: the container's limit, when there is one;
+	// MachineBytes: the machine's memory.
 	OwnCeilingBytes uint64 `json:"own_ceiling_bytes,omitempty"`
+	MachineBytes    uint64 `json:"machine_bytes,omitempty"`
 	// Statements: Slots at once, StatementBytes each, headroom included.
 	// SQLMemoryBytes is the SQL memory each is given, before the headroom.
 	Slots          int    `json:"slots,omitempty"`
@@ -318,11 +320,12 @@ func pgMemoryVerdict(p pgMemoryPlan) pgMemoryDoc {
 		return d
 	}
 	own := uint64(d.Slots)*d.StatementBytes + d.TailsBytes + d.ResultsBytes
+	d.MachineBytes = p.In.MachineBytes
 	if p.In.OwnCeiling {
-		d.OwnCeilingBytes = p.In.BudgetBytes
+		d.OwnCeilingBytes = p.In.CeilingBytes
 	}
-	if p.In.OwnCeiling && p.In.BudgetBytes > 0 && own > p.In.BudgetBytes {
-		d.ComparedWith, d.AvailableBytes, d.NeedBytes = "own_ceiling", p.In.BudgetBytes, own
+	if d.OwnCeilingBytes > 0 && own > d.OwnCeilingBytes {
+		d.ComparedWith, d.AvailableBytes, d.NeedBytes = "own_ceiling", d.OwnCeilingBytes, own
 	} else {
 		d.ComparedWith, d.AvailableBytes, d.NeedBytes = "machine", p.In.MachineBytes, own+d.IndexPoolBytes
 	}
@@ -352,7 +355,12 @@ func pgMemoryVerdict(p pgMemoryPlan) pgMemoryDoc {
 func pgMemoryAdvice(d pgMemoryDoc, workers int) string {
 	short := d.NeedBytes - d.AvailableBytes
 	others := d.TailsBytes + d.ResultsBytes
-	more := fmt.Sprintf("raise PG_ROUTER_MEMORY by %s", pgGiB(short))
+	// Over its own ceiling: raising it helps only as far as the machine
+	// holds it beside the index pool, or the next start says to lower it.
+	more := "give the machine more memory"
+	if room := d.MachineBytes - min(d.MachineBytes, d.IndexPoolBytes); d.NeedBytes <= room {
+		more = fmt.Sprintf("raise PG_ROUTER_MEMORY to at least %s (at most %s fits this machine beside the index MySQL)", pgGiB(d.NeedBytes), pgGiB(room))
+	}
 	if d.ComparedWith == "machine" {
 		others += d.IndexPoolBytes
 		more = fmt.Sprintf("give the machine %s more", pgGiB(short))
@@ -365,8 +373,8 @@ func pgMemoryAdvice(d pgMemoryDoc, workers int) string {
 			return fmt.Sprintf("the tails, the results held for clients and the index MySQL's buffer pool take %s of the machine's %s alone; give the machine more memory, or lower the index MySQL's buffer pool",
 				pgGiB(others), pgGiB(d.AvailableBytes))
 		}
-		return fmt.Sprintf("the tails and the results held for clients take %s of its %s ceiling alone; raise PG_ROUTER_MEMORY, or lower BINTRAIL_SQL_TAIL_MAX_BYTES",
-			pgGiB(others), pgGiB(d.AvailableBytes))
+		return fmt.Sprintf("the tails and the results held for clients take %s of its %s ceiling alone; %s, or bound the tails lower (BINTRAIL_SQL_TAIL_MAX_BYTES in this service's environment)",
+			pgGiB(others), pgGiB(d.AvailableBytes), more)
 	}
 	room := d.AvailableBytes - others
 	if fit := int(room / d.StatementBytes); fit >= 2 && fit-1 < workers {
@@ -374,7 +382,7 @@ func pgMemoryAdvice(d pgMemoryDoc, workers int) string {
 			pgWorkersFit(fit-1), fit-1, fit-1, countOfStatementsAtOnce(fit), more)
 	}
 	if limit := pgMemoryLimitFor(int64(room / 2)); limit > 0 {
-		return fmt.Sprintf("with 1 worker (PG_ROUTER_WORKERS=1 in .env, or --workers 1), each statement fits with at most %s of SQL memory (SQL_MEMORY=%s in .env, or --sql-memory %s); or %s",
+		return fmt.Sprintf("with 1 worker (PG_ROUTER_WORKERS=1 in .env, or --workers 1), each statement fits with at most %s of SQL memory (--sql-memory %s; SQL_MEMORY=%s in .env sets it for the web interface and the MySQL router too); or %s",
 			pgGiB(uint64(limit)), pgMiBSetting(limit), pgMiBSetting(limit), more)
 	}
 	return fmt.Sprintf("not even one statement with the least SQL memory the router takes (%s) fits beside the rest; %s", pgGiB(console.SQLMemoryFloor), more)
@@ -457,7 +465,11 @@ func pgMemoryLines(d pgMemoryDoc) string {
 		if d.OwnCeilingBytes > 0 {
 			ceiling = fmt.Sprintf(" (it fits its own %s ceiling, which does not keep the machine from running out)", pgGiB(d.OwnCeilingBytes))
 		}
-		fmt.Fprintf(&b, "PostgreSQL router: at most it and the index MySQL on this machine may need %s of this machine's %s%s: %s.\n", pgGiB(d.NeedBytes), pgGiB(d.AvailableBytes), ceiling, strings.Join(parts, ", "))
+		who := "it and the index MySQL on this machine"
+		if d.IndexPoolBytes == 0 {
+			who = "it"
+		}
+		fmt.Fprintf(&b, "PostgreSQL router: at most %s may need %s of this machine's %s%s: %s.\n", who, pgGiB(d.NeedBytes), pgGiB(d.AvailableBytes), ceiling, strings.Join(parts, ", "))
 	} else {
 		fmt.Fprintf(&b, "PostgreSQL router: at most it may need %s of its own %s ceiling: %s.\n", pgGiB(d.NeedBytes), pgGiB(d.AvailableBytes), strings.Join(parts, ", "))
 	}
@@ -522,8 +534,8 @@ func (w *pgMemoryWatch) doc() *pgMemoryDoc {
 // read reads the verdict now, outside the lock, and keeps it. The log says
 // it when it becomes over: at start, or when a server is added or a buffer
 // pool grows while the router runs.
-func (w *pgMemoryWatch) read() *pgMemoryDoc {
-	d := pgMemoryVerdict(w.plan(context.Background()))
+func (w *pgMemoryWatch) read(ctx context.Context) *pgMemoryDoc {
+	d := pgMemoryVerdict(w.plan(ctx))
 	w.mu.Lock()
 	was := w.last
 	w.last = &d
@@ -543,7 +555,7 @@ func (w *pgMemoryWatch) follow(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			w.read()
+			w.read(ctx)
 		}
 	}
 }
