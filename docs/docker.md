@@ -954,7 +954,7 @@ that is already there).
 | `PG_ROUTER_MEMORY`, `PG_ROUTER_CPUS` | ceilings for the whole service, e.g. `8g` and `4` | none |
 | `PG_ROUTER_CPU_SHARES` | CPU priority of the service against the others (`cpu_shares`); `1024` is the default priority, the same as capture's | 256, below capture |
 | `SQL_MEMORY` | memory each statement may use (shared with the other services) | 2GB |
-| `SQL_PORT_MAX_ROWS` | most rows one statement returns; a result with more is refused, not cut (shared with the other services: set, it is the MySQL port's cap too) | 200,000 (the MySQL port's is 10,000) |
+| `SQL_PORT_MAX_ROWS` | most rows one statement returns; a result with more is refused, not cut (shared with the other services: set, it is the MySQL port's cap too). The PostgreSQL port also cuts a result past 1,000,000 cells, never under 10,000 rows | 200,000 (the MySQL port's is 10,000) |
 | `PG_ROUTER_AWS_ACCESS_KEY_ID`, `PG_ROUTER_AWS_SECRET_ACCESS_KEY`, `PG_ROUTER_AWS_SESSION_TOKEN` | S3 keys for this service alone, which only reads S3 ([below](#read-only-keys-for-the-router)) | the shared `AWS_*` keys |
 
 **S3.** The service is given the same S3 variables as `bintrail` (`AWS_*`,

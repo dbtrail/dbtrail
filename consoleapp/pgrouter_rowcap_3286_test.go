@@ -20,10 +20,11 @@ func TestPGRouterRowCapIsItsOwn_3286(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The plan rule that sends an estimated big result to the source moves
-	// with it: a result estimated under 200,000 rows is tried on the copy.
-	if st.SQLPortMaxRows != 200_000 || st.Cost.RowCap != 200_000 {
-		t.Errorf("row cap %d, cost rule's %d; want 200,000 for both", st.SQLPortMaxRows, st.Cost.RowCap)
+	// The plan rule that sends an estimated big result to the source keeps
+	// 10,000: what it sent there before still goes there, so a wide result
+	// it sent is never run on the copy and refused for its size.
+	if st.SQLPortMaxRows != 200_000 || st.Cost.RowCap != 10_000 {
+		t.Errorf("row cap %d, cost rule's %d; want 200,000 and 10,000", st.SQLPortMaxRows, st.Cost.RowCap)
 	}
 	t.Setenv("BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS", "5000")
 	if st, err = pgRouterSettingsFrom(pgRouterTestCmd(t)); err != nil || st.SQLPortMaxRows != 5000 || st.Cost.RowCap != 5000 {
@@ -50,5 +51,35 @@ func TestPGRouteStatsCountsResultTooLarge_3286(t *testing.T) {
 	r.note("s2", pgshim.RouteNote{Side: pgshim.RouteCopy, Reason: pgshim.ReasonHeavyOnCopy})
 	if b, _ := json.Marshal(r.doc("").Servers["s2"]); strings.Contains(string(b), "result_too_large") {
 		t.Errorf("%s", b)
+	}
+}
+
+// The answer's memory is in the memory warning (#3296): the calibration
+// still holds with it. The 8 GB host of #3296 warns; the same setup on
+// 16 GB and the two PostgreSQL boards fit.
+func TestPGMemoryCountsTheAnswer_3286(t *testing.T) {
+	if pgCopyCellBytes != 160 || pgCopyAnswerBytes != 1_000_000*160+64<<20 {
+		t.Fatalf("answer bound %d", pgCopyAnswerBytes)
+	}
+	plan := func(mem uint64) pgMemoryPlan {
+		return pgMemoryPlan{Servers: 1, Workers: 2, Memory: "2GB", ResultsBytes: defaultFlashbackResultBudget, AnswerBytes: pgCopyAnswerBytes,
+			In: pgTestMachine(mem), Pools: []pgIndexPool{{Bytes: 3 * pgTestGiB, Place: pgPoolBundled}}}
+	}
+	if d := pgMemoryVerdict(plan(8 * pgTestGiB)); d.Verdict != "over" {
+		t.Errorf("8 GB: %+v", d)
+	}
+	for _, mem := range []uint64{16 * pgTestGiB, 15988900 << 10, 16041000 << 10} {
+		d := pgMemoryVerdict(plan(mem))
+		if d.Verdict != "fits" {
+			t.Errorf("%d bytes: %+v", mem, d)
+		}
+		if !strings.Contains(pgMemoryLines(d), "for its answer while it is read and sent") {
+			t.Errorf("%q", pgMemoryLines(d))
+		}
+	}
+	// The advice of one worker leaves room for its answer.
+	d := pgMemoryVerdict(plan(8 * pgTestGiB))
+	if !strings.Contains(d.Advice, "PG_ROUTER_WORKERS=1") {
+		t.Errorf("advice %q", d.Advice)
 	}
 }

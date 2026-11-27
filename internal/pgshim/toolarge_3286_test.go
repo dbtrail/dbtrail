@@ -77,6 +77,8 @@ func TestRouteNote_tooLarge(t *testing.T) {
 	}{
 		{"over the row cap", sqlsandbox.Result{Columns: col, Rows: [][]any{{json.Number("1")}}, Truncated: true}, nil, "54000", TooLargeRows},
 		{"over the bytes", sqlsandbox.Result{}, sqlsandbox.ErrResultTooLarge, "54000", TooLargeBytes},
+		{"over the cells", sqlsandbox.Result{Columns: col, Rows: [][]any{{json.Number("1")}}, Truncated: true, CutByCells: true}, nil, "54000", TooLargeCells},
+		{"a cell too long", sqlsandbox.Result{Columns: col, Rows: [][]any{{json.Number("1")}}, TruncatedCells: 1}, nil, "54000", TooLargeCellLength},
 		{"answered", sqlsandbox.Result{Columns: col, Rows: [][]any{{json.Number("1")}}}, nil, "", ""},
 		{"another error", sqlsandbox.Result{}, &sqlsandbox.QueryError{Message: "Conversion Error: no"}, "22000", ""},
 	} {

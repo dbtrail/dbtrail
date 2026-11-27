@@ -2327,10 +2327,17 @@ An expensive statement the copy could not return is answered by the source
 too (`result_over_row_cap` in `/status`). The copy returns at most
 `--sql-port-max-rows` rows for one statement (200,000 by default, where the
 MySQL port's default is 10,000: a report of 100,000 rows is not unusual) and
-refuses a larger result, it does not cut it. What one statement may hold in
-memory stays bounded by its bytes (64 MB) as well; a result past either is
-refused with `54000` and counted in `/status` under `result_too_large`, as
-`rows` or `bytes`. So when the plan says the statement
+refuses a larger result, it does not cut it. A wide result is held to
+1,000,000 cells (rows times columns), never under 10,000 rows, which is what
+any width had before: what an answer takes in the router's memory while it is
+read and sent follows its cells (about 160 bytes each beside its text,
+measured), so one answer takes at most about 220 MB, counted in the router's
+memory sum ("Whether its memory fits the machine"). Its text is also held to
+64 MB. A result past any of these is refused with `54000` and counted in
+`/status` under `result_too_large`, as `rows`, `cells`, `bytes` or
+`cell_length` (one cell longer than a cell may be). The plan rule below
+keeps 10,000 rows: a statement it sent to the source before the cap went
+to 200,000 still goes there. So when the plan says the statement
 returns more rows than that, the port does not run it on the copy only to
 refuse it: your PostgreSQL answers it, and sends every row. The plan's
 estimate is used for one kind of statement, the one where it can be trusted:
@@ -2870,6 +2877,9 @@ What it adds up is each part's ceiling, not what it uses now:
   the memory the router plans with unless set), and any of them can be
   switched to fresh mode while the router runs. Not counted with
   `BINTRAIL_SQL_TAILS=off`;
+- what each statement's answer may take while it is read and sent (about
+  220 MB: 1,000,000 cells and 64 MB of text), once per statement that can
+  run at once;
 - the results held for clients that have not read them (256 MiB);
 - the buffer pool of each index MySQL on the same machine: compose's
   `index-mysql`, or a MySQL on loopback whose host name is this machine's.

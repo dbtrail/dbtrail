@@ -496,10 +496,10 @@ type DateScale struct {
 // A text cell longer than MaxCellBytes is cut and ends with a marker;
 // TruncatedCells counts them.
 type Result struct {
-	Columns        []Column      `json:"columns"`
-	Rows           [][]any       `json:"rows"`
-	Truncated      bool          `json:"truncated"`
-	TruncatedCells int           `json:"truncated_cells"`
+	Columns        []Column `json:"columns"`
+	Rows           [][]any  `json:"rows"`
+	Truncated      bool     `json:"truncated"`
+	TruncatedCells int      `json:"truncated_cells"`
 	// CutByCells: Truncated at Session.MaxCells, not at MaxRows.
 	CutByCells bool          `json:"cut_by_cells,omitempty"`
 	Elapsed    time.Duration `json:"elapsed_ns"`

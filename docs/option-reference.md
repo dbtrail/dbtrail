@@ -1033,9 +1033,9 @@ When true, the PostgreSQL router keeps a row per statement shape and side in /st
 
 ### `console-sql-port-max-rows`
 
-The most rows one statement on the SQL port may return. A result with more rows is refused with an error (1104 on the MySQL port), never silently cut. It does not change the SQL page of the web interface, which shows 1,000 rows.
+The most rows one statement on the SQL port may return. A result with more rows is refused with an error (1104 on the MySQL port, 54000 on the PostgreSQL port), never silently cut. It does not change the SQL page of the web interface, which shows 1,000 rows. The PostgreSQL port also refuses a result past 1,000,000 cells (rows times columns), never under 10,000 rows.
 
-- Default: 10000.
+- Default: 10000 for router, 200000 for pg-router.
 - Example: `console-sql-port-max-rows = 50000`
 - Environment variable: `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS`
 - Read by: router, pg-router.

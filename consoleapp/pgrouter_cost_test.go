@@ -17,7 +17,7 @@ func TestPGRouterCostSettings(t *testing.T) {
 	}
 	// RowCap is the port's row cap (--sql-port-max-rows): a statement whose
 	// plan returns more is not tried on the copy (#3154).
-	if st.Cost != (pgshim.CostPolicy{CostThreshold: 50000, ScanRows: 1000000, RowCap: 200000}) {
+	if st.Cost != (pgshim.CostPolicy{CostThreshold: 50000, ScanRows: 1000000, RowCap: 10000}) {
 		t.Fatalf("defaults: %+v", st.Cost)
 	}
 	if st, err = pgRouterSettingsFrom(pgRouterTestCmd(t, "--sql-port-max-rows", "250")); err != nil || st.Cost.RowCap != 250 || st.SQLPortMaxRows != 250 {
@@ -31,11 +31,11 @@ func TestPGRouterCostSettings(t *testing.T) {
 
 	t.Setenv("BINTRAIL_PG_ROUTER_COST_THRESHOLD", " 1234.5 ")
 	t.Setenv("BINTRAIL_PG_ROUTER_SCAN_ROWS", "77")
-	if st, err = pgRouterSettingsFrom(pgRouterTestCmd(t)); err != nil || st.Cost != (pgshim.CostPolicy{CostThreshold: 1234.5, ScanRows: 77, RowCap: 200000}) {
+	if st, err = pgRouterSettingsFrom(pgRouterTestCmd(t)); err != nil || st.Cost != (pgshim.CostPolicy{CostThreshold: 1234.5, ScanRows: 77, RowCap: 10000}) {
 		t.Fatalf("from the environment: %+v %v", st.Cost, err)
 	}
 	// A flag wins over its variable, and one rule may be off.
-	if st, err = pgRouterSettingsFrom(pgRouterTestCmd(t, "--cost-threshold", "0", "--scan-rows", "5")); err != nil || st.Cost != (pgshim.CostPolicy{CostThreshold: 0, ScanRows: 5, RowCap: 200000}) {
+	if st, err = pgRouterSettingsFrom(pgRouterTestCmd(t, "--cost-threshold", "0", "--scan-rows", "5")); err != nil || st.Cost != (pgshim.CostPolicy{CostThreshold: 0, ScanRows: 5, RowCap: 10000}) {
 		t.Fatalf("flags over the environment: %+v %v", st.Cost, err)
 	}
 	clearPGRouterEnv(t)

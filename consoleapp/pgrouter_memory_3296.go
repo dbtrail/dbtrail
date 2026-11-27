@@ -231,7 +231,10 @@ type pgMemoryPlan struct {
 	// ResultsBytes is what the router holds for clients that have not read
 	// their answers yet (defaultFlashbackResultBudget).
 	ResultsBytes int64
-	In           console.PGMemoryInputs
+	// AnswerBytes is what each statement's answer may take in the router
+	// while it is read and sent (pgCopyAnswerBytes, #3286).
+	AnswerBytes int64
+	In          console.PGMemoryInputs
 	Pools        []pgIndexPool
 }
 
@@ -260,6 +263,9 @@ type pgMemoryDoc struct {
 	// SQLMemoryBytes is the SQL memory each is given, before the headroom.
 	Slots          int    `json:"slots,omitempty"`
 	StatementBytes uint64 `json:"statement_bytes,omitempty"`
+	// AnswerBytes: what each one's answer may take in the router while it is
+	// read and sent.
+	AnswerBytes uint64 `json:"answer_bytes,omitempty"`
 	SQLMemoryBytes uint64 `json:"sql_memory_bytes,omitempty"`
 	// TailsBytes: every server's tails together, Servers of them.
 	Servers    int    `json:"servers"`
@@ -300,6 +306,7 @@ func pgMemoryVerdict(p pgMemoryPlan) pgMemoryDoc {
 		d.SQLMemoryBytes = uint64(mem)
 	}
 	d.ResultsBytes = uint64(max(p.ResultsBytes, 0))
+	d.AnswerBytes = uint64(max(p.AnswerBytes, 0))
 	d.TailsUnbounded = p.In.TailsUnbounded
 	if p.In.TailsBytes > 0 {
 		d.TailsBytes = uint64(p.In.TailsBytes) * uint64(max(p.Servers, 0))
@@ -319,7 +326,7 @@ func pgMemoryVerdict(p pgMemoryPlan) pgMemoryDoc {
 		d.Verdict, d.Why = "unknown", "the memory of this machine cannot be read here"
 		return d
 	}
-	own := uint64(d.Slots)*d.StatementBytes + d.TailsBytes + d.ResultsBytes
+	own := uint64(d.Slots)*(d.StatementBytes+d.AnswerBytes) + d.TailsBytes + d.ResultsBytes
 	d.MachineBytes = p.In.MachineBytes
 	if p.In.OwnCeiling {
 		d.OwnCeilingBytes = p.In.CeilingBytes
@@ -377,15 +384,22 @@ func pgMemoryAdvice(d pgMemoryDoc, workers int) string {
 			pgGiB(others), pgGiB(d.AvailableBytes), more)
 	}
 	room := d.AvailableBytes - others
-	if fit := int(room / d.StatementBytes); fit >= 2 && fit-1 < workers {
+	if fit := int(room / (d.StatementBytes + d.AnswerBytes)); fit >= 2 && fit-1 < workers {
 		return fmt.Sprintf("with the SQL memory as it is, %s (PG_ROUTER_WORKERS=%d in .env, or --workers %d), %s with the one kept for short statements; or %s",
 			pgWorkersFit(fit-1), fit-1, fit-1, countOfStatementsAtOnce(fit), more)
 	}
-	if limit := pgMemoryLimitFor(int64(room / 2)); limit > 0 {
-		return fmt.Sprintf("with 1 worker (PG_ROUTER_WORKERS=1 in .env, or --workers 1), each statement fits with at most %s of SQL memory (--sql-memory %s; SQL_MEMORY=%s in .env sets it for the web interface and the MySQL router too); or %s",
-			pgGiB(uint64(limit)), pgMiBSetting(limit), pgMiBSetting(limit), more)
+	if per := room / 2; per > d.AnswerBytes {
+		if limit := pgMemoryLimitFor(int64(per - d.AnswerBytes)); limit > 0 {
+			return pgOneWorkerAdvice(limit, more)
+		}
 	}
 	return fmt.Sprintf("not even one statement with the least SQL memory the router takes (%s) fits beside the rest; %s", pgGiB(console.SQLMemoryFloor), more)
+}
+
+// pgOneWorkerAdvice is the advice of one worker at limit of SQL memory.
+func pgOneWorkerAdvice(limit int64, more string) string {
+	return fmt.Sprintf("with 1 worker (PG_ROUTER_WORKERS=1 in .env, or --workers 1), each statement fits with at most %s of SQL memory (--sql-memory %s; SQL_MEMORY=%s in .env sets it for the web interface and the MySQL router too); or %s",
+		pgGiB(uint64(limit)), pgMiBSetting(limit), pgMiBSetting(limit), more)
 }
 
 // pgMiBSetting writes a SQL memory the way --sql-memory and SQL_MEMORY take
@@ -451,6 +465,9 @@ func pgMemoryLines(d pgMemoryDoc) string {
 	}
 	var parts []string
 	parts = append(parts, fmt.Sprintf("%s at %s each (%s of SQL memory and its headroom)", countOfStatementsAtOnce(d.Slots), pgGiB(d.StatementBytes), pgGiB(d.SQLMemoryBytes)))
+	if d.AnswerBytes > 0 {
+		parts = append(parts, fmt.Sprintf("up to %s each for its answer while it is read and sent", pgGiB(d.AnswerBytes)))
+	}
 	switch {
 	case d.TailsUnbounded:
 		parts = append(parts, "the tails, which have no bound (BINTRAIL_SQL_TAIL_MAX_BYTES=0) and are not counted")
@@ -572,7 +589,7 @@ func pgMemoryPlanFor(workers int, memory string, srv interface {
 	PostgresServerIDs() []string
 }) func(ctx context.Context) pgMemoryPlan {
 	return func(ctx context.Context) pgMemoryPlan {
-		p := pgMemoryPlan{Workers: workers, Servers: len(srv.PostgresServerIDs()), Memory: memory, ResultsBytes: defaultFlashbackResultBudget, In: console.PGMemoryInputsNow()}
+		p := pgMemoryPlan{Workers: workers, Servers: len(srv.PostgresServerIDs()), Memory: memory, ResultsBytes: defaultFlashbackResultBudget, AnswerBytes: pgCopyAnswerBytes, In: console.PGMemoryInputsNow()}
 		dsns := srv.PostgresIndexDSNs()
 		p.Pools = make([]pgIndexPool, len(dsns))
 		var wg sync.WaitGroup

@@ -798,9 +798,9 @@ func pgCopySlots(workers int) int { return workers + 1 }
 // is answered whole up to it, refused past it. The MySQL port's
 // (console.DefaultSQLPortMaxRows, 10,000) refused CH-benCHmark's Q16, about
 // 100,000 rows, on every run, where PostgreSQL alone answers it in seconds.
-// What one statement holds in memory stays bounded by its bytes
-// (sqlsandbox's MaxResultBytes, 64 MB) and the port's 256 MB for every
-// result at once, as before. BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS (compose's
+// What one answer takes in this process's memory is bounded by its cells
+// (pgCopyMaxCells) and its bytes (sqlsandbox's MaxResultBytes, 64 MB):
+// pgCopyAnswerBytes. BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS (compose's
 // SQL_PORT_MAX_ROWS) still sets both ports' cap when given.
 const defaultPGRouterMaxRows = 200_000
 
@@ -814,7 +814,18 @@ const defaultPGRouterMaxRows = 200_000
 const (
 	pgCopyMaxCells       = 1_000_000
 	pgCopyCellsFloorRows = 10_000
+	// pgCopyCellBytes is what a cell takes while its answer is decoded and
+	// written for the wire, its text aside: measured at 92 bytes alive and
+	// 151 allocated per small numeric cell (pgshim TestCellMemoryCost_3286,
+	// which fails past 160).
+	pgCopyCellBytes = 160
 )
+
+// pgCopyAnswerBytes is the most one statement's answer takes in this
+// process while it is read and sent (pgMemoryPlan.AnswerBytes): its cells
+// and its text. A result under 10,000 rows wider than 100 columns can take
+// more, as any width could before.
+var pgCopyAnswerBytes = int64(pgCopyMaxCells*pgCopyCellBytes) + sqlsandbox.DefaultLimits().MaxResultBytes
 
 // pgRouterQueryTimeout bounds each statement end to end, a wait for a worker
 // included: the same five minutes as the MySQL port's.
