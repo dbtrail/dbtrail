@@ -85,6 +85,11 @@ const (
 	JoinCheckCouldNotRun  = "could_not_run" // not checked: the copy's plan could not be had or read
 )
 
+// JoinCheckConnectedOrder is the outcome of a statement checked, dangerous
+// in the copy's order and in the order written, and run with its tables in
+// a connected order (sqlsandbox Session.TryConnectedJoinOrder).
+const JoinCheckConnectedOrder = "connected_order"
+
 // JoinStats is a server's column statistics for the copy's join check,
 // shared by all of its connections (Forward.JoinStats).
 type JoinStats struct {
@@ -363,6 +368,8 @@ func (s *session) noteJoinCheck(res sqlsandbox.Result, err error, asked bool, wa
 		return ""
 	case err != nil:
 		return ""
+	case res.JoinOrderConnected != "":
+		return JoinCheckConnectedOrder
 	case res.JoinOrderWritten:
 		s.logger.Debug("pgshim: the copy ran a statement with its joins in the order written: in the copy's own order one was estimated far past its inputs")
 		return JoinCheckWrittenOrder

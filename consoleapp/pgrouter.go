@@ -1334,6 +1334,7 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 				MaxCells: pgCopyMaxCells, CellsFloorRows: pgCopyCellsFloorRows}
 			if opts.JoinNDV != nil {
 				sess.JoinNDV = &sqlsandbox.JoinCounts{NDV: opts.JoinNDV}
+				sess.TryConnectedJoinOrder = true
 			}
 			// How far the snapshot files it reads reach (#3125), for an
 			// answer that reads a table without its recent changes.

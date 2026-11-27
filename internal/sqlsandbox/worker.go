@@ -229,10 +229,10 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 	}()
 	// The order the join check chose travels with an engine error too, so
 	// the parent does not run the same plan again (oomretry.go).
-	ranWritten := false
+	ranOrder, ranTables := "", ""
 	defer func() {
-		if ranWritten && res.Error != nil && res.Error.Kind == errQuery {
-			res.JoinOrder = joinOrderWritten
+		if ranOrder != "" && res.Error != nil && res.Error.Kind == errQuery {
+			res.JoinOrder, res.JoinOrderTables = ranOrder, ranTables
 		}
 	}()
 	if sess.err != nil {
@@ -397,19 +397,35 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 	// because running it in the order written is a SET. When the order
 	// written was asked for already, only that order is checked
 	// (checkJoinsWritten): there is no other to move to.
+	// The text that runs: the statement's own, or the join check's in a
+	// connected order of its tables (joinconnected.go). Everything else of
+	// the job (its parse, the column names, the select limit) is the
+	// statement's own, which that text keeps.
+	runSQL := job.SQL
 	if job.JoinNDV != nil {
 		var check joinCheck
 		if job.KeepJoinOrder {
 			check = checkJoinsWritten(ctx, conn, job.SQL, job.JoinNDV)
 		} else {
-			check = checkJoins(ctx, conn, job.SQL, job.JoinNDV, job.SkipCommonSubplan)
+			check = checkJoins(ctx, conn, job.SQL, job.JoinNDV, job.SkipCommonSubplan, job.TryConnectedJoinOrder)
 		}
 		switch {
+		case check.err != nil:
+			return wireResult{Error: &wireError{Kind: errQuery, Message: "the join check did not finish: " + check.err.Error()}}
 		case check.refusal != "":
-			return wireResult{Error: &wireError{Kind: errJoinTooBig, Message: check.refusal}}
+			// Why the connected order was not used, for the parent's log.
+			return wireResult{Error: &wireError{Kind: errJoinTooBig, Message: check.refusal},
+				ConnectedOrderNote: check.connectedNote.why, ConnectedOrderFailed: check.connectedNote.failed}
+		case check.connected != nil:
+			runSQL = check.connected.text
+			res.JoinOrder, res.JoinOrderTables = joinOrderConnected, strings.Join(check.connected.order, ", ")
+			ranOrder, ranTables = joinOrderConnected, res.JoinOrderTables
+			// The order written's line, so the parent does not run it again
+			// in another order after the kernel stops it (oomretry.go).
+			fmt.Fprintln(stderr, joinOrderConnectedLine+res.JoinOrderTables)
 		case check.written:
 			res.JoinOrder = joinOrderWritten
-			ranWritten = true
+			ranOrder = joinOrderWritten
 			// Said on stderr too, before the statement runs: a worker the
 			// kernel stops leaves no answer, and the parent reads this line
 			// to know which order it ran in (oomretry.go).
@@ -438,7 +454,7 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 	}
 
 	start := time.Now()
-	rows, err := conn.QueryContext(ctx, job.SQL)
+	rows, err := conn.QueryContext(ctx, runSQL)
 	if err != nil {
 		msg := err.Error()
 		if missingSchema != "" && strings.Contains(msg, "does not exist") {

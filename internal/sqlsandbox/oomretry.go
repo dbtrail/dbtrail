@@ -121,6 +121,12 @@ const (
 // the kernel stops leaves no answer that says so.
 const joinOrderWrittenLine = "sql worker: the join check runs this statement with its joins in the order written"
 
+// joinOrderConnectedLine starts the line a worker writes instead when the
+// order written is a connected order of the statement's tables
+// (joinconnected.go), followed by that order. It holds joinOrderWrittenLine,
+// so the parent reads it as the order written.
+const joinOrderConnectedLine = joinOrderWrittenLine + ", its tables in a connected order: "
+
 // outOfMemoryPrefix starts DuckDB's out of memory errors, and the ones this
 // package writes in their place (oomFenceMessage, spillCapMessage).
 const outOfMemoryPrefix = "Out of Memory Error"
