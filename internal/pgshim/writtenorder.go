@@ -28,8 +28,10 @@ import (
 // two protocols share a shape unless an argument is written with a cast the
 // simple statement does not have.
 //
-// It is remembered only when the retry in the order written answered
-// (sqlsandbox.WrittenOrderRetryOK): never from a retry that failed, one that
+// It is remembered when the retry in the order written answered
+// (sqlsandbox.WrittenOrderRetryOK), or when a statement slow in the copy's
+// own order answered clearly faster in the order written on trial
+// (writtenorder_slow.go): never from a retry that failed, one that
 // was skipped, a cancel, a time-out or any other error. What it learned is
 // about the plan, so an answer the port then does not give (copy_too_old, a
 // result too large) still counts.
@@ -85,9 +87,16 @@ type WrittenOrders struct {
 	// Remember is how long a shape is kept from when it was learned: 0 is
 	// DefaultWrittenOrderRemember, a negative value remembers nothing.
 	Remember time.Duration
+	// SlowAfter is how long a statement must take in the copy's own order
+	// for its shape to be tried in the order written (writtenorder_slow.go):
+	// 0 is DefaultWrittenOrderSlowAfter, a negative value marks nothing.
+	SlowAfter time.Duration
 
 	mu sync.Mutex
 	at map[string]time.Time
+	// slow is the shapes slowness marked (writtenorder_slow.go), bounded
+	// apart from at, so its bound never forgets a shape at holds.
+	slow map[string]slowShape
 	// now is the clock, time.Now when nil.
 	now func() time.Time
 }
@@ -136,14 +145,23 @@ func (w *WrittenOrders) note(key string) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	now := w.clock()
+	// Running out of memory in the copy's own order is the stronger lesson:
+	// what slowness marked of the shape (a trial, or its own order kept) no
+	// longer counts.
+	delete(w.slow, key)
 	if at, ok := w.at[key]; ok && now.Sub(at) < w.keepFor() {
 		return false
 	}
+	w.rememberLocked(key, now)
+	return true
+}
+
+// rememberLocked remembers key from now, with w.mu held.
+func (w *WrittenOrders) rememberLocked(key string, now time.Time) {
 	if w.at == nil || len(w.at) >= writtenOrdersMax {
 		w.at = map[string]time.Time{}
 	}
 	w.at[key] = now
-	return true
 }
 
 // forget forgets key, and reports whether it was remembered.

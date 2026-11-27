@@ -261,7 +261,8 @@ type RunOptions struct {
 	JoinNDV map[string]float64
 	// KeepJoinOrder runs the statement with its joins in the order written
 	// (sqlsandbox.Session.KeepJoinOrder): its shape ran out of memory in the
-	// copy's own order before and answered in this one (writtenorder.go).
+	// copy's own order before and answered in this one (writtenorder.go), or
+	// was slow there and is tried in this one (writtenorder_slow.go).
 	KeepJoinOrder bool
 }
 
@@ -493,17 +494,12 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		opts.JoinNDV, want = s.joinNDVFor(text)
 		// A shape that ran out of memory in the copy's join order and
 		// answered in the order written runs in the order written from the
-		// start, within half of the client's time (writtenorder.go).
-		shape := s.writtenOrderKey(qstr)
-		remembered := shape != "" && s.bound.WrittenOrders.has(shape)
-		run := ctx
-		if remembered {
-			startInWrittenOrder(&opts)
-			var cancel context.CancelFunc
-			run, cancel = s.writtenOrderContext(ctx)
-			defer cancel()
-		}
-		res, err = s.bound.Run(run, text, opts)
+		// start, within half of the client's time (writtenorder.go); one
+		// slow in the copy's join order is tried in the order written
+		// (writtenorder_slow.go).
+		var release func()
+		res, release, err = s.runRemembering(ctx, qstr, text, opts, want)
+		defer release()
 		var changed *sqlsandbox.MayHaveChangedError
 		if (opts.NeedTails || opts.NoOlderTails) && errors.As(err, &changed) {
 			// Said at info once a minute for the process (#3116): every
@@ -511,9 +507,6 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 			// take, and /status counts them only as copy_too_old.
 			logEveryMinute(s.logger, "copy_too_old", "pgshim: a statement went to the source in fresh mode: the copy's recent changes for it were not ready, or older than an earlier answer of the copy on its connection (said once a minute)", "why", changed.Reason)
 		}
-		s.joinCheck = rememberedJoinCheck(remembered, s.noteJoinCheck(res, err, opts.JoinNDV != nil, want))
-		s.oomRetry = sqlsandbox.WrittenOrderRetryOf(res, err)
-		err = s.settleWrittenOrder(ctx, run, qstr, shape, remembered, res, err)
 	}
 	if res.Spool != nil {
 		// Only a bug gets here: this port asks for no result in a file.

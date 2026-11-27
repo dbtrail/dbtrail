@@ -45,11 +45,18 @@ func TestPGRouteStats_countsRememberedWrittenOrder(t *testing.T) {
 		{Side: pgshim.RouteCopy, Reason: pgshim.ReasonAnswersTheSame, WrittenOrder: pgshim.WrittenOrderRemembered},
 		{Side: pgshim.RouteSource, Reason: pgshim.ReasonCopyRefusedAfterWrittenOrder, WrittenOrder: pgshim.WrittenOrderForgotten},
 		{Side: pgshim.RouteCopy, Reason: pgshim.ReasonAnswersTheSame, OOMRetry: sqlsandbox.WrittenOrderRetryOK},
+		// Slowness: none of these is a remembered run.
+		{Side: pgshim.RouteCopy, Reason: pgshim.ReasonAnswersTheSame, WrittenOrder: pgshim.WrittenOrderSlowMarked},
+		{Side: pgshim.RouteCopy, Reason: pgshim.ReasonAnswersTheSame, WrittenOrder: pgshim.WrittenOrderLearnedSlow},
+		{Side: pgshim.RouteCopy, Reason: pgshim.ReasonAnswersTheSame, WrittenOrder: pgshim.WrittenOrderOwnOrderKept},
+		{Side: pgshim.RouteCopy, Reason: pgshim.ReasonAnswersTheSame, WrittenOrder: pgshim.WrittenOrderOwnOrderKept},
+		{Side: pgshim.RouteSource, Reason: pgshim.ReasonCopyRefused, WrittenOrder: pgshim.WrittenOrderTrial},
 	} {
 		r.note("p", n)
 	}
 	n := r.counts("").Servers["p"]
-	want := map[string]uint64{"written_order_remembered": 3, "written_order_forgotten": 1, "oom_retry_written_order_ok": 1}
+	want := map[string]uint64{"written_order_remembered": 3, "written_order_forgotten": 1, "oom_retry_written_order_ok": 1,
+		"written_order_slow_marked": 1, "written_order_trial": 4, "written_order_learned_slow": 1, "written_order_own_order_kept": 2}
 	if !maps.Equal(n.JoinChecks, want) {
 		t.Errorf("join_checks %v, want %v", n.JoinChecks, want)
 	}

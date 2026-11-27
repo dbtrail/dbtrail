@@ -2481,6 +2481,53 @@ separate runs. A remembered statement whose join check passed adds nothing to
 `planned`. The log has one `INFO` line when a shape is learned and one
 when it is forgotten, not one per statement.
 
+**The port also learns the order written from a slow statement.** Running
+out of memory is not the only sign of a bad join order. Measured on the
+CH-benCHmark's Q7 over fresh-mode views on a live copy (200 warehouses, 4
+threads): in the engine's own join order it flips between two plans, one
+that answers in about 7 seconds and one that takes a steady 31 to 33
+seconds, while in the order written the same statement over the same
+snapshot answers in 5.7 to 6.6 seconds. The join check does not catch it,
+since no join of it is estimated past 3 billion rows, and its estimates flag
+it on one copy and not on another, so which plan a server gets depends on the
+day. So a statement that answers on the copy in the
+engine's own order and takes 15 seconds or more marks its shape for a trial.
+The time counted is the engine's own run, not the wait for a free worker or
+the building of the copy's views, so a statement that queued behind a report
+is not taken for a slow plan. A statement that failed, one already run in
+the order written (a remembered shape, or the join check's choice), one the
+second run after an out of memory answered, and one the port could only read
+in part never mark anything. The next statement of a marked shape runs in the
+order written, as a remembered one does: with the join check of that order,
+and within half of what is left of the client's `statement_timeout` where
+the source can have the rest. If it answers in at most half the time of the
+slow run, the shape is remembered exactly like one learned from running out
+of memory: 24 hours from that moment, and forgotten, with the statement sent
+to the source as `copy_refused_after_written_order`, if it later runs out of
+memory or time in the order written. If it answers but is not that much
+faster, the engine's own order is kept for that shape, and no trial happens
+again for 24 hours. If it fails in the order written (out of memory, out of
+time, or a join there too big for the join check), it is not sent to the
+source: the copy answered it before in its own order, so it runs once more,
+at once, in that order, within half of what is left of `statement_timeout`
+where the source can have the rest, and the engine's own order is kept for
+24 hours. That second run is answered like any statement in the copy's own
+order. When the client's own `statement_timeout` ends the trial, the client
+gets `57014` as always, and the engine's own order is kept for 24 hours. A
+cancel or any other error is answered as itself, and the shape stays marked
+for its next statement. The comparison is deliberately strict: a shape
+covers every value of a statement, so a trial measured with one date range
+can be wrong for another, and the 24 hours correct a wrong verdict. Marks
+are per server, at most 4,096 of them (apart from the remembered shapes, so
+neither forgets the other), each lasting 24 hours, in memory only. `/status`
+counts them under `join_checks`: `written_order_slow_marked` for each
+statement that marked its shape, `written_order_trial` for each trial, and,
+as parts of it, `written_order_learned_slow` (remembered from then on, so its
+next statements count as `written_order_remembered`) and
+`written_order_own_order_kept`. The log has one `DEBUG` line when a shape is
+marked, with the time it took and the threshold, and one `INFO` line for
+each trial's verdict.
+
 **The copy does not cache a subplan a statement reads twice.** On this port
 the engine's `common_subplan` optimizer is off: over a view of the copy it
 wrote the whole view to disk (the CH-benCHmark's Q17, which reads
