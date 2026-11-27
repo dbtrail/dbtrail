@@ -215,10 +215,17 @@ func (s *session) commitShapeNote() {
 	if s.shapeNote != "" {
 		s.notice(s.shapeNote)
 	}
-	s.shapeNote = ""
+	// The notice of a capture whose record is not current
+	// (capture_stale_3202.go) is held to the same moment.
+	if s.captureNote != "" {
+		s.notice(s.captureNote)
+	}
+	s.shapeNote, s.captureNote = "", ""
 }
 
-func (s *session) dropShapeNote() { s.shapeNote, s.shapeUnchecked = "", "" }
+func (s *session) dropShapeNote() {
+	s.shapeNote, s.shapeUnchecked, s.captureNote, s.captureState = "", "", "", ""
+}
 
 // warnEveryMinute is logEveryMinute at warn level.
 func warnEveryMinute(logger *slog.Logger, key, msg string, args ...any) {

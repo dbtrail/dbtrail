@@ -63,8 +63,9 @@ const (
 // captureStateRefusal is the error of a statement for the copy while
 // capture's record of dropped changes is not current, nil when the copy may
 // run it. The statement then goes to the source (fallTo). Where it cannot go
-// there, or the host could not tell, it runs on the copy with a NOTICE, and
-// the statement's note says so (captureState).
+// there, or the host could not tell, it runs on the copy, and its NOTICE
+// waits in captureNote until the copy's answer is the client's
+// (commitShapeNote); the statement's note says so (captureState).
 func (s *session) captureStateRefusal(ctx context.Context, text string) *pgErr {
 	if s.bound == nil || s.bound.CaptureState == nil {
 		return nil
@@ -103,13 +104,16 @@ func (s *session) captureStateRefusal(ctx context.Context, text string) *pgErr {
 			s.fallTo(ReasonCaptureStateStale)
 			return &pgErr{"55000", st.Why + "; the copy may be missing changes of any of this server's tables, so it does not answer"}
 		}
-		s.notice("Capture's record of the changes it dropped is not current: " + st.Why +
-			". The copy answered from what it holds, which may be missing changes made since to any of this server's tables. " + because)
+		s.captureNote = "Capture's record of the changes it dropped is not current: " + st.Why +
+			". The copy answered from what it holds, which may be missing changes made since to any of this server's tables. " + because
 	default:
-		s.notice("DBTrail could not check whether capture's record of the changes it dropped is current (" + st.Why +
-			"), so the copy answered as it does without that check: its tables may be missing changes made since capture last saved its state.")
+		s.captureNote = "DBTrail could not check whether capture's record of the changes it dropped is current (" + st.Why +
+			"), so the copy answered as it does without that check: its tables may be missing changes made since capture last saved its state."
 		st.Kind = CaptureUnchecked
 	}
+	// Sent with the shape note, once the copy's answer is the client's
+	// (commitShapeNote): the copy can still fail and the source answer, or
+	// the wait for the source's position send it there.
 	s.captureState = st.Kind
 	return nil
 }

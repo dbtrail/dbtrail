@@ -1243,8 +1243,9 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		// writing (#3202): its record of dropped changes is not current, and
 		// the source answers. The index says how old the last save is; the
 		// source is asked where its WAL stands only once that is past the
-		// bound, as the forwarding account, never a row of a table.
-		bound.CaptureState = pgPortCaptureState(tgt.ID, tgt.IndexDB, fwd.DSN, sources, logger)
+		// bound, as the forwarding account, on a connection outside the
+		// pool, never a row of a table.
+		bound.CaptureState = pgPortCaptureState(tgt.ID, tgt.IndexDB, fwd.DSN, logger)
 		// The copy waits for the source's position on a connection the
 		// source answered, then answers (#2985).
 		bound.CopyWait = func(ctx context.Context, lsn uint64) (pgshim.CopyWaitOutcome, string) {

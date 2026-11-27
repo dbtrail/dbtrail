@@ -313,3 +313,46 @@ func TestCaptureStale_3202_stoppedWhileAsked(t *testing.T) {
 		t.Errorf("the copy ran %d statements", d)
 	}
 }
+
+// The NOTICE goes out only with the copy's answer: a statement the copy
+// fails and the source answers gets none, over every protocol. (Here the
+// state could not be checked, so the copy runs it on a connection that
+// forwards.)
+func TestCaptureStale_3202_theNoticeWaitsForTheCopysAnswer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	p := newTablesPort(t)
+	k := withCaptureKnob(p)
+	k.set(CaptureState{Kind: CaptureUnchecked, Why: "your PostgreSQL did not answer within 2s"}, nil)
+	var fail atomic.Bool
+	p.l.copyErr = func(st string) error {
+		if fail.Load() && !strings.Contains(st, "dbtrail_describe") {
+			return errors.New("Catalog Error: Scalar Function with name nope does not exist")
+		}
+		return nil
+	}
+	for _, how := range strictProtocols {
+		t.Run(how, func(t *testing.T) {
+			fail.Store(true)
+			c, notices := strictConn(t, ctx, p.l)
+			got := strictRun(ctx, c, p.l, how, "SELECT sum(n) FROM big")
+			if got.answer != "42" || got.side != RouteSource || got.reason != ReasonCopyRefused {
+				t.Errorf("the copy failed: %+v, want the source's 42", got)
+			}
+			if n := strings.Join(notices(), "|"); strings.Contains(n, "could not check") {
+				t.Errorf("notices %q for a statement the source answered", n)
+			}
+			if note := p.l.last(); note.CaptureState != "" {
+				t.Errorf("counted as %q on the copy, though the source answered", note.CaptureState)
+			}
+			fail.Store(false)
+			d, notices := strictConn(t, ctx, p.l)
+			if got := strictRun(ctx, d, p.l, how, "SELECT sum(n) FROM big"); got.answer != "7" || got.side != RouteCopy {
+				t.Errorf("the copy answered: %+v", got)
+			}
+			if n := strings.Join(notices(), "|"); strings.Count(n, "could not check") != 1 {
+				t.Errorf("notices %q, want the one notice with the copy's answer", n)
+			}
+		})
+	}
+}

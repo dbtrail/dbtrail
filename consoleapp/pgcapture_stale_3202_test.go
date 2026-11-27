@@ -43,6 +43,7 @@ func TestPGCaptureState_3202_theRule(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		row    pgPositionRow
+		was    string  // the server's last verdict's kind
 		source *answer // nil: the source must not be asked
 		want   string  // CaptureState.Kind
 		why    []string
@@ -98,10 +99,30 @@ func TestPGCaptureState_3202_theRule(t *testing.T) {
 			want:   pgshim.CaptureUnchecked, why: []string{"the port could not connect to your PostgreSQL"}},
 		{name: "saves stopped, the source failed otherwise", row: pgSavedRow(600, sent), source: &answer{err: errors.New("dial tcp 10.0.3.7:5432: refused")},
 			want: pgshim.CaptureUnchecked, why: []string{"your PostgreSQL could not be asked"}},
+		// Stale already, and the source does not answer in time (its
+		// connections taken by the statements that went there): stays stale,
+		// or the statements would go back to the copy exactly now.
+		{name: "stale, then the source does not answer in time", row: pgSavedRow(600, sent), was: pgshim.CaptureStale,
+			source: &answer{err: &pgCaptureAskError{cause: "your PostgreSQL did not answer within 2s", err: context.DeadlineExceeded, timedOut: true}},
+			want:   pgshim.CaptureStale, why: []string{"600 seconds", "when last asked"}},
+		{name: "stale, then a bare deadline", row: pgSavedRow(600, sent), was: pgshim.CaptureStale, source: &answer{err: context.DeadlineExceeded},
+			want: pgshim.CaptureStale},
+		// Never stale: nothing to keep.
+		{name: "not stale before, the source does not answer in time", row: pgSavedRow(600, sent),
+			source: &answer{err: &pgCaptureAskError{cause: "your PostgreSQL did not answer within 2s", err: context.DeadlineExceeded, timedOut: true}},
+			want:   pgshim.CaptureUnchecked},
+		{name: "unchecked before, the source does not answer in time", row: pgSavedRow(600, sent), was: pgshim.CaptureUnchecked,
+			source: &answer{err: &pgCaptureAskError{cause: "x", err: context.DeadlineExceeded, timedOut: true}}, want: pgshim.CaptureUnchecked},
+		// Stale, and the source refuses the connection (it is away, not
+		// busy): the statements could not go there either.
+		{name: "stale, then the source refuses", row: pgSavedRow(600, sent), was: pgshim.CaptureStale,
+			source: &answer{err: &pgCaptureAskError{cause: "the port could not connect to your PostgreSQL", err: errors.New("refused")}}, want: pgshim.CaptureUnchecked},
+		// Stale, and capture saves again: the old verdict is not kept.
+		{name: "stale, then a save", row: pgSavedRow(3, sent), was: pgshim.CaptureStale},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			asked := 0
-			st, seen := pgCaptureStateFrom(context.Background(), tc.row, bound, func(context.Context) (uint64, error) {
+			st, seen := pgCaptureStateFrom(context.Background(), tc.row, bound, pgshim.CaptureState{Kind: tc.was, Why: "before"}, func(context.Context) (uint64, error) {
 				asked++
 				if tc.source == nil {
 					return 0, errors.New("not to be asked")
@@ -333,5 +354,114 @@ func TestPGCaptureState_3202_statusCounts(t *testing.T) {
 	n := r.doc("").Servers["srv1"]
 	if n.CaptureStateOnCopy[pgshim.CaptureStale] != 1 || n.CaptureStateOnCopy[pgshim.CaptureUnchecked] != 1 || n.Reasons[pgshim.ReasonCaptureStateStale] != 1 {
 		t.Errorf("%+v", n)
+	}
+}
+
+// Stale, then every question to the source times out (its connections
+// taken by the statements that went there, a source slow under them): the
+// server stays stale while the save is old, and goes unchecked only once it
+// was not stale before.
+func TestPGCaptureState_3202_staysStaleWhenTheQuestionTimesOut(t *testing.T) {
+	ctx := context.Background()
+	f := newPGCaptureFixture()
+	f.set(pgSavedRow(90, 1000), 2000)
+	if st, _ := f.c.state(ctx); st.Kind != pgshim.CaptureStale {
+		t.Fatalf("stale: %+v", st)
+	}
+	f.mu.Lock()
+	f.srcErr = &pgCaptureAskError{cause: "your PostgreSQL did not answer within 2s", err: context.DeadlineExceeded, timedOut: true}
+	f.mu.Unlock()
+	for i := range 3 {
+		f.advance(pgCaptureStateTTL)
+		if st, err := f.c.state(ctx); err != nil || st.Kind != pgshim.CaptureStale {
+			t.Fatalf("question %d timed out: %+v %v, want still stale", i, st, err)
+		}
+	}
+	if n := strings.Count(f.log.String(), "level=WARN"); n != 1 {
+		t.Errorf("warned %d times, want once: %s", n, f.log.String())
+	}
+}
+
+// /status does not say a verdict nobody asked for since as the state now.
+func TestPGCaptureState_3202_anOldVerdictIsNotSaid(t *testing.T) {
+	f := newPGCaptureFixture()
+	f.set(pgSavedRow(90, 1000), 2000)
+	if st, _ := f.c.state(context.Background()); st.Kind != pgshim.CaptureStale {
+		t.Fatalf("stale: %+v", st)
+	}
+	if f.c.doc() == nil {
+		t.Fatal("a fresh stale verdict is not said")
+	}
+	f.advance(pgCaptureStateFailTTL + time.Millisecond)
+	if d := f.c.doc(); d != nil {
+		t.Errorf("a verdict %s old is said as now: %+v", pgCaptureStateFailTTL, d)
+	}
+}
+
+// /status asks for a fresh verdict, so a capture that saves again with no
+// statement coming is said as current, and its clearing logged; and a stall
+// with no statement is warned about when /status is asked.
+func TestPGCaptureState_3202_statusAsksForAFreshVerdict(t *testing.T) {
+	f := newPGCaptureFixture()
+	pgCaptureStateCaches.mu.Lock()
+	if pgCaptureStateCaches.of == nil {
+		pgCaptureStateCaches.of = map[string]*pgCaptureStateCache{}
+		pgCaptureStateCaches.key = map[string]pgCaptureStateKey{}
+	}
+	pgCaptureStateCaches.of["srv-status"] = f.c
+	pgCaptureStateCaches.mu.Unlock()
+	t.Cleanup(func() {
+		pgCaptureStateCaches.mu.Lock()
+		delete(pgCaptureStateCaches.of, "srv-status")
+		pgCaptureStateCaches.mu.Unlock()
+	})
+	r := newPGRouteStats(time.Now(), false)
+	f.set(pgSavedRow(90, 1000), 2000)
+	if d := r.doc("").Servers["srv-status"].CaptureState; d == nil || d.State != pgshim.CaptureStale {
+		t.Fatalf("a stall with no statement, /status: %+v", d)
+	}
+	if !strings.Contains(f.log.String(), "level=WARN") {
+		t.Errorf("a stall with no statement is not warned about when /status asks: %s", f.log.String())
+	}
+	f.advance(pgCaptureStateTTL)
+	f.set(pgSavedRow(1, 2000), 2000)
+	if d := r.doc("").Servers["srv-status"].CaptureState; d != nil {
+		t.Errorf("after capture saved again, no statement: %+v", d)
+	}
+	if !strings.Contains(f.log.String(), "capture saves its state again") {
+		t.Errorf("the clearing is not logged: %s", f.log.String())
+	}
+}
+
+// The line that says it ended names what ended it.
+func TestPGCaptureState_3202_theClearingNamesItsCause(t *testing.T) {
+	ctx := context.Background()
+	f := newPGCaptureFixture()
+	f.mu.Lock()
+	f.rowErr = errors.New("index down")
+	f.mu.Unlock()
+	if _, err := f.c.state(ctx); err == nil {
+		t.Fatal("want the index's error")
+	}
+	f.advance(pgCaptureStateFailTTL)
+	f.mu.Lock()
+	f.rowErr = nil
+	f.mu.Unlock()
+	f.set(pgSavedRow(1, 1000), 1000)
+	if _, err := f.c.state(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if l := f.log.String(); !strings.Contains(l, "can be read from the index again") || strings.Contains(l, "saves its state again") {
+		t.Errorf("after the index came back: %s", l)
+	}
+	// Stale, then the source is no longer past the save (still old).
+	f.advance(pgCaptureStateTTL)
+	f.set(pgSavedRow(90, 1000), 2000)
+	_, _ = f.c.state(ctx)
+	f.advance(pgCaptureStateTTL)
+	f.set(pgSavedRow(95, 3000), 2000)
+	_, _ = f.c.state(ctx)
+	if l := f.log.String(); !strings.Contains(l, "not past the last position capture saved") {
+		t.Errorf("after the source stopped being past the save: %s", l)
 	}
 }

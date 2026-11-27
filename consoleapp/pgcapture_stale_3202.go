@@ -32,6 +32,16 @@ import (
 //     sent-through position, #2746), read from the source as the server's
 //     forwarding account. Compared by position only.
 //
+// The question to the source has a connection of its own, outside the
+// port's pool of connections to its sources (pgSourceSlots): once a server
+// is stale its statements go to the source and can fill that pool, and a
+// question that waited for a slot would find none, turn the verdict to
+// unchecked, and send the statements back to the copy exactly while the
+// record cannot be trusted. It is one short connection and one row, at most
+// one per server at a time (the cache's flight) and one a second while the
+// save is old. And a question that times out while the save is still old
+// keeps a stale verdict the server already had (pgCaptureStateFrom).
+//
 // The second is what tells a stall from a quiet source. A running capture
 // that is resumed saves every checkpoint period (10 s in watch) even with
 // nothing to capture, and within checkpointSoonest of any change, so a save
@@ -86,6 +96,8 @@ type pgCaptureSeen struct {
 type pgCaptureAskError struct {
 	cause string
 	err   error
+	// timedOut: the source did not answer within pgCaptureStateWait.
+	timedOut bool
 }
 
 func (e *pgCaptureAskError) Error() string { return e.err.Error() }
@@ -93,8 +105,12 @@ func (e *pgCaptureAskError) Unwrap() error { return e.err }
 
 // pgCaptureStateFrom is the verdict on row, stream_state as
 // readPGPositionRow reads it, with the source asked (sourceAt) only when the
-// last save is older than bound. Pure but for sourceAt.
-func pgCaptureStateFrom(ctx context.Context, row pgPositionRow, bound time.Duration,
+// last save is older than bound. was is the server's last verdict: a stale
+// one is kept when the source does not answer in time while the save is
+// still old, since nothing says the source stopped writing, and dropping to
+// unchecked would send the statements back to the copy. Pure but for
+// sourceAt.
+func pgCaptureStateFrom(ctx context.Context, row pgPositionRow, bound time.Duration, was pgshim.CaptureState,
 	sourceAt func(context.Context) (uint64, error)) (pgshim.CaptureState, pgCaptureSeen) {
 	if ok, _ := pgPositionRefusal(row); !ok {
 		return pgshim.CaptureState{}, pgCaptureSeen{}
@@ -109,6 +125,11 @@ func pgCaptureStateFrom(ctx context.Context, row pgPositionRow, bound time.Durat
 		var ae *pgCaptureAskError
 		if errors.As(err, &ae) && ae.cause != "" {
 			cause = ae.cause
+		}
+		if was.Kind == pgshim.CaptureStale && (errors.As(err, &ae) && ae.timedOut || errors.Is(err, context.DeadlineExceeded)) {
+			return pgshim.CaptureState{Kind: pgshim.CaptureStale, Why: fmt.Sprintf(
+				"capture has not saved its state for %d seconds, and your PostgreSQL had written past the last position it saved when last asked, so its record of the changes it dropped is not current",
+				int64(seen.savedAgo/time.Second))}, seen
 		}
 		return pgshim.CaptureState{Kind: pgshim.CaptureUnchecked, Why: fmt.Sprintf(
 			"capture has not saved its state for %d seconds, and %s", int64(seen.savedAgo/time.Second), cause)}, seen
@@ -184,7 +205,13 @@ func (c *pgCaptureStateCache) state(ctx context.Context) (pgshim.CaptureState, e
 	var st pgshim.CaptureState
 	var seen pgCaptureSeen
 	if err == nil {
-		st, seen = pgCaptureStateFrom(context.WithoutCancel(ctx), row, pgCaptureStaleBound, c.askSource)
+		c.mu.Lock()
+		was := c.st
+		if c.err != nil {
+			was = pgshim.CaptureState{}
+		}
+		c.mu.Unlock()
+		st, seen = pgCaptureStateFrom(context.WithoutCancel(ctx), row, pgCaptureStaleBound, was, c.askSource)
 	} else {
 		err = fmt.Errorf("server %s: read capture's state from the index: %w", c.server, err)
 	}
@@ -218,9 +245,17 @@ func (c *pgCaptureStateCache) store(st pgshim.CaptureState, err error, seen pgCa
 		c.logger.Warn("PostgreSQL router: capture's state could not be read from the index; the copy answers this server's statements, with a notice",
 			"server", c.server, "error", err)
 	default:
-		if was != "" {
-			c.logger.Info("PostgreSQL router: capture saves its state again, or the source wrote nothing past it; statements go where they did before",
-				"server", c.server, "was", was)
+		switch {
+		case was == "":
+		case was == "index_unread":
+			c.logger.Info("PostgreSQL router: capture's state can be read from the index again; statements go where they did before",
+				"server", c.server)
+		case seen.savedAgo <= pgCaptureStaleBound:
+			c.logger.Info("PostgreSQL router: capture saves its state again; statements go where they did before",
+				"server", c.server, "was", was, "saved_ago", seen.savedAgo)
+		default:
+			c.logger.Info("PostgreSQL router: the source's WAL is not past the last position capture saved; statements go where they did before",
+				"server", c.server, "was", was, "saved_ago", seen.savedAgo)
 		}
 	}
 }
@@ -233,11 +268,14 @@ type pgCaptureStateDoc struct {
 	CheckedAt string `json:"checked_at"`
 }
 
-// doc is the verdict for /status, nil when it is current or none was read.
+// doc is the verdict for /status, nil when it is current, none was read,
+// or the one read is older than pgCaptureStateFailTTL: a verdict nobody
+// asked for since is not said as the state now. /status asks for a fresh one
+// first (pgCaptureStateNow).
 func (c *pgCaptureStateCache) doc() *pgCaptureStateDoc {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.has {
+	if !c.has || c.now().Sub(c.at) > pgCaptureStateFailTTL {
 		return nil
 	}
 	d := &pgCaptureStateDoc{State: c.st.Kind, Why: c.st.Why, CheckedAt: c.at.UTC().Format(time.RFC3339)}
@@ -260,20 +298,19 @@ var pgCaptureStateCaches struct {
 // pgCaptureStateKey is what a server's cache reads with: a change of either
 // is a new cache.
 type pgCaptureStateKey struct {
-	index   *sql.DB
-	dsn     string
-	sources *pgSourceSlots
+	index *sql.DB
+	dsn   string
 }
 
 // pgPortCaptureState is pgshim.Binding.CaptureState for server, whose index
 // is index and whose port forwards as dsn, one cache per server shared by its
-// connections. The source is asked on one of the port's connections to its
-// sources (sources), as a forwarded statement is.
-func pgPortCaptureState(server string, index *sql.DB, dsn string, sources *pgSourceSlots, logger *slog.Logger) func(context.Context) (pgshim.CaptureState, error) {
-	if index == nil || dsn == "" || sources == nil {
+// connections. The source is asked on a connection of the question's own,
+// never one of the port's pool (see the top of this file).
+func pgPortCaptureState(server string, index *sql.DB, dsn string, logger *slog.Logger) func(context.Context) (pgshim.CaptureState, error) {
+	if index == nil || dsn == "" {
 		return nil
 	}
-	key := pgCaptureStateKey{index, dsn, sources}
+	key := pgCaptureStateKey{index, dsn}
 	pgCaptureStateCaches.mu.Lock()
 	if pgCaptureStateCaches.of == nil {
 		pgCaptureStateCaches.of = map[string]*pgCaptureStateCache{}
@@ -283,7 +320,7 @@ func pgPortCaptureState(server string, index *sql.DB, dsn string, sources *pgSou
 	if c == nil || pgCaptureStateCaches.key[server] != key {
 		c = newPGCaptureStateCache(server, logger,
 			func(ctx context.Context) (pgPositionRow, error) { return readPGPositionRow(ctx, index) },
-			func(ctx context.Context) (uint64, error) { return pgAskFlushed(ctx, dsn, sources.acquire) })
+			func(ctx context.Context) (uint64, error) { return pgAskFlushed(ctx, dsn) })
 		pgCaptureStateCaches.of[server], pgCaptureStateCaches.key[server] = c, key
 	}
 	pgCaptureStateCaches.mu.Unlock()
@@ -291,36 +328,47 @@ func pgPortCaptureState(server string, index *sql.DB, dsn string, sources *pgSou
 }
 
 // pgCaptureStateNow is server's verdict for /status, nil when none is to be
-// said.
-func pgCaptureStateNow(server string) *pgCaptureStateDoc {
+// said. It asks for one first, as a statement would (kept pgCaptureStateTTL:
+// one read of the index, and the source only while the save is old), so
+// that /status says the state now, and a stall or its end is logged, though
+// no statement comes. Without statements or /status requests nothing is
+// asked, and nothing logged.
+func pgCaptureStateNow(ctx context.Context, server string) *pgCaptureStateDoc {
 	pgCaptureStateCaches.mu.Lock()
 	c := pgCaptureStateCaches.of[server]
 	pgCaptureStateCaches.mu.Unlock()
 	if c == nil {
 		return nil
 	}
+	_, _ = c.state(ctx)
 	return c.doc()
+}
+
+// pgCaptureStateServers are the servers the port keeps a verdict for.
+func pgCaptureStateServers() []string {
+	pgCaptureStateCaches.mu.Lock()
+	defer pgCaptureStateCaches.mu.Unlock()
+	out := make([]string, 0, len(pgCaptureStateCaches.of))
+	for id := range pgCaptureStateCaches.of {
+		out = append(out, id)
+	}
+	return out
 }
 
 // pgAskFlushed reads how far the source's WAL is flushed
 // (pgcapture.QueryFlushedLSN: on a standby, how far it replayed), within
-// pgCaptureStateWait, on one of the port's connections to its sources
-// (acquire), given back when it ends. Nothing is written, and no row of a
-// table is read.
-func pgAskFlushed(ctx context.Context, dsn string, acquire func(context.Context) (func(), bool)) (uint64, error) {
+// pgCaptureStateWait, on a connection of its own (not the port's pool, see
+// the top of this file). Nothing is written, and no row of a table is read.
+func pgAskFlushed(ctx context.Context, dsn string) (uint64, error) {
 	ctx, cancel := context.WithTimeout(ctx, pgCaptureStateWait)
 	defer cancel()
 	failed := func(cause string, err error) error {
+		e := &pgCaptureAskError{cause: cause, err: err}
 		if ctx.Err() != nil {
-			cause = fmt.Sprintf("your PostgreSQL did not answer within %s", pgCaptureStateWait)
+			e.cause, e.timedOut = fmt.Sprintf("your PostgreSQL did not answer within %s", pgCaptureStateWait), true
 		}
-		return &pgCaptureAskError{cause: cause, err: err}
+		return e
 	}
-	release, ok := acquire(ctx)
-	if !ok {
-		return 0, &pgCaptureAskError{cause: "every connection of the port to your PostgreSQL stayed taken", err: errNoSourceSlot}
-	}
-	defer release()
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
 		return 0, failed("the port could not connect to your PostgreSQL", err)

@@ -2,6 +2,7 @@ package consoleapp
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"maps"
@@ -494,6 +495,22 @@ const (
 // asked of the console outside the tally's lock, which every statement takes.
 func (r *pgRouteStats) doc(listen string) pgRouterStatusDoc {
 	d := r.counts(listen)
+	// Capture's state (#3202), asked outside the tally's lock: it can read
+	// the index, and the source while a save is old.
+	for _, id := range pgCaptureStateServers() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*pgCaptureStateWait)
+		cs := pgCaptureStateNow(ctx, id)
+		cancel()
+		if cs == nil {
+			continue
+		}
+		n, ok := d.Servers[id]
+		if !ok {
+			n = pgRouterServerNumbers{Reasons: map[string]uint64{}, Answers: map[string]console.RouteAnswers{}}
+		}
+		n.CaptureState = cs
+		d.Servers[id] = n
+	}
 	if r.lanes != nil {
 		n := r.lanes.numbers()
 		d.CopyLanes = &n
@@ -540,7 +557,7 @@ func (r *pgRouteStats) counts(listen string) pgRouterStatusDoc {
 		Servers: map[string]pgRouterServerNumbers{}}
 	for id, t := range r.perServer {
 		n := pgRouterServerNumbers{Copy: t.copy, Source: t.source, Refused: t.refused,
-			Reasons: maps.Clone(t.reasons), JoinChecks: maps.Clone(t.joinChecks), HeavyOlderOnCopy: maps.Clone(t.heavyOlder), ShapeUnchecked: maps.Clone(t.shapeUnchecked), CaptureStateOnCopy: maps.Clone(t.captureOnCopy), CaptureState: pgCaptureStateNow(id), Answers: map[string]console.RouteAnswers{}, ForwardingOff: t.barred}
+			Reasons: maps.Clone(t.reasons), JoinChecks: maps.Clone(t.joinChecks), HeavyOlderOnCopy: maps.Clone(t.heavyOlder), ShapeUnchecked: maps.Clone(t.shapeUnchecked), CaptureStateOnCopy: maps.Clone(t.captureOnCopy), Answers: map[string]console.RouteAnswers{}, ForwardingOff: t.barred}
 		switch {
 		case t.ageWhy != "":
 			n.DataAgeUnknownReason = t.ageWhy
