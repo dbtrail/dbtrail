@@ -2331,8 +2331,9 @@ refuses a larger result, it does not cut it. A wide result is held to
 1,000,000 cells (rows times columns), never under 10,000 rows, which is what
 any width had before: what an answer takes in the router's memory while it is
 read and sent follows its cells (about 160 bytes each beside its text,
-measured), so one answer takes at most about 220 MB, counted in the router's
-memory sum ("Whether its memory fits the machine"). Its text is also held to
+measured) and its text, held up to four times at once, so one answer takes up
+to about 400 MB, counted in the router's memory sum ("Whether its memory
+fits the machine"). Its text is also held to
 64 MB. A result past any of these is refused with `54000` and counted in
 `/status` under `result_too_large`, as `rows`, `cells`, `bytes` or
 `cell_length` (one cell longer than a cell may be). The plan rule below
@@ -2879,8 +2880,8 @@ What it adds up is each part's ceiling, not what it uses now:
   switched to fresh mode while the router runs. Not counted with
   `BINTRAIL_SQL_TAILS=off`;
 - what each statement's answer may take while it is read and sent (about
-  220 MB: 1,000,000 cells and 64 MB of text), once per statement that can
-  run at once;
+  400 MB: 1,000,000 cells, and 64 MB of text four times), once per statement
+  that can run at once;
 - the results held for clients that have not read them (256 MiB);
 - the buffer pool of each index MySQL on the same machine: compose's
   `index-mysql`, or a MySQL on loopback whose host name is this machine's.
@@ -2913,8 +2914,9 @@ said (`verdict` is `idle`).
 
 The factory settings (four workers at 2 GB) can ask for more than a 16 GB
 machine has with the index MySQL's default buffer pool on it, so the router
-warns there. Two workers fit it with one PostgreSQL server; each more server
-adds its recent changes' budget.
+warns there. A 16 GB machine has about 15.3 GiB to give; with one PostgreSQL
+server, two workers and a 3 GB index buffer pool fit it, which is how the
+boards run, and each more server adds its recent changes' budget.
 
 In `/status`, `memory` has `verdict` (`fits`, `over`, `idle`, or `unknown`
 with `why` when the machine's memory or the SQL memory cannot be read),

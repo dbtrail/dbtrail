@@ -23,7 +23,9 @@ import (
 // 1,000,000 small numeric cells, the most cells per byte of text.
 func TestCellMemoryCost_3286(t *testing.T) {
 	// The most cells per byte of text, and the most text per cell.
-	t.Run("small numbers", func(t *testing.T) { measureAnswer(t, 100_000, 10, "INTEGER", func(i, j int) string { return strconv.Itoa((i*10 + j) % 100000) }) })
+	t.Run("small numbers", func(t *testing.T) {
+		measureAnswer(t, 100_000, 10, "INTEGER", func(i, j int) string { return strconv.Itoa((i*10 + j) % 100000) })
+	})
 	long := strconv.Quote(strings.Repeat("x", 3000))
 	t.Run("long text", func(t *testing.T) { measureAnswer(t, 20_000, 1, "VARCHAR", func(int, int) string { return long }) })
 }

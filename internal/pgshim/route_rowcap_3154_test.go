@@ -145,7 +145,7 @@ func TestCostPolicy_overRowCap(t *testing.T) {
 		if (why != "") != tc.over {
 			t.Errorf("%s: %q, want over=%v", tc.name, why, tc.over)
 		}
-		if tc.over && !(strings.Contains(why, "row cap of 10000") && strings.Contains(why, "not tried on the copy")) {
+		if tc.over && !(strings.Contains(why, "over the 10000 the copy is tried for") && strings.Contains(why, "not tried on the copy")) {
 			t.Errorf("%s: the reason does not say the cap and what was done: %q", tc.name, why)
 		}
 	}
