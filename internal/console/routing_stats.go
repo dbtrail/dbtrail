@@ -48,11 +48,12 @@ type routingStats struct {
 	// Kept apart from perServer, whose counts are routing decisions: a
 	// statement with nothing to decide must not show up as one.
 	alone map[string]*routingAnswers
-	// joinOrders counts, per server id, the statements the copy answered in
-	// a join order picked by the shape of their FROM
-	// (sqlsandbox.Session.JoinOrderByShape), by that order: "written" or
-	// "connected". Kept apart from perServer's reasons, whose counts are
-	// routing decisions.
+	// joinOrders counts, per server id, the copy's answers the client got
+	// for statements whose join order the copy tried to pick by the shape of
+	// their FROM (sqlsandbox.Session.JoinOrderByShape), by what it did:
+	// "written", "connected", or "failed" (an error, and the copy's own
+	// order). Kept apart from perServer's reasons, whose counts are routing
+	// decisions.
 	joinOrders map[string]map[string]uint64
 }
 
@@ -119,7 +120,7 @@ func (r *routingStats) answeredAlone(serverID string, took time.Duration, refuse
 // joinOrderByShape counts one statement the copy answered in order, a
 // sqlsandbox.Result.JoinOrderByShape; "" counts nothing.
 func (r *routingStats) joinOrderByShape(serverID, order string) {
-	if order == "" {
+	if r == nil || order == "" {
 		return
 	}
 	r.mu.Lock()

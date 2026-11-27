@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"reflect"
 	"slices"
@@ -259,5 +260,39 @@ func TestRunner_joinOrderByShape(t *testing.T) {
 	// Each tl row meets one ta and one tb row: half of them have aw 0.
 	if fmt.Sprint(res.Rows) != "[[0 525000] [1 525000]]" || res.JoinOrderByShape != JoinOrderByShapeConnected {
 		t.Errorf("big: rows %v, order %q", res.Rows, res.JoinOrderByShape)
+	}
+}
+
+// A statement of the shape whose rewrite fails on an error (here a view
+// whose table is gone, which DESCRIBE cannot bind) is failed, with the fixed
+// note: the step's own text is the engine's.
+func TestPickShapeOrder_failed(t *testing.T) {
+	conn := shapeConn(t)
+	ctx := context.Background()
+	for _, stmt := range []string{"CREATE TABLE gone (a INTEGER)", "CREATE VIEW tz AS SELECT a AS za FROM gone", "DROP TABLE gone"} {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	got := pickShapeOrder(ctx, conn, "SELECT count(*) AS n FROM ta, tb, tz WHERE aid = za AND bid = za")
+	if got.order != JoinOrderByShapeFailed || got.note != shapeOrderFailedNote || got.text != "" {
+		t.Fatalf("%+v", got)
+	}
+}
+
+// A pick that failed on an error is a warning; a shape that does not apply
+// is debug; nothing is logged without a note.
+func TestLogJoinOrderByShapeNote(t *testing.T) {
+	var buf bytes.Buffer
+	was := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(was) })
+	logJoinOrderByShapeNote(wireResult{JoinOrderByShape: JoinOrderByShapeFailed, JoinOrderByShapeNote: shapeOrderFailedNote})
+	logJoinOrderByShapeNote(wireResult{JoinOrderByShapeNote: "one table"})
+	logJoinOrderByShapeNote(wireResult{JoinOrderByShape: JoinOrderByShapeConnected})
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "level=WARN") || !strings.Contains(lines[0], shapeOrderFailedNote) ||
+		!strings.Contains(lines[1], "level=DEBUG") || !strings.Contains(lines[1], "one table") {
+		t.Errorf("logged:\n%s", buf.String())
 	}
 }

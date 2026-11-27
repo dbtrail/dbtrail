@@ -73,6 +73,14 @@ func TestJoinOrderByShape_onlyForRoutedStatements(t *testing.T) {
 		{"routed, tables listed with commas", "SELECT a.x, count(*) FROM a, b WHERE a.id = b.id GROUP BY a.x", true, false, true},
 		{"routed, a JOIN", "SELECT a.x, count(*) FROM a JOIN b ON a.id = b.id GROUP BY a.x", true, false, true},
 		{"routed, STRAIGHT_JOIN", "SELECT a.x, count(*) FROM a STRAIGHT_JOIN b WHERE a.id = b.id GROUP BY a.x", true, true, false},
+		// A STRAIGHT_JOIN the copy cannot keep (KeepsJoinOrder says no) is
+		// still the client's: planned as before, never reordered by shape.
+		{"routed, SELECT STRAIGHT_JOIN over commas", "SELECT STRAIGHT_JOIN a.x, count(*) FROM a, b, c WHERE a.id = b.id AND c.y = a.y GROUP BY a.x", true, false, false},
+		{"routed, STRAIGHT_JOIN mixed with commas", "SELECT a.x, count(*) FROM a STRAIGHT_JOIN b, c WHERE a.id = b.id AND c.y = a.y GROUP BY a.x", true, false, false},
+		// Read as copyText reads it: not in a comment, a string or a name.
+		{"routed, straight_join in a comment", "SELECT /* STRAIGHT_JOIN */ a.x, count(*) FROM a, b WHERE a.id = b.id GROUP BY a.x", true, false, true},
+		{"routed, straight_join in a string", "SELECT a.x, count(*) FROM a, b WHERE a.id = b.id AND a.n <> 'STRAIGHT_JOIN' GROUP BY a.x", true, false, true},
+		{"routed, a column named straight_join", "SELECT a.x, count(*) FROM a, b WHERE a.id = b.straight_join GROUP BY a.x", true, false, true},
 		{"not routed", "SELECT a.x, count(*) FROM a, b WHERE a.id = b.id GROUP BY a.x", false, false, false},
 		{"not routed, STRAIGHT_JOIN", "SELECT a.x, count(*) FROM a STRAIGHT_JOIN b WHERE a.id = b.id GROUP BY a.x", false, true, false},
 	}

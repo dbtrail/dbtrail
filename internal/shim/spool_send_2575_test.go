@@ -204,7 +204,7 @@ func TestHandlerClose_removesAPendingFile(t *testing.T) {
 	h := NewHandler(nil, nil)
 	h.BindFreeSQL(f)
 	h.BindConn(&capturePW{})
-	res, err := h.runFreeSQLRouted("", "SELECT 1", nil, false, true, false, "expensive", 0)
+	res, err := h.runFreeSQLRouted("", "SELECT 1", nil, false, false, true, false, "expensive", 0)
 	if err != nil || res == nil || h.spooled == nil {
 		t.Fatalf("(%v, %v), pending %v", res, err, h.spooled)
 	}

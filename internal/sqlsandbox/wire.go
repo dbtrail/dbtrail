@@ -130,9 +130,11 @@ type wireResult struct {
 	// JoinOrderByShape is the order the join order by shape
 	// (Session.JoinOrderByShape, shapeorder.go) ran an answered statement
 	// in: JoinOrderByShapeWritten, or JoinOrderByShapeConnected with its
-	// tables in JoinOrderTables; "" when it left the statement to the
-	// copy's own order, and then JoinOrderByShapeNote says why. The note
-	// never holds the engine's text.
+	// tables in JoinOrderTables; JoinOrderByShapeFailed when picking it
+	// failed on an error, and "" when the shape does not apply, both run in
+	// the copy's own order with JoinOrderByShapeNote saying why. The note
+	// never holds the engine's text of a step that read the statement or
+	// its tables.
 	JoinOrderByShape     string `json:"join_order_by_shape,omitempty"`
 	JoinOrderByShapeNote string `json:"join_order_by_shape_note,omitempty"`
 	// ResidentBytes is the memory the worker holds after the statement, its

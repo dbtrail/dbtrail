@@ -42,15 +42,22 @@ import (
 const (
 	JoinOrderByShapeWritten   = "written"
 	JoinOrderByShapeConnected = "connected"
+	// JoinOrderByShapeFailed: the statement had the shape, and picking its
+	// order failed on an error (a step of the rewrite, or turning the
+	// reordering off), so it ran in the copy's own order. Logged as a
+	// warning; a statement that does not have the shape is not this.
+	JoinOrderByShapeFailed = "failed"
 )
 
 // shapeOrderFailedNote is the note of a rewrite that did not work: the
 // step's own text can quote the engine's, and so a row's value.
 const shapeOrderFailedNote = "a step of writing the statement in a connected order did not work"
 
-// shapeOrder is what the join order by shape picked: order one of the
-// JoinOrderByShape* names, with text the statement to run and tables its
-// connected order; or order "" and note why the statement is left as it is.
+// shapeOrder is what the join order by shape picked: order
+// JoinOrderByShapeWritten or JoinOrderByShapeConnected, with text the
+// statement to run and tables its connected order; or order "" (the shape
+// does not apply) or JoinOrderByShapeFailed (an error), and note why the
+// statement is left as it is.
 type shapeOrder struct {
 	order  string
 	text   string
@@ -68,7 +75,7 @@ func pickShapeOrder(ctx context.Context, conn *sql.Conn, statement string) shape
 	case note.writtenConnected:
 		return shapeOrder{order: JoinOrderByShapeWritten, text: statement}
 	case note.failed:
-		return shapeOrder{note: shapeOrderFailedNote}
+		return shapeOrder{order: JoinOrderByShapeFailed, note: shapeOrderFailedNote}
 	case note.why != "":
 		return shapeOrder{note: shapeNoteForLog(note.why)}
 	}
@@ -91,12 +98,18 @@ func shapeNoteForLog(why string) string {
 	return why
 }
 
-// logJoinOrderByShapeNote says, at debug level, why the join order by shape
-// left out's statement to the copy's own order: a shape's why, with no
-// name of a column (shapeNoteForLog), or shapeOrderFailedNote; never the
-// engine's text.
+// logJoinOrderByShapeNote says why the join order by shape left out's
+// statement to the copy's own order: as a warning when picking it failed on
+// an error (shapeOrderFailedNote, or the SET that turns the reordering off,
+// which holds no row's value), at debug level when the shape does not apply
+// (a shape's why, with no name of a column: shapeNoteForLog). Never the
+// engine's text of a step that read the statement or its tables.
 func logJoinOrderByShapeNote(out wireResult) {
-	if out.JoinOrderByShapeNote != "" {
+	switch {
+	case out.JoinOrderByShapeNote == "":
+	case out.JoinOrderByShape == JoinOrderByShapeFailed:
+		slog.Warn("sql on the copy: the join order of a statement of tables listed with commas could not be picked by its shape; it ran in the copy's own join order", "why", out.JoinOrderByShapeNote)
+	default:
 		slog.Debug("sql on the copy: the join order by shape left a statement to the copy's own join order", "why", out.JoinOrderByShapeNote)
 	}
 }

@@ -267,6 +267,10 @@ type copyAnswer struct {
 	// (#2360), "" when the table is off: the answer's lag is kept for that
 	// row too.
 	shape string
+	// joinOrder is the join order the copy picked by the shape of the
+	// statement's FROM (sqlsandbox.Result.JoinOrderByShape), counted under
+	// join_orders once the run is the answer (NoteRoute).
+	joinOrder string
 }
 
 // lastAnswerState is the SQLOnCopy's record of its connection's last answer.
@@ -297,6 +301,22 @@ func (q *SQLOnCopy) noteCopyAnswerMark(files map[string][]string, ok bool, ranAt
 	a := copyAnswer{side: "copy", files: files, ok: ok, ranAt: ranAt, tailThrough: tailThrough, tailThroughID: tailThroughID, allTailed: allTailed}
 	q.last.mu.Lock()
 	q.last.pending = &a
+	q.last.mu.Unlock()
+}
+
+// notePendingRun records a run of the copy that answered as out, at ranAt,
+// pending the port's decision (noteCopyAnswerMark): with the tables it read
+// and the join order it ran in, which only count once it is the answer.
+func (q *SQLOnCopy) notePendingRun(out sqlOutcome, ranAt time.Time) {
+	if q == nil {
+		return
+	}
+	q.noteCopyAnswerMark(out.ReadFrom, out.ReadFromOK, ranAt, out.TailThrough, out.TailThroughID, out.AllTailed)
+	q.last.mu.Lock()
+	if q.last.pending != nil {
+		q.last.pending.readCopy = out.ReadCopyTables
+		q.last.pending.joinOrder = out.Result.JoinOrderByShape
+	}
 	q.last.mu.Unlock()
 }
 
@@ -339,6 +359,11 @@ func (q *SQLOnCopy) NoteRoute(side string) {
 		q.last.a = *q.last.pending
 		if q.s != nil {
 			q.s.copyAges.note(q.id, q.last.a)
+			// The client gets this run's answer: a result the port threw
+			// away after the copy ran (the row cap, a column it cannot
+			// declare, a file it cannot read) went to MySQL and is never
+			// committed here.
+			q.s.routing.joinOrderByShape(q.id, q.last.a.joinOrder)
 		}
 	} else {
 		q.last.a = copyAnswer{side: side}

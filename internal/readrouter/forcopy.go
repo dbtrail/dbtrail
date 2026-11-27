@@ -823,14 +823,25 @@ func namedByDot(bl string, at, kw int) bool {
 // list of tables is a no for that reason too.
 func KeepsJoinOrder(stmt string) bool {
 	sc := scan(stmt)
-	straight := false
+	return hasStraightJoin(sc) && !otherJoins(sc.blanked)
+}
+
+// HasStraightJoin reports whether stmt holds a STRAIGHT_JOIN in any form, a
+// join or the SELECT modifier, read as copyText reads it: not in a comment
+// or a string, not a name next to a dot. The client then fixed some order
+// of its joins, even where the copy cannot keep it (KeepsJoinOrder says
+// no), and the copy must not pick another one for it either.
+func HasStraightJoin(stmt string) bool {
+	return hasStraightJoin(scan(stmt))
+}
+
+func hasStraightJoin(sc scanned) bool {
 	for _, j := range sc.keywords {
 		if j.word == "straight_join" && !namedByDot(sc.blanked, j.bl, len(j.word)) {
-			straight = true
-			break
+			return true
 		}
 	}
-	return straight && !otherJoins(sc.blanked)
+	return false
 }
 
 // fromEnds are the words that end a FROM clause at its own depth.

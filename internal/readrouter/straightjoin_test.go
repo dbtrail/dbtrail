@@ -89,3 +89,28 @@ func TestForCopy_straightJoinInAPreparedPiece(t *testing.T) {
 		t.Errorf("piece: got %q refused %q", got, why)
 	}
 }
+
+// HasStraightJoin finds the keyword in any form, read as copyText reads it.
+func TestHasStraightJoin(t *testing.T) {
+	for _, tc := range []struct {
+		stmt string
+		want bool
+	}{
+		{"SELECT * FROM a STRAIGHT_JOIN b ON a.id = b.id", true},
+		{"SELECT STRAIGHT_JOIN * FROM a, b WHERE a.id = b.id", true},
+		{"SELECT DISTINCT straight_join a.x FROM a, b WHERE a.id = b.id", true},
+		{"SELECT * FROM a STRAIGHT_JOIN b, c WHERE a.id = b.id", true},
+		{"SELECT * FROM (SELECT * FROM a STRAIGHT_JOIN b) t, c", true},
+		{"SELECT * FROM a, b WHERE a.id = b.id", false},
+		{"SELECT /* STRAIGHT_JOIN */ * FROM a, b", false},
+		{"SELECT * FROM a, b -- STRAIGHT_JOIN\nWHERE a.id = b.id", false},
+		{"SELECT * FROM a, b WHERE a.n = 'STRAIGHT_JOIN'", false},
+		{"SELECT * FROM a, b WHERE a.id = b.straight_join", false},
+		{"SELECT straight_join.x FROM t", false},
+		{"", false},
+	} {
+		if got := HasStraightJoin(tc.stmt); got != tc.want {
+			t.Errorf("%q: %v, want %v", tc.stmt, got, tc.want)
+		}
+	}
+}

@@ -549,8 +549,10 @@ type Result struct {
 	// written (Session.RetryOutOfMemoryInWrittenOrder), "" otherwise.
 	WrittenOrderRetry string `json:"-"`
 	// JoinOrderByShape is the order Session.JoinOrderByShape ran the
-	// statement in: JoinOrderByShapeWritten or JoinOrderByShapeConnected,
-	// "" when it left it to the copy's own order or was off.
+	// statement in: JoinOrderByShapeWritten or JoinOrderByShapeConnected;
+	// JoinOrderByShapeFailed when picking it failed on an error and the
+	// statement ran in the copy's own order; "" when the shape does not
+	// apply or the option was off.
 	JoinOrderByShape string `json:"-"`
 	// Note is a sentence the caller adds for the reader, set by the parent
 	// and never by the worker (#2210: the answer came from an earlier copy).

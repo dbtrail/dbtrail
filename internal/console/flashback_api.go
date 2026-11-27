@@ -123,10 +123,10 @@ type routingServerDTO struct {
 	// statements, how many failed, how long they took. Absent until a
 	// statement finishes.
 	Answers map[string]RouteAnswers `json:"answers,omitempty"`
-	// JoinOrders counts the statements the copy answered in a join order
-	// picked by the shape of their FROM, by that order: "written" (the
-	// order written, connected already) or "connected" (written again in a
-	// connected order). Absent until one is.
+	// JoinOrders counts the copy's answers the client got in a join order
+	// picked by the shape of their FROM: "written" (the order written,
+	// connected already), "connected" (written again in a connected order)
+	// or "failed" (an error; the copy's own order). Absent until one is.
 	JoinOrders map[string]uint64 `json:"join_orders,omitempty"`
 }
 
