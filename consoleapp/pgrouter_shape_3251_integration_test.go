@@ -99,7 +99,6 @@ var pgShapeChanged = []string{
 	"SELECT id, c FROM public.shp_move ORDER BY id",
 	"SELECT * FROM shp_part_1 ORDER BY id",
 	"SELECT count(*) FROM shp_same JOIN shp_add ON shp_add.id = shp_same.id",
-	`SELECT * FROM "MixedChanged" ORDER BY id`,
 }
 
 // pgShapeTTLSlack is past the time the port keeps the source's answer
@@ -181,12 +180,16 @@ func TestIntegrationPGRouterShape_3251(t *testing.T) {
 			if got, why := answered(c, gone, extended); !strings.HasPrefix(got, "error 42703") || why != pgshim.ReasonCopyShapeDiffers {
 				t.Errorf("extended=%v: %s: %q (%s), want PostgreSQL's 42703 from the source", extended, gone, got, why)
 			}
-			// A table in mixed case that did not change: on the copy, not
-			// taken for one the source no longer has.
-			const mixed = `SELECT * FROM "MixedCase" ORDER BY id`
-			wantMixed := pgUserRows(t, ctx, source, mixed, extended)
-			if got, why := answered(pgClient(t, ctx, env.portDSN(), nil), mixed, extended); got != wantMixed || why != pgshim.ReasonAnswersTheSame {
-				t.Errorf("extended=%v: %s: %q (%s), want the copy's %q", extended, mixed, got, why, wantMixed)
+			// A quoted name with capitals never reaches the copy's check: the
+			// screen sends it to the source (veto), since the copy does not
+			// tell "Name" from "name". Only a heavy statement goes to the
+			// copy in spite of that, and there the table is looked up by
+			// its OID (below), never by its name.
+			for _, mixed := range []string{`SELECT * FROM "MixedCase" ORDER BY id`, `SELECT * FROM "MixedChanged" ORDER BY id`} {
+				want := pgUserRows(t, ctx, source, mixed, extended)
+				if got, why := answered(pgClient(t, ctx, env.portDSN(), nil), mixed, extended); got != want || why != pgshim.ReasonVeto {
+					t.Errorf("extended=%v: %s: %q (%s), want PostgreSQL's %q by the screen's veto", extended, mixed, got, why, want)
+				}
 			}
 			// The table that did not change stays on the copy, on a
 			// connection the source did not answer about it (on this one the

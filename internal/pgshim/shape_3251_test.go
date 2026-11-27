@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 )
@@ -639,5 +640,34 @@ func TestCopyShape_3251_noNoticeBeforeAFormatRefusal(t *testing.T) {
 	}
 	if len(*notices) != 1 {
 		t.Errorf("an answered execution: notices %q, want one", *notices)
+	}
+}
+
+// The same over a Describe of the portal, which hands the answer's columns
+// over: refused for its result formats, no notice; described, the notice
+// comes before its columns, and once.
+func TestCopyShape_3251_noNoticeBeforeAFormatRefusalOnDescribe(t *testing.T) {
+	p, k := newShapePort(t)
+	r := dialRaw(t, p.l.login)
+	if got := r.send(&pgproto3.Parse{Name: "s", Query: "SELECT sum(n) FROM public.big"}, &pgproto3.Sync{}); got[0] != "ParseComplete" {
+		t.Fatalf("parse: %v", got)
+	}
+	k.fail(errors.New("dial tcp 10.0.3.7:5432: connect: connection refused"))
+	notices := func(got []string) int {
+		n := 0
+		for _, m := range got {
+			if strings.HasPrefix(m, "Notice ") {
+				n++
+			}
+		}
+		return n
+	}
+	got := r.send(&pgproto3.Bind{PreparedStatement: "s", ResultFormatCodes: []int16{0, 0, 0}}, &pgproto3.Describe{ObjectType: 'P'}, &pgproto3.Execute{}, &pgproto3.Sync{})
+	if !slices.Contains(got, "Error 08P01") || notices(got) != 0 {
+		t.Errorf("a portal refused for its formats at its Describe: %v, want 08P01 and no notice", got)
+	}
+	got = r.send(&pgproto3.Bind{PreparedStatement: "s"}, &pgproto3.Describe{ObjectType: 'P'}, &pgproto3.Execute{}, &pgproto3.Sync{})
+	if notices(got) != 1 {
+		t.Errorf("a portal described and run: %v, want one notice", got)
 	}
 }

@@ -103,7 +103,9 @@ func TestPGShapeCache_3251(t *testing.T) {
 		t.Errorf("asked %d times, want 3: an OID not found is not asked again at once", n)
 	}
 	// Past the moment, asked again: an ALTER TABLE since is seen.
-	src.set(func() { src.now[1] = pgshim.SourceShape{Schema: "public", Name: "a", OID: 1, Columns: []baseline.PGColumn{{Name: "id", TypeOID: 20, TypeMod: -1, Ordinal: 1}}} })
+	src.set(func() {
+		src.now[1] = pgshim.SourceShape{Schema: "public", Name: "a", OID: 1, Columns: []baseline.PGColumn{{Name: "id", TypeOID: 20, TypeMod: -1, Ordinal: 1}}}
+	})
 	clock.add(1100 * time.Millisecond)
 	if got := get(1); got[1].Columns[0].TypeOID != 20 {
 		t.Errorf("after the moment: %v, want the source's new type", got)
