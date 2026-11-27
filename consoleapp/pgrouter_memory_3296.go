@@ -235,7 +235,7 @@ type pgMemoryPlan struct {
 	// while it is read and sent (pgCopyAnswerBytes, #3286).
 	AnswerBytes int64
 	In          console.PGMemoryInputs
-	Pools        []pgIndexPool
+	Pools       []pgIndexPool
 }
 
 // pgMemoryDoc is the verdict, in /status as "memory" and in the start-up
@@ -265,7 +265,7 @@ type pgMemoryDoc struct {
 	StatementBytes uint64 `json:"statement_bytes,omitempty"`
 	// AnswerBytes: what each one's answer may take in the router while it is
 	// read and sent.
-	AnswerBytes uint64 `json:"answer_bytes,omitempty"`
+	AnswerBytes    uint64 `json:"answer_bytes,omitempty"`
 	SQLMemoryBytes uint64 `json:"sql_memory_bytes,omitempty"`
 	// TailsBytes: every server's tails together, Servers of them.
 	Servers    int    `json:"servers"`

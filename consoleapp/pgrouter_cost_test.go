@@ -24,7 +24,8 @@ func TestPGRouterCostSettings(t *testing.T) {
 		t.Fatalf("a row cap of 250: %+v %v", st.Cost, err)
 	}
 	t.Setenv("BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS", "77000")
-	if st, err = pgRouterSettingsFrom(pgRouterTestCmd(t)); err != nil || st.Cost.RowCap != 77000 {
+	// A cap raised past 10,000 leaves the plan rule at 10,000 (#3286).
+	if st, err = pgRouterSettingsFrom(pgRouterTestCmd(t)); err != nil || st.Cost.RowCap != 10000 || st.SQLPortMaxRows != 77000 {
 		t.Fatalf("a row cap from the environment: %+v %v", st.Cost, err)
 	}
 	t.Setenv("BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS", "")
