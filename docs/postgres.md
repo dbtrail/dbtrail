@@ -2896,7 +2896,12 @@ So the PostgreSQL port stops trusting the record of a server when both hold:
   port reads `pg_current_wal_flush_lsn()` (on a standby,
   `pg_last_wal_replay_lsn()`) as the server's forwarding user, only once the
   save is past the minute, and compares positions, never clocks. A quiet
-  source is not past it, so its copy keeps answering.
+  source is not past it, so its copy keeps answering. The question has a
+  short connection of its own, at most one per server at a time and one a
+  second, not one of the port's connections to its sources: statements sent
+  there while the server is stale can take all of those, and the question
+  must not wait behind them. If it gets no answer within 2 seconds while the
+  save is still old, a server that was stale stays stale.
 
 While both hold, a statement that reads any table of that server's copy is
 answered by your PostgreSQL, counted as `capture_state_stale`, heavy
@@ -2907,11 +2912,18 @@ server that hides tables or columns, a statement routed to the copy as
 `source_unreachable` or `capture_gate`, `SUMMARIZE`), the copy answers it
 with a NOTICE that says capture's record is not current and why. When the
 port cannot ask your PostgreSQL where its WAL stands, the copy answers with a
-NOTICE that says it could not check. Both are counted in `/status` under
-`capture_state_on_copy` (`stale`, `unchecked`), and `/status` shows the
-reason under `capture_state` for as long as it lasts. The router logs a
-`WARN` when it starts, naming how long ago capture saved and both positions,
-and an `INFO` when it ends.
+NOTICE that says it could not check. The NOTICE is sent with the copy's
+answer only: a statement the copy fails, and the source then answers, gets
+none. Both are counted in `/status` under `capture_state_on_copy` (`stale`,
+`unchecked`), and `/status` shows the reason under `capture_state` for as
+long as it lasts. The router logs a `WARN` when it starts, naming how long
+ago capture saved and both positions, and an `INFO` when it ends, naming
+what ended it.
+
+The state is checked when a statement needs it and when `/status` is
+requested, at most once a second per server. With neither, nothing is
+checked: a capture that stops saving on a router nobody uses is warned about
+at the first statement or `/status` request after that.
 
 It ends by itself: once capture saves again, statements go where they went
 before, prepared ones included.
