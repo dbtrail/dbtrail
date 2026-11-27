@@ -183,8 +183,9 @@ type pgMemoryPlan struct {
 // pgMemoryDoc is the verdict, in /status as "memory" and in the start-up
 // lines.
 type pgMemoryDoc struct {
-	// Verdict: "fits", "over", or "unknown" when the machine's memory or the
-	// SQL memory cannot be read (Why says which).
+	// Verdict: "fits", "over", "idle" when there is no PostgreSQL server
+	// yet (nothing runs on the copy, so nothing is said), or "unknown" when
+	// the machine's memory or the SQL memory cannot be read (Why says which).
 	Verdict string `json:"verdict"`
 	Why     string `json:"why,omitempty"`
 	// ComparedWith: "machine" (no ceiling of its own: the machine it shares
@@ -256,6 +257,13 @@ func pgMemoryVerdict(p pgMemoryPlan) pgMemoryDoc {
 		d.Verdict = "fits"
 		return d
 	}
+	if len(p.Pools) == 0 {
+		// No PostgreSQL server: no statement runs on the copy, and the
+		// tails hold nothing. The sum is shown; it is said once a server
+		// is added (pgMemoryWatch reads it again every minute).
+		d.Verdict = "idle"
+		return d
+	}
 	d.Verdict = "over"
 	d.Advice = pgMemoryAdvice(d, p.Workers, others)
 	return d
@@ -322,8 +330,11 @@ func pgGiB(b uint64) string {
 // pgMemoryLines is the verdict as start-up lines: one that says what was
 // added up, and, when it is over, the warning and what fits.
 func pgMemoryLines(d pgMemoryDoc) string {
-	if d.Verdict == "unknown" {
+	switch d.Verdict {
+	case "unknown":
 		return "PostgreSQL router: whether its memory fits this machine is not said: " + d.Why + ".\n"
+	case "idle":
+		return "PostgreSQL router: no PostgreSQL server is listed yet, so whether its memory fits this machine is said once one is (in /status, and in the log if it does not fit).\n"
 	}
 	var parts []string
 	parts = append(parts, fmt.Sprintf("%s at %s each (%s of SQL memory and its headroom)", countOfStatementsAtOnce(d.Slots), pgGiB(d.StatementBytes), pgGiB(d.SQLMemoryBytes)))
@@ -401,8 +412,28 @@ func (w *pgMemoryWatch) doc() *pgMemoryDoc {
 	ctx, cancel := context.WithTimeout(context.Background(), pgMemoryReadWait)
 	defer cancel()
 	d := pgMemoryVerdict(w.plan(ctx))
+	// The log says it when it becomes over: at start, or when a server is
+	// added or a buffer pool grows while the router runs.
+	if d.Verdict == "over" && (w.last == nil || w.last.Verdict != "over") {
+		logPGMemory(&d)
+	}
 	w.at, w.last = w.now(), &d
 	return w.last
+}
+
+// follow reads the verdict again every minute until ctx ends, so that the
+// log says it without anyone asking /status.
+func (w *pgMemoryWatch) follow(ctx context.Context) {
+	t := time.NewTicker(w.every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			w.doc()
+		}
+	}
 }
 
 // pgMemoryReadWait bounds the read of the index servers' buffer pools.

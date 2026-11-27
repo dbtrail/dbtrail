@@ -37,6 +37,12 @@ func TestPGMemoryVerdict_theTwoHostsOfTheIssue(t *testing.T) {
 	if d := pgMemoryVerdict(plan(16 * pgTestGiB)); d.Verdict != "fits" {
 		t.Errorf("16 GB host: %+v, want fits (it ran with 4 GB free)", d)
 	}
+	// The two PostgreSQL boards, healthy, read from their /proc/meminfo.
+	for _, kb := range []uint64{15988900, 16041000} {
+		if d := pgMemoryVerdict(plan(kb << 10)); d.Verdict != "fits" {
+			t.Errorf("board with %d kB: %+v, want fits", kb, d)
+		}
+	}
 }
 
 // The factory settings (4 workers at 2 GB) are worked out here so the
@@ -103,8 +109,13 @@ func TestPGMemoryVerdict_edges(t *testing.T) {
 	t.Run("no PostgreSQL server yet", func(t *testing.T) {
 		p := base()
 		p.Pools = nil
-		if d := pgMemoryVerdict(p); d.IndexPool != "none" {
-			t.Errorf("%+v", d)
+		// The MySQL board: the factory settings on 15.3 GiB are over, but
+		// with no PostgreSQL server nothing runs on the copy.
+		p.Workers = defaultPGRouterWorkers
+		p.In = pgTestMachine(16041004 << 10)
+		d := pgMemoryVerdict(p)
+		if d.IndexPool != "none" || d.Verdict != "idle" || d.Advice != "" || strings.Contains(pgMemoryLines(d), "WARNING") {
+			t.Errorf("%+v / %q", d, pgMemoryLines(d))
 		}
 	})
 	t.Run("tails unbounded are said, not added as zero", func(t *testing.T) {

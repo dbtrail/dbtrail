@@ -552,9 +552,8 @@ func runPGRouter(cmd *cobra.Command, _ []string) error {
 	// Whether the statements, the tails and an index MySQL on this machine
 	// fit its memory (#3296): said once here, and in /status as it is now.
 	memWatch := newPGMemoryWatch(pgMemoryPlanFor(st.Workers, memory, srv))
-	memDoc := memWatch.doc()
-	fmt.Fprint(os.Stderr, pgMemoryLines(*memDoc))
-	logPGMemory(memDoc)
+	fmt.Fprint(os.Stderr, pgMemoryLines(*memWatch.doc()))
+	go memWatch.follow(ctx)
 	if p := st.TLS.ValidityProblemFor(time.Now(), pgVerifying); p != "" {
 		// In the log as well: the startup lines are plain text on stderr.
 		slog.Warn("PostgreSQL router: " + p)
