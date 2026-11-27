@@ -104,6 +104,19 @@ type pgRouterServerNumbers struct {
 	// counted under Reasons by the reason it was routed by. Absent until one
 	// is counted.
 	ShapeUnchecked map[string]uint64 `json:"copy_shape_unchecked,omitempty"`
+	// CaptureStateOnCopy counts the statements the copy answered, with a
+	// notice, while capture's record of the changes it dropped was not known
+	// to be current (#3202), by kind: stale (capture stopped saving while the
+	// source wrote, and the statement could not go to the source) and
+	// unchecked (the source could not be asked whether it wrote). Each is
+	// also counted under Reasons by the reason it was routed by; the ones the
+	// source answered are under capture_state_stale. Absent until one is
+	// counted.
+	CaptureStateOnCopy map[string]uint64 `json:"capture_state_on_copy,omitempty"`
+	// CaptureState says, while it holds, that capture's record of the
+	// changes it dropped is not current for this server, why, and when the
+	// port last checked (#3202). Absent while it is current.
+	CaptureState *pgCaptureStateDoc `json:"capture_state,omitempty"`
 	// Answers is what each side ("copy", "source", "refused") finished:
 	// counts, errors and times.
 	Answers map[string]console.RouteAnswers `json:"answers"`
@@ -187,6 +200,7 @@ type pgRouteTally struct {
 	joinChecks            map[string]uint64
 	heavyOlder            map[string]uint64
 	shapeUnchecked        map[string]uint64
+	captureOnCopy         map[string]uint64
 	answers               map[string]*pgRouteAnswers
 	rows                  map[pgShapeKey]*pgShapeRow
 	notCounted            uint64
@@ -348,6 +362,12 @@ func (r *pgRouteStats) note(id string, n pgshim.RouteNote) {
 			t.shapeUnchecked = map[string]uint64{}
 		}
 		t.shapeUnchecked[n.ShapeUnchecked]++
+	}
+	if n.CaptureState != "" {
+		if t.captureOnCopy == nil {
+			t.captureOnCopy = map[string]uint64{}
+		}
+		t.captureOnCopy[n.CaptureState]++
 	}
 	a := t.answers[n.Side]
 	if a == nil {
@@ -520,7 +540,7 @@ func (r *pgRouteStats) counts(listen string) pgRouterStatusDoc {
 		Servers: map[string]pgRouterServerNumbers{}}
 	for id, t := range r.perServer {
 		n := pgRouterServerNumbers{Copy: t.copy, Source: t.source, Refused: t.refused,
-			Reasons: maps.Clone(t.reasons), JoinChecks: maps.Clone(t.joinChecks), HeavyOlderOnCopy: maps.Clone(t.heavyOlder), ShapeUnchecked: maps.Clone(t.shapeUnchecked), Answers: map[string]console.RouteAnswers{}, ForwardingOff: t.barred}
+			Reasons: maps.Clone(t.reasons), JoinChecks: maps.Clone(t.joinChecks), HeavyOlderOnCopy: maps.Clone(t.heavyOlder), ShapeUnchecked: maps.Clone(t.shapeUnchecked), CaptureStateOnCopy: maps.Clone(t.captureOnCopy), CaptureState: pgCaptureStateNow(id), Answers: map[string]console.RouteAnswers{}, ForwardingOff: t.barred}
 		switch {
 		case t.ageWhy != "":
 			n.DataAgeUnknownReason = t.ageWhy

@@ -75,6 +75,11 @@ func (q *SQLOnCopy) PGTablesNotCaptured(ctx context.Context) ([]PGTableNotCaptur
 // checkpoint; bintrail-pg's default is 5 s), a minute.
 const pgNoCaptureStateBound = time.Minute
 
+// PGNoCaptureStateBound is pgNoCaptureStateBound for the PostgreSQL port's
+// rule on a capture that saved its state and stopped saving it (#3202,
+// consoleapp): one bound for "capture is not saving".
+const PGNoCaptureStateBound = pgNoCaptureStateBound
+
 // pgFileWritten is when t's file was last written, by this host's clock;
 // zero when it cannot be told.
 func pgFileWritten(t views.BaselineTable) time.Time {

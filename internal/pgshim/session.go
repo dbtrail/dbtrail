@@ -96,6 +96,10 @@ type session struct {
 	// its kind (ShapeUnchecked*), for the statement's note.
 	shapeNote      string
 	shapeUnchecked string
+	// captureState is the kind of CaptureState the copy answered the
+	// statement being run under, with a notice (capture_stale_3202.go), for
+	// its RouteNote; "" when none.
+	captureState string
 	// shapeDescribe sends the Describe just made to the source: a table the
 	// statement reads changed there (shape_3251.go). Only that Describe:
 	// each execution is checked again.
