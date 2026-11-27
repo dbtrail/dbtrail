@@ -2336,16 +2336,17 @@ memory sum ("Whether its memory fits the machine"). Its text is also held to
 64 MB. A result past any of these is refused with `54000` and counted in
 `/status` under `result_too_large`, as `rows`, `cells`, `bytes` or
 `cell_length` (one cell longer than a cell may be). The plan rule below
-keeps 10,000 rows: a statement it sent to the source before the cap went
-to 200,000 still goes there. So when the plan says the statement
-returns more rows than that, the port does not run it on the copy only to
-refuse it: your PostgreSQL answers it, and sends every row. The plan's
+keeps 10,000 rows (or the row cap, when you set it lower): a statement it
+sent to the source before the cap went to 200,000 still goes there. So when
+the plan says an expensive statement returns more than 10,000 rows, the port
+does not try it on the copy, where a wide result could be refused for its
+cells or its bytes: your PostgreSQL answers it, and sends every row. The plan's
 estimate is used for one kind of statement, the one where it can be trusted:
 one table read alone, whole or by an index, with nothing left to check row
 by row (no `Filter` in the plan), under a `LIMIT` or a sort at most
 (`SELECT * FROM orders`, `SELECT * FROM orders WHERE id > 5000 ORDER BY id`).
-A `LIMIT` at or under the cap, written as a number, keeps the statement on
-the copy. A prepared statement with parameters (`LIMIT $1`, `WHERE id > $1`)
+A `LIMIT` of 10,000 or less (or of the row cap, when lower), written as a
+number, keeps the statement on the copy. A prepared statement with parameters (`LIMIT $1`, `WHERE id > $1`)
 is never sent to the source for its size: its plan is asked for once,
 without its values, PostgreSQL then estimates by fixed guesses (a `LIMIT $1`
 is taken to return a tenth of the rows), and the port does not take a guess
@@ -2977,7 +2978,7 @@ The reasons, with the MySQL port's names where they mean the same:
 | copy | `heavy_on_copy` | its plan on the source is expensive, so the copy answers it even though the port would otherwise send it to the source for how the copy answers it: the answer may differ from PostgreSQL's (simple protocol only, since 0.140.0) |
 | copy | `capture_gate` | the server forwards with the capture account, and the statement did not pass that account's check, so the copy answered it without asking the source for its plan |
 | source | `cheap_plan` | its plan on the source is under both thresholds: the source answers it, by its indexes |
-| source | `result_over_row_cap` | its plan on the source is expensive and says it returns more rows than the copy returns for one statement (`--sql-port-max-rows`): the copy would refuse the result, so it is not tried there |
+| source | `result_over_row_cap` | its plan on the source is expensive and says it returns more than 10,000 rows (or `--sql-port-max-rows`, when lower): a result that large may be refused by the copy for its cells or bytes, so it is not tried there |
 | source | `explain_failed` | its plan could not be had (the source refused the `EXPLAIN`, a text of more than one statement): the source answers it, its error included |
 | source | `in_transaction` | the client's transaction block |
 | source | `veto` | a construct the copy answers differently, or is not known to answer the same |

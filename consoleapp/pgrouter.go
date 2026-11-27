@@ -815,17 +815,18 @@ const (
 	pgCopyMaxCells       = 1_000_000
 	pgCopyCellsFloorRows = 10_000
 	// pgCopyCellBytes is what a cell takes while its answer is decoded and
-	// written for the wire, its text aside: measured at 92 bytes alive and
-	// 151 allocated per small numeric cell (pgshim TestCellMemoryCost_3286,
-	// which fails past 160).
-	pgCopyCellBytes = 160
+	// written for the wire, its text aside (pgshim.CellMemoryBytes, held to
+	// the measure by pgshim's TestCellMemoryCost_3286).
+	pgCopyCellBytes = pgshim.CellMemoryBytes
 )
 
-// pgCopyAnswerBytes is the most one statement's answer takes in this
-// process while it is read and sent (pgMemoryPlan.AnswerBytes): its cells
-// and its text. A result under 10,000 rows wider than 100 columns can take
-// more, as any width could before.
-var pgCopyAnswerBytes = int64(pgCopyMaxCells*pgCopyCellBytes) + sqlsandbox.DefaultLimits().MaxResultBytes
+// pgCopyAnswerBytes is what one statement's answer may take in this process
+// while it is read and sent (pgMemoryPlan.AnswerBytes): its cells, and its
+// text (at most sqlsandbox's MaxResultBytes, 64 MB) up to
+// pgshim.TextCopiesInMemory times at once. About 400 MB. A result under
+// 10,000 rows wider than 100 columns can take more, as any width could
+// before.
+var pgCopyAnswerBytes = int64(pgCopyMaxCells*pgCopyCellBytes) + pgshim.TextCopiesInMemory*sqlsandbox.DefaultLimits().MaxResultBytes
 
 // pgRouterQueryTimeout bounds each statement end to end, a wait for a worker
 // included: the same five minutes as the MySQL port's.

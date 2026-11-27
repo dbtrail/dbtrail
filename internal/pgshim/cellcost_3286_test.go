@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,25 +13,29 @@ import (
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
 
-// What one cell of the copy's answer takes in the port's memory while it is
-// decoded and written for the wire (#3286): the worker's JSON line, its
-// decoding into a sqlsandbox.Result (json.Number cells, as the parent reads
-// it), and the [][]byte rows runFree builds, all alive at once as they are
-// at the end of runFree. Measured over 1,000,000 small numeric cells, the
-// cheapest text and the most cells per byte. consoleapp's pgCopyCellBytes
-// must stay at or above it (TestPGCopyCellBytesCoversTheMeasure_3286 there
-// pins the number); this test fails when the cost grows past it.
-const measuredCellCostCeiling = 160
-
+// What the copy's answer takes in the port's memory while it is read and
+// written for the wire (#3286), held to the model the PostgreSQL router
+// sizes its memory sum with: CellMemoryBytes a cell beside the text, and the
+// text TextCopiesInMemory times. Everything alive at once at the end of
+// runFree is measured: the worker's output line, the JSON decoder (which
+// buffers the whole line), the decoded sqlsandbox.Result (json.Number
+// cells, as the parent reads it) and the [][]byte rows for the wire. Over
+// 1,000,000 small numeric cells, the most cells per byte of text.
 func TestCellMemoryCost_3286(t *testing.T) {
-	const rows, cols = 100_000, 10
+	// The most cells per byte of text, and the most text per cell.
+	t.Run("small numbers", func(t *testing.T) { measureAnswer(t, 100_000, 10, "INTEGER", func(i, j int) string { return strconv.Itoa((i*10 + j) % 100000) }) })
+	long := strconv.Quote(strings.Repeat("x", 3000))
+	t.Run("long text", func(t *testing.T) { measureAnswer(t, 20_000, 1, "VARCHAR", func(int, int) string { return long }) })
+}
+
+func measureAnswer(t *testing.T, rows, cols int, typ string, cell func(i, j int) string) {
 	var line bytes.Buffer
 	line.WriteString(`{"columns":[`)
 	for j := range cols {
 		if j > 0 {
 			line.WriteByte(',')
 		}
-		line.WriteString(`{"name":"c` + strconv.Itoa(j) + `","type":"INTEGER"}`)
+		line.WriteString(`{"name":"c` + strconv.Itoa(j) + `","type":"` + typ + `"}`)
 	}
 	line.WriteString(`],"rows":[`)
 	for i := range rows {
@@ -42,16 +47,20 @@ func TestCellMemoryCost_3286(t *testing.T) {
 			if j > 0 {
 				line.WriteByte(',')
 			}
-			line.WriteString(strconv.Itoa((i*cols + j) % 100000))
+			line.WriteString(cell(i, j))
 		}
 		line.WriteByte(']')
 	}
 	line.WriteString(`]}`)
-	raw := line.Bytes()
+	text := line.String()
+	line.Reset()
 
 	runtime.GC()
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
+	// The worker's output, made after the snapshot: it is alive in the real
+	// path too.
+	raw := []byte(text)
 
 	var res sqlsandbox.Result
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -71,14 +80,15 @@ func TestCellMemoryCost_3286(t *testing.T) {
 	}
 	runtime.ReadMemStats(&after)
 	cells := rows * cols
-	perCell := float64(after.TotalAlloc-before.TotalAlloc) / float64(cells)
 	live := float64(after.HeapAlloc) - float64(before.HeapAlloc)
-	t.Logf("%d cells: %.0f bytes allocated per cell, %.0f live per cell; the JSON line itself %.1f per cell",
-		cells, perCell, live/float64(cells), float64(len(raw))/float64(cells))
+	model := float64(cells*CellMemoryBytes + TextCopiesInMemory*len(raw))
+	t.Logf("%d cells, %d bytes of JSON: %.0f bytes alive (%.0f a cell), %.0f allocated; the model says %.0f",
+		cells, len(raw), live, live/float64(cells), float64(after.TotalAlloc-before.TotalAlloc), model)
 	runtime.KeepAlive(raw)
+	runtime.KeepAlive(dec)
 	runtime.KeepAlive(res)
 	runtime.KeepAlive(wire)
-	if live/float64(cells) > measuredCellCostCeiling {
-		t.Errorf("%.0f live bytes per cell, over the %d pgCopyCellBytes is sized with", live/float64(cells), measuredCellCostCeiling)
+	if live > model {
+		t.Errorf("%.0f bytes alive, over the %.0f of CellMemoryBytes and TextCopiesInMemory: raise them", live, model)
 	}
 }

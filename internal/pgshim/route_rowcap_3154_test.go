@@ -339,7 +339,7 @@ func TestRouteByCost_resultOverRowCap_leavesNoSide(t *testing.T) {
 
 // Every reason the port notes has words in its status.
 func TestResultOverRowCap_statusWords(t *testing.T) {
-	if w := reasonMeans[ReasonResultOverRowCap]; !strings.Contains(w, "more rows than the copy returns") {
+	if w := reasonMeans[ReasonResultOverRowCap]; !strings.Contains(w, "more rows than the port tries on the copy") {
 		t.Errorf("status words for %s: %q", ReasonResultOverRowCap, w)
 	}
 }

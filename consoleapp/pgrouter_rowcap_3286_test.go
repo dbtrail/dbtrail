@@ -58,7 +58,7 @@ func TestPGRouteStatsCountsResultTooLarge_3286(t *testing.T) {
 // still holds with it. The 8 GB host of #3296 warns; the same setup on
 // 16 GB and the two PostgreSQL boards fit.
 func TestPGMemoryCountsTheAnswer_3286(t *testing.T) {
-	if pgCopyCellBytes != 160 || pgCopyAnswerBytes != 1_000_000*160+64<<20 {
+	if pgCopyCellBytes != pgshim.CellMemoryBytes || pgCopyAnswerBytes != 1_000_000*pgshim.CellMemoryBytes+pgshim.TextCopiesInMemory*64<<20 {
 		t.Fatalf("answer bound %d", pgCopyAnswerBytes)
 	}
 	plan := func(mem uint64) pgMemoryPlan {
