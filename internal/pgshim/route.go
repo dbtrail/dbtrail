@@ -88,9 +88,14 @@ const ReasonCopyRefusedAfterWrittenOrder = "copy_refused_after_written_order"
 const ReasonCaptureGate = "capture_gate"
 
 // What a result refused for its size passed (RouteNote.TooLarge, #3286).
+// TooLargeCells: past the cells a result this wide may have
+// (sqlsandbox.Session.MaxCells); TooLargeCellLength: one cell longer than a
+// cell may be.
 const (
-	TooLargeRows  = "rows"
-	TooLargeBytes = "bytes"
+	TooLargeRows       = "rows"
+	TooLargeCells      = "cells"
+	TooLargeBytes      = "bytes"
+	TooLargeCellLength = "cell_length"
 )
 
 // RouteNote is one statement's decision, for the port's status.

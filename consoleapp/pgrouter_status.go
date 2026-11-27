@@ -120,8 +120,9 @@ type pgRouterServerNumbers struct {
 	ShapeUnchecked map[string]uint64 `json:"copy_shape_unchecked,omitempty"`
 	// ResultTooLarge counts the statements the copy ran whose result was
 	// refused for its size (#3286): "rows" past --sql-port-max-rows,
-	// "bytes" past the bytes one statement returns. The client got error
-	// 54000 for each.
+	// "cells" past the cells a result that wide may have, "bytes" past the
+	// bytes one statement returns, "cell_length" a cell longer than one may
+	// be. The client got error 54000 for each.
 	ResultTooLarge map[string]uint64 `json:"result_too_large,omitempty"`
 	// CaptureStateOnCopy counts the statements the copy answered, with a
 	// notice, while capture's record of the changes it dropped was not known

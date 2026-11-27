@@ -263,7 +263,12 @@ func pgRouterSettingsFrom(cmd *cobra.Command) (pgRouterSettings, error) {
 	}
 	// The copy refuses a result of more rows than this: a statement whose
 	// plan says it returns more is the source's (pgshim.CostPolicy.RowCap).
-	st.Cost.RowCap = int64(st.SQLPortMaxRows)
+	// The plan rule that sends an expensive statement whose estimated result
+	// is large to the source keeps the 10,000 it had before the port's cap
+	// went to 200,000 (#3286): a wide result it sent there would now be run
+	// on the copy and refused for its cells or bytes. A lower cap still
+	// pulls it down.
+	st.Cost.RowCap = int64(min(st.SQLPortMaxRows, pgCopyCellsFloorRows))
 	st.StatusStatements, _ = f.GetBool("status-statements")
 	if !f.Changed("status-statements") {
 		if v := os.Getenv("BINTRAIL_PG_ROUTER_STATUS_STATEMENTS"); v != "" {
@@ -799,6 +804,18 @@ func pgCopySlots(workers int) int { return workers + 1 }
 // SQL_PORT_MAX_ROWS) still sets both ports' cap when given.
 const defaultPGRouterMaxRows = 200_000
 
+// pgCopyMaxCells and pgCopyCellsFloorRows bound a result by its cells
+// (#3286, sqlsandbox.Session.MaxCells): what it takes in this process's
+// memory, once decoded and written for the wire, follows its cells, about
+// pgCopyCellBytes each beside its text. A result of up to 1,000,000 cells
+// gets every row up to the row cap (CH-benCHmark's Q16, 100,000 rows of 4
+// columns, is 400,000); a wider one is cut, but never under 10,000 rows, what
+// any width had before.
+const (
+	pgCopyMaxCells       = 1_000_000
+	pgCopyCellsFloorRows = 10_000
+)
+
 // pgRouterQueryTimeout bounds each statement end to end, a wait for a worker
 // included: the same five minutes as the MySQL port's.
 const pgRouterQueryTimeout = defaultFlashbackQueryTimeout
@@ -1299,7 +1316,10 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			// And a statement of a shape that needed the order written runs
 			// that way from the start (pgshim writtenorder.go).
 			sess := sqlsandbox.Session{PostgresRules: true, TrimPadded: true, PostgresNames: true, TimeZone: opts.TimeZone, SkipCommonSubplan: true,
-				RetryOutOfMemoryInWrittenOrder: true, KeepJoinOrder: opts.KeepJoinOrder}
+				RetryOutOfMemoryInWrittenOrder: true, KeepJoinOrder: opts.KeepJoinOrder,
+				// A wide result is cut by its cells (#3286), so what it takes
+				// in this process's memory stays bounded at any row cap.
+				MaxCells: pgCopyMaxCells, CellsFloorRows: pgCopyCellsFloorRows}
 			if opts.JoinNDV != nil {
 				sess.JoinNDV = &sqlsandbox.JoinCounts{NDV: opts.JoinNDV}
 			}
