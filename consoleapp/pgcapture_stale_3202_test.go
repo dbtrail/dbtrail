@@ -418,16 +418,18 @@ func TestPGCaptureState_3202_statusAsksForAFreshVerdict(t *testing.T) {
 	r := newPGRouteStats(time.Now(), false)
 	// A server of this port: one statement counted before the stall.
 	r.note("srv-status", pgshim.RouteNote{Side: pgshim.RouteCopy, Reason: pgshim.ReasonAnswersTheSame})
-	// Another port's server is not said here.
-	if _, ok := r.doc("").Servers["srv1"]; ok {
-		t.Error("a server this port counted nothing of is in its document")
-	}
 	f.set(pgSavedRow(90, 1000), 2000)
 	if d := r.doc("").Servers["srv-status"].CaptureState; d == nil || d.State != pgshim.CaptureStale {
 		t.Fatalf("a stall with no statement, /status: %+v", d)
 	}
 	if !strings.Contains(f.log.String(), "level=WARN") {
 		t.Errorf("a stall with no statement is not warned about when /status asks: %s", f.log.String())
+	}
+	// A server this port counted nothing of (another port's) is not in its
+	// document, stale or not.
+	other := newPGRouteStats(time.Now(), false)
+	if _, ok := other.doc("").Servers["srv-status"]; ok {
+		t.Error("a server this port counted nothing of is in its document")
 	}
 	f.advance(pgCaptureStateTTL)
 	f.set(pgSavedRow(1, 2000), 2000)
