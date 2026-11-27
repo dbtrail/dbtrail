@@ -548,10 +548,11 @@ func (s *session) describeFree(st *preparedStatement) (cols []string, types []co
 	// (shape_3251.go): the copy would describe the old ones. The source
 	// describes it, and the statement stays there, held to the columns the
 	// source described, as PostgreSQL holds a prepared statement to its
-	// shape. Where nothing goes to the source, or the columns could not be
-	// compared, the Describe is refused.
+	// shape. Where nothing goes to the source, the Describe is refused.
+	// Where the columns could not be compared, the copy describes it, and
+	// its executions say so (runFree).
 	ctx, done := s.statementContext()
-	changed, perr := s.copyShapeDiffers(ctx, RewriteForCopy(st.query))
+	changed, _, perr := s.copyShapeDiffers(ctx, RewriteForCopy(st.query))
 	done()
 	if perr != nil {
 		return nil, nil, false, perr
@@ -795,7 +796,13 @@ func (s *session) runPortal(p *portal) *pgErr {
 	s.argsPadded = paddedArgument(p.stmt.paramOIDs)
 	s.fastLane = fastLaneFor(p.stmt, p.route)
 	s.portalHeavy, s.copyReason = s.expensive(p.route), p.route.reason
+	s.shapeUnchecked = false
 	cols, types, rows, tag, perr := s.run(p.text)
+	if s.shapeUnchecked && perr == nil && p.route.side == RouteCopy {
+		// Answered without its tables' columns compared (shape_3251.go).
+		p.route.reason = ReasonCopyShapeUnchecked
+	}
+	s.shapeUnchecked = false
 	s.screened = ""
 	s.argsBound, s.argsPadded = false, false
 	s.fastLane, s.portalHeavy, s.copyReason = false, false, ""

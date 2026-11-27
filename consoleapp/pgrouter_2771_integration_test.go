@@ -769,7 +769,8 @@ func TestIntegrationPGRouterForward(t *testing.T) {
 				t.Fatal(err)
 			}
 			env.srv.RefreshFollowedFiles()
-			cl := pgClient(t, ctx, strings.Replace(env.portDSN(), "dbname=pgsrv", "dbname="+c.name, 1), nil)
+			var notices []string
+			cl := pgClient(t, ctx, strings.Replace(env.portDSN(), "dbname=pgsrv", "dbname="+c.name, 1), &notices)
 			got := one(ctx, cl, "BEGIN")
 			if !strings.HasPrefix(got, "error "+c.code) || !strings.Contains(got, c.says) || strings.Contains(got, "wrong-pw") {
 				t.Errorf("%s: %q", c.name, got)
@@ -777,15 +778,20 @@ func TestIntegrationPGRouterForward(t *testing.T) {
 			if cl.TxStatus() != 'I' {
 				t.Errorf("%s: status %c after a BEGIN that failed", c.name, cl.TxStatus())
 			}
-			// A statement that reads a table is refused, not answered by the
-			// copy: its columns there cannot be compared with the source's
-			// (#3251, copy_shape_unchecked). The connection stays open, and
-			// one that reads no table is still the copy's.
-			if got := one(ctx, cl, count); !strings.HasPrefix(got, "error 55000") || !strings.Contains(got, "could not check") || strings.Contains(got, "wrong-pw") {
-				t.Errorf("%s: a statement on a table with the source unreachable: %q, want 55000", c.name, got)
+			// The copy still answers, and says it could not check whether
+			// the table changed on the source (#3251, copy_shape_unchecked).
+			notices = nil
+			if got := one(ctx, cl, count); got != "2" {
+				t.Errorf("%s: the copy still answers: %q", c.name, got)
 			}
-			if got := one(ctx, cl, "SELECT 1 + 1 AS two"); got != "2" {
-				t.Errorf("%s: a statement that reads no table: %q, want the copy's 2", c.name, got)
+			said := 0
+			for _, n := range notices {
+				if strings.Contains(n, "could not check whether") && !strings.Contains(n, "wrong-pw") {
+					said++
+				}
+			}
+			if said != 1 {
+				t.Errorf("%s: notices %q, want one that says the table could not be checked", c.name, notices)
 			}
 		}
 	})

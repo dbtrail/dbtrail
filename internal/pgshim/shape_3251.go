@@ -29,9 +29,10 @@ import (
 // spite of a difference does not hold for it. Where nothing can go to the
 // source (the server hides tables or columns), the statement is refused, as
 // a char(n) or a collation the copy cannot compare is. When the source
-// cannot be asked, the statement is refused too (ReasonCopyShapeUnchecked):
-// its columns on the copy may be the old ones, and sending it to a source
-// that did not answer would only wait for it again.
+// cannot be asked (down, slower than the question's time, no connection to
+// it free), the copy answers as it would without the check, with a NOTICE
+// that says the tables could not be checked (ReasonCopyShapeUnchecked): the
+// copy stays a way to read while the source is away.
 //
 // The comparison is by table: a statement that names only columns the
 // change did not touch goes to the source all the same. Once capture sees
@@ -52,32 +53,33 @@ type SourceShape struct {
 
 // copyShapeDiffers says why the copy's columns of a table text reads are not
 // the source's, "" when every table it reads is as its snapshot recorded it.
-// refusal, when not nil, is the statement's error: its tables' columns could
-// not be compared (the source could not be asked, the copy's catalog could
-// not be read), or it was stopped meanwhile; the reason it is counted under
-// is in busyRefused.
-func (s *session) copyShapeDiffers(ctx context.Context, text string) (why string, refusal *pgErr) {
+// unchecked, when not "", is the notice for the client: the source could not
+// be asked, and the copy answers as if nothing changed. refusal, when not
+// nil, is the statement's error: the copy's catalog could not be read, or the
+// statement was stopped meanwhile; the reason it is counted under is in
+// busyRefused.
+func (s *session) copyShapeDiffers(ctx context.Context, text string) (why, unchecked string, refusal *pgErr) {
 	if s.bound == nil || s.bound.SourceShapes == nil || s.bound.Catalog == nil {
-		return "", nil
+		return "", "", nil
 	}
 	toks, _ := lexSQL(text)
 	switch firstWord(toks) {
 	case "show", "describe", "explain", "summarize":
 		// The copy's own commands (copy_command): they describe the copy, and
 		// the source has none of them.
-		return "", nil
+		return "", "", nil
 	}
 	v, perr := s.catalog()
 	if perr != nil {
 		if busy := s.catalogBusy; busy != "" {
 			s.busyRefused = busy
-			return "", busyRefusal(busy)
+			return "", "", busyRefusal(busy)
 		}
-		return "", perr
+		return "", "", perr
 	}
 	read := shapeTablesRead(text, v.tables)
 	if len(read) == 0 {
-		return "", nil
+		return "", "", nil
 	}
 	names := make([][2]string, len(read))
 	for i, at := range read {
@@ -85,14 +87,17 @@ func (s *session) copyShapeDiffers(ctx context.Context, text string) (why string
 	}
 	now, err := s.bound.SourceShapes(ctx, names)
 	if perr := notCapturedStopped(ctx); perr != nil {
-		return "", perr
+		return "", "", perr
 	}
 	if err != nil {
 		// The error's own text (an address) goes to the log, not to the
 		// client.
-		logEveryMinute(s.logger, "pgshim: shapes unread", "pgshim: the columns of the tables a statement reads could not be read from the source; the statement is refused", "err", err)
-		s.busyRefused = ReasonCopyShapeUnchecked
-		return "", &pgErr{"55000", "DBTrail could not check that the columns of the tables this statement reads are on your PostgreSQL what they are on the copy (the source did not answer in time, or refused the question; DBTrail's log has the details), so the statement was not answered; run it again"}
+		logEveryMinute(s.logger, "pgshim: shapes unread", "pgshim: the columns of the tables a statement reads could not be read from the source; the copy answers, with a notice", "err", err)
+		list := make([]string, len(names))
+		for i, n := range names {
+			list[i] = n[0] + "." + n[1]
+		}
+		return "", "DBTrail could not check whether " + strings.Join(list, ", ") + " changed on your PostgreSQL (the source did not answer in time; DBTrail's log has the details), so this was answered from the copy as of its snapshot.", nil
 	}
 	for _, at := range read {
 		t := &v.tables[at]
@@ -103,21 +108,23 @@ func (s *session) copyShapeDiffers(ctx context.Context, text string) (why string
 			// shape too, and its name must not reach the client.
 			logEveryMinute(s.logger, "pgshim: shape differs "+t.Schema+"."+t.Name, "pgshim: a table changed on the source since its snapshot; the copy does not answer statements that read it",
 				"table", t.Schema+"."+t.Name, "change", detail)
-			return why, nil
+			return why, "", nil
 		}
 	}
-	return "", nil
+	return "", "", nil
 }
 
 // shapeRefusal is the error of a statement for the copy that reads a table
 // whose columns on the source are not its snapshot's, nil when the copy may
 // run it. The statement then goes to the source (fallTo); where it cannot go
-// there, it is refused.
+// there, it is refused. When the source could not be asked, the copy runs
+// it, and its notice waits in shapeNote for the copy's answer (runFree).
 func (s *session) shapeRefusal(ctx context.Context, text string) *pgErr {
-	why, perr := s.copyShapeDiffers(ctx, text)
+	why, unchecked, perr := s.copyShapeDiffers(ctx, text)
 	if perr != nil {
 		return perr
 	}
+	s.shapeNote = unchecked
 	if why == "" {
 		return nil
 	}

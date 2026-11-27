@@ -195,7 +195,7 @@ func TestIntegrationPGRouterShape_3251(t *testing.T) {
 			t.Errorf("a new connection: %q (%s), want the source", got, why)
 		}
 		// The source's columns, read as the forwarding user, catalog only.
-		ask := pgPortSourceShapes(withAccount(t, pgFwdSourceDSN(t), pgFixtureRole, pgFixturePass), "test")
+		ask := pgPortSourceShapes(withAccount(t, pgFwdSourceDSN(t), pgFixtureRole, pgFixturePass), "test", newPGSourceSlots(2))
 		got, err := ask(ctx, [][2]string{{"public", "shp_add"}, {"public", "shp_absent"}})
 		if err != nil {
 			t.Fatalf("the source's shapes: %v", err)

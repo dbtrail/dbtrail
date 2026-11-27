@@ -74,9 +74,6 @@ const (
 	ReasonReadOnly        = "read_only"         // not a read, and the port is read-only toward the source
 	ReasonCopyQueueFull   = "copy_queue_full"   // for the copy, whose workers were all taken and the line for one full (#3109)
 	ReasonCopyWaitTimeout = "copy_wait_timeout" // for the copy, it waited for a worker as long as it may (#3109)
-	// For the copy, whose tables' columns on the source could not be read to
-	// compare with its snapshot's (shape_3251.go).
-	ReasonCopyShapeUnchecked = "copy_shape_unchecked"
 )
 
 // ReasonCopyRefusedAfterWrittenOrder: the source answered a statement that
@@ -88,6 +85,11 @@ const ReasonCopyRefusedAfterWrittenOrder = "copy_refused_after_written_order"
 // with (#3054), and the statement did not pass that account's gate
 // (capture_gate.go), so the copy answered it without the source's plan.
 const ReasonCaptureGate = "capture_gate"
+
+// ReasonCopyShapeUnchecked: the copy answered a statement whose tables'
+// columns on the source could not be read to compare with its snapshot's
+// (shape_3251.go), with a notice that says so.
+const ReasonCopyShapeUnchecked = "copy_shape_unchecked"
 
 // RouteNote is one statement's decision, for the port's status.
 type RouteNote struct {

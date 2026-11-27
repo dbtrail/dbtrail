@@ -106,7 +106,7 @@ func newShapePort(t *testing.T) (*tablesPort, *shapeKnob) {
 
 var (
 	shapeDiffers   = costOutcome{"42", "", RouteSource, ReasonCopyShapeDiffers}
-	shapeUnchecked = costOutcome{"", "55000", RouteRefused, ReasonCopyShapeUnchecked}
+	shapeUnchecked = costOutcome{"7", "", RouteCopy, ReasonCopyShapeUnchecked}
 )
 
 func addColumn(table string) func(map[[2]string]SourceShape) {
@@ -244,58 +244,54 @@ func TestCopyShape_3251_noShapeRecorded(t *testing.T) {
 }
 
 // The source cannot be asked (down, refusing the account, slower than the
-// question's time): the statement fails closed. Nothing is run on the copy,
-// whose columns may be the old ones, and nothing is sent to a source that
-// just did not answer: it is refused, and can be run again.
+// question's time, no connection to it free): the copy answers, as it would
+// without the check, and the client is told by a NOTICE that the tables
+// could not be checked; /status counts it under copy_shape_unchecked.
 func TestCopyShape_3251_sourceCannotBeAsked(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	p, k := newShapePort(t)
 	k.fail(errors.New("dial tcp 10.0.3.7:5432: connect: connection refused"))
-	c := costPortConn(t, ctx, p.l)
-	runs := p.l.runs.Load()
-	res, err := c.Exec(ctx, "SELECT sum(n) FROM big").ReadAll()
-	var pe *pgconn.PgError
-	if !errors.As(err, &pe) || pe.Code != "55000" || len(res) > 0 && len(res[0].Rows) > 0 {
-		t.Fatalf("simple: %v %v, want 55000", err, res)
+	c, notices := noticeConn(t, ctx, p.l)
+	said := func(what string) {
+		t.Helper()
+		n := *notices
+		if len(n) != 1 || !strings.Contains(n[0], "could not check whether public.big, other.big changed") || !strings.Contains(n[0], "answered from the copy as of its snapshot") || strings.Contains(n[0], "10.0.3.7") {
+			t.Errorf("%s: notices %q, want one that names the tables, without the address", what, n)
+		}
+		*notices = nil
 	}
-	if strings.Contains(pe.Message, "10.0.3.7") || !strings.Contains(pe.Message, "could not check") {
-		t.Errorf("the client's message: %q: it says what happened, and the address stays in the log", pe.Message)
+	unchecked := costOutcome{"7", "", RouteCopy, ReasonCopyShapeUnchecked}
+	if got := costSimple(ctx, c, p.l, "SELECT sum(n) FROM big"); got != unchecked {
+		t.Errorf("simple: %+v, want %+v", got, unchecked)
 	}
-	if n := p.l.last(); n.Side != RouteRefused || n.Reason != ReasonCopyShapeUnchecked {
-		t.Errorf("noted %s/%s, want refused/%s", n.Side, n.Reason, ReasonCopyShapeUnchecked)
+	said("simple")
+	// Extended: Prepare describes it on the copy; each execution says so.
+	if _, err := c.Prepare(ctx, "s", "SELECT sum(n) FROM big", nil); err != nil {
+		t.Fatalf("prepare: %v", err)
 	}
-	// Extended: Prepare describes the statement, which is where it is
-	// refused; an Execute of one prepared earlier is refused too.
-	if _, err := c.Prepare(ctx, "s", "SELECT sum(n) FROM big", nil); !errors.As(err, &pe) || pe.Code != "55000" {
-		t.Errorf("prepare: %v, want 55000", err)
+	*notices = nil
+	if r := c.ExecPrepared(ctx, "s", nil, nil, nil).Read(); r.Err != nil || len(r.Rows) != 1 || string(r.Rows[0][0]) != "7" {
+		t.Fatalf("execute: %v %q, want the copy's 7", r.Err, r.Rows)
 	}
-	if d := p.l.runs.Load() - runs; d != 0 {
-		t.Errorf("the copy ran %d statements, want none", d)
+	if n := p.l.last(); n.Side != RouteCopy || n.Reason != ReasonCopyShapeUnchecked {
+		t.Errorf("execute noted %s/%s, want copy/%s", n.Side, n.Reason, ReasonCopyShapeUnchecked)
 	}
+	said("execute")
+	// The copy fails it and the source answers: no notice that the copy did.
+	p.l.copyErr = func(string) error { return errors.New("Catalog Error: Scalar Function with name nope does not exist") }
+	if got := costSimple(ctx, c, p.l, "SELECT sum(n) FROM big"); got.side != RouteSource {
+		t.Errorf("the copy fails it: %+v, want the source", got)
+	}
+	if len(*notices) != 0 {
+		t.Errorf("the source answered, and the client was told the copy did: %q", *notices)
+	}
+	p.l.copyErr = nil
+	// Once the source answers again, a changed table is the source's.
 	k.fail(nil)
-	if _, err := c.Prepare(ctx, "early", "SELECT sum(n) FROM big", nil); err != nil {
-		t.Fatal(err)
-	}
-	// Its Describe ran on the copy; its execution must not.
-	runs = p.l.runs.Load()
-	k.fail(errors.New("timeout: the source did not answer within 2s"))
-	if r := c.ExecPrepared(ctx, "early", nil, nil, nil).Read(); !errors.As(r.Err, &pe) || pe.Code != "55000" {
-		t.Errorf("execute: %v, want 55000", r.Err)
-	}
-	if n := p.l.last(); n.Side != RouteRefused || n.Reason != ReasonCopyShapeUnchecked {
-		t.Errorf("execute noted %s/%s, want refused/%s", n.Side, n.Reason, ReasonCopyShapeUnchecked)
-	}
-	if d := p.l.runs.Load() - runs; d != 0 {
-		t.Errorf("the copy ran %d statements, want none", d)
-	}
-	// A statement that reads no table of the copy asks nothing.
-	asked := k.asked.Load()
-	if got := costSimple(ctx, c, p.l, "SELECT sum(n) FROM nosuch_on_copy"); got.side == RouteRefused {
-		t.Errorf("a table the copy does not hold: %+v, not refused for its shape", got)
-	}
-	if k.asked.Load() != asked {
-		t.Error("the source was asked about the shape of no table of the copy")
+	k.edit(addColumn("big"))
+	if got := costSimple(ctx, costPortConn(t, ctx, p.l), p.l, "SELECT sum(n) FROM big"); got != shapeDiffers {
+		t.Errorf("the source back, big changed: %+v, want %+v", got, shapeDiffers)
 	}
 }
 

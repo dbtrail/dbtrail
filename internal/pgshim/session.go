@@ -90,6 +90,12 @@ type session struct {
 	// its tables' columns could not be compared with the source's, or
 	// differ from them where nothing goes to the source (shape_3251.go).
 	busyRefused string
+	// shapeNote is the notice of a statement the copy runs without its
+	// tables' columns compared with the source's (shape_3251.go), sent once
+	// the copy answered it; shapeUnchecked says it was, for the statement's
+	// reason in the port's status.
+	shapeNote      string
+	shapeUnchecked bool
 	// screenBusy is why the statement route just decided was not screened
 	// (routeFree): the copy was too busy to list its columns.
 	screenBusy string
@@ -305,7 +311,7 @@ func (s *session) handleSimpleQuery(qstr string) error {
 		s.routeNote(qstr, d, time.Since(started), !ok)
 		return s.readyFlush()
 	}
-	s.fallback, s.busyRefused = "", ""
+	s.fallback, s.busyRefused, s.shapeUnchecked = "", "", false
 	// Only now, for the statement the copy runs: what the screen read of
 	// the copy's columns on the way here was not its run.
 	s.fastLane = oneTable && d.side == RouteCopy
@@ -333,6 +339,11 @@ func (s *session) handleSimpleQuery(qstr string) error {
 		s.routeNote(qstr, d, time.Since(started), true)
 		return s.readyFlush()
 	}
+	if s.shapeUnchecked && d.side == RouteCopy {
+		// Answered without its tables' columns compared (shape_3251.go).
+		d.reason = ReasonCopyShapeUnchecked
+	}
+	s.shapeUnchecked = false
 	s.routeNote(qstr, d, time.Since(started), false)
 	// cols == nil marks a non-row reply (a handshake/setup probe like SET): no
 	// RowDescription, just the CommandComplete tag. A real query — even one that

@@ -2,6 +2,7 @@ package consoleapp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -20,7 +21,9 @@ import (
 // This reads them from the source's catalog (pg_class, pg_namespace,
 // pg_attribute: never a row of a table), as the account the server forwards
 // with, and keeps each table's answer for pgShapeTTL, so a burst of
-// statements asks once and a change is seen within that time.
+// statements asks once and a change is seen within that time. Each question
+// takes one of the port's connections to its sources (pgSourceSlots), as a
+// forwarded statement does, so the port's bound on them holds for it too.
 
 // pgShapesSQL reads, for each table named, its OID and the columns a
 // snapshot would store (pgbaseline's: not dropped, not generated), in attnum
@@ -36,8 +39,9 @@ ORDER BY n.nspname, c.relname, a.attnum`
 // pgShapeTTL is how long a table's answer is kept: the longest an ALTER
 // TABLE can go unseen by a statement on the copy. pgShapeFailTTL is how long
 // a failure is the answer, so a source that is down is not asked again by
-// every statement while it is (each is refused meanwhile). pgShapeWait bounds
-// one question.
+// every statement while it is (the copy answers each meanwhile, with a
+// notice). pgShapeWait bounds one question, the wait for a connection of the
+// port's included.
 const (
 	pgShapeTTL     = time.Second
 	pgShapeFailTTL = 2 * time.Second
@@ -123,25 +127,34 @@ func (c *pgShapeCache) shapes(ctx context.Context, tables [][2]string) (map[[2]s
 
 var pgShapeCaches struct {
 	mu    sync.Mutex
-	byDSN map[string]*pgShapeCache
+	byDSN map[pgShapeCacheKey]*pgShapeCache
+}
+
+// pgShapeCacheKey is one source as one port reaches it: the account, and the
+// port's connections to its sources.
+type pgShapeCacheKey struct {
+	dsn     string
+	sources *pgSourceSlots
 }
 
 // pgPortSourceShapes is pgshim.Binding.SourceShapes for a server whose port
 // forwards as dsn (its forwarding account, or its capture account when it
 // said so, #3054: a read of the catalog alone, which the capture gate has
-// nothing to say about), one cache per dsn shared by its connections. server
+// nothing to say about), one cache per dsn and port shared by its
+// connections. Each question takes a connection of sources first. server
 // names the server in the error.
-func pgPortSourceShapes(dsn, server string) func(ctx context.Context, tables [][2]string) (map[[2]string]pgshim.SourceShape, error) {
+func pgPortSourceShapes(dsn, server string, sources *pgSourceSlots) func(ctx context.Context, tables [][2]string) (map[[2]string]pgshim.SourceShape, error) {
+	key := pgShapeCacheKey{dsn, sources}
 	pgShapeCaches.mu.Lock()
 	if pgShapeCaches.byDSN == nil {
-		pgShapeCaches.byDSN = map[string]*pgShapeCache{}
+		pgShapeCaches.byDSN = map[pgShapeCacheKey]*pgShapeCache{}
 	}
-	c := pgShapeCaches.byDSN[dsn]
+	c := pgShapeCaches.byDSN[key]
 	if c == nil {
 		c = &pgShapeCache{ttl: pgShapeTTL, failTTL: pgShapeFailTTL, now: time.Now, ask: func(ctx context.Context, schemas, names []string) (map[[2]string]pgshim.SourceShape, error) {
-			return pgAskShapes(ctx, dsn, schemas, names)
+			return pgAskShapes(ctx, dsn, sources.acquire, schemas, names)
 		}}
-		pgShapeCaches.byDSN[dsn] = c
+		pgShapeCaches.byDSN[key] = c
 	}
 	pgShapeCaches.mu.Unlock()
 	return func(ctx context.Context, tables [][2]string) (map[[2]string]pgshim.SourceShape, error) {
@@ -153,10 +166,21 @@ func pgPortSourceShapes(dsn, server string) func(ctx context.Context, tables [][
 	}
 }
 
-// pgAskShapes reads the answer from the source, within pgShapeWait.
-func pgAskShapes(ctx context.Context, dsn string, schemas, names []string) (map[[2]string]pgshim.SourceShape, error) {
+// errNoSourceSlot is a question that found every connection of the port to
+// its sources taken for as long as it could wait.
+var errNoSourceSlot = errors.New("every connection of the port to its sources was taken")
+
+// pgAskShapes reads the answer from the source, within pgShapeWait, on one
+// of the port's connections to its sources (acquire), given back when it
+// ends.
+func pgAskShapes(ctx context.Context, dsn string, acquire func(context.Context) (func(), bool), schemas, names []string) (map[[2]string]pgshim.SourceShape, error) {
 	ctx, cancel := context.WithTimeout(ctx, pgShapeWait)
 	defer cancel()
+	release, ok := acquire(ctx)
+	if !ok {
+		return nil, errNoSourceSlot
+	}
+	defer release()
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
 		return nil, err

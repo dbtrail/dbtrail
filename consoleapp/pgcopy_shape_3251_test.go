@@ -198,3 +198,46 @@ func TestPGCopyCatalog_recordedShape_3251(t *testing.T) {
 		t.Errorf("the recorded shape: %+v, want the snapshot's, its hidden column included", r)
 	}
 }
+
+// A question takes one of the port's connections to its sources before it
+// connects, and gives it back: the port's bound on them holds for it. With
+// none free it does not connect at all.
+func TestPGAskShapes_takesASourceSlot_3251(t *testing.T) {
+	unreachable := "postgres://nobody@127.0.0.1:1/none?connect_timeout=1&sslmode=disable"
+	var taken, given int
+	acquire := func(context.Context) (func(), bool) {
+		taken++
+		return func() { given++ }, true
+	}
+	if _, err := pgAskShapes(context.Background(), unreachable, acquire, []string{"public"}, []string{"t"}); err == nil {
+		t.Fatal("a source nothing listens for answered")
+	}
+	if taken != 1 || given != 1 {
+		t.Errorf("took %d connections and gave back %d, want 1 and 1", taken, given)
+	}
+	none := func(context.Context) (func(), bool) { return nil, false }
+	started := time.Now()
+	if _, err := pgAskShapes(context.Background(), unreachable, none, []string{"public"}, []string{"t"}); !errors.Is(err, errNoSourceSlot) {
+		t.Errorf("no connection free: %v, want %v", err, errNoSourceSlot)
+	}
+	if d := time.Since(started); d > 500*time.Millisecond {
+		t.Errorf("no connection free took %v: it must not try to connect", d)
+	}
+	// Through the port's own slots: every one taken, the question waits no
+	// longer than pgShapeWait and fails.
+	slots := newPGSourceSlots(1)
+	slots.wait = time.Minute
+	hold, ok := slots.acquire(context.Background())
+	if !ok {
+		t.Fatal("the one slot")
+	}
+	defer hold()
+	ask := pgPortSourceShapes(unreachable, "test", slots)
+	started = time.Now()
+	if _, err := ask(context.Background(), [][2]string{{"public", "t"}}); !errors.Is(err, errNoSourceSlot) {
+		t.Errorf("the port's slots all taken: %v, want %v", err, errNoSourceSlot)
+	}
+	if d := time.Since(started); d < pgShapeWait-100*time.Millisecond || d > pgShapeWait+time.Second {
+		t.Errorf("waited %v for a slot, want about %v", d, pgShapeWait)
+	}
+}

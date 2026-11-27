@@ -401,6 +401,16 @@ var loginTimeout = 30 * time.Second
 // runFree answers a statement that is not time travel on the copy.
 func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][][]byte, tag string, perr *pgErr) {
 	started := time.Now()
+	s.shapeNote = ""
+	defer func() {
+		// The tables' columns could not be compared with the source's
+		// (shape_3251.go): said with the copy's answer, and only then.
+		if s.shapeNote != "" && perr == nil {
+			s.notice(s.shapeNote)
+			s.shapeUnchecked = true
+		}
+		s.shapeNote = ""
+	}()
 	s.joinCheck, s.oomRetry, s.writtenOrder = "", "", ""
 	// A session time zone the copy could not be asked about when it was set
 	// is asked about now (settings.go), before the statement's own context:

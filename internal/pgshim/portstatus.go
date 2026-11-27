@@ -111,7 +111,7 @@ var reasonMeans = map[string]string{
 	ReasonSourceUnreachable: "the source could not be asked for the statement's plan, so the copy answered as it does without one",
 	ReasonJoinTooBig:        "the copy's plan of the statement has a join estimated far larger than its inputs, in the copy's join order and in the order written, so it was not run there",
 
-	ReasonCopyShapeUnchecked: "the columns of a table the statement reads could not be read from the source to compare with the copy's snapshot, so the statement was refused and not sent anywhere; run it again",
+	ReasonCopyShapeUnchecked: "the columns of a table the statement reads could not be read from the source to compare with the copy's snapshot, so the copy answered it as of its snapshot, with a notice that says so",
 
 	ReasonCopyRefusedAfterWrittenOrder: "the copy ran out of memory for the statement in its own join order, and again when it ran the statement with its joins in the order written; or, for a statement shape the port remembered as needing the order written, in that order, after which the shape is forgotten",
 }
