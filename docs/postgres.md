@@ -2186,21 +2186,37 @@ The source answers a cheap statement for:
     user, about once a second per server while statements arrive. It takes
     one of the port's connections to its sources while it lasts, as a
     forwarded statement does, so the port's bound on them holds for it too.
+    One question is asked at a time for a set of tables; every statement
+    that needs it waits for its answer, and stops waiting when its own
+    `statement_timeout` or a cancel request ends it.
   - A name without a schema is checked in every schema the copy holds it in:
     a change of `public.t` also sends an unqualified read of `t` to the
     source when the `search_path` points at `other.t`.
-  - A table dropped or renamed on the source, dropped and created again
-    (another OID), or whose snapshot does not record its columns (one taken
-    before they were recorded) counts as changed.
-  - When the source cannot be asked (it is down, does not answer within two
-    seconds, refuses the question, or every connection of the port to its
-    sources stays taken for those two seconds), the copy answers as it would
-    without the check, with a NOTICE: `DBTrail could not check whether
-    <table> changed on your PostgreSQL ..., so this was answered from the copy
-    as of its snapshot.` `/status` counts it under `copy_shape_unchecked`,
-    and the router's log says it at info level once a minute. The failure is
-    kept for two seconds, so a source that is down is not asked by every
-    statement.
+  - A table dropped or renamed on the source, or dropped and created again
+    (another OID), counts as changed.
+  - When the source cannot be asked, the copy answers as it would without
+    the check, with a NOTICE that names the tables and the cause: `DBTrail
+    could not check whether <table> changed on your PostgreSQL (<cause>;
+    DBTrail's log has the details). This was answered from the copy as of
+    its snapshot.` The cause is one of: your PostgreSQL did not answer within
+    2 seconds; the port could not connect to your PostgreSQL; your
+    PostgreSQL refused the question (SQLSTATE `<code>`); the port could not
+    read your PostgreSQL's answer; every connection of the port to your
+    PostgreSQL stayed taken. The router's log has the error itself, at warn
+    level once a minute per server. The failure is kept for two seconds, so
+    a source that is down is not asked by every statement.
+  - **A table whose snapshot does not record its shape** (one last read
+    whole before 0.108.0, which an update from captured changes carries
+    forward as it was) cannot be compared: the copy answers it the same way,
+    with the NOTICE `The copy's snapshot of <table> does not record its
+    shape, so it cannot be compared with your PostgreSQL's; a full read
+    records it.` An upgrade does not send such tables to the source.
+  - Both are counted in `/status` under `copy_shape_unchecked`, by why
+    (`source_not_asked`, `no_shape_recorded`), apart from the reasons: the
+    statement is counted under the reason it was routed by
+    (`answers_the_same`, `heavy_on_copy`, `capture_gate` and so on). The
+    notice is sent only once the copy's answer is the client's: a statement
+    the copy fails, which the source then answers, gets none.
   - On a server that hides tables or columns, which sends nothing to its
     source, a statement that reads a changed table is refused with `55000`
     until the table's next snapshot (counted as `refused`, under
@@ -2209,7 +2225,8 @@ The source answers a cheap statement for:
     after it gets what PostgreSQL gives one: `0A000 cached plan must not
     change result type` when its columns changed, after which drivers
     prepare it again. One described while its table differs is described by
-    the source, and stays there for as long as it is prepared.
+    the source; each of its executions is checked again, so once the
+    table's next snapshot records its columns the copy answers it.
   - **What this does not see: a rewrite that keeps every column's type.**
     `ALTER TABLE t ALTER COLUMN n TYPE int USING n + 1` on an `int` column
     changes the values and no column, so the shape is the snapshot's, and
@@ -2484,8 +2501,8 @@ What this costs and where it can go wrong:
   the statement, as before routing by plan, with a NOTICE that routing by
   plan is off for the moment (`source_unreachable` in `/status`). A statement
   that reads a table also gets the notice that its columns could not be
-  compared with the source's (`copy_shape_unchecked`, see the table whose
-  columns changed, above).
+  compared with the source's (counted under `copy_shape_unchecked`, see the
+  table whose columns changed, above).
 - **A statement shape the source answers is asked about once a minute, not
   every time**, when its answer cannot depend on its values: a connection
   remembers the verdict on `SELECT ... WHERE id = 5` for a minute, by its shape (values blanked)
@@ -2826,7 +2843,6 @@ The reasons, with the MySQL port's names where they mean the same:
 | copy | `copy_command` | a command of the copy's own (`SHOW TABLES`, `DESCRIBE`) |
 | copy | `hidden_rules` | the server hides tables or columns: nothing is sent to its source |
 | copy | `heavy_on_copy` | its plan on the source is expensive, so the copy answers it even though the port would otherwise send it to the source for how the copy answers it: the answer may differ from PostgreSQL's (simple protocol only, since 0.140.0) |
-| copy | `copy_shape_unchecked` | the columns of a table it reads could not be read from the source to compare with its snapshot's (the source down or slow, no connection to it free): the copy answered as of its snapshot, with a NOTICE that says so |
 | copy | `capture_gate` | the server forwards with the capture account, and the statement did not pass that account's check, so the copy answered it without asking the source for its plan |
 | source | `cheap_plan` | its plan on the source is under both thresholds: the source answers it, by its indexes |
 | source | `result_over_row_cap` | its plan on the source is expensive and says it returns more rows than the copy returns for one statement (`--sql-port-max-rows`): the copy would refuse the result, so it is not tried there |

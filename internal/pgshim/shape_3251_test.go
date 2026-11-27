@@ -106,7 +106,7 @@ func newShapePort(t *testing.T) (*tablesPort, *shapeKnob) {
 
 var (
 	shapeDiffers   = costOutcome{"42", "", RouteSource, ReasonCopyShapeDiffers}
-	shapeUnchecked = costOutcome{"7", "", RouteCopy, ReasonCopyShapeUnchecked}
+	shapeUncheckedHidden = costOutcome{"7", "", RouteCopy, ReasonHiddenRules}
 )
 
 func addColumn(table string) func(map[[2]string]SourceShape) {
@@ -223,23 +223,46 @@ func putShapes(dst, src map[[2]string]SourceShape) {
 	}
 }
 
-// A snapshot that does not record a table's shape cannot be compared with
-// the source's: the source answers.
+// A snapshot that does not record a table's shape (one last read whole
+// before shapes were recorded, carried forward since) cannot be compared
+// with the source's: the copy answers, with a notice that says a full read
+// records it, and nothing is asked of the source for it. An upgrade does not
+// send a whole server to the source, nor refuse it on one that hides tables.
 func TestCopyShape_3251_noShapeRecorded(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	p, _ := newShapePort(t)
-	p.l.catalog = func() []CatalogTable {
-		tables := shapedCatalogOf(shapePortTables...)
-		tables[1].Recorded = nil // big
-		return tables
-	}
-	c := costPortConn(t, ctx, p.l)
-	if got := costSimple(ctx, c, p.l, "SELECT sum(n) FROM big"); got != shapeDiffers {
-		t.Errorf("no shape recorded: %+v, want %+v", got, shapeDiffers)
-	}
-	if got := costSimple(ctx, c, p.l, "SELECT sum(n) FROM wide"); got != tablesOnCopy {
-		t.Errorf("another table: %+v, want the copy", got)
+	for _, hidden := range []bool{false, true} {
+		p, k := newShapePort(t)
+		p.l.catalog = func() []CatalogTable {
+			tables := shapedCatalogOf(shapePortTables...)
+			tables[1].Recorded = nil // big
+			return tables
+		}
+		want := costOutcome{"7", "", RouteCopy, ReasonAnswersTheSame}
+		if hidden {
+			p.l.barred = func() string { return "the server hides tables or columns" }
+			want.reason = ReasonHiddenRules
+		}
+		c, notices := noticeConn(t, ctx, p.l)
+		asked := k.asked.Load()
+		if got := costSimple(ctx, c, p.l, "SELECT sum(n) FROM public.big"); got != want || p.l.last().ShapeUnchecked != ShapeUncheckedNoShapeRecorded {
+			t.Errorf("hidden=%v: no shape recorded: %+v %q, want %+v, %s", hidden, got, p.l.last().ShapeUnchecked, want, ShapeUncheckedNoShapeRecorded)
+		}
+		if k.asked.Load() != asked {
+			t.Errorf("hidden=%v: the source was asked about a table with no shape to compare", hidden)
+		}
+		if n := *notices; len(n) != 1 || !strings.Contains(n[0], "snapshot of public.big does not record its shape") || !strings.Contains(n[0], "a full read records it") {
+			t.Errorf("hidden=%v: notices %q", hidden, n)
+		}
+		// Another table that did change is still the source's.
+		k.edit(addColumn("wide"))
+		wantWide := shapeDiffers
+		if hidden {
+			wantWide = costOutcome{"", "55000", RouteRefused, ReasonCopyShapeDiffers}
+		}
+		if got := costSimple(ctx, costPortConn(t, ctx, p.l), p.l, "SELECT sum(n) FROM wide"); got != wantWide {
+			t.Errorf("hidden=%v: a changed table beside it: %+v, want %+v", hidden, got, wantWide)
+		}
 	}
 }
 
@@ -253,19 +276,33 @@ func TestCopyShape_3251_sourceCannotBeAsked(t *testing.T) {
 	p, k := newShapePort(t)
 	k.fail(errors.New("dial tcp 10.0.3.7:5432: connect: connection refused"))
 	c, notices := noticeConn(t, ctx, p.l)
-	said := func(what string) {
+	said := func(what, cause string) {
 		t.Helper()
 		n := *notices
-		if len(n) != 1 || !strings.Contains(n[0], "could not check whether public.big, other.big changed") || !strings.Contains(n[0], "answered from the copy as of its snapshot") || strings.Contains(n[0], "10.0.3.7") {
-			t.Errorf("%s: notices %q, want one that names the tables, without the address", what, n)
+		if len(n) != 1 || !strings.Contains(n[0], "could not check whether public.big, other.big changed on your PostgreSQL ("+cause+";") || !strings.Contains(n[0], "answered from the copy as of its snapshot") || strings.Contains(n[0], "10.0.3.7") {
+			t.Errorf("%s: notices %q, want one that names the tables and says %q, without the address", what, n, cause)
 		}
 		*notices = nil
 	}
-	unchecked := costOutcome{"7", "", RouteCopy, ReasonCopyShapeUnchecked}
-	if got := costSimple(ctx, c, p.l, "SELECT sum(n) FROM big"); got != unchecked {
-		t.Errorf("simple: %+v, want %+v", got, unchecked)
+	// The reason stays the one the statement was routed by; the check is
+	// counted apart.
+	unchecked := costOutcome{"7", "", RouteCopy, ReasonAnswersTheSame}
+	check := func(what string, got costOutcome, want costOutcome) {
+		t.Helper()
+		if got != want || p.l.last().ShapeUnchecked != ShapeUncheckedSourceNotAsked {
+			t.Errorf("%s: %+v %q, want %+v, %s", what, got, p.l.last().ShapeUnchecked, want, ShapeUncheckedSourceNotAsked)
+		}
 	}
-	said("simple")
+	check("simple", costSimple(ctx, c, p.l, "SELECT sum(n) FROM big"), unchecked)
+	said("simple", "the source could not be asked")
+	// The cause the host gives is the one said: generic, and true.
+	k.fail(&ShapeCheckError{Cause: "your PostgreSQL refused the question (SQLSTATE 42501)", Err: errors.New("permission denied for table pg_attribute at 10.0.3.7")})
+	check("refused", costSimple(ctx, c, p.l, "SELECT sum(n) FROM big"), unchecked)
+	said("refused", "your PostgreSQL refused the question (SQLSTATE 42501)")
+	// Heavy, with a veto: answered by the copy as heavy_on_copy, as before.
+	check("heavy", costSimple(ctx, c, p.l, "SELECT sum(n) FROM big WHERE now() > '2000-01-01'"), costOutcome{"7", "", RouteCopy, ReasonHeavyOnCopy})
+	*notices = nil
+	k.fail(errors.New("dial tcp 10.0.3.7:5432: connect: connection refused"))
 	// Extended: Prepare describes it on the copy; each execution says so.
 	if _, err := c.Prepare(ctx, "s", "SELECT sum(n) FROM big", nil); err != nil {
 		t.Fatalf("prepare: %v", err)
@@ -274,17 +311,17 @@ func TestCopyShape_3251_sourceCannotBeAsked(t *testing.T) {
 	if r := c.ExecPrepared(ctx, "s", nil, nil, nil).Read(); r.Err != nil || len(r.Rows) != 1 || string(r.Rows[0][0]) != "7" {
 		t.Fatalf("execute: %v %q, want the copy's 7", r.Err, r.Rows)
 	}
-	if n := p.l.last(); n.Side != RouteCopy || n.Reason != ReasonCopyShapeUnchecked {
-		t.Errorf("execute noted %s/%s, want copy/%s", n.Side, n.Reason, ReasonCopyShapeUnchecked)
+	if n := p.l.last(); n.Side != RouteCopy || n.Reason != ReasonAnswersTheSame || n.ShapeUnchecked != ShapeUncheckedSourceNotAsked {
+		t.Errorf("execute noted %s/%s %q, want copy/%s %s", n.Side, n.Reason, n.ShapeUnchecked, ReasonAnswersTheSame, ShapeUncheckedSourceNotAsked)
 	}
-	said("execute")
+	said("execute", "the source could not be asked")
 	// The copy fails it and the source answers: no notice that the copy did.
 	p.l.copyErr = func(string) error { return errors.New("Catalog Error: Scalar Function with name nope does not exist") }
 	if got := costSimple(ctx, c, p.l, "SELECT sum(n) FROM big"); got.side != RouteSource {
 		t.Errorf("the copy fails it: %+v, want the source", got)
 	}
-	if len(*notices) != 0 {
-		t.Errorf("the source answered, and the client was told the copy did: %q", *notices)
+	if len(*notices) != 0 || p.l.last().ShapeUnchecked != "" {
+		t.Errorf("the source answered, and the client was told the copy did: %q %q", *notices, p.l.last().ShapeUnchecked)
 	}
 	p.l.copyErr = nil
 	// Once the source answers again, a changed table is the source's.
@@ -345,8 +382,20 @@ func TestCopyShape_3251_preparedStatements(t *testing.T) {
 	if res := d.ExecPrepared(ctx, "again", nil, nil, nil).Read(); res.Err != nil || len(res.Rows) != 1 || string(res.Rows[0][0]) != "7" {
 		t.Errorf("healed, a new connection: %v %q, want the copy's 7", res.Err, res.Rows)
 	}
-	if got, n := exec("after"); got != "42" || n.Side != RouteSource {
-		t.Errorf("described by the source, healed: %s %s/%s, want the source still", got, n.Side, n.Reason)
+	// Described by the source while the table differed: not pinned there,
+	// each execution is checked again (the reason is the moment's).
+	if _, n := exec("after"); n.Reason == ReasonCopyShapeDiffers {
+		t.Errorf("described by the source, healed: %s/%s: copy_shape_differs must not keep it", n.Side, n.Reason)
+	}
+	e := costPortConn(t, ctx, p.l)
+	k.edit(addColumn("big"))
+	if _, err := e.Prepare(ctx, "later", "SELECT sum(n) FROM big", nil); err != nil {
+		t.Fatal(err)
+	}
+	putBack := sameShapes(shapedCatalogOf(shapePortTables...))
+	k.edit(func(now map[[2]string]SourceShape) { putShapes(now, putBack) })
+	if res := e.ExecPrepared(ctx, "later", nil, nil, nil).Read(); res.Err != nil || len(res.Rows) != 1 || string(res.Rows[0][0]) != "7" {
+		t.Errorf("described by the source, healed, on a connection the source did not answer: %v %q, want the copy's 7", res.Err, res.Rows)
 	}
 	if !transientFallback(ReasonCopyShapeDiffers) {
 		t.Error("copy_shape_differs must not keep a statement described on the copy on the source for good")
@@ -380,8 +429,8 @@ func TestCopyShape_3251_copyOnly(t *testing.T) {
 		t.Errorf("another table: %+v, want the copy's", got)
 	}
 	k.fail(errors.New("boom"))
-	if got := costSimple(ctx, c, p.l, "SELECT sum(n) FROM wide"); got != shapeUnchecked {
-		t.Errorf("the source cannot be asked: %+v, want %+v", got, shapeUnchecked)
+	if got := costSimple(ctx, c, p.l, "SELECT sum(n) FROM wide"); got != shapeUncheckedHidden || p.l.last().ShapeUnchecked != ShapeUncheckedSourceNotAsked {
+		t.Errorf("the source cannot be asked: %+v %q, want %+v, %s", got, p.l.last().ShapeUnchecked, shapeUncheckedHidden, ShapeUncheckedSourceNotAsked)
 	}
 }
 
@@ -400,7 +449,6 @@ func TestCopyShapeWhy_3251(t *testing.T) {
 		want  string
 	}{
 		{"not on the source", nil, nil, false, "public.t is not on your PostgreSQL under that name"},
-		{"no shape recorded", func(c CatalogTable) CatalogTable { c.Recorded = nil; return c }, nil, true, "does not record the columns of public.t"},
 		{"another OID", nil, func(s SourceShape) SourceShape { s.OID = 1; return s }, true, "dropped and created again"},
 		{"a column added", nil, func(s SourceShape) SourceShape {
 			s.Columns = append(slices.Clone(s.Columns), baseline.PGColumn{Name: "e", TypeOID: 25, TypeMod: -1, Ordinal: 3})
@@ -513,7 +561,7 @@ func TestShapeTablesRead_3251(t *testing.T) {
 }
 
 func TestCopyShapeReasons_3251(t *testing.T) {
-	for _, r := range []string{ReasonCopyShapeDiffers, ReasonCopyShapeUnchecked} {
+	for _, r := range []string{ReasonCopyShapeDiffers} {
 		if reasonMeans[r] == "" {
 			t.Errorf("%s has no sentence in the port's status", r)
 		}

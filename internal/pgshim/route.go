@@ -86,11 +86,6 @@ const ReasonCopyRefusedAfterWrittenOrder = "copy_refused_after_written_order"
 // (capture_gate.go), so the copy answered it without the source's plan.
 const ReasonCaptureGate = "capture_gate"
 
-// ReasonCopyShapeUnchecked: the copy answered a statement whose tables'
-// columns on the source could not be read to compare with its snapshot's
-// (shape_3251.go), with a notice that says so.
-const ReasonCopyShapeUnchecked = "copy_shape_unchecked"
-
 // RouteNote is one statement's decision, for the port's status.
 type RouteNote struct {
 	// Statement is the text the client sent.
@@ -118,6 +113,11 @@ type RouteNote struct {
 	// older_than_earlier), where a light one would have gone to the source
 	// (freshRefusals, #3116); "" when it did not.
 	HeavyOlder string
+	// ShapeUnchecked is why the copy answered the statement without its
+	// tables' columns compared with the source's (ShapeUnchecked*,
+	// shape_3251.go), "" when they were or nothing needed it. Counted apart:
+	// Reason stays the one the statement was routed by.
+	ShapeUnchecked string
 }
 
 // routeDecision is which side answers a statement, and why.
@@ -1927,13 +1927,18 @@ func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, fa
 	s.writtenOrder = ""
 	heavyOlder := s.heavyOlder
 	s.heavyOlder = ""
+	shapeUnchecked := s.shapeUnchecked
+	s.shapeUnchecked = ""
+	if d.side != RouteCopy || failed {
+		shapeUnchecked = ""
+	}
 	if s.bound == nil || s.bound.Routed == nil || d.side == "" {
 		return
 	}
 	if d.side != RouteCopy {
 		joinCheck = ""
 	}
-	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed, JoinCheck: joinCheck, OOMRetry: oomRetry, WrittenOrder: writtenOrder, HeavyOlder: heavyOlder})
+	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed, JoinCheck: joinCheck, OOMRetry: oomRetry, WrittenOrder: writtenOrder, HeavyOlder: heavyOlder, ShapeUnchecked: shapeUnchecked})
 }
 
 // fieldName reports whether the token at j is the field a date_trunc or a

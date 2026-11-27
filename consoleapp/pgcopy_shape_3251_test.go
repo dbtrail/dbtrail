@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/console"
@@ -239,5 +242,148 @@ func TestPGAskShapes_takesASourceSlot_3251(t *testing.T) {
 	}
 	if d := time.Since(started); d < pgShapeWait-100*time.Millisecond || d > pgShapeWait+time.Second {
 		t.Errorf("waited %v for a slot, want about %v", d, pgShapeWait)
+	}
+}
+
+// A source that answers slowly (or a port whose connections to it are all
+// taken): its answer, and its failure, are dated when they arrive, so the
+// statements that follow within ttl, or failTTL, are not asked again.
+func TestPGShapeCache_datedOnArrival_3251(t *testing.T) {
+	var mu sync.Mutex
+	at := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return at }
+	asked := 0
+	var fail error
+	c := &pgShapeCache{ttl: time.Second, failTTL: 2 * time.Second, now: clock, ask: func(context.Context, []string, []string) (map[[2]string]pgshim.SourceShape, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		asked++
+		at = at.Add(1500 * time.Millisecond) // longer than ttl
+		if fail != nil {
+			return nil, fail
+		}
+		return map[[2]string]pgshim.SourceShape{{"public", "a"}: {OID: 1}}, nil
+	}}
+	ctx := context.Background()
+	for range 3 {
+		if _, err := c.shapes(ctx, [][2]string{{"public", "a"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if asked != 1 {
+		t.Errorf("asked %d times, want once: an answer slower than ttl is dated when it came", asked)
+	}
+	mu.Lock()
+	at = at.Add(1100 * time.Millisecond)
+	fail = errors.New("slow")
+	mu.Unlock()
+	for range 3 {
+		if _, err := c.shapes(ctx, [][2]string{{"public", "a"}}); err == nil {
+			t.Fatal("the failure was not the answer")
+		}
+	}
+	if asked != 2 {
+		t.Errorf("asked %d times, want twice: a failure slower than failTTL is dated when it came", asked)
+	}
+}
+
+// A question on its way holds nobody else up: a statement whose tables are
+// known is answered at once, and one that waits for the question stops
+// waiting when its own context ends, without failing it for the others.
+func TestPGShapeCache_aQuestionHoldsNobodyUp_3251(t *testing.T) {
+	gate := make(chan struct{})
+	var mu sync.Mutex
+	asked := 0
+	c := &pgShapeCache{ttl: time.Minute, failTTL: time.Minute, now: time.Now, ask: func(ctx context.Context, _, names []string) (map[[2]string]pgshim.SourceShape, error) {
+		mu.Lock()
+		asked++
+		mu.Unlock()
+		if names[0] == "slow" {
+			<-gate
+		}
+		out := map[[2]string]pgshim.SourceShape{}
+		for _, n := range names {
+			out[[2]string{"public", n}] = pgshim.SourceShape{OID: 7}
+		}
+		return out, nil
+	}}
+	if _, err := c.shapes(context.Background(), [][2]string{{"public", "fast"}}); err != nil {
+		t.Fatal(err)
+	}
+	// The first waiter's context ends while the question is on its way.
+	cctx, stop := context.WithCancel(context.Background())
+	first := make(chan error, 1)
+	go func() {
+		_, err := c.shapes(cctx, [][2]string{{"public", "slow"}})
+		first <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	second := make(chan map[[2]string]pgshim.SourceShape, 1)
+	go func() {
+		got, _ := c.shapes(context.Background(), [][2]string{{"public", "slow"}})
+		second <- got
+	}()
+	started := time.Now()
+	if got, err := c.shapes(context.Background(), [][2]string{{"public", "fast"}}); err != nil || got[[2]string{"public", "fast"}].OID != 7 {
+		t.Errorf("a known table during a question: %v %v", got, err)
+	}
+	if d := time.Since(started); d > 100*time.Millisecond {
+		t.Errorf("a known table waited %v behind a question", d)
+	}
+	stop()
+	select {
+	case err := <-first:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("the cancelled waiter: %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the cancelled waiter is still waiting")
+	}
+	close(gate)
+	select {
+	case got := <-second:
+		if got[[2]string{"public", "slow"}].OID != 7 {
+			t.Errorf("the other waiter: %v, want the question's answer", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the other waiter never got the answer")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if asked != 2 {
+		t.Errorf("asked %d times, want 2 (fast once, slow once)", asked)
+	}
+}
+
+// What the client is told of a failure is its cause in words, never the
+// error's text.
+func TestPGAskShapes_causes_3251(t *testing.T) {
+	var ce *pgshim.ShapeCheckError
+	none := func(context.Context) (func(), bool) { return nil, false }
+	if _, err := pgAskShapes(context.Background(), "postgres://x@127.0.0.1:1/x?sslmode=disable", none, []string{"public"}, []string{"t"}); !errors.As(err, &ce) || ce.Cause != "every connection of the port to your PostgreSQL stayed taken" {
+		t.Errorf("no slot: %v", err)
+	}
+	one := func(context.Context) (func(), bool) { return func() {}, true }
+	_, err := pgAskShapes(context.Background(), "postgres://nobody:secret@127.0.0.1:1/none?connect_timeout=1&sslmode=disable", one, []string{"public"}, []string{"t"})
+	if !errors.As(err, &ce) || ce.Cause != "the port could not connect to your PostgreSQL" || strings.Contains(ce.Cause, "127.0.0.1") || strings.Contains(ce.Cause, "secret") {
+		t.Errorf("unreachable: %v (%+v)", err, ce)
+	}
+	if got := pgRefusedCause(&pgconn.PgError{Code: "42501", Message: "permission denied for column secret_salary"}); got != "your PostgreSQL refused the question (SQLSTATE 42501)" {
+		t.Errorf("refused: %q", got)
+	}
+}
+
+// Counted in /status apart from the reasons, by why.
+func TestPGRouteStatsCountsShapeUnchecked_3251(t *testing.T) {
+	r := newPGRouteStats(time.Now(), false)
+	r.note("s1", pgshim.RouteNote{Side: pgshim.RouteCopy, Reason: pgshim.ReasonHeavyOnCopy, ShapeUnchecked: pgshim.ShapeUncheckedSourceNotAsked})
+	r.note("s1", pgshim.RouteNote{Side: pgshim.RouteCopy, Reason: pgshim.ReasonAnswersTheSame, ShapeUnchecked: pgshim.ShapeUncheckedNoShapeRecorded})
+	r.note("s1", pgshim.RouteNote{Side: pgshim.RouteCopy, Reason: pgshim.ReasonAnswersTheSame})
+	n := r.doc("").Servers["s1"]
+	if n.ShapeUnchecked[pgshim.ShapeUncheckedSourceNotAsked] != 1 || n.ShapeUnchecked[pgshim.ShapeUncheckedNoShapeRecorded] != 1 || len(n.ShapeUnchecked) != 2 {
+		t.Errorf("copy_shape_unchecked %v", n.ShapeUnchecked)
+	}
+	if n.Reasons[pgshim.ReasonHeavyOnCopy] != 1 || n.Reasons[pgshim.ReasonAnswersTheSame] != 2 {
+		t.Errorf("reasons %v: the count apart must not change them", n.Reasons)
 	}
 }

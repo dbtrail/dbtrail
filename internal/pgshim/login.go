@@ -150,9 +150,10 @@ type Binding struct {
 	// does not have is absent from the answer. Asked before a statement runs
 	// on the copy, for the tables it reads (shape_3251.go): one whose shape
 	// is not its snapshot's is answered by the source
-	// (ReasonCopyShapeDiffers), or refused where nothing can go there; an
-	// error refuses the statement (ReasonCopyShapeUnchecked). nil: nothing
-	// is asked.
+	// (ReasonCopyShapeDiffers), or refused where nothing can go there. On
+	// an error the copy answers, with a NOTICE (RouteNote.ShapeUnchecked);
+	// a *ShapeCheckError says what the client may be told of its cause.
+	// nil: nothing is asked.
 	SourceShapes func(ctx context.Context, tables [][2]string) (map[[2]string]SourceShape, error)
 	// Status, when set, answers SHOW dbtrail.router_status on this
 	// connection (portstatus.go): name and value pairs, in the order to
@@ -401,16 +402,9 @@ var loginTimeout = 30 * time.Second
 // runFree answers a statement that is not time travel on the copy.
 func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][][]byte, tag string, perr *pgErr) {
 	started := time.Now()
-	s.shapeNote = ""
-	defer func() {
-		// The tables' columns could not be compared with the source's
-		// (shape_3251.go): said with the copy's answer, and only then.
-		if s.shapeNote != "" && perr == nil {
-			s.notice(s.shapeNote)
-			s.shapeUnchecked = true
-		}
-		s.shapeNote = ""
-	}()
+	// The notice of tables not compared with the source's is the caller's
+	// to send once the copy's answer is the client's (commitShapeNote).
+	s.dropShapeNote()
 	s.joinCheck, s.oomRetry, s.writtenOrder = "", "", ""
 	// A session time zone the copy could not be asked about when it was set
 	// is asked about now (settings.go), before the statement's own context:

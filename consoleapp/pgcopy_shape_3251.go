@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/pgshim"
@@ -49,8 +51,10 @@ const (
 )
 
 // pgShapeCache is one source's answers, by table, and its last failure. Its
-// lock is held across a question: questions that meet wait for the first
-// one's answer instead of each opening a connection.
+// lock guards those alone and is never held across a question: a question
+// runs on its own, one at a time per set of tables (a flight), and every
+// statement that needs that set waits for it as long as its own context
+// lasts, no longer. Answers and failures are dated when they arrive.
 type pgShapeCache struct {
 	ttl, failTTL time.Duration
 	now          func() time.Time
@@ -60,69 +64,107 @@ type pgShapeCache struct {
 	known    map[[2]string]pgShapeKnown
 	failed   error
 	failedAt time.Time
+	flights  map[string]*pgShapeFlight
 }
 
-// pgShapeKnown is what the source said of one table, and when it was asked.
+// pgShapeKnown is what the source said of one table, and when it said it.
 type pgShapeKnown struct {
 	at    time.Time
 	shape pgshim.SourceShape
 	found bool
 }
 
+// pgShapeFlight is one question on its way: done closes when its answer (or
+// err) is in the cache.
+type pgShapeFlight struct {
+	done chan struct{}
+	err  error
+}
+
 // shapes answers pgshim.Binding.SourceShapes from what is kept, asking the
 // source about the tables not known within ttl, all in one question.
 func (c *pgShapeCache) shapes(ctx context.Context, tables [][2]string) (map[[2]string]pgshim.SourceShape, error) {
-	out := map[[2]string]pgshim.SourceShape{}
-	if len(tables) == 0 {
-		return out, nil
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	now := c.now()
-	var schemas, names []string
-	seen := map[[2]string]bool{}
-	for _, t := range tables {
-		if k, ok := c.known[t]; ok && now.Sub(k.at) < c.ttl || seen[t] {
-			continue
-		}
-		seen[t] = true
-		schemas, names = append(schemas, t[0]), append(names, t[1])
-	}
-	if len(names) > 0 {
-		if c.failed != nil && now.Sub(c.failedAt) < c.failTTL {
-			return nil, c.failed
-		}
-		got, err := c.ask(ctx, schemas, names)
-		if err != nil {
-			if ctx.Err() == nil {
-				// A statement stopped while it asked is not the source's
-				// failure.
-				c.failed, c.failedAt = err, now
+	for {
+		c.mu.Lock()
+		now := c.now()
+		var schemas, names []string
+		seen := map[[2]string]bool{}
+		for _, t := range tables {
+			if k, ok := c.known[t]; ok && now.Sub(k.at) < c.ttl || seen[t] {
+				continue
 			}
+			seen[t] = true
+			schemas, names = append(schemas, t[0]), append(names, t[1])
+		}
+		if len(names) == 0 {
+			out := map[[2]string]pgshim.SourceShape{}
+			for _, t := range tables {
+				if k := c.known[t]; k.found {
+					out[t] = k.shape
+				}
+			}
+			c.mu.Unlock()
+			return out, nil
+		}
+		if c.failed != nil && now.Sub(c.failedAt) < c.failTTL {
+			err := c.failed
+			c.mu.Unlock()
 			return nil, err
 		}
+		key := strings.Join(schemas, "\x00") + "\x01" + strings.Join(names, "\x00")
+		f := c.flights[key]
+		if f == nil {
+			f = &pgShapeFlight{done: make(chan struct{})}
+			if c.flights == nil {
+				c.flights = map[string]*pgShapeFlight{}
+			}
+			c.flights[key] = f
+			// The question is the source's, not this statement's: one that
+			// is cancelled must not fail it for the others waiting on it.
+			// pgAskShapes bounds it.
+			go c.fly(context.WithoutCancel(ctx), key, f, schemas, names)
+		}
+		c.mu.Unlock()
+		select {
+		case <-f.done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		if f.err != nil {
+			return nil, f.err
+		}
+		// Answered: read it from the cache, with whatever else is kept.
+	}
+}
+
+// fly asks the source and keeps its answer, or its failure, dated when it
+// came.
+func (c *pgShapeCache) fly(ctx context.Context, key string, f *pgShapeFlight, schemas, names []string) {
+	got, err := c.ask(ctx, schemas, names)
+	c.mu.Lock()
+	at := c.now()
+	if err != nil {
+		c.failed, c.failedAt = err, at
+	} else {
 		c.failed = nil
 		if c.known == nil {
 			c.known = map[[2]string]pgShapeKnown{}
 		}
 		for k, v := range c.known {
-			if now.Sub(v.at) >= c.ttl {
+			if at.Sub(v.at) >= c.ttl {
 				delete(c.known, k)
 			}
 		}
-		// Dated from before the question: the answer is at least that new.
 		for i := range names {
-			key := [2]string{schemas[i], names[i]}
-			s, found := got[key]
-			c.known[key] = pgShapeKnown{at: now, shape: s, found: found}
+			k := [2]string{schemas[i], names[i]}
+			sh, found := got[k]
+			c.known[k] = pgShapeKnown{at: at, shape: sh, found: found}
 		}
 	}
-	for _, t := range tables {
-		if k := c.known[t]; k.found {
-			out[t] = k.shape
-		}
-	}
-	return out, nil
+	delete(c.flights, key)
+	f.err = err
+	c.mu.Unlock()
+	close(f.done)
 }
 
 var pgShapeCaches struct {
@@ -176,19 +218,27 @@ var errNoSourceSlot = errors.New("every connection of the port to its sources wa
 func pgAskShapes(ctx context.Context, dsn string, acquire func(context.Context) (func(), bool), schemas, names []string) (map[[2]string]pgshim.SourceShape, error) {
 	ctx, cancel := context.WithTimeout(ctx, pgShapeWait)
 	defer cancel()
+	// What the client is told of a failure: its cause in words, never the
+	// error's own text (an address, an account, a column).
+	failed := func(cause string, err error) error {
+		if ctx.Err() != nil {
+			cause = fmt.Sprintf("your PostgreSQL did not answer within %s", pgShapeWait)
+		}
+		return &pgshim.ShapeCheckError{Cause: cause, Err: err}
+	}
 	release, ok := acquire(ctx)
 	if !ok {
-		return nil, errNoSourceSlot
+		return nil, &pgshim.ShapeCheckError{Cause: "every connection of the port to your PostgreSQL stayed taken", Err: errNoSourceSlot}
 	}
 	defer release()
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
-		return nil, err
+		return nil, failed("the port could not connect to your PostgreSQL", err)
 	}
 	defer conn.Close(context.Background())
 	rows, err := conn.Query(ctx, pgShapesSQL, schemas, names)
 	if err != nil {
-		return nil, err
+		return nil, failed(pgRefusedCause(err), err)
 	}
 	defer rows.Close()
 	out := map[[2]string]pgshim.SourceShape{}
@@ -200,18 +250,28 @@ func pgAskShapes(ctx context.Context, dsn string, acquire func(context.Context) 
 		var mod *int32
 		var num *int16
 		if err := rows.Scan(&schema, &table, &oid, &name, &typ, &mod, &num); err != nil {
-			return nil, err
+			return nil, failed("the port could not read your PostgreSQL's answer", err)
 		}
 		key := [2]string{schema, table}
-		s := out[key]
-		s.OID = oid
+		sh := out[key]
+		sh.OID = oid
 		if name != nil && typ != nil && mod != nil && num != nil {
-			s.Columns = append(s.Columns, baseline.PGColumn{Name: *name, TypeOID: *typ, TypeMod: *mod, Ordinal: int(*num)})
+			sh.Columns = append(sh.Columns, baseline.PGColumn{Name: *name, TypeOID: *typ, TypeMod: *mod, Ordinal: int(*num)})
 		}
-		out[key] = s
+		out[key] = sh
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, failed(pgRefusedCause(err), err)
 	}
 	return out, nil
+}
+
+// pgRefusedCause is the cause of a question the source answered with an
+// error: its SQLSTATE, which says what without the message's words.
+func pgRefusedCause(err error) string {
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) {
+		return "your PostgreSQL refused the question (SQLSTATE " + pe.Code + ")"
+	}
+	return "the port could not read your PostgreSQL's answer"
 }
