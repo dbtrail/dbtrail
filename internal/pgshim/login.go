@@ -517,6 +517,9 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	}
 	if err != nil {
 		perr := s.statementError(ctx, err)
+		if errors.Is(err, sqlsandbox.ErrResultTooLarge) {
+			s.tooLarge = TooLargeBytes
+		}
 		if ctx.Err() == nil {
 			// To the source, or refused when the copy was busy (route.go).
 			perr = s.copyFailed(err, perr)
@@ -534,6 +537,14 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	if res.Truncated {
 		// Refused, not returned short: a client would take the first rows
 		// for the whole answer.
+		if res.CutByCells {
+			// Cut by its cells (Session.MaxCells): a wide result.
+			s.tooLarge = TooLargeCells
+			return nil, nil, nil, "", &pgErr{"54000", fmt.Sprintf(
+				"the result has more than %d rows of %d columns, the most a result this wide returns on this port, and is not returned cut; add a LIMIT, select fewer columns, or narrow the statement",
+				len(res.Rows), len(res.Columns))}
+		}
+		s.tooLarge = TooLargeRows
 		return nil, nil, nil, "", &pgErr{"54000", fmt.Sprintf(
 			"the result has more than %d rows, the most one statement returns on this port, and is not returned cut; add a LIMIT or narrow the statement",
 			len(res.Rows))}
@@ -552,6 +563,7 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		// again the way PostgreSQL writes its kind, and a cut bytea would
 		// come out as other bytes with no marker in sight. A notice is not
 		// enough: most drivers drop it.
+		s.tooLarge = TooLargeCellLength
 		return nil, nil, nil, "", &pgErr{"54000", fmt.Sprintf(
 			"%d cell(s) of the result are longer than the most one cell may be on this port, and are not returned cut; select fewer columns, or a part of the long one (substring, left)",
 			res.TruncatedCells)}

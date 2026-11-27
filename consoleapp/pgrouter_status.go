@@ -118,6 +118,12 @@ type pgRouterServerNumbers struct {
 	// counted under Reasons by the reason it was routed by. Absent until one
 	// is counted.
 	ShapeUnchecked map[string]uint64 `json:"copy_shape_unchecked,omitempty"`
+	// ResultTooLarge counts the statements the copy ran whose result was
+	// refused for its size (#3286): "rows" past --sql-port-max-rows,
+	// "cells" past the cells a result that wide may have, "bytes" past the
+	// bytes one statement returns, "cell_length" a cell longer than one may
+	// be. The client got error 54000 for each.
+	ResultTooLarge map[string]uint64 `json:"result_too_large,omitempty"`
 	// CaptureStateOnCopy counts the statements the copy answered, with a
 	// notice, while capture's record of the changes it dropped was not known
 	// to be current (#3202), by kind: stale (capture stopped saving while the
@@ -217,6 +223,7 @@ type pgRouteTally struct {
 	joinChecks            map[string]uint64
 	heavyOlder            map[string]uint64
 	shapeUnchecked        map[string]uint64
+	tooLarge              map[string]uint64
 	captureOnCopy         map[string]uint64
 	answers               map[string]*pgRouteAnswers
 	rows                  map[pgShapeKey]*pgShapeRow
@@ -390,6 +397,12 @@ func (r *pgRouteStats) note(id string, n pgshim.RouteNote) {
 			t.heavyOlder = map[string]uint64{}
 		}
 		t.heavyOlder[n.HeavyOlder]++
+	}
+	if n.TooLarge != "" {
+		if t.tooLarge == nil {
+			t.tooLarge = map[string]uint64{}
+		}
+		t.tooLarge[n.TooLarge]++
 	}
 	if n.ShapeUnchecked != "" {
 		if t.shapeUnchecked == nil {
@@ -613,7 +626,7 @@ func (r *pgRouteStats) counts(listen string) pgRouterStatusDoc {
 		Servers: map[string]pgRouterServerNumbers{}}
 	for id, t := range r.perServer {
 		n := pgRouterServerNumbers{Copy: t.copy, Source: t.source, Refused: t.refused,
-			Reasons: maps.Clone(t.reasons), JoinChecks: maps.Clone(t.joinChecks), HeavyOlderOnCopy: maps.Clone(t.heavyOlder), ShapeUnchecked: maps.Clone(t.shapeUnchecked), CaptureStateOnCopy: maps.Clone(t.captureOnCopy), Answers: map[string]console.RouteAnswers{}, ForwardingOff: t.barred}
+			Reasons: maps.Clone(t.reasons), JoinChecks: maps.Clone(t.joinChecks), HeavyOlderOnCopy: maps.Clone(t.heavyOlder), ShapeUnchecked: maps.Clone(t.shapeUnchecked), ResultTooLarge: maps.Clone(t.tooLarge), CaptureStateOnCopy: maps.Clone(t.captureOnCopy), Answers: map[string]console.RouteAnswers{}, ForwardingOff: t.barred}
 		switch {
 		case t.ageWhy != "":
 			n.DataAgeUnknownReason = t.ageWhy

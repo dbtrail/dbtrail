@@ -1569,7 +1569,7 @@ starts it.
 | `--max-connections` | `BINTRAIL_PG_ROUTER_MAX_CONNECTIONS` | 256 | Clients connected at once (1 to 1024). One more is refused with an error |
 | `--max-source-connections` | `BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS` | 16 | Connections to the servers' own PostgreSQL held at once, every server together (1 to 1024). A client holds one while a statement the source answers, its plan, or its transaction block runs there; past the limit the statement that needed one waits for one to be given back, up to 30 seconds, and is then refused (`53300`) |
 | `--max-wait` | `BINTRAIL_PG_ROUTER_MAX_WAIT` | none | How long a statement waits for its turn before it is refused (`53000`, `copy_wait_timeout`; it is not sent to the source) |
-| `--sql-port-max-rows` | `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS` | the port's row cap | Most rows one statement returns |
+| `--sql-port-max-rows` | `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS` | 200,000 | Most rows one statement returns; a result with more is refused with `54000`, not cut |
 | `--token` | `BINTRAIL_CONSOLE_TOKEN` | none | The access token, one more password. It does not open the port |
 | `--servers-file` | `BINTRAIL_CONSOLE_SERVERS` | `~/.config/bintrail/console-servers.yaml` | The servers file the web interface manages. Read, never written |
 
@@ -2325,16 +2325,29 @@ one rule off; both cannot be 0.
 
 An expensive statement the copy could not return is answered by the source
 too (`result_over_row_cap` in `/status`). The copy returns at most
-`--sql-port-max-rows` rows for one statement (10,000 by default) and refuses a
-larger result, it does not cut it. So when the plan says the statement
-returns more rows than that, the port does not run it on the copy only to
-refuse it: your PostgreSQL answers it, and sends every row. The plan's
+`--sql-port-max-rows` rows for one statement (200,000 by default, where the
+MySQL port's default is 10,000: a report of 100,000 rows is not unusual) and
+refuses a larger result, it does not cut it. A wide result is held to
+1,000,000 cells (rows times columns), never under 10,000 rows, which is what
+any width had before: what an answer takes in the router's memory while it is
+read and sent follows its cells (about 160 bytes each beside its text,
+measured) and its text, held up to four times at once, so one answer takes up
+to about 400 MB, counted in the router's memory sum ("Whether its memory
+fits the machine"). Its text is also held to
+64 MB. A result past any of these is refused with `54000` and counted in
+`/status` under `result_too_large`, as `rows`, `cells`, `bytes` or
+`cell_length` (one cell longer than a cell may be). The plan rule below
+keeps 10,000 rows (or the row cap, when you set it lower): a statement it
+sent to the source before the cap went to 200,000 still goes there. So when
+the plan says an expensive statement returns more than 10,000 rows, the port
+does not try it on the copy, where a wide result could be refused for its
+cells or its bytes: your PostgreSQL answers it, and sends every row. The plan's
 estimate is used for one kind of statement, the one where it can be trusted:
 one table read alone, whole or by an index, with nothing left to check row
 by row (no `Filter` in the plan), under a `LIMIT` or a sort at most
 (`SELECT * FROM orders`, `SELECT * FROM orders WHERE id > 5000 ORDER BY id`).
-A `LIMIT` at or under the cap, written as a number, keeps the statement on
-the copy. A prepared statement with parameters (`LIMIT $1`, `WHERE id > $1`)
+A `LIMIT` of 10,000 or less (or of the row cap, when lower), written as a
+number, keeps the statement on the copy. A prepared statement with parameters (`LIMIT $1`, `WHERE id > $1`)
 is never sent to the source for its size: its plan is asked for once,
 without its values, PostgreSQL then estimates by fixed guesses (a `LIMIT $1`
 is taken to return a tenth of the rows), and the port does not take a guess
@@ -2866,6 +2879,9 @@ What it adds up is each part's ceiling, not what it uses now:
   the memory the router plans with unless set), and any of them can be
   switched to fresh mode while the router runs. Not counted with
   `BINTRAIL_SQL_TAILS=off`;
+- what each statement's answer may take while it is read and sent (about
+  400 MB: 1,000,000 cells, and 64 MB of text four times), once per statement
+  that can run at once;
 - the results held for clients that have not read them (256 MiB);
 - the buffer pool of each index MySQL on the same machine: compose's
   `index-mysql`, or a MySQL on loopback whose host name is this machine's.
@@ -2898,8 +2914,9 @@ said (`verdict` is `idle`).
 
 The factory settings (four workers at 2 GB) can ask for more than a 16 GB
 machine has with the index MySQL's default buffer pool on it, so the router
-warns there. Two workers fit it with one PostgreSQL server; each more server
-adds its recent changes' budget.
+warns there. A 16 GB machine has about 15.3 GiB to give; with one PostgreSQL
+server, two workers and a 3 GB index buffer pool fit it, which is how the
+boards run, and each more server adds its recent changes' budget.
 
 In `/status`, `memory` has `verdict` (`fits`, `over`, `idle`, or `unknown`
 with `why` when the machine's memory or the SQL memory cannot be read),
@@ -2963,7 +2980,7 @@ The reasons, with the MySQL port's names where they mean the same:
 | copy | `heavy_on_copy` | its plan on the source is expensive, so the copy answers it even though the port would otherwise send it to the source for how the copy answers it: the answer may differ from PostgreSQL's (simple protocol only, since 0.140.0) |
 | copy | `capture_gate` | the server forwards with the capture account, and the statement did not pass that account's check, so the copy answered it without asking the source for its plan |
 | source | `cheap_plan` | its plan on the source is under both thresholds: the source answers it, by its indexes |
-| source | `result_over_row_cap` | its plan on the source is expensive and says it returns more rows than the copy returns for one statement (`--sql-port-max-rows`): the copy would refuse the result, so it is not tried there |
+| source | `result_over_row_cap` | its plan on the source is expensive and says it returns more than 10,000 rows (or `--sql-port-max-rows`, when lower): a result that large may be refused by the copy for its cells or bytes, so it is not tried there |
 | source | `explain_failed` | its plan could not be had (the source refused the `EXPLAIN`, a text of more than one statement): the source answers it, its error included |
 | source | `in_transaction` | the client's transaction block |
 | source | `veto` | a construct the copy answers differently, or is not known to answer the same |

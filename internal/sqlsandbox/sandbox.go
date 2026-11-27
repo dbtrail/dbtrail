@@ -333,6 +333,15 @@ type Session struct {
 	// name. Only the PostgreSQL-protocol port sets it: the SQL card and the
 	// MySQL port show the engine's names.
 	PostgresNames bool
+	// MaxCells, above 0, also cuts the result at MaxCells / columns rows,
+	// never under CellsFloorRows (#3286): what a result takes in the
+	// caller's memory follows its cells, not its rows, once decoded and
+	// written for its wire. A result cut there is Truncated, with
+	// CutByCells. Only the PostgreSQL port sets it, with its row cap of
+	// 200,000: a narrow report gets every row, a wide one no more than the
+	// 10,000 any width had before. 0: no cut by cells.
+	MaxCells       int
+	CellsFloorRows int
 	// ResultToFile is the caller's, not the connection's: it can send a
 	// result larger than the memory cap to its client from a file
 	// (Result.Spool), so the statement may run with no row cap and its
@@ -498,11 +507,13 @@ type DateScale struct {
 // A text cell longer than MaxCellBytes is cut and ends with a marker;
 // TruncatedCells counts them.
 type Result struct {
-	Columns        []Column      `json:"columns"`
-	Rows           [][]any       `json:"rows"`
-	Truncated      bool          `json:"truncated"`
-	TruncatedCells int           `json:"truncated_cells"`
-	Elapsed        time.Duration `json:"elapsed_ns"`
+	Columns        []Column `json:"columns"`
+	Rows           [][]any  `json:"rows"`
+	Truncated      bool     `json:"truncated"`
+	TruncatedCells int      `json:"truncated_cells"`
+	// CutByCells: Truncated at Session.MaxCells, not at MaxRows.
+	CutByCells bool          `json:"cut_by_cells,omitempty"`
+	Elapsed    time.Duration `json:"elapsed_ns"`
 	// Phases is where the time went, for the measurement #2026 asks for.
 	Phases Phases `json:"phases"`
 	// JoinOrderWritten: the join check (Session.JoinNDV) ran the statement
@@ -1801,6 +1812,7 @@ func marshalJob(job Job, limits Limits, spill spillSpec, spool string, more bool
 	return json.Marshal(wireJob{
 		CopyDirs: allowedDirs(job.CopyDirs), ViewsSQL: viewsSQL, AskViews: asking, SQL: job.SQL, NoFileReaders: job.NoFileReaders, Schema: job.Schema,
 		TimeZone: job.Session.TimeZone, MySQLClock: job.Session.MySQLClock, SelectLimit: job.Session.SelectLimit, KeepJoinOrder: job.Session.KeepJoinOrder, PostgresRules: job.Session.PostgresRules, PostgresNames: job.Session.PostgresNames,
+		MaxCells: job.Session.MaxCells, CellsFloorRows: job.Session.CellsFloorRows,
 		JoinNDV: job.Session.joinNDV(), SkipCommonSubplan: job.Session.SkipCommonSubplan, TryConnectedJoinOrder: job.Session.TryConnectedJoinOrder,
 		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
@@ -2130,7 +2142,7 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 			return Result{}, &WorkerError{Err: errors.New(out.Error.Message), PID: pid, Stderr: w.stderr.text()}
 		}
 	}
-	res := Result{Columns: out.Columns, Rows: out.Rows, Truncated: out.Truncated,
+	res := Result{Columns: out.Columns, Rows: out.Rows, Truncated: out.Truncated, CutByCells: out.CutByCells,
 		TruncatedCells: out.TruncatedCells, Elapsed: time.Duration(out.ElapsedNS),
 		JoinOrderWritten: out.JoinOrder == joinOrderWritten, JoinCheckSkipped: out.JoinCheckSkipped,
 		Phases: Phases{

@@ -145,7 +145,7 @@ func TestCostPolicy_overRowCap(t *testing.T) {
 		if (why != "") != tc.over {
 			t.Errorf("%s: %q, want over=%v", tc.name, why, tc.over)
 		}
-		if tc.over && !(strings.Contains(why, "row cap of 10000") && strings.Contains(why, "not tried on the copy")) {
+		if tc.over && !(strings.Contains(why, "over the 10000 the copy is tried for") && strings.Contains(why, "not tried on the copy")) {
 			t.Errorf("%s: the reason does not say the cap and what was done: %q", tc.name, why)
 		}
 	}
@@ -339,7 +339,7 @@ func TestRouteByCost_resultOverRowCap_leavesNoSide(t *testing.T) {
 
 // Every reason the port notes has words in its status.
 func TestResultOverRowCap_statusWords(t *testing.T) {
-	if w := reasonMeans[ReasonResultOverRowCap]; !strings.Contains(w, "more rows than the copy returns") {
+	if w := reasonMeans[ReasonResultOverRowCap]; !strings.Contains(w, "more rows than the port tries on the copy") {
 		t.Errorf("status words for %s: %q", ReasonResultOverRowCap, w)
 	}
 }

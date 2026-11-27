@@ -484,6 +484,15 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 		}
 		res.Columns[i] = Column{Name: name, Type: typeNames[i]}
 	}
+	// The cut by cells (Session.MaxCells): a narrower cap than the rows' for
+	// a wide result, never under the floor. A client's own sql_select_limit
+	// under it stays the cut it asked for.
+	cutByCells := false
+	if job.MaxCells > 0 && len(types) > 0 {
+		if byCells := max(job.MaxCells/len(types), job.CellsFloorRows); byCells < rowLimit {
+			rowLimit, askedFor, cutByCells = byCells, false, true
+		}
+	}
 	res.Rows = [][]any{}
 	var rd renderer
 	var bytesSoFar int64
@@ -509,6 +518,7 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 			// at the client's own sql_select_limit is what it asked for, not
 			// a truncation.
 			res.Truncated = !askedFor
+			res.CutByCells = cutByCells
 			break
 		}
 		raw := make([]any, len(types))

@@ -100,6 +100,9 @@ type session struct {
 	// statement being run under, with a notice (capture_stale_3202.go), for
 	// its RouteNote; "" when none.
 	captureState string
+	// tooLarge is which cap the copy's result passed, for the statement's
+	// RouteNote (TooLargeRows, TooLargeBytes); "" when none.
+	tooLarge string
 	// captureNote is that statement's notice, sent with shapeNote once the
 	// copy's answer is the client's (commitShapeNote).
 	captureNote string

@@ -87,6 +87,30 @@ const ReasonCopyRefusedAfterWrittenOrder = "copy_refused_after_written_order"
 // (capture_gate.go), so the copy answered it without the source's plan.
 const ReasonCaptureGate = "capture_gate"
 
+// What a result refused for its size passed (RouteNote.TooLarge, #3286).
+// CellMemoryBytes and TextCopiesInMemory are what the copy's answer takes in
+// this port's memory while it is read and written for the wire (#3286): each
+// cell about CellMemoryBytes beside its text (the decoded value and its
+// wire slice), and its text up to TextCopiesInMemory times at once (the
+// worker's output, the JSON decoder's buffer of it, the decoded strings and
+// the wire bytes overlap). Measured by TestCellMemoryCost_3286, which fails
+// when the real cost passes this model. The PostgreSQL router sizes its
+// memory sum with them.
+const (
+	CellMemoryBytes    = 160
+	TextCopiesInMemory = 4
+)
+
+// TooLargeCells: past the cells a result this wide may have
+// (sqlsandbox.Session.MaxCells); TooLargeCellLength: one cell longer than a
+// cell may be.
+const (
+	TooLargeRows       = "rows"
+	TooLargeCells      = "cells"
+	TooLargeBytes      = "bytes"
+	TooLargeCellLength = "cell_length"
+)
+
 // RouteNote is one statement's decision, for the port's status.
 type RouteNote struct {
 	// Statement is the text the client sent.
@@ -127,6 +151,10 @@ type RouteNote struct {
 	// current (capture_stale_3202.go); "" when it was, or the source
 	// answered. Counted apart, as ShapeUnchecked is.
 	CaptureState string
+	// TooLarge is which cap the copy's result passed when it was refused
+	// for its size (TooLargeRows: --sql-port-max-rows; TooLargeBytes: the
+	// bytes one statement returns), "" when it was not.
+	TooLarge string
 }
 
 // routeDecision is which side answers a statement, and why.
@@ -1946,6 +1974,11 @@ func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, fa
 	}
 	captureState := s.captureState
 	s.captureState = ""
+	tooLarge := s.tooLarge
+	s.tooLarge = ""
+	if d.side != RouteCopy || !failed {
+		tooLarge = ""
+	}
 	if d.side != RouteCopy || failed {
 		captureState = ""
 	}
@@ -1955,7 +1988,7 @@ func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, fa
 	if d.side != RouteCopy {
 		joinCheck = ""
 	}
-	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed, JoinCheck: joinCheck, OOMRetry: oomRetry, WrittenOrder: writtenOrder, HeavyOlder: heavyOlder, ShapeUnchecked: shapeUnchecked, CaptureState: captureState})
+	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed, JoinCheck: joinCheck, OOMRetry: oomRetry, WrittenOrder: writtenOrder, HeavyOlder: heavyOlder, ShapeUnchecked: shapeUnchecked, CaptureState: captureState, TooLarge: tooLarge})
 }
 
 // fieldName reports whether the token at j is the field a date_trunc or a

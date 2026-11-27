@@ -59,11 +59,13 @@ type CostPolicy struct {
 	// it without asking the source again (rememberedVerdict); 0 is
 	// DefaultCostRemember, a negative value remembers nothing.
 	Remember time.Duration
-	// RowCap is the most rows the copy returns for one statement (the
-	// host's cap: a result with more is refused, not cut); 0 when the host
-	// gives none. A statement the plan sends to the copy whose result the
-	// plan estimates above it is not tried there: the source answers it
-	// (ReasonResultOverRowCap, #3154).
+	// RowCap is the most rows the plan may estimate for a statement the
+	// copy is tried for; 0 when the host gives none. A statement the plan
+	// sends to the copy whose result the plan estimates above it is not
+	// tried there: the source answers it (ReasonResultOverRowCap, #3154).
+	// The PostgreSQL router gives the smaller of its row cap and 10,000
+	// (#3286): the copy may return more, but a wide result past that may be
+	// refused there for its cells or bytes.
 	RowCap int64
 }
 
@@ -111,7 +113,7 @@ func (p CostPolicy) overRowCap(pl pgPlan) string {
 	if p.RowCap <= 0 || pl.resultRows <= float64(p.RowCap) {
 		return ""
 	}
-	return fmt.Sprintf("the plan returns about %.0f rows, over the copy's row cap of %d: not tried on the copy", pl.resultRows, p.RowCap)
+	return fmt.Sprintf("the plan returns about %.0f rows, over the %d the copy is tried for: not tried on the copy", pl.resultRows, p.RowCap)
 }
 
 // pgPlan is what the policy reads of a plan: the top node's Total Cost, the

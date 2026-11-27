@@ -43,6 +43,9 @@ type wireJob struct {
 	PostgresRules bool `json:"postgres_rules,omitempty"`
 	// PostgresNames: see Session.PostgresNames.
 	PostgresNames bool `json:"postgres_names,omitempty"`
+	// MaxCells, CellsFloorRows: see Session.MaxCells.
+	MaxCells       int `json:"max_cells,omitempty"`
+	CellsFloorRows int `json:"cells_floor_rows,omitempty"`
 	// SkipCommonSubplan: see Session.SkipCommonSubplan.
 	SkipCommonSubplan bool `json:"skip_common_subplan,omitempty"`
 	// JoinNDV: see Session.JoinNDV. Nil: no join check.
@@ -95,6 +98,8 @@ type wireResult struct {
 	Rows           [][]any  `json:"rows,omitempty"`
 	Truncated      bool     `json:"truncated"`
 	TruncatedCells int      `json:"truncated_cells"`
+	// CutByCells: see Result.CutByCells.
+	CutByCells bool `json:"cut_by_cells,omitempty"`
 	// Spooled: the rows are in the job's SpoolDir, SpoolRows of them, not in
 	// Rows.
 	Spooled   bool  `json:"spooled,omitempty"`

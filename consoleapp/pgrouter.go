@@ -146,7 +146,7 @@ func addPGRouterFlags(cmd *cobra.Command) {
 	f.Float64("cost-threshold", pgshim.DefaultCostThreshold, "With a server's forwarding user, a statement the copy answers as PostgreSQL does goes to the copy only when it is expensive on the source: when the Total Cost at the top of its plan (EXPLAIN on the source, before it runs) is at least this, or a sequential scan in the plan is estimated at --scan-rows rows or more; otherwise the source answers it, by its indexes (a read by a primary key costs about 1 to 12). 0 turns this rule off. Env BINTRAIL_PG_ROUTER_COST_THRESHOLD.")
 	f.Int64("scan-rows", pgshim.DefaultScanRows, "With a server's forwarding user, a statement the copy answers as PostgreSQL does goes to the copy when a sequential scan in its plan on the source (any Seq Scan node, at any depth) is estimated at this many rows or more, whatever its cost. 0 turns this rule off. Env BINTRAIL_PG_ROUTER_SCAN_ROWS.")
 	f.String("max-wait", "", "How long a statement waits for its turn when every worker is busy, e.g. 30s or 2m; past it the client gets an error (53000) to run it again, and the statement is not sent to the source. Empty or 0: no limit of its own, and the five minutes one statement may take, its wait included, is what ends it. Env BINTRAIL_PG_ROUTER_MAX_WAIT.")
-	f.Int("sql-port-max-rows", console.DefaultSQLPortMaxRows, "Most rows one statement returns; a result with more is refused, not cut. Env BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS.")
+	f.Int("sql-port-max-rows", defaultPGRouterMaxRows, "Most rows one statement returns; a result with more is refused, not cut. Env BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS.")
 }
 
 // pgRouterSettings is what pg-router starts with, flags and environment
@@ -263,7 +263,12 @@ func pgRouterSettingsFrom(cmd *cobra.Command) (pgRouterSettings, error) {
 	}
 	// The copy refuses a result of more rows than this: a statement whose
 	// plan says it returns more is the source's (pgshim.CostPolicy.RowCap).
-	st.Cost.RowCap = int64(st.SQLPortMaxRows)
+	// The plan rule that sends an expensive statement whose estimated result
+	// is large to the source keeps the 10,000 it had before the port's cap
+	// went to 200,000 (#3286): a wide result it sent there would now be run
+	// on the copy and refused for its cells or bytes. A lower cap still
+	// pulls it down.
+	st.Cost.RowCap = int64(min(st.SQLPortMaxRows, pgCopyCellsFloorRows))
 	st.StatusStatements, _ = f.GetBool("status-statements")
 	if !f.Changed("status-statements") {
 		if v := os.Getenv("BINTRAIL_PG_ROUTER_STATUS_STATEMENTS"); v != "" {
@@ -789,6 +794,40 @@ func pgFastLaneLine(workers int) string {
 // one more, kept for short statements.
 func pgCopySlots(workers int) int { return workers + 1 }
 
+// defaultPGRouterMaxRows is the PostgreSQL port's row cap (#3286): a report
+// is answered whole up to it, refused past it. The MySQL port's
+// (console.DefaultSQLPortMaxRows, 10,000) refused CH-benCHmark's Q16, about
+// 100,000 rows, on every run, where PostgreSQL alone answers it in seconds.
+// What one answer takes in this process's memory is bounded by its cells
+// (pgCopyMaxCells) and its bytes (sqlsandbox's MaxResultBytes, 64 MB):
+// pgCopyAnswerBytes. BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS (compose's
+// SQL_PORT_MAX_ROWS) still sets both ports' cap when given.
+const defaultPGRouterMaxRows = 200_000
+
+// pgCopyMaxCells and pgCopyCellsFloorRows bound a result by its cells
+// (#3286, sqlsandbox.Session.MaxCells): what it takes in this process's
+// memory, once decoded and written for the wire, follows its cells, about
+// pgCopyCellBytes each beside its text. A result of up to 1,000,000 cells
+// gets every row up to the row cap (CH-benCHmark's Q16, 100,000 rows of 4
+// columns, is 400,000); a wider one is cut, but never under 10,000 rows, what
+// any width had before.
+const (
+	pgCopyMaxCells       = 1_000_000
+	pgCopyCellsFloorRows = 10_000
+	// pgCopyCellBytes is what a cell takes while its answer is decoded and
+	// written for the wire, its text aside (pgshim.CellMemoryBytes, held to
+	// the measure by pgshim's TestCellMemoryCost_3286).
+	pgCopyCellBytes = pgshim.CellMemoryBytes
+)
+
+// pgCopyAnswerBytes is what one statement's answer may take in this process
+// while it is read and sent (pgMemoryPlan.AnswerBytes): its cells, and its
+// text (at most sqlsandbox's MaxResultBytes, 64 MB) up to
+// pgshim.TextCopiesInMemory times at once. About 400 MB. A result under
+// 10,000 rows wider than 100 columns can take more, as any width could
+// before.
+var pgCopyAnswerBytes = int64(pgCopyMaxCells*pgCopyCellBytes) + pgshim.TextCopiesInMemory*sqlsandbox.DefaultLimits().MaxResultBytes
+
 // pgRouterQueryTimeout bounds each statement end to end, a wait for a worker
 // included: the same five minutes as the MySQL port's.
 const pgRouterQueryTimeout = defaultFlashbackQueryTimeout
@@ -1289,7 +1328,10 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			// And a statement of a shape that needed the order written runs
 			// that way from the start (pgshim writtenorder.go).
 			sess := sqlsandbox.Session{PostgresRules: true, TrimPadded: true, PostgresNames: true, TimeZone: opts.TimeZone, SkipCommonSubplan: true,
-				RetryOutOfMemoryInWrittenOrder: true, KeepJoinOrder: opts.KeepJoinOrder}
+				RetryOutOfMemoryInWrittenOrder: true, KeepJoinOrder: opts.KeepJoinOrder,
+				// A wide result is cut by its cells (#3286), so what it takes
+				// in this process's memory stays bounded at any row cap.
+				MaxCells: pgCopyMaxCells, CellsFloorRows: pgCopyCellsFloorRows}
 			if opts.JoinNDV != nil {
 				sess.JoinNDV = &sqlsandbox.JoinCounts{NDV: opts.JoinNDV}
 				sess.TryConnectedJoinOrder = true
