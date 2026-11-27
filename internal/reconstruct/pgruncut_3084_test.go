@@ -186,14 +186,52 @@ func TestPGRunCutFile_3084(t *testing.T) {
 func TestPGHoldThroughRun_3084(t *testing.T) {
 	run := &pgRunEnd{until: 1, held: &pgRunHeld{}}
 	cfg := FullTableConfig{pgRun: run}
-	pgHoldThroughRun(cfg, "public", "lost", &CaptureGap{}, false)
-	pgHoldThroughRun(cfg, "public", "dropped", nil, true)
-	pgHoldThroughRun(cfg, "public", "whole", nil, false)
-	pgHoldThroughRun(FullTableConfig{}, "public", "mysql", nil, false) // no run: nothing, no panic
+	pgHoldThroughRun(cfg, "public", "lost", &CaptureGap{}, false, false)
+	pgHoldThroughRun(cfg, "public", "dropped", nil, true, false)
+	pgHoldThroughRun(cfg, "public", "whole", nil, false, false)
+	pgHoldThroughRun(cfg, "public", "late", nil, false, true)
+	pgHoldThroughRun(FullTableConfig{}, "public", "mysql", nil, false, false) // no run: nothing, no panic
 	if run.held.tables[[2]string{"public", "lost"}] || run.held.tables[[2]string{"public", "dropped"}] {
 		t.Fatal("a table with a loss in its window is held through the run")
 	}
+	if run.held.tables[[2]string{"public", "late"}] {
+		t.Fatal("a table the index records entering capture after its file's floor is held through the run")
+	}
+	// A run told to go on over gaps holds nothing: finding nothing proves
+	// nothing there.
+	gaps := &pgRunEnd{until: 1, held: &pgRunHeld{}}
+	pgHoldThroughRun(FullTableConfig{pgRun: gaps, AllowGaps: true}, "public", "whole", nil, false, false)
+	if len(gaps.held.tables) != 0 {
+		t.Fatal("a run over gaps held a table through its end")
+	}
 	if !run.held.tables[[2]string{"public", "whole"}] {
 		t.Fatal("a whole table is not held through the run")
+	}
+}
+
+// The record names the bound every table it holds holds (heldSince): what a
+// file the run folded records, for a fold that took changes up to its end.
+func TestPGRunCutSince(t *testing.T) {
+	at := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	dir := filepath.Join(t.TempDir(), SnapshotDirName(at))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := &pgRunEnd{at: at, until: 0x7FFF, newestAt: at.Add(-30 * time.Second), held: &pgRunHeld{}}
+	run.holdThrough("public", "item")
+	want := run.foldedDeltaSince(foldFrom(0x100, run.until), 0x100, at.Add(-time.Hour))
+	if got := run.heldSince(); !got.Equal(want) || got.IsZero() {
+		t.Fatalf("heldSince %s, want what a fold to the run's end records, %s", got, want)
+	}
+	if err := run.writeCut(dir); err != nil {
+		t.Fatal(err)
+	}
+	cut, found, err := ReadPGRunCut(dir)
+	if err != nil || !found || !cut.Since.Equal(want) {
+		t.Fatalf("read back %v %v %v; want since %s", cut.Since, found, err, want)
+	}
+	// An index with no change writes no record, so nothing names a bound.
+	if none := (pgRunEnd{none: true}); !none.heldSince().IsZero() {
+		t.Error("a run with no change names a bound")
 	}
 }

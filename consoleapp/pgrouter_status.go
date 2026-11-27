@@ -171,8 +171,8 @@ type pgRouterServerNumbers struct {
 	// For an answer that read a table from its snapshot alone (#3125),
 	// DataAsOf is the oldest bound its snapshot files record: every change
 	// committed before it is in the file. It is a minute before the moment
-	// the file was written at, and a table with no change keeps the bound of
-	// the update that last wrote its file, so it only errs old.
+	// the file was written at, and a table with no change takes the bound of
+	// the update that carried it (pgHeldThrough), so it only errs old.
 	DataAsOf          string `json:"data_as_of,omitempty"`
 	DataAgeSeconds    *int64 `json:"data_age_seconds,omitempty"`
 	DataAgeMaxSeconds *int64 `json:"data_age_max_seconds,omitempty"`

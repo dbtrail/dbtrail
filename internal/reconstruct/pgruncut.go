@@ -2,6 +2,7 @@ package reconstruct
 
 import (
 	"cmp"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/snapshotdir"
 )
 
@@ -69,6 +71,13 @@ type pgRunCutRecord struct {
 	// copied into another directory says nothing about it.
 	At     string      `json:"at"`
 	Tables [][2]string `json:"tables"`
+	// Since is what a file the run wrote records as MetaKeyPGDeltaSince
+	// (pgRunEnd.heldSince): every table in Tables holds every change
+	// committed before it, a table the run carried forward unchanged too,
+	// whose own footer keeps the bound of the update that last wrote it.
+	// Absent in a record from before it was written (the reader then knows
+	// only the file's own bound).
+	Since string `json:"since,omitempty"`
 }
 
 // writeCut writes the run's record into snapshotDir, the directory it is
@@ -95,7 +104,11 @@ func (r *pgRunEnd) writeCut(snapshotDir string) error {
 	slices.SortFunc(tables, func(a, b [2]string) int {
 		return cmp.Or(strings.Compare(a[0], b[0]), strings.Compare(a[1], b[1]))
 	})
-	b, err := json.Marshal(pgRunCutRecord{Version: 1, LSN: r.until + 1, ReachID: r.reachID, At: at.Format(time.RFC3339), Tables: tables})
+	rec := pgRunCutRecord{Version: 1, LSN: r.until + 1, ReachID: r.reachID, At: at.Format(time.RFC3339), Tables: tables}
+	if since := r.heldSince(); !since.IsZero() {
+		rec.Since = since.Format(time.RFC3339)
+	}
+	b, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
@@ -119,7 +132,11 @@ type PGRunCut struct {
 	// through, 0 when it does not say.
 	ReachID uint64
 	// At is the time of the directory the record was written for.
-	At     time.Time
+	At time.Time
+	// Since is the record's Since: zero when it has none. Every table the
+	// record holds holds every change committed before it, which is how old
+	// the console says a carried table's answer is (pg_snapshot_age.go).
+	Since  time.Time
 	tables map[[2]string]bool
 }
 
@@ -149,6 +166,13 @@ func ReadPGRunCut(dir string) (cut PGRunCut, found bool, err error) {
 		return PGRunCut{}, false, fmt.Errorf("%s names no time or no position", PGRunCutFile)
 	}
 	cut = PGRunCut{LSN: rec.LSN, ReachID: rec.ReachID, At: at.UTC(), tables: make(map[[2]string]bool, len(rec.Tables))}
+	if rec.Since != "" {
+		since, err := time.Parse(time.RFC3339, rec.Since)
+		if err != nil {
+			return PGRunCut{}, false, fmt.Errorf("%s names a bound that does not parse: %w", PGRunCutFile, err)
+		}
+		cut.Since = since.UTC()
+	}
 	for _, t := range rec.Tables {
 		cut.tables[t] = true
 	}
@@ -158,11 +182,25 @@ func ReadPGRunCut(dir string) (cut PGRunCut, found bool, err error) {
 // pgHoldThroughRun records, at a table's successful end, that the table holds
 // through the run's end: not when the window had a known loss of captured
 // changes, or capture dropped changes of the table and the fold went on
-// without them (notCovered). Its file then records the loss itself, and a
-// reader that moved its start to the run's end would ask over less.
-func pgHoldThroughRun(cfg FullTableConfig, schema, table string, capGap *CaptureGap, notCovered bool) {
-	if capGap != nil || notCovered {
+// without them (notCovered); not for a run told to go on over gaps
+// (cfg.AllowGaps: hours rotated away unarchived, archives that could not be
+// listed, a file older than capture's start all go on with a warning, and
+// finding nothing in the window then proves nothing, MySQL's rule for its
+// fold cut too); and not when the index records the table entering capture
+// after its file's floor (lateEntry, #2862: what it had in between was never
+// captured). Its file then says what it holds, and a reader that moved its
+// start, or its age, to the run's end would claim more.
+func pgHoldThroughRun(cfg FullTableConfig, schema, table string, capGap *CaptureGap, notCovered, lateEntry bool) {
+	if cfg.AllowGaps || capGap != nil || notCovered || lateEntry {
 		return
 	}
 	cfg.pgRun.holdThrough(schema, table)
+}
+
+// pgEnteredCaptureLate says whether the index records schema.table entering
+// capture after bmeta's floor, or cannot say (TableCaptureEntry): either way
+// the run does not hold the table through its end.
+func pgEnteredCaptureLate(db *sql.DB, bmeta baseline.DumpMetadata, schema, table string) bool {
+	e := TableCaptureEntry(db, "postgres", bmeta, schema, table)
+	return e.Late || e.Err != nil
 }
