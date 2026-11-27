@@ -921,7 +921,12 @@ renewed one.
 statements at once, two threads each, 256 clients. Each statement may take the
 SQL memory (2GB unless set), so four at once can take 8GB, plus the recent
 changes fresh mode holds for each server in fresh mode: on a machine with
-16GB, set `PG_ROUTER_WORKERS=2` or `PG_ROUTER_MEMORY`.
+16GB, set `PG_ROUTER_WORKERS=2` or `PG_ROUTER_MEMORY`. The service adds its
+statements, those recent changes and the bundled index MySQL's buffer pool up
+when it starts and once a minute after, and warns in its log when they may
+need more memory than the machine has, with the number of workers or the SQL
+memory that fits (`docker compose logs pg-router`; the PostgreSQL guide,
+"Whether its memory fits the machine").
 
 **CPU priority.** Like the MySQL router, the service runs at a lower CPU
 priority than capture (`cpu_shares: 256` in the file, `PG_ROUTER_CPU_SHARES`
