@@ -42,7 +42,9 @@ func TestIntegrationJoinOrdersCountTheAnswersTheClientGot(t *testing.T) {
 			t.Fatalf("order %q, rows %v", res.JoinOrderByShape, res.Rows)
 		}
 	}
-	counted := func() uint64 { return r.s.routing.snapshot()[bootServerID].JoinOrders[sqlsandbox.JoinOrderByShapeConnected] }
+	counted := func() uint64 {
+		return r.s.routing.snapshot()[bootServerID].JoinOrders[sqlsandbox.JoinOrderByShapeConnected]
+	}
 
 	run(t)
 	q.NoteRoute("mysql") // the port threw the copy's answer away
