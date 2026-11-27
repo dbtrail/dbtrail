@@ -140,11 +140,15 @@ func TestIntegrationPGRouterWithReadingAWithIsAnsweredByTheCopy_3043(t *testing.
 	// Two changes after the snapshot: row 1's counter, and a second row.
 	exec1("UPDATE " + pgChainTable + " SET counter = 1 WHERE id = 1")
 	exec1("INSERT INTO " + pgChainTable + " VALUES (2, 0)")
+	// Waited for on the copy's own answers: since #3116 a light statement
+	// whose tails are not ready yet is answered by the source, with the
+	// changes in it, so the answer alone no longer says the copy has them.
 	pgTestWait(t, "the copy's tail to show the changes", 90*time.Second, func() (bool, string) {
 		c := pgClient(t, ctx, dsn, nil)
 		defer c.Close(context.Background())
-		got := one(ctx, c, plain) + " " + one(ctx, c, "SELECT count(*) FROM "+pgChainTable)
-		return got == "1 2", got
+		counter, byA := answeredBy(c, plain)
+		rows, byB := answeredBy(c, "SELECT count(*) FROM "+pgChainTable)
+		return counter == "1" && rows == "2" && byA == "copy" && byB == "copy", counter + " by " + byA + ", " + rows + " by " + byB
 	})
 
 	// A connection the source never answered: the copy answers, with the
