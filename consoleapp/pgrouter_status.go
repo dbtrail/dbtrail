@@ -496,8 +496,22 @@ const (
 func (r *pgRouteStats) doc(listen string) pgRouterStatusDoc {
 	d := r.counts(listen)
 	// Capture's state (#3202), asked outside the tally's lock: it can read
-	// the index, and the source while a save is old.
+	// the index, and the source while a save is old. Only for this port's
+	// servers: the ones it counted a statement of, and the PostgreSQL
+	// servers of its console (r.modes).
+	ours := map[string]bool{}
+	for id := range d.Servers {
+		ours[id] = true
+	}
+	if r.modes != nil {
+		for _, id := range r.modes.PostgresServerIDs() {
+			ours[id] = true
+		}
+	}
 	for _, id := range pgCaptureStateServers() {
+		if !ours[id] {
+			continue
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*pgCaptureStateWait)
 		cs := pgCaptureStateNow(ctx, id)
 		cancel()

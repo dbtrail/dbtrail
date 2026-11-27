@@ -416,6 +416,12 @@ func TestPGCaptureState_3202_statusAsksForAFreshVerdict(t *testing.T) {
 		pgCaptureStateCaches.mu.Unlock()
 	})
 	r := newPGRouteStats(time.Now(), false)
+	// A server of this port: one statement counted before the stall.
+	r.note("srv-status", pgshim.RouteNote{Side: pgshim.RouteCopy, Reason: pgshim.ReasonAnswersTheSame})
+	// Another port's server is not said here.
+	if _, ok := r.doc("").Servers["srv1"]; ok {
+		t.Error("a server this port counted nothing of is in its document")
+	}
 	f.set(pgSavedRow(90, 1000), 2000)
 	if d := r.doc("").Servers["srv-status"].CaptureState; d == nil || d.State != pgshim.CaptureStale {
 		t.Fatalf("a stall with no statement, /status: %+v", d)
