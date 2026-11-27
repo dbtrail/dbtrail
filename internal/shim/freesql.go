@@ -523,7 +523,7 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 			if err != nil {
 				return nil, err
 			}
-			res, err := h.runFreeSQLRouted(currentDB, text, readrouter.ShapeOf(qstr), readrouter.KeepsJoinOrder(qstr), toFile, false, reason, unchangedWithin)
+			res, err := h.runFreeSQLRouted(currentDB, text, readrouter.ShapeOf(qstr), readrouter.KeepsJoinOrder(qstr), readrouter.HasStraightJoin(qstr), toFile, false, reason, unchangedWithin)
 			if err != nil {
 				return nil, err
 			}
@@ -1276,7 +1276,7 @@ func (h *Handler) notTimeTravelError(qstr string) error {
 
 // runFreeSQL serves one ordinary statement through the bound FreeSQL.
 func (h *Handler) runFreeSQL(schema, qstr string) (*mysql.Result, error) {
-	return h.runFreeSQLRouted(schema, qstr, nil, false, false, false, "", 0)
+	return h.runFreeSQLRouted(schema, qstr, nil, false, false, false, false, "", 0)
 }
 
 // copyText is the statement the routing ladder sends the copy: the client's
@@ -1313,7 +1313,11 @@ func copyText(qstr string, o readrouter.CopyOptions) (string, error) {
 //
 // binary is sqlsandbox.Session.BinaryResult: the caller turns the answer
 // into a prepared statement's, so less of it is held in memory.
-func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnTypes, keepJoinOrder, toFile, binary bool, routeReason string, unchangedWithin time.Duration) (served *mysql.Result, refused error) {
+//
+// straightJoin: the client's statement holds a STRAIGHT_JOIN in any form
+// (readrouter.HasStraightJoin), which qstr, rewritten for the copy, no
+// longer does. The copy then never picks the join order by shape.
+func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnTypes, keepJoinOrder, straightJoin, toFile, binary bool, routeReason string, unchangedWithin time.Duration) (served *mysql.Result, refused error) {
 	if h.router == nil {
 		// Where the copy answers alone, this is the statement's answer: the
 		// copy's when it is served, a refusal otherwise, including one made
@@ -1414,6 +1418,18 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 	// The client wrote STRAIGHT_JOIN, which qstr no longer holds (copyText
 	// rewrote it): the copy makes the joins in the order written, as MySQL.
 	sess.KeepJoinOrder = keepJoinOrder
+	// What the routing ladder sends to the copy has its join order picked
+	// from the shape of its FROM before it runs (sqlsandbox's
+	// JoinOrderByShape): the copy's planner, reading the tables through
+	// views, picked orders for CH-benCHmark Q5, Q8 and Q21 that ran out of
+	// memory, and MySQL then answered them later than it would have alone.
+	// A STRAIGHT_JOIN the client wrote, in any form, leaves the order to
+	// the client: kept as written where the copy can keep it
+	// (KeepJoinOrder), planned as before where it cannot (SELECT
+	// STRAIGHT_JOIN over tables listed with commas, a STRAIGHT_JOIN mixed
+	// with other joins), never reordered by shape. A port without routing
+	// runs as it always did.
+	sess.JoinOrderByShape = h.router != nil && !keepJoinOrder && !straightJoin
 	sess.UnchangedWithin = unchangedWithin
 	sess.ResultToFile = toFile
 	sess.BinaryResult = toFile && binary // what it bounds is the file's

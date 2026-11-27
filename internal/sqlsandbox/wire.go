@@ -52,6 +52,8 @@ type wireJob struct {
 	JoinNDV map[string]float64 `json:"join_ndv,omitempty"`
 	// TryConnectedJoinOrder: see Session.TryConnectedJoinOrder.
 	TryConnectedJoinOrder bool `json:"try_connected_join_order,omitempty"`
+	// JoinOrderByShape: see Session.JoinOrderByShape.
+	JoinOrderByShape bool `json:"join_order_by_shape,omitempty"`
 	// The worker's caps.
 	Threads     int    `json:"threads"`
 	MemoryLimit string `json:"memory_limit"`
@@ -125,6 +127,16 @@ type wireResult struct {
 	// a statement of another shape.
 	ConnectedOrderNote   string `json:"connected_order_note,omitempty"`
 	ConnectedOrderFailed bool   `json:"connected_order_failed,omitempty"`
+	// JoinOrderByShape is the order the join order by shape
+	// (Session.JoinOrderByShape, shapeorder.go) ran an answered statement
+	// in: JoinOrderByShapeWritten, or JoinOrderByShapeConnected with its
+	// tables in JoinOrderTables; JoinOrderByShapeFailed when picking it
+	// failed on an error, and "" when the shape does not apply, both run in
+	// the copy's own order with JoinOrderByShapeNote saying why. The note
+	// never holds the engine's text of a step that read the statement or
+	// its tables.
+	JoinOrderByShape     string `json:"join_order_by_shape,omitempty"`
+	JoinOrderByShapeNote string `json:"join_order_by_shape_note,omitempty"`
 	// ResidentBytes is the memory the worker holds after the statement, its
 	// DuckDB closed; 0 where the platform does not say. Sent by a worker that
 	// stays for another job (wireJob.More).

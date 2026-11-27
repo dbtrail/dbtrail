@@ -1743,6 +1743,38 @@ What this is and is not:
   be read (a prepared statement whose placeholder sits inside the right side
   of the join), the copy refuses the statement and MySQL answers it. MySQL
   always gets the statement as the client wrote it.
+  **The join order of a list of tables, picked before it runs.** A routed
+  statement with no `STRAIGHT_JOIN` anywhere (as a join or as `SELECT
+  STRAIGHT_JOIN`; one in a comment, a string or a name does not count)
+  whose `FROM` is a list of tables
+  separated by commas (`FROM a, b, c`, every condition in `WHERE`) does not
+  get the copy's own join order. When the order written is connected
+  already (each table has a condition with one of the tables before it), it
+  runs in that order, with the copy's join reordering off. Otherwise the
+  copy writes it again with the largest table first and, each time, the
+  smallest table a condition joins to those already placed, and runs that.
+  The new text must parse back to the same statement and give the same
+  columns; it is the copy's alone, and the client, MySQL and the audit
+  record keep the statement as written. Anything else (one table, an
+  explicit `JOIN`, a subquery in `FROM`, `WITH`, an `OR` at the top of
+  `WHERE`, `*`, `COLUMNS(...)`, a column the copy cannot place in exactly
+  one table) is planned as any other statement. The copy's planner, which
+  reads the tables through views, picked orders for CH-benCHmark Q5, Q8 and
+  Q21 that ran out of memory, and MySQL then answered them later than it
+  would have alone; picked this way they answered in 2.9 s, 0.67 s and
+  1.8 s on a copy of 100 warehouses, every answer the same, and no other
+  report of the 22 was more than 1.6 times slower. A statement whose order
+  written is connected but slow can take longer than in the copy's own
+  order; a statement that runs out of memory in the order picked is not
+  run again in another one, and MySQL answers it as before. A statement
+  with `STRAIGHT_JOIN` keeps the order written where the copy can keep it
+  (above) and is planned as any other where it cannot, never reordered.
+  `/status` counts, per server under `join_orders`, the copy's answers the
+  client got this way (an answer the port threw away and sent to MySQL is
+  not one): `written`, `connected`, and `failed` when picking the order
+  failed on an error, which is also logged as a warning, and the statement
+  ran in the copy's own order. The port without routing plans every
+  statement as before.
   **LIKE without case, a switch per server, off by default.** MySQL
   compares `LIKE` without case under its default collations; the copy
   compares it with case, so `name LIKE 'pr%'` finds "PRODUCT" on one and

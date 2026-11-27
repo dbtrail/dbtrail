@@ -470,7 +470,7 @@ func (h *Handler) runPreparedOnCopy(st *preparedStmt, args []any, db string, toF
 	if v := h.narrowArgumentVeto(args); v != "" {
 		return nil, &narrowStatementError{why: v}
 	}
-	res, err := h.runFreeSQLRouted(db, text, readrouter.ShapeOf(st.query), readrouter.KeepsJoinOrder(st.query), toFile, true, reason, unchangedWithin)
+	res, err := h.runFreeSQLRouted(db, text, readrouter.ShapeOf(st.query), readrouter.KeepsJoinOrder(st.query), readrouter.HasStraightJoin(st.query), toFile, true, reason, unchangedWithin)
 	if err != nil {
 		return nil, err
 	}
