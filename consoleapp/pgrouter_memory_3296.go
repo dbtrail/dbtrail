@@ -40,9 +40,14 @@ import (
 //     clients and the buffer pool of an index MySQL on the same machine are
 //     compared with the machine's memory. Past it, the kernel chooses what
 //     to stop, and the index MySQL is a candidate.
-//   - With a ceiling of its own, its statements, tails and results are
-//     compared with that ceiling, and the buffer pool is not: it is outside
-//     it. Past it, the router's own statements are stopped, not the index.
+//   - With a ceiling of its own the kernel enforces (a container's limit,
+//     PG_ROUTER_MEMORY), its statements, tails and results are compared with
+//     that ceiling, and the buffer pool is not: it is outside it. Past it,
+//     the router's own statements are stopped, not the index.
+//     BINTRAIL_MEMORY_SHARE is not such a ceiling: nothing enforces it.
+//
+// The tails are counted once per PostgreSQL server: each server's tails
+// have a budget of their own (tail_wire.go, tailBytesShare).
 //
 // The daemon's snapshot work is left out of the sum on purpose: its 40%
 // share is a plan for work that runs a few minutes an hour, and counting it
@@ -70,12 +75,13 @@ const pgMemoryMinHeadroom = 256 << 20
 
 // pgMemoryLimitFor is the largest SQL memory whose statement, headroom
 // included, takes at most per bytes, in 128 MiB steps; 0 when none of at
-// least 256 MiB does.
+// least console.SQLMemoryFloor (the least the router starts with) does.
 func pgMemoryLimitFor(per int64) int64 {
 	const step = 128 << 20
 	l := min(per*4/5, per-pgMemoryMinHeadroom)
 	l = l / step * step
-	if l < 2*step {
+	if l < console.SQLMemoryFloor {
+		// The router refuses a SQL memory under the floor at start.
 		return 0
 	}
 	return l
@@ -92,14 +98,18 @@ const (
 	// pgPoolElsewhere: another machine, or one the router cannot confirm is
 	// this one. Its memory is not this machine's.
 	pgPoolElsewhere pgPoolPlace = "elsewhere"
-	// pgPoolUnread: the index did not answer, so its buffer pool is unknown.
+	// pgPoolUnread: an index on loopback that did not answer, so neither
+	// its buffer pool nor whether it is this machine's is known.
 	pgPoolUnread pgPoolPlace = "unread"
 )
 
-// pgIndexPool is one index MySQL's buffer pool and where it runs.
+// pgIndexPool is one index MySQL's buffer pool and where it runs. Unread:
+// the index did not answer, so Bytes is unknown; Place is where it may be
+// (bundled from the DSN alone, unread for a loopback one).
 type pgIndexPool struct {
-	Bytes uint64
-	Place pgPoolPlace
+	Bytes  uint64
+	Place  pgPoolPlace
+	Unread bool
 }
 
 // pgBundledIndexHost is the compose service the bundled index MySQL runs as
@@ -148,22 +158,63 @@ func pgSameHostname(a, b string) bool {
 	return strings.EqualFold(a, b) || strings.EqualFold(first(a), first(b))
 }
 
+// pgDSNKind says, from the DSN alone, where an index may run: compose's
+// index-mysql ("bundled"), loopback or a socket ("loopback", this machine
+// only if its @@hostname says so), anything else ("remote"), or "" when the
+// DSN does not parse.
+func pgDSNKind(dsn string) string {
+	switch pgPoolPlaceOf(dsn, "x", "x") {
+	case pgPoolBundled:
+		return "bundled"
+	case pgPoolThisMachine:
+		return "loopback"
+	}
+	if _, err := mysql.ParseDSN(dsn); err != nil {
+		return ""
+	}
+	return "remote"
+}
+
 // pgReadIndexPool reads the buffer pool of the index of dsn, on a connection
-// of its own that is closed after, within ctx. A server that does not answer
-// is pgPoolUnread, never a guess.
+// of its own that is closed after, within ctx. An index on another machine
+// is not asked: its memory is not this one's. One that may be on this
+// machine and does not answer is Unread, never a guess, and the log says
+// why at debug level.
 func pgReadIndexPool(ctx context.Context, dsn string) pgIndexPool {
+	kind := pgDSNKind(dsn)
+	if kind == "remote" || kind == "" {
+		return pgIndexPool{Place: pgPoolElsewhere}
+	}
+	unread := pgIndexPool{Place: pgPoolUnread, Unread: true}
+	if kind == "bundled" {
+		unread.Place = pgPoolBundled
+	}
+	addr := ""
+	if cfg, err := mysql.ParseDSN(dsn); err == nil {
+		addr = cfg.Addr
+	}
 	db, err := config.Open(dsn)
 	if err != nil {
-		return pgIndexPool{Place: pgPoolUnread}
+		slog.Debug("PostgreSQL router: the index MySQL's buffer pool could not be read", "addr", addr, "error", err)
+		return unread
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 	var pool uint64
 	var host string
 	if err := db.QueryRowContext(ctx, "SELECT @@innodb_buffer_pool_size, @@hostname").Scan(&pool, &host); err != nil {
-		return pgIndexPool{Place: pgPoolUnread}
+		slog.Debug("PostgreSQL router: the index MySQL's buffer pool could not be read", "addr", addr, "error", err)
+		return unread
 	}
-	local, _ := os.Hostname()
+	if kind == "bundled" {
+		return pgIndexPool{Bytes: pool, Place: pgPoolBundled}
+	}
+	local, err := os.Hostname()
+	if err != nil || local == "" {
+		// Cannot say whether the loopback index is this machine's.
+		slog.Debug("PostgreSQL router: this machine's host name could not be read", "error", err)
+		return unread
+	}
 	return pgIndexPool{Bytes: pool, Place: pgPoolPlaceOf(dsn, host, local)}
 }
 
@@ -171,6 +222,10 @@ func pgReadIndexPool(ctx context.Context, dsn string) pgIndexPool {
 type pgMemoryPlan struct {
 	// Workers is --workers; the copy runs one statement more (pgCopySlots).
 	Workers int
+	// Servers is how many PostgreSQL servers are listed: each one's tails
+	// have their own budget. Any of them can be switched to fresh mode
+	// while the router runs, so all are counted.
+	Servers int
 	// Memory is the SQL memory each statement is given, as set.
 	Memory string
 	// ResultsBytes is what the router holds for clients that have not read
@@ -183,40 +238,56 @@ type pgMemoryPlan struct {
 // pgMemoryDoc is the verdict, in /status as "memory" and in the start-up
 // lines.
 type pgMemoryDoc struct {
-	// Verdict: "fits", "over", "idle" when there is no PostgreSQL server
-	// yet (nothing runs on the copy, so nothing is said), or "unknown" when
-	// the machine's memory or the SQL memory cannot be read (Why says which).
+	// Verdict: "fits"; "over"; "idle" when no PostgreSQL server is listed
+	// (nothing runs on the copy, so nothing is said); "unknown" when the
+	// machine's memory or the SQL memory cannot be read, or the buffer pool
+	// of an index that may run on this machine could not be read and the
+	// rest fits (Why says which).
 	Verdict string `json:"verdict"`
 	Why     string `json:"why,omitempty"`
-	// ComparedWith: "machine" (no ceiling of its own: the machine it shares
-	// with capture and the index MySQL) or "own_ceiling".
+	// ComparedWith: "machine" (the machine it shares with capture and the
+	// index MySQL) or "own_ceiling" (a container's limit, PG_ROUTER_MEMORY,
+	// which the router's own statements, tails and results passed).
 	ComparedWith   string `json:"compared_with,omitempty"`
 	AvailableBytes uint64 `json:"available_bytes,omitempty"`
-	// NeedBytes is the sum of the parts below.
+	// NeedBytes is the sum of the parts below that are compared.
 	NeedBytes uint64 `json:"need_bytes,omitempty"`
+	// OwnCeilingBytes: the container's limit, when there is one.
+	OwnCeilingBytes uint64 `json:"own_ceiling_bytes,omitempty"`
 	// Statements: Slots at once, StatementBytes each, headroom included.
 	// SQLMemoryBytes is the SQL memory each is given, before the headroom.
 	Slots          int    `json:"slots,omitempty"`
 	StatementBytes uint64 `json:"statement_bytes,omitempty"`
 	SQLMemoryBytes uint64 `json:"sql_memory_bytes,omitempty"`
-	TailsBytes     uint64 `json:"tails_bytes,omitempty"`
+	// TailsBytes: every server's tails together, Servers of them.
+	Servers    int    `json:"servers"`
+	TailsBytes uint64 `json:"tails_bytes,omitempty"`
 	// TailsUnbounded: BINTRAIL_SQL_TAIL_MAX_BYTES=0; the tails are not in
 	// NeedBytes, and may take more.
 	TailsUnbounded bool   `json:"tails_unbounded,omitempty"`
 	ResultsBytes   uint64 `json:"results_bytes,omitempty"`
-	// IndexPoolBytes: the buffer pools of the index MySQL servers on this
-	// machine, counted only when compared with the machine. IndexPool says
-	// where they are: "bundled", "this_machine", "elsewhere", "unread",
-	// "none" (no PostgreSQL server yet), joined by "," when they differ.
-	IndexPoolBytes uint64 `json:"index_pool_bytes,omitempty"`
-	IndexPool      string `json:"index_pool,omitempty"`
+	// IndexPoolBytes: the buffer pools read of the index MySQL servers on
+	// this machine. IndexPool says where the indexes are: "bundled",
+	// "this_machine", "elsewhere", "unread" (on loopback, not read), "none"
+	// (no PostgreSQL server yet), joined by "," when they differ.
+	// IndexPoolUnread: one that may be on this machine was not read.
+	IndexPoolBytes  uint64 `json:"index_pool_bytes,omitempty"`
+	IndexPool       string `json:"index_pool,omitempty"`
+	IndexPoolUnread bool   `json:"index_pool_unread,omitempty"`
 	// Advice says what fits, when the verdict is "over".
 	Advice string `json:"advice,omitempty"`
 }
 
 // pgMemoryVerdict adds the plan up.
+//
+// With no ceiling of its own, the router's statements, tails and results
+// and the index pools on this machine are compared with the machine. With
+// a ceiling, the router's own part is compared with the ceiling first; if
+// it fits there, the router can take at most that much, and that plus the
+// index pools is compared with the machine: a ceiling as big as the
+// machine protects nothing.
 func pgMemoryVerdict(p pgMemoryPlan) pgMemoryDoc {
-	d := pgMemoryDoc{Slots: pgCopySlots(p.Workers)}
+	d := pgMemoryDoc{Slots: pgCopySlots(p.Workers), Servers: p.Servers}
 	per, err := pgMemoryPerSlot(p.Memory)
 	if err != nil {
 		d.Verdict, d.Why = "unknown", err.Error()
@@ -229,64 +300,84 @@ func pgMemoryVerdict(p pgMemoryPlan) pgMemoryDoc {
 	d.ResultsBytes = uint64(max(p.ResultsBytes, 0))
 	d.TailsUnbounded = p.In.TailsUnbounded
 	if p.In.TailsBytes > 0 {
-		d.TailsBytes = uint64(p.In.TailsBytes)
+		d.TailsBytes = uint64(p.In.TailsBytes) * uint64(max(p.Servers, 0))
 	}
 	places := map[pgPoolPlace]bool{}
-	var pool uint64
 	for _, pl := range p.Pools {
 		places[pl.Place] = true
-		if pl.Place == pgPoolBundled || pl.Place == pgPoolThisMachine {
-			pool += pl.Bytes
+		switch {
+		case pl.Unread && pl.Place != pgPoolElsewhere:
+			d.IndexPoolUnread = true
+		case pl.Place == pgPoolBundled || pl.Place == pgPoolThisMachine:
+			d.IndexPoolBytes += pl.Bytes
 		}
 	}
 	d.IndexPool = pgPoolPlacesText(places)
-	if p.In.OwnCeiling {
-		d.ComparedWith, d.AvailableBytes = "own_ceiling", p.In.BudgetBytes
-	} else {
-		d.ComparedWith, d.AvailableBytes = "machine", p.In.MachineBytes
-		d.IndexPoolBytes = pool
-	}
-	if d.AvailableBytes == 0 {
+	if p.In.MachineBytes == 0 {
 		d.Verdict, d.Why = "unknown", "the memory of this machine cannot be read here"
-		d.ComparedWith = ""
 		return d
 	}
-	others := d.TailsBytes + d.ResultsBytes + d.IndexPoolBytes
-	d.NeedBytes = uint64(d.Slots)*d.StatementBytes + others
-	if d.NeedBytes <= d.AvailableBytes {
-		d.Verdict = "fits"
-		return d
+	own := uint64(d.Slots)*d.StatementBytes + d.TailsBytes + d.ResultsBytes
+	if p.In.OwnCeiling {
+		d.OwnCeilingBytes = p.In.BudgetBytes
 	}
-	if len(p.Pools) == 0 {
+	if p.In.OwnCeiling && p.In.BudgetBytes > 0 && own > p.In.BudgetBytes {
+		d.ComparedWith, d.AvailableBytes, d.NeedBytes = "own_ceiling", p.In.BudgetBytes, own
+	} else {
+		d.ComparedWith, d.AvailableBytes, d.NeedBytes = "machine", p.In.MachineBytes, own+d.IndexPoolBytes
+	}
+	switch {
+	case p.Servers <= 0:
 		// No PostgreSQL server: no statement runs on the copy, and the
-		// tails hold nothing. The sum is shown; it is said once a server
-		// is added (pgMemoryWatch reads it again every minute).
+		// tails hold nothing. The sum is in /status; it is said once a
+		// server is added (pgMemoryWatch reads it again every minute).
 		d.Verdict = "idle"
-		return d
+	case d.NeedBytes > d.AvailableBytes:
+		d.Verdict = "over"
+		d.Advice = pgMemoryAdvice(d, p.Workers)
+	case d.IndexPoolUnread:
+		d.Verdict = "unknown"
+		d.Why = "the buffer pool of an index MySQL that may run on this machine could not be read, and without it the rest fits"
+	default:
+		d.Verdict = "fits"
 	}
-	d.Verdict = "over"
-	d.Advice = pgMemoryAdvice(d, p.Workers, others)
 	return d
 }
 
 // pgMemoryAdvice is what fits in what is left once the tails, the results
-// and the index's pool are taken off: fewer workers at the same memory, or,
-// when not even one worker fits, less memory each with one worker.
-func pgMemoryAdvice(d pgMemoryDoc, workers int, others uint64) string {
+// (and, against the machine, the index's pool) are taken off: fewer workers
+// at the same memory, or, when not even one worker fits, less memory each
+// with one worker. Against the machine with a ceiling of its own, the
+// ceiling that fits is said too.
+func pgMemoryAdvice(d pgMemoryDoc, workers int) string {
+	short := d.NeedBytes - d.AvailableBytes
+	others := d.TailsBytes + d.ResultsBytes
+	more := fmt.Sprintf("raise PG_ROUTER_MEMORY by %s", pgGiB(short))
+	if d.ComparedWith == "machine" {
+		others += d.IndexPoolBytes
+		more = fmt.Sprintf("give the machine %s more", pgGiB(short))
+		if d.OwnCeilingBytes > 0 && d.AvailableBytes > d.IndexPoolBytes {
+			more = fmt.Sprintf("lower PG_ROUTER_MEMORY to at most %s, so that its statements are stopped before the machine runs out, or %s", pgGiB(d.AvailableBytes-d.IndexPoolBytes), more)
+		}
+	}
 	if others >= d.AvailableBytes {
-		return fmt.Sprintf("the tails, the results held for clients and the index MySQL's buffer pool take %s of the %s alone; give the machine more memory, or lower the index MySQL's buffer pool",
+		if d.ComparedWith == "machine" {
+			return fmt.Sprintf("the tails, the results held for clients and the index MySQL's buffer pool take %s of the machine's %s alone; give the machine more memory, or lower the index MySQL's buffer pool",
+				pgGiB(others), pgGiB(d.AvailableBytes))
+		}
+		return fmt.Sprintf("the tails and the results held for clients take %s of its %s ceiling alone; raise PG_ROUTER_MEMORY, or lower BINTRAIL_SQL_TAIL_MAX_BYTES",
 			pgGiB(others), pgGiB(d.AvailableBytes))
 	}
 	room := d.AvailableBytes - others
 	if fit := int(room / d.StatementBytes); fit >= 2 && fit-1 < workers {
-		return fmt.Sprintf("with the SQL memory as it is, %d workers fit (PG_ROUTER_WORKERS=%d in .env, or --workers %d), %s with the one kept for short statements, or give the machine %s more",
-			fit-1, fit-1, fit-1, countOfStatementsAtOnce(fit), pgGiB(d.NeedBytes-d.AvailableBytes))
+		return fmt.Sprintf("with the SQL memory as it is, %s (PG_ROUTER_WORKERS=%d in .env, or --workers %d), %s with the one kept for short statements; or %s",
+			pgWorkersFit(fit-1), fit-1, fit-1, countOfStatementsAtOnce(fit), more)
 	}
 	if limit := pgMemoryLimitFor(int64(room / 2)); limit > 0 {
-		return fmt.Sprintf("with 1 worker (PG_ROUTER_WORKERS=1 in .env, or --workers 1), each statement fits with at most %s of SQL memory (SQL_MEMORY=%s in .env, or --sql-memory %s), or give the machine %s more",
-			pgGiB(uint64(limit)), pgMiBSetting(limit), pgMiBSetting(limit), pgGiB(d.NeedBytes-d.AvailableBytes))
+		return fmt.Sprintf("with 1 worker (PG_ROUTER_WORKERS=1 in .env, or --workers 1), each statement fits with at most %s of SQL memory (SQL_MEMORY=%s in .env, or --sql-memory %s); or %s",
+			pgGiB(uint64(limit)), pgMiBSetting(limit), pgMiBSetting(limit), more)
 	}
-	return fmt.Sprintf("not even one statement fits beside the rest; give the machine %s more", pgGiB(d.NeedBytes-d.AvailableBytes))
+	return fmt.Sprintf("not even one statement with the least SQL memory the router takes (%s) fits beside the rest; %s", pgGiB(console.SQLMemoryFloor), more)
 }
 
 // pgMiBSetting writes a SQL memory the way --sql-memory and SQL_MEMORY take
@@ -296,6 +387,13 @@ func pgMiBSetting(b int64) string {
 		return fmt.Sprintf("%dGiB", b>>30)
 	}
 	return fmt.Sprintf("%dMiB", b>>20)
+}
+
+func pgWorkersFit(n int) string {
+	if n == 1 {
+		return "1 worker fits"
+	}
+	return fmt.Sprintf("%d workers fit", n)
 }
 
 // countOfStatementsAtOnce is "1 statement at once" or "N statements at once".
@@ -319,6 +417,13 @@ func pgPoolPlacesText(places map[pgPoolPlace]bool) string {
 	return strings.Join(out, ",")
 }
 
+func pgTailsServers(n int) string {
+	if n == 1 {
+		return "1 PostgreSQL server"
+	}
+	return fmt.Sprintf("%d PostgreSQL servers, a budget each", n)
+}
+
 // pgGiB writes bytes as GiB with one decimal, or as whole MiB under 1 GiB.
 func pgGiB(b uint64) string {
 	if b < 1<<30 {
@@ -330,11 +435,11 @@ func pgGiB(b uint64) string {
 // pgMemoryLines is the verdict as start-up lines: one that says what was
 // added up, and, when it is over, the warning and what fits.
 func pgMemoryLines(d pgMemoryDoc) string {
-	switch d.Verdict {
-	case "unknown":
-		return "PostgreSQL router: whether its memory fits this machine is not said: " + d.Why + ".\n"
-	case "idle":
+	switch {
+	case d.Verdict == "idle":
 		return "PostgreSQL router: no PostgreSQL server is listed yet, so whether its memory fits this machine is said once one is (in /status, and in the log if it does not fit).\n"
+	case d.Verdict == "unknown" && d.AvailableBytes == 0:
+		return "PostgreSQL router: whether its memory fits this machine is not said: " + d.Why + ".\n"
 	}
 	var parts []string
 	parts = append(parts, fmt.Sprintf("%s at %s each (%s of SQL memory and its headroom)", countOfStatementsAtOnce(d.Slots), pgGiB(d.StatementBytes), pgGiB(d.SQLMemoryBytes)))
@@ -342,87 +447,94 @@ func pgMemoryLines(d pgMemoryDoc) string {
 	case d.TailsUnbounded:
 		parts = append(parts, "the tails, which have no bound (BINTRAIL_SQL_TAIL_MAX_BYTES=0) and are not counted")
 	case d.TailsBytes > 0:
-		parts = append(parts, fmt.Sprintf("the tails' %s", pgGiB(d.TailsBytes)))
+		parts = append(parts, fmt.Sprintf("the tails' %s (%s)", pgGiB(d.TailsBytes), pgTailsServers(d.Servers)))
 	}
 	parts = append(parts, fmt.Sprintf("the %s of results held for clients", pgGiB(d.ResultsBytes)))
 	var b strings.Builder
 	if d.ComparedWith == "machine" {
 		parts = append(parts, pgPoolPart(d))
-		fmt.Fprintf(&b, "PostgreSQL router: at most it may need %s of this machine's %s: %s.\n", pgGiB(d.NeedBytes), pgGiB(d.AvailableBytes), strings.Join(parts, ", "))
+		ceiling := ""
+		if d.OwnCeilingBytes > 0 {
+			ceiling = fmt.Sprintf(" (it fits its own %s ceiling, which does not keep the machine from running out)", pgGiB(d.OwnCeilingBytes))
+		}
+		fmt.Fprintf(&b, "PostgreSQL router: at most it and the index MySQL on this machine may need %s of this machine's %s%s: %s.\n", pgGiB(d.NeedBytes), pgGiB(d.AvailableBytes), ceiling, strings.Join(parts, ", "))
 	} else {
 		fmt.Fprintf(&b, "PostgreSQL router: at most it may need %s of its own %s ceiling: %s.\n", pgGiB(d.NeedBytes), pgGiB(d.AvailableBytes), strings.Join(parts, ", "))
 	}
-	if d.Verdict != "over" {
-		return b.String()
-	}
-	if d.ComparedWith == "machine" {
-		fmt.Fprintf(&b, "WARNING: PostgreSQL router: that is %s more than this machine has. Under heavy reports the machine swaps and the kernel stops processes for memory, and it can stop the index MySQL, which capture writes to. Advice: %s. Or give this service a ceiling of its own (PG_ROUTER_MEMORY in .env), so that its statements are stopped first.\n",
-			pgGiB(d.NeedBytes-d.AvailableBytes), d.Advice)
-	} else {
-		fmt.Fprintf(&b, "WARNING: PostgreSQL router: that is %s more than its ceiling. Under heavy reports its own statements are stopped for memory. Advice: %s.\n",
-			pgGiB(d.NeedBytes-d.AvailableBytes), strings.Replace(d.Advice, "give the machine", "raise the ceiling by", 1))
+	switch d.Verdict {
+	case "unknown":
+		fmt.Fprintf(&b, "PostgreSQL router: whether that fits is not said: %s. It is read again every minute (/status).\n", d.Why)
+	case "over":
+		if d.ComparedWith == "machine" {
+			fmt.Fprintf(&b, "WARNING: PostgreSQL router: that is %s more than this machine has. Under heavy reports the machine swaps and the kernel stops processes for memory, and it can stop the index MySQL, which capture writes to. Advice: %s.\n",
+				pgGiB(d.NeedBytes-d.AvailableBytes), d.Advice)
+		} else {
+			fmt.Fprintf(&b, "WARNING: PostgreSQL router: that is %s more than its ceiling. Under heavy reports its own statements are stopped for memory. Advice: %s.\n",
+				pgGiB(d.NeedBytes-d.AvailableBytes), d.Advice)
+		}
 	}
 	return b.String()
 }
 
 func pgPoolPart(d pgMemoryDoc) string {
-	switch d.IndexPool {
-	case "none":
+	switch {
+	case d.IndexPool == "none":
 		return "no index MySQL yet (no PostgreSQL server)"
-	case string(pgPoolElsewhere):
+	case d.IndexPoolBytes == 0 && !d.IndexPoolUnread:
 		return "no index MySQL on this machine"
-	case string(pgPoolUnread):
-		return "the index MySQL's buffer pool, which could not be read and is not counted"
+	case d.IndexPoolBytes == 0:
+		return "the buffer pool of the index MySQL, which could not be read and is not counted"
 	}
 	s := fmt.Sprintf("the %s buffer pool of the index MySQL on this machine", pgGiB(d.IndexPoolBytes))
-	if strings.Contains(d.IndexPool, string(pgPoolUnread)) {
-		s += " (another index could not be read and is not counted)"
+	if d.IndexPoolUnread {
+		s += " (another one could not be read and is not counted)"
 	}
 	return s
 }
 
-// pgMemoryWatch keeps the verdict for /status, read again at most once a
-// minute: the buffer pool can be resized online, and a PostgreSQL server can
-// be added while the router runs. The SQL memory and the workers are the
-// ones applied at start.
+// pgMemoryWatch keeps the verdict for /status. follow reads it again every
+// minute, outside any request: the buffer pool can be resized online, and a
+// PostgreSQL server can be added while the router runs. /status only takes
+// the last one, so an index that does not answer never slows it. The SQL
+// memory and the workers are the ones applied at start.
 type pgMemoryWatch struct {
 	plan  func(ctx context.Context) pgMemoryPlan
 	every time.Duration
-	now   func() time.Time
 
 	mu   sync.Mutex
-	at   time.Time
 	last *pgMemoryDoc
 }
 
 func newPGMemoryWatch(plan func(ctx context.Context) pgMemoryPlan) *pgMemoryWatch {
-	return &pgMemoryWatch{plan: plan, every: time.Minute, now: time.Now}
+	return &pgMemoryWatch{plan: plan, every: time.Minute}
 }
 
-// doc is the verdict now, from the last minute's.
+// doc is the last verdict read, nil before the first.
 func (w *pgMemoryWatch) doc() *pgMemoryDoc {
 	if w == nil {
 		return nil
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.last != nil && w.now().Sub(w.at) < w.every {
-		return w.last
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), pgMemoryReadWait)
-	defer cancel()
-	d := pgMemoryVerdict(w.plan(ctx))
-	// The log says it when it becomes over: at start, or when a server is
-	// added or a buffer pool grows while the router runs.
-	if d.Verdict == "over" && (w.last == nil || w.last.Verdict != "over") {
-		logPGMemory(&d)
-	}
-	w.at, w.last = w.now(), &d
 	return w.last
 }
 
-// follow reads the verdict again every minute until ctx ends, so that the
-// log says it without anyone asking /status.
+// read reads the verdict now, outside the lock, and keeps it. The log says
+// it when it becomes over: at start, or when a server is added or a buffer
+// pool grows while the router runs.
+func (w *pgMemoryWatch) read() *pgMemoryDoc {
+	d := pgMemoryVerdict(w.plan(context.Background()))
+	w.mu.Lock()
+	was := w.last
+	w.last = &d
+	w.mu.Unlock()
+	if d.Verdict == "over" && (was == nil || was.Verdict != "over") {
+		logPGMemory(&d)
+	}
+	return &d
+}
+
+// follow reads the verdict again every minute until ctx ends.
 func (w *pgMemoryWatch) follow(ctx context.Context) {
 	t := time.NewTicker(w.every)
 	defer t.Stop()
@@ -431,22 +543,37 @@ func (w *pgMemoryWatch) follow(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			w.doc()
+			w.read()
 		}
 	}
 }
 
-// pgMemoryReadWait bounds the read of the index servers' buffer pools.
-const pgMemoryReadWait = 3 * time.Second
+// pgMemoryReadWait bounds the read of each index server's buffer pool; the
+// servers are read at once, so one that does not answer does not use up
+// another's time.
+const pgMemoryReadWait = 2 * time.Second
 
 // pgMemoryPlanFor is the plan of a router with these workers and memory over
 // srv's PostgreSQL servers.
-func pgMemoryPlanFor(workers int, memory string, srv interface{ PostgresIndexDSNs() []string }) func(ctx context.Context) pgMemoryPlan {
+func pgMemoryPlanFor(workers int, memory string, srv interface {
+	PostgresIndexDSNs() []string
+	PostgresServerIDs() []string
+}) func(ctx context.Context) pgMemoryPlan {
 	return func(ctx context.Context) pgMemoryPlan {
-		p := pgMemoryPlan{Workers: workers, Memory: memory, ResultsBytes: defaultFlashbackResultBudget, In: console.PGMemoryInputsNow()}
-		for _, dsn := range srv.PostgresIndexDSNs() {
-			p.Pools = append(p.Pools, pgReadIndexPool(ctx, dsn))
+		p := pgMemoryPlan{Workers: workers, Servers: len(srv.PostgresServerIDs()), Memory: memory, ResultsBytes: defaultFlashbackResultBudget, In: console.PGMemoryInputsNow()}
+		dsns := srv.PostgresIndexDSNs()
+		p.Pools = make([]pgIndexPool, len(dsns))
+		var wg sync.WaitGroup
+		for i, dsn := range dsns {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				rctx, cancel := context.WithTimeout(ctx, pgMemoryReadWait)
+				defer cancel()
+				p.Pools[i] = pgReadIndexPool(rctx, dsn)
+			}()
 		}
+		wg.Wait()
 		return p
 	}
 }

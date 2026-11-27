@@ -21,12 +21,15 @@ type PGMemoryInputs struct {
 	// came from.
 	BudgetBytes uint64
 	BudgetWords string
-	// OwnCeiling: this process has a memory ceiling of its own, a
-	// container's limit or BINTRAIL_MEMORY_SHARE below 1. Past it, the
-	// kernel stops this process's own work, not the index MySQL's.
+	// OwnCeiling: this process runs under a memory ceiling the kernel
+	// enforces (a container's limit). Past it, the kernel stops this
+	// process's own work, not the index MySQL's. BINTRAIL_MEMORY_SHARE alone
+	// is not one: it changes what the process plans with, and nothing
+	// enforces it, so past the machine's memory the index can still be
+	// stopped.
 	OwnCeiling bool
-	// TailsBytes is what the tails may hold in all (0 with TailsOff or
-	// TailsUnbounded).
+	// TailsBytes is what the tails of ONE server may hold (0 with TailsOff
+	// or TailsUnbounded): each PostgreSQL server gets its own budget.
 	TailsBytes     int64
 	TailsOff       bool
 	TailsUnbounded bool
@@ -41,15 +44,15 @@ func PGMemoryInputsNow() PGMemoryInputs {
 		MachineBytes: memTotal("/proc/meminfo"),
 		BudgetBytes:  memoryBudget(),
 		BudgetWords:  MemoryBudgetWords(),
-		OwnCeiling:   memoryCapped("/") || MemoryShare() < 1,
+		OwnCeiling:   memoryCapped("/"),
 	}
 	switch {
 	case tailsForcedOff():
 		in.TailsOff = true
-	case tailBudgetFromEnv().Bytes <= 0:
+	case pgTailBudgetFromEnv().Bytes <= 0:
 		in.TailsUnbounded = true
 	default:
-		in.TailsBytes = tailBudgetFromEnv().Bytes
+		in.TailsBytes = pgTailBudgetFromEnv().Bytes
 	}
 	return in
 }
