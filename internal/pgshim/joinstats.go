@@ -81,13 +81,14 @@ const (
 const (
 	JoinCheckPlanned      = "planned"       // checked: run in the copy's own join order
 	JoinCheckWrittenOrder = "written_order" // checked: run in the order written
-	// checked: dangerous in the copy's order and in the order written, run
-	// with its tables in a connected order (sqlsandbox
-	// Session.TryConnectedJoinOrder)
-	JoinCheckConnectedOrder = "connected_order"
 	JoinCheckNoStatistics = "no_statistics" // not checked: the server has no counts now (not read yet, failed, none readable, too old)
 	JoinCheckCouldNotRun  = "could_not_run" // not checked: the copy's plan could not be had or read
 )
+
+// JoinCheckConnectedOrder is the outcome of a statement checked, dangerous
+// in the copy's order and in the order written, and run with its tables in
+// a connected order (sqlsandbox Session.TryConnectedJoinOrder).
+const JoinCheckConnectedOrder = "connected_order"
 
 // JoinStats is a server's column statistics for the copy's join check,
 // shared by all of its connections (Forward.JoinStats).
