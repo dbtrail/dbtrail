@@ -299,7 +299,13 @@ func TestPGShapeCache_aQuestionHoldsNobodyUp_3251(t *testing.T) {
 		asked++
 		mu.Unlock()
 		if names[0] == "slow" {
-			<-gate
+			select {
+			case <-gate:
+			case <-ctx.Done():
+				// A question tied to the statement that asked it would end
+				// here when that statement is cancelled.
+				return nil, ctx.Err()
+			}
 		}
 		out := map[[2]string]pgshim.SourceShape{}
 		for _, n := range names {

@@ -105,7 +105,7 @@ func newShapePort(t *testing.T) (*tablesPort, *shapeKnob) {
 }
 
 var (
-	shapeDiffers   = costOutcome{"42", "", RouteSource, ReasonCopyShapeDiffers}
+	shapeDiffers         = costOutcome{"42", "", RouteSource, ReasonCopyShapeDiffers}
 	shapeUncheckedHidden = costOutcome{"7", "", RouteCopy, ReasonHiddenRules}
 )
 
@@ -565,5 +565,29 @@ func TestCopyShapeReasons_3251(t *testing.T) {
 		if reasonMeans[r] == "" {
 			t.Errorf("%s has no sentence in the port's status", r)
 		}
+	}
+}
+
+// An execution the copy ran but the port then refused (its columns are not
+// the ones its Describe told the client): the copy's answer never reached
+// the client, so neither does the notice that it was the copy's.
+func TestCopyShape_3251_noNoticeForARefusedExecution(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	p, k := newShapePort(t)
+	p.l.wideExec = true
+	c, notices := noticeConn(t, ctx, p.l)
+	if _, err := c.Prepare(ctx, "s", "SELECT sum(n) FROM public.big", nil); err != nil {
+		t.Fatal(err)
+	}
+	k.fail(errors.New("dial tcp 10.0.3.7:5432: connect: connection refused"))
+	*notices = nil
+	r := c.ExecPrepared(ctx, "s", nil, nil, nil).Read()
+	var pe *pgconn.PgError
+	if !errors.As(r.Err, &pe) || pe.Code != "0A000" {
+		t.Fatalf("execute: %v, want 0A000 (the premise: refused after the copy ran it)", r.Err)
+	}
+	if len(*notices) != 0 || p.l.last().ShapeUnchecked != "" {
+		t.Errorf("a refused execution: notices %q, noted %q, want neither", *notices, p.l.last().ShapeUnchecked)
 	}
 }

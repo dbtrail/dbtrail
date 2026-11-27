@@ -84,13 +84,17 @@ type pgShapeFlight struct {
 // shapes answers pgshim.Binding.SourceShapes from what is kept, asking the
 // source about the tables not known within ttl, all in one question.
 func (c *pgShapeCache) shapes(ctx context.Context, tables [][2]string) (map[[2]string]pgshim.SourceShape, error) {
+	// waited: a question this statement waited for has answered. What it
+	// answered is the answer, however old the clock says it is by now, so a
+	// clock that jumps cannot ask again and again.
+	waited := false
 	for {
 		c.mu.Lock()
 		now := c.now()
 		var schemas, names []string
 		seen := map[[2]string]bool{}
 		for _, t := range tables {
-			if k, ok := c.known[t]; ok && now.Sub(k.at) < c.ttl || seen[t] {
+			if k, ok := c.known[t]; ok && (waited || now.Sub(k.at) < c.ttl) || seen[t] {
 				continue
 			}
 			seen[t] = true
@@ -134,6 +138,7 @@ func (c *pgShapeCache) shapes(ctx context.Context, tables [][2]string) (map[[2]s
 			return nil, f.err
 		}
 		// Answered: read it from the cache, with whatever else is kept.
+		waited = true
 	}
 }
 

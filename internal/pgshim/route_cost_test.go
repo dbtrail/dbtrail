@@ -593,6 +593,10 @@ type costLogin struct {
 	sides *CostSides
 	// notCaptured, when set, is Binding.NotCaptured.
 	notCaptured func(context.Context) ([]TableNotCaptured, error)
+	// wideExec makes the copy answer an execution with two columns where
+	// its Describe (the statement inside dbtrail_describe) has one, so the
+	// port refuses the execution after the copy ran it (#3251).
+	wideExec bool
 	// shapes, when set, is Binding.SourceShapes (#3251).
 	shapes func(context.Context, [][2]string) (map[[2]string]SourceShape, error)
 	// joinStats, when set, is the server's Forward.JoinStats; joinNDV
@@ -688,6 +692,9 @@ func (l *costLogin) run(_ context.Context, st string, opts RunOptions) (sqlsandb
 	l.heldAtCopy = append(l.heldAtCopy, l.held.Load())
 	l.mu.Unlock()
 	res := sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "n", Type: "INTEGER"}}, Rows: [][]any{{int32(7)}}}
+	if l.wideExec && !strings.Contains(st, "dbtrail_describe") {
+		res = sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "n", Type: "INTEGER"}, {Name: "m", Type: "INTEGER"}}, Rows: [][]any{{int32(7), int32(8)}}}
+	}
 	if l.olderThanSeen.Load() {
 		res.Note = olderThanSeenNote
 	}
