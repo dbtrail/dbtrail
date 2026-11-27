@@ -137,6 +137,14 @@ func TestConnectedOrderSQL(t *testing.T) {
 			why: "a *"},
 		{name: "a table's * in the select list", sql: "SELECT stock.* FROM supplier, nation, stock WHERE mod(s_w_id, 10) = su_suppkey AND su_nationkey = n_nationkey",
 			why: "a *"},
+		{name: "a #n in WHERE", sql: "SELECT su_name FROM supplier, nation, stock WHERE #1 = 7 AND mod(s_w_id, 10) = su_suppkey AND su_nationkey = n_nationkey",
+			why: "#n"},
+		{name: "a #n in ORDER BY", sql: "SELECT su_name FROM supplier, nation, stock WHERE mod(s_w_id, 10) = su_suppkey AND su_nationkey = n_nationkey ORDER BY #2",
+			why: "#n"},
+		{name: "COLUMNS(*)", sql: "SELECT max(COLUMNS(*)) FROM supplier, nation, stock WHERE mod(s_w_id, 10) = su_suppkey AND su_nationkey = n_nationkey",
+			why: "COLUMNS"},
+		{name: "a * in HAVING", sql: "SELECT su_name FROM supplier, nation, stock WHERE mod(s_w_id, 10) = su_suppkey AND su_nationkey = n_nationkey GROUP BY su_name HAVING count(COLUMNS(*)) > 1",
+			why: "COLUMNS"},
 		{name: "a WITH", sql: "WITH s AS (SELECT * FROM supplier) SELECT count(*) AS n FROM s, nation, stock WHERE mod(s_w_id, 10) = su_suppkey AND su_nationkey = n_nationkey",
 			why: "WITH"},
 		{name: "no WHERE", sql: "SELECT count(*) AS n FROM supplier, nation", why: "no WHERE"},
@@ -144,15 +152,15 @@ func TestConnectedOrderSQL(t *testing.T) {
 			why: "plain SELECT"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rw, why := connectedOrderSQL(ctx, conn, tc.sql, facts)
+			rw, note := connectedOrderSQL(ctx, conn, tc.sql, facts)
 			if tc.why != "" {
-				if !strings.Contains(why, tc.why) || rw.text != "" {
-					t.Fatalf("why %q, text %q; want why with %q", why, rw.text, tc.why)
+				if !strings.Contains(note.why, tc.why) || rw.text != "" || note.failed {
+					t.Fatalf("note %+v, text %q; want a shape's why with %q", note, rw.text, tc.why)
 				}
 				return
 			}
-			if why != "" {
-				t.Fatalf("no rewrite: %s", why)
+			if note.why != "" {
+				t.Fatalf("no rewrite: %+v", note)
 			}
 			if !slices.Equal(rw.order, tc.order) {
 				t.Errorf("order %v, want %v", rw.order, tc.order)
@@ -192,38 +200,41 @@ func TestConnectedOrderSQL(t *testing.T) {
 }
 
 // joinViews are views over range() in the shape of Q21's failure: tl (1e6
-// rows) joins ta and tb (2e5 each) by its own key of each and by a column of
-// 10 values all three have. DuckDB's own order joins ta with tb first on
-// that column alone, which it derives from the others (4e9 rows by the
-// source's counts), and the order written does the same; a connected order
-// starts at tl.
-const joinViews = `CREATE VIEW ta AS SELECT range AS aid, range % 10 AS aw FROM range(200000);
-CREATE VIEW tb AS SELECT range AS bid, range % 10 AS bw FROM range(200000);
-CREATE VIEW tl AS SELECT range AS lid, ((range * 7) % 200000) % 10 AS lw, (range * 7) % 200000 AS la, (range * 13) % 200000 AS lb FROM range(1000000);
+// rows) joins ta and tb (7e4 each) by its own key of each and by a column
+// all three have. joinViewsNDV gives that column 1 distinct value at the
+// source, so DuckDB's own order, which joins ta with tb first on it alone (a
+// condition it derives from the others), is estimated at 4.9e9 rows, and so
+// is the order written, where the same condition is pushed into the cross
+// product of ta and tb; a connected order starts at tl. On the copy the
+// column is unique, so every order answers, in a moment: the statement's own
+// answer, without the check, is the reference.
+const joinViews = `CREATE VIEW ta AS SELECT range AS aid, range AS aw FROM range(70000);
+CREATE VIEW tb AS SELECT range AS bid, range AS bw FROM range(70000);
+CREATE VIEW tl AS SELECT range AS lid, range % 70000 AS lw, range % 70000 AS la, range % 70000 AS lb FROM range(1000000);
 `
 
-const joinViewsQuery = "SELECT aw, count(*) AS n FROM ta, tb, tl WHERE lw = aw AND la = aid AND lw = bw AND lb = bid GROUP BY aw ORDER BY aw"
+const joinViewsQuery = "SELECT aw % 10 AS g, count(*) AS n FROM ta, tb, tl WHERE lw = aw AND la = aid AND lw = bw AND lb = bid GROUP BY g ORDER BY g"
 
-var joinViewsNDV = map[string]float64{"aw": 10, "bw": 10, "lw": 10, "aid": 200000, "bid": 200000, "la": 200000, "lb": 200000}
+var joinViewsNDV = map[string]float64{"aw": 1, "bw": 1, "lw": 1, "aid": 70000, "bid": 70000, "la": 70000, "lb": 70000}
 
-// The reference: the connected order written by hand, run in the order
-// written with no check.
+// joinViewsReference is the statement's own answer, run as it is, with no
+// check and so in DuckDB's own order.
 func joinViewsReference(t *testing.T, dir string) [][]any {
 	t.Helper()
-	res := runJob(wireJob{CopyDirs: []string{dir}, ViewsSQL: joinViews, KeepJoinOrder: true,
-		SQL:     "SELECT aw, count(*) AS n FROM tl, ta, tb WHERE lw = aw AND la = aid AND lw = bw AND lb = bid GROUP BY aw ORDER BY aw",
+	res := runJob(wireJob{CopyDirs: []string{dir}, ViewsSQL: joinViews, SQL: joinViewsQuery, SkipCommonSubplan: true,
 		Threads: 1, MemoryLimit: "256MB", MaxRows: 100, MaxResultBytes: 1 << 20}, nil, os.Stderr)
 	if res.Error != nil {
 		t.Fatalf("the reference: %+v", res.Error)
 	}
-	if len(res.Rows) == 0 {
-		t.Fatal("the reference has no rows")
+	if len(res.Rows) != 10 {
+		t.Fatalf("the reference: %v", res.Rows)
 	}
 	return res.Rows
 }
 
 // In the worker, through DuckDB's own plans and the real check: refused in
-// both orders without the option, answered in the connected order with it.
+// both orders without the option, answered in the connected order with it,
+// with the statement's own answer.
 func TestWorker_connectedOrder(t *testing.T) {
 	dir := t.TempDir()
 	want := joinViewsReference(t, dir)
@@ -232,6 +243,9 @@ func TestWorker_connectedOrder(t *testing.T) {
 	res := runJob(job, nil, os.Stderr)
 	if res.Error == nil || res.Error.Kind != errJoinTooBig || !strings.Contains(res.Error.Message, "in the order written (") {
 		t.Fatalf("without the option: %+v", res.Error)
+	}
+	if res.ConnectedOrderNote != "" {
+		t.Errorf("a note without the option: %q", res.ConnectedOrderNote)
 	}
 	job.TryConnectedJoinOrder = true
 	var stderr bytes.Buffer
@@ -247,23 +261,61 @@ func TestWorker_connectedOrder(t *testing.T) {
 	}
 	// Said on stderr as the order written is, so a worker the kernel stops
 	// is not run again in another order (oomretry.go).
-	if !strings.Contains(stderr.String(), joinOrderWrittenLine+", its tables in a connected order: tl, ta, tb") {
+	if !strings.Contains(stderr.String(), joinOrderConnectedLine+"tl, ta, tb") || !strings.Contains(joinOrderConnectedLine, joinOrderWrittenLine) {
 		t.Errorf("stderr: %s", stderr.String())
 	}
 	// The statement's own column names.
-	if len(res.Columns) != 2 || res.Columns[0].Name != "aw" || res.Columns[1].Name != "n" {
+	if len(res.Columns) != 2 || res.Columns[0].Name != "g" || res.Columns[1].Name != "n" {
 		t.Errorf("columns %+v", res.Columns)
 	}
-	// A statement of another shape is refused as before, word for word.
-	job.SQL = strings.Replace(joinViewsQuery, "SELECT aw, count(*) AS n", "SELECT *", 1)
-	job.SQL = strings.Replace(job.SQL, " GROUP BY aw ORDER BY aw", "", 1)
+	// A statement of another shape is refused as before, word for word, and
+	// the answer says why the connected order was not used.
+	job.SQL = "SELECT max(COLUMNS(*)) FROM ta, tb, tl WHERE lw = aw AND la = aid AND lw = bw AND lb = bid"
 	res = runJob(job, nil, os.Stderr)
 	if res.Error == nil || res.Error.Kind != errJoinTooBig {
-		t.Fatalf("a * with the option: %+v", res.Error)
+		t.Fatalf("COLUMNS(*) with the option: %+v", res.Error)
+	}
+	if !strings.Contains(res.ConnectedOrderNote, "COLUMNS") || res.ConnectedOrderFailed {
+		t.Errorf("the note: %q failed %v", res.ConnectedOrderNote, res.ConnectedOrderFailed)
 	}
 	job.TryConnectedJoinOrder = false
 	if again := runJob(job, nil, os.Stderr); again.Error == nil || again.Error.Message != res.Error.Message {
 		t.Errorf("the refusal changed with the option: %q, without %+v", res.Error.Message, again.Error)
+	}
+	// An engine error in the connected order says it ran in that order.
+	job.TryConnectedJoinOrder = true
+	job.SQL = "SELECT aw % 10 AS g, count(*) AS n FROM ta, tb, tl WHERE lw = aw AND la = aid AND lw = bw AND lb = bid AND CAST('x' || lid AS INTEGER) > 0 GROUP BY g"
+	res = runJob(job, nil, os.Stderr)
+	if res.Error == nil || res.Error.Kind != errQuery || res.JoinOrder != joinOrderConnected || res.JoinOrderTables != "tl, ta, tb" {
+		t.Errorf("an engine error: %+v %q %q", res.Error, res.JoinOrder, res.JoinOrderTables)
+	}
+}
+
+// The statement's time running out while the connected order is tried is
+// that, not a refusal of its joins.
+func TestCheckJoins_connectedOrderOutOfTime(t *testing.T) {
+	conn, _ := chConn(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	was := joinDanger
+	t.Cleanup(func() { joinDanger = was })
+	joinDanger = func([]byte, map[string]float64) (string, error) {
+		calls++
+		if calls == 2 {
+			cancel()
+		}
+		return "HASH_JOIN on a = b", nil
+	}
+	check := checkJoins(ctx, conn, chQ21, map[string]float64{"o_id": 1}, true, true)
+	if check.err == nil || check.refusal != "" || check.written {
+		t.Fatalf("%+v", check)
+	}
+	// Without the option, the same verdicts are a refusal, as before.
+	calls = 0
+	ctx2 := context.Background()
+	if check := checkJoins(ctx2, conn, chQ21, map[string]float64{"o_id": 1}, true, false); check.refusal == "" || check.err != nil {
+		t.Fatalf("without the option: %+v", check)
 	}
 }
 

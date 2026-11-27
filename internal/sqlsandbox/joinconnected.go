@@ -30,8 +30,8 @@ import (
 // (json_serialize_sql, then json_deserialize_sql of the reordered tree), so
 // nothing is parsed here by hand:
 //
-//   - one SELECT, no WITH, no SAMPLE, and no * in its select list (a * over
-//     a reordered FROM gives its columns in another order);
+//   - one SELECT, no WITH, no SAMPLE, and no *, COLUMNS(...) or #n anywhere
+//     outside its subqueries (each depends on the order of the FROM);
 //   - its FROM a chain of implicit cross products (FROM a, b, c) of plain
 //     tables or views, aliases allowed: no JOIN, subquery, table function,
 //     column aliases or AT clause;
@@ -88,6 +88,16 @@ type tableFacts struct {
 	rows    float64
 }
 
+// connectedNote is why a connected order was not used: why, "" when it
+// was; failed when a step did not work (logged as a warning), not when the
+// statement is of another shape or has no connected order; err the
+// statement's context's error when it ended meanwhile.
+type connectedNote struct {
+	why    string
+	failed bool
+	err    error
+}
+
 // connectedRewrite is a statement written again in a connected order: its
 // text, and the order, by the names that qualify its tables.
 type connectedRewrite struct {
@@ -97,23 +107,28 @@ type connectedRewrite struct {
 
 // connectedOrderSQL writes statement again in a connected order of its
 // tables, on conn, the statement's own session; facts says what each FROM
-// table holds. why says why it is not, and then the rewrite is empty.
-func connectedOrderSQL(ctx context.Context, conn *sql.Conn, statement string, facts func(ref string) (tableFacts, error)) (connectedRewrite, string) {
+// table holds. The note says why it is not, and then the rewrite is empty:
+// a statement of another shape, or (failed) a step that did not work.
+func connectedOrderSQL(ctx context.Context, conn *sql.Conn, statement string, facts func(ref string) (tableFacts, error)) (connectedRewrite, connectedNote) {
+	shape := func(why string) (connectedRewrite, connectedNote) { return connectedRewrite{}, connectedNote{why: why} }
+	failed := func(why string) (connectedRewrite, connectedNote) {
+		return connectedRewrite{}, connectedNote{why: why, failed: true}
+	}
 	doc, err := serializeSQL(ctx, conn, statement)
 	if err != nil {
-		return connectedRewrite{}, err.Error()
+		return failed(err.Error())
 	}
 	node, why := connectedShape(doc)
 	if why != "" {
-		return connectedRewrite{}, why
+		return shape(why)
 	}
 	tables, why := fromTables(node["from_table"])
 	if why != "" {
-		return connectedRewrite{}, why
+		return shape(why)
 	}
 	conjuncts, why := whereConjuncts(node["where_clause"])
 	if why != "" {
-		return connectedRewrite{}, why
+		return shape(why)
 	}
 	info := make([]tableFacts, len(tables))
 	read := map[string]tableFacts{}
@@ -121,7 +136,7 @@ func connectedOrderSQL(ctx context.Context, conn *sql.Conn, statement string, fa
 		f, ok := read[t.ref]
 		if !ok {
 			if f, err = facts(t.ref); err != nil {
-				return connectedRewrite{}, fmt.Sprintf("the table %s could not be read: %s", t.ref, firstLine(err.Error()))
+				return failed(fmt.Sprintf("the table %s could not be read: %s", t.ref, firstLine(err.Error())))
 			}
 			read[t.ref] = f
 		}
@@ -129,7 +144,7 @@ func connectedOrderSQL(ctx context.Context, conn *sql.Conn, statement string, fa
 	}
 	conds, why := conditionTables(conjuncts, tables, info)
 	if why != "" {
-		return connectedRewrite{}, why
+		return shape(why)
 	}
 	rows := make([]float64, len(info))
 	for i := range info {
@@ -137,46 +152,46 @@ func connectedOrderSQL(ctx context.Context, conn *sql.Conn, statement string, fa
 	}
 	order, why := connectedOrder(rows, conds)
 	if why != "" {
-		return connectedRewrite{}, why
+		return shape(why)
 	}
 	node["from_table"] = crossChain(node["from_table"].(map[string]any), tables, order)
 	want, err := json.Marshal(doc)
 	if err != nil {
-		return connectedRewrite{}, "the new order could not be written: " + err.Error()
+		return failed("the new order could not be written: " + err.Error())
 	}
 	var text string
 	if err := conn.QueryRowContext(ctx, "SELECT json_deserialize_sql(?::JSON)::VARCHAR", string(want)).Scan(&text); err != nil {
-		return connectedRewrite{}, "the new order could not be written: " + firstLine(err.Error())
+		return failed("the new order could not be written: " + firstLine(err.Error()))
 	}
 	// The text DuckDB wrote must parse to the tree asked for.
 	again, err := serializeSQL(ctx, conn, text)
 	if err != nil {
-		return connectedRewrite{}, "the statement in the new order could not be parsed: " + err.Error()
+		return failed("the statement in the new order could not be parsed: " + err.Error())
 	}
 	var asked any
 	if err := decodeNumbers(want, &asked); err != nil {
-		return connectedRewrite{}, err.Error()
+		return failed(err.Error())
 	}
 	if !reflect.DeepEqual(withoutLocations(asked), withoutLocations(again)) {
-		return connectedRewrite{}, "the statement in the new order does not parse to the same statement"
+		return failed("the statement in the new order does not parse to the same statement")
 	}
 	// And give the statement's own columns.
 	own, err := describeResult(ctx, conn, statement)
 	if err != nil {
-		return connectedRewrite{}, "the statement's columns could not be had: " + firstLine(err.Error())
+		return failed("the statement's columns could not be had: " + firstLine(err.Error()))
 	}
 	theirs, err := describeResult(ctx, conn, text)
 	if err != nil {
-		return connectedRewrite{}, "the columns of the statement in the new order could not be had: " + firstLine(err.Error())
+		return failed("the columns of the statement in the new order could not be had: " + firstLine(err.Error()))
 	}
 	if !reflect.DeepEqual(own, theirs) {
-		return connectedRewrite{}, "the statement in the new order does not give the statement's own columns"
+		return failed("the statement in the new order does not give the statement's own columns")
 	}
 	names := make([]string, len(order))
 	for i, at := range order {
 		names[i] = tables[at].name
 	}
-	return connectedRewrite{text: text, order: names}, ""
+	return connectedRewrite{text: text, order: names}, connectedNote{}
 }
 
 // serializeSQL is DuckDB's parse of text (json_serialize_sql), its numbers
@@ -284,10 +299,10 @@ func connectedShape(doc map[string]any) (map[string]any, string) {
 	if node["sample"] != nil {
 		return nil, "a SAMPLE"
 	}
-	for _, e := range listOf(node["select_list"]) {
-		if hasStar(e) {
-			return nil, "a * in the select list"
-		}
+	// Anywhere in the statement, outside its subqueries: the select list,
+	// WHERE, GROUP BY, HAVING, QUALIFY, ORDER BY.
+	if fromOrdered(node) {
+		return nil, "a *, COLUMNS(...) or #n, which depend on the order of the FROM"
 	}
 	return node, ""
 }
@@ -297,25 +312,27 @@ func listOf(v any) []any {
 	return l
 }
 
-// hasStar reports whether the expression e holds a * (or COLUMNS), outside
-// any subquery of it.
-func hasStar(e any) bool {
+// fromOrdered reports whether e holds an expression whose meaning depends on
+// the order of the FROM's tables, outside any subquery of it: a * or
+// COLUMNS(...) (STAR), which expands to the columns in that order, or a #n
+// (POSITIONAL_REFERENCE), the n-th of them.
+func fromOrdered(e any) bool {
 	switch t := e.(type) {
 	case map[string]any:
 		if t["class"] == "SUBQUERY" {
 			return false
 		}
-		if t["class"] == "STAR" {
+		if t["class"] == "STAR" || t["class"] == "POSITIONAL_REFERENCE" || t["type"] == "POSITIONAL_REFERENCE" {
 			return true
 		}
 		for _, v := range t {
-			if hasStar(v) {
+			if fromOrdered(v) {
 				return true
 			}
 		}
 	case []any:
 		for _, v := range t {
-			if hasStar(v) {
+			if fromOrdered(v) {
 				return true
 			}
 		}

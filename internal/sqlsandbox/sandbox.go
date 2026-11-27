@@ -689,6 +689,20 @@ type QueryError struct {
 
 func (e *QueryError) Error() string { return e.Message }
 
+// logConnectedOrderNote says why the join check did not use a connected
+// order for out, a statement it refused, when it tried one: at debug level
+// when the statement has another shape or no connected order, as a warning
+// when a step did not work.
+func logConnectedOrderNote(out wireResult) {
+	switch {
+	case out.ConnectedOrderNote == "":
+	case out.ConnectedOrderFailed:
+		slog.Warn("sql on the copy: a connected order of a statement's tables could not be tried; the statement is refused for its joins", "why", out.ConnectedOrderNote)
+	default:
+		slog.Debug("sql on the copy: no connected order of a statement's tables is used; the statement is refused for its joins", "why", out.ConnectedOrderNote)
+	}
+}
+
 // ranWrittenOrder reports whether joinOrder, a worker's wireResult.JoinOrder,
 // is one of the order written: as written, or in a connected order of the
 // statement's tables, which runs in the order written too.
@@ -2075,7 +2089,12 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 			// statement ran out of memory, the worker did not fail.
 			// The worker said on stderr whether the join check had it run
 			// in the order written (joinOrderWrittenLine).
-			return Result{}, &QueryError{Message: oomFenceMessage, ranWrittenOrder: strings.Contains(w.stderr.text(), joinOrderWrittenLine)}
+			stderr := w.stderr.text()
+			if _, order, ok := strings.Cut(stderr, joinOrderConnectedLine); ok {
+				order, _, _ = strings.Cut(order, "\n")
+				slog.Info("sql on the copy: a statement run with its tables in a connected order ran out of memory and was stopped", "order", order)
+			}
+			return Result{}, &QueryError{Message: oomFenceMessage, ranWrittenOrder: strings.Contains(stderr, joinOrderWrittenLine)}
 		}
 		if waitErr != nil {
 			err = fmt.Errorf("%w (no result: %v)", waitErr, err)
@@ -2089,10 +2108,15 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 		case errRefused:
 			return Result{}, &RefusedError{Reason: out.Error.Message}
 		case errQuery:
+			if out.JoinOrder == joinOrderConnected {
+				slog.Info("sql on the copy: a statement run with its tables in a connected order failed in the engine",
+					"order", out.JoinOrderTables, "error", firstLine(out.Error.Message))
+			}
 			return Result{}, engineError(out, spill, noSpill)
 		case errTooLarge:
 			return Result{}, ErrResultTooLarge
 		case errJoinTooBig:
+			logConnectedOrderNote(out)
 			return Result{}, &JoinTooBigError{Reason: out.Error.Message}
 		case errSpool:
 			// The result file could not be written (a full disk, its folder

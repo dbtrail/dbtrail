@@ -229,10 +229,10 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 	}()
 	// The order the join check chose travels with an engine error too, so
 	// the parent does not run the same plan again (oomretry.go).
-	ranOrder := ""
+	ranOrder, ranTables := "", ""
 	defer func() {
 		if ranOrder != "" && res.Error != nil && res.Error.Kind == errQuery {
-			res.JoinOrder = ranOrder
+			res.JoinOrder, res.JoinOrderTables = ranOrder, ranTables
 		}
 	}()
 	if sess.err != nil {
@@ -410,15 +410,19 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 			check = checkJoins(ctx, conn, job.SQL, job.JoinNDV, job.SkipCommonSubplan, job.TryConnectedJoinOrder)
 		}
 		switch {
+		case check.err != nil:
+			return wireResult{Error: &wireError{Kind: errQuery, Message: "the join check did not finish: " + check.err.Error()}}
 		case check.refusal != "":
-			return wireResult{Error: &wireError{Kind: errJoinTooBig, Message: check.refusal}}
+			// Why the connected order was not used, for the parent's log.
+			return wireResult{Error: &wireError{Kind: errJoinTooBig, Message: check.refusal},
+				ConnectedOrderNote: check.connectedNote.why, ConnectedOrderFailed: check.connectedNote.failed}
 		case check.connected != nil:
 			runSQL = check.connected.text
 			res.JoinOrder, res.JoinOrderTables = joinOrderConnected, strings.Join(check.connected.order, ", ")
-			ranOrder = joinOrderConnected
+			ranOrder, ranTables = joinOrderConnected, res.JoinOrderTables
 			// The order written's line, so the parent does not run it again
 			// in another order after the kernel stops it (oomretry.go).
-			fmt.Fprintln(stderr, joinOrderWrittenLine+", its tables in a connected order: "+res.JoinOrderTables)
+			fmt.Fprintln(stderr, joinOrderConnectedLine+res.JoinOrderTables)
 		case check.written:
 			res.JoinOrder = joinOrderWritten
 			ranOrder = joinOrderWritten
