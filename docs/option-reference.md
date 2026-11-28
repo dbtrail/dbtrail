@@ -968,9 +968,9 @@ How many statements the PostgreSQL router runs on the copy at the same time, 1 t
 
 ### `pg-router-threads`
 
-How many CPU threads each statement on the copy may use in the PostgreSQL router, 1 to 16.
+How many CPU threads each statement on the copy may use in the PostgreSQL router, 1 to 16, or auto. auto shares the vCPUs the router may use (a container's CPU limit included) among the statements that can run at once, the workers plus the one kept for short statements, rounded up: 2 each on 8 vCPUs with 4 workers, 3 with 2. A number is used exactly as it is.
 
-- Default: 2.
+- Default: auto.
 - Example: `pg-router-threads = 4`
 - Environment variable: `BINTRAIL_PG_ROUTER_THREADS`
 - Read by: pg-router.

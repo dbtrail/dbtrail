@@ -1566,13 +1566,40 @@ the SQL memory, so four at once can take 8GB, plus the recent changes fresh
 mode holds (up to a fifth of the process's memory for each server in fresh
 mode): on a 16GB machine, set `--workers 2`.
 
+The threads of each statement are worked out from the machine unless
+`--threads` gives a number: the vCPUs this process may use shared among the
+statements that can run on the copy at once (`--workers` plus the one kept for
+short statements), rounded up, between 1 and 16. So with the default 4
+workers, 8 vCPUs give 2 threads each and 16 give 4; with `--workers 2`, 8
+vCPUs give 3. The vCPUs are what the Go runtime counts for the process
+(`GOMAXPROCS`): the CPUs it may run on and, in a container, its CPU limit,
+rounded up and, on a machine with 2 CPUs or more, never below 2 (a limit of
+1 or 1.5 CPUs counts as 2); a `GOMAXPROCS` set in the environment is
+used as it is. It is worked out once, at start; the start-up lines say the
+number and where it came from. More threads let one statement use more
+memory: a large join that fits its `--sql-memory` at 2 threads may spill to
+disk, or fail, at 13 on a 64 vCPU machine; lower `--threads` or raise
+`--sql-memory` for it.
+
+Why vCPUs and not cores, and why round up: the reports are CPU-bound, and a
+thread with no core to run on waits at no cost, while a core with no thread
+stays idle. Measured with 3 reports at once over a real copy, on a 16 vCPU
+Intel machine (two hyperthreads per core), 6 threads each answered 72.8
+reports a minute and 3 threads 58.8, with the machine 46 % idle. On Graviton
+and AMD, where a vCPU is a core, 3 or 4 threads gave the same (within 2 %).
+With fewer threads one report alone takes longer (21 % with 3 threads instead
+of 4 on Graviton); on a full machine the reports together kept the same pace
+there, and on Intel with hyperthreads more threads finished more. The statements the router passes to your
+PostgreSQL are kept fast by the workers' lower CPU priority (below), not by
+leaving cores free.
+
 Capture comes first on the cores. The compose service and the packaged
 systemd unit run this process at a lower CPU priority than capture
 (`cpu_shares: 256`, `PG_ROUTER_CPU_SHARES` in the compose `.env`;
 `CPUWeight=25` in the unit), as they run the MySQL router: when every core is
 busy, capture and the snapshot update are served first and the statements
 here take longer. The process does not read that priority; `--workers` and
-`--threads` stay as set. Started by hand it has the priority of whatever
+`--threads` stay as set (`--threads auto` counts the vCPUs, not the priority). Started by hand it has the priority of whatever
 starts it.
 
 Inside the process, the router's own work comes before the copy's. Each
@@ -1596,7 +1623,7 @@ only), each worker competes as a group of its own and the step has no effect.
 | `--tls-cert` | `BINTRAIL_PG_ROUTER_TLS_CERT` | none: a certificate made up at start | The certificate (PEM, its chain after it) a client that asks for TLS gets. Requires `--tls-key` |
 | `--tls-key` | `BINTRAIL_PG_ROUTER_TLS_KEY` | none | Its private key (PEM, not encrypted with a passphrase) |
 | `--workers` | `BINTRAIL_PG_ROUTER_WORKERS` | 4 | How many statements run on the copy at once (1 to 16). The rest wait their turn. The copy has one worker more, kept for statements that read one table and join nothing, so it runs up to this plus 1 at once ([why](#the-copys-worker-for-short-statements)) |
-| `--threads` | `BINTRAIL_PG_ROUTER_THREADS` | 2 | Threads each statement may use (1 to 16) |
+| `--threads` | `BINTRAIL_PG_ROUTER_THREADS` | `auto` | Threads each statement may use (1 to 16), or `auto`: the vCPUs over `--workers` plus 1, rounded up ([above](#sql-on-the-copy-from-psql)) |
 | `--sql-memory` | `BINTRAIL_CONSOLE_SQL_MEMORY` | 2GB, or the value saved in the web interface | Memory each statement may use |
 | `--max-connections` | `BINTRAIL_PG_ROUTER_MAX_CONNECTIONS` | 256 | Clients connected at once (1 to 1024). One more is refused with an error |
 | `--max-source-connections` | `BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS` | 16 | Connections to the servers' own PostgreSQL held at once, every server together (1 to 1024). A client holds one while a statement the source answers, its plan, or its transaction block runs there; past the limit the statement that needed one waits for one to be given back, up to 30 seconds, and is then refused (`53300`) |

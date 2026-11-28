@@ -80,7 +80,7 @@ func TestPGRouterSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Listen != "127.0.0.1:5433" || st.Workers != 4 || st.Threads != 2 || st.MaxConns != 256 {
+	if st.Listen != "127.0.0.1:5433" || st.Workers != 4 || !st.ThreadsAuto || st.MaxConns != 256 {
 		t.Fatalf("defaults: %+v", st)
 	}
 	if st.SQLPortMaxRows != defaultPGRouterMaxRows || defaultPGRouterMaxRows != 200_000 {
