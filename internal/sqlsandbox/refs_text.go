@@ -60,7 +60,8 @@ type TextUse struct {
 	// rebuild text (LEFT, SUBSTRING, REPLACE, a CAST, ...: every function
 	// but keepsEnds). What it returns can end with a space the value held
 	// inside ('Jo Ann' cut to three is 'Jo '), which a PAD SPACE collation
-	// does not see and the copy does.
+	// does not see and the copy does. Not through a node that answers true
+	// or false (answersTruth): the call sees that value, not the text.
 	Wrapped []ColumnRef `json:"wrapped,omitempty"`
 }
 
