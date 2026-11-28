@@ -111,6 +111,13 @@ func install(t *testing.T, env ...string) run {
 // wrote before installing, or a compose file from an earlier run.
 func installWith(t *testing.T, prep func(dir string), env ...string) run {
 	t.Helper()
+	return installScript(t, "install.sh", prep, env...)
+}
+
+// installScript is installWith for another script of the repository's root
+// (install-postgres.sh), run the same way with the same stand-ins.
+func installScript(t *testing.T, script string, prep func(dir string), env ...string) run {
+	t.Helper()
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
@@ -134,7 +141,7 @@ func installWith(t *testing.T, prep func(dir string), env ...string) run {
 	}
 	log := filepath.Join(tmp, "docker.log")
 	curlLog := filepath.Join(tmp, "curl.log")
-	cmd := exec.Command("sh", filepath.Join(root, "install.sh"))
+	cmd := exec.Command("sh", filepath.Join(root, script))
 	cmd.Env = append([]string{
 		"PATH=" + bin + ":/usr/bin:/bin",
 		"HOME=" + tmp,

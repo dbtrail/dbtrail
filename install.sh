@@ -18,6 +18,10 @@
 #   DBTRAIL_METRICS_PORT  host port for Prometheus /metrics (default: 9090,
 #                    or the next free one when 9090 is taken)
 #   DBTRAIL_NO_OPEN  set to 1 to NOT open a browser (default: opens best-effort)
+#   DBTRAIL_FOR      postgres: the words and the next steps of an installation
+#                    for PostgreSQL servers (install-postgres.sh sets it), with
+#                    no other database named; mysql (the default): for MySQL
+#                    and MariaDB servers. The stack installed is the same.
 #
 # No root needed beyond whatever your Docker setup already requires.
 
@@ -37,6 +41,18 @@ START_PG="https://www.dbtrail.com/docs/postgres/"
 # The promise, word for word the headline of the README's header and of the
 # dbtrail.com home page (#2637); test/installer pins it.
 PROMISE="Heavy MySQL queries, from minutes to seconds."
+# An installation for PostgreSQL servers speaks of PostgreSQL alone (#3319):
+# its promise is the headline of dbtrail.com/postgresql, and what keeps the
+# change history is "DBTrail's history store". test/installer pins both.
+FOR="${DBTRAIL_FOR:-mysql}"
+case "$FOR" in
+  mysql) STORE="DBTrail's MySQL" ;;
+  postgres|postgresql)
+    FOR=postgres
+    PROMISE="Heavy PostgreSQL reports, on a copy of your tables."
+    STORE="DBTrail's history store" ;;
+  *) printf 'ERROR: DBTRAIL_FOR is "%s"; it takes postgres or mysql.\n' "$FOR" >&2; exit 1 ;;
+esac
 
 # ── color capability detection ──────────────────────────────────────────
 # Four tiers so the sunset gradient degrades gracefully: 24-bit truecolor →
@@ -92,7 +108,9 @@ sunset_word() {
   while [ "$i" -lt "$n" ]; do
     ch=$(printf '%s' "$word" | cut -c $((i + 1)))
     t=$(( i * 100 / (n - 1) ))           # position 0..100 along the gradient
-    if [ "$t" -lt 50 ]; then             # pink → orange
+    if [ "$FOR" = postgres ]; then       # dbtrail.com/postgresql: green → orange
+      r=$(( 14 + (255 - 14) * t / 100 )); g=$(( 159 + (138 - 159) * t / 100 )); b=$(( 119 + (61 - 119) * t / 100 ))
+    elif [ "$t" -lt 50 ]; then           # pink → orange
       lt=$(( t * 2 ))
       r=255; g=$(( 77 + (138 - 77) * lt / 100 )); b=$(( 141 + (61 - 141) * lt / 100 ))
     else                                 # orange → violet
@@ -108,7 +126,8 @@ banner() {
   printf '\n  '
   fg 255 210 61 93; printf '●'; crst                          # gold sun node
   printf '   '; sunset_word; printf '\n  '
-  fg 255 77 141 35; printf '▌'; crst                          # pink bar
+  if [ "$FOR" = postgres ]; then fg 14 159 119 32; else fg 255 77 141 35; fi
+  printf '▌'; crst                                             # pink (green) bar
   printf '   %s%s%s\n  ' "$DIM" "$PROMISE" "$RST"
   fg 255 138 61 33; printf '▌'; crst                          # orange bar
   printf '   %sinstalling the Docker stack → %s%s\n\n' "$DIM" "$DIR" "$RST"
@@ -427,11 +446,17 @@ else
     grep -v '"127.0.0.1:3309:3309"' docker-compose.yml > docker-compose.yml.tmp \
       && mv docker-compose.yml.tmp docker-compose.yml
     if grep -Eq '^[^#]*3309:3309' docker-compose.yml; then
+      if [ "$FOR" = postgres ]; then
+        die "Port 3309 is in use on this machine and its published-port line in
+    ${DIR}/docker-compose.yml isn't what this installer expected. Delete that
+    'ports:' line by hand, or report it."
+      fi
       die "Port 3309 is in use on this machine and the MySQL port's published-port
     line in ${DIR}/docker-compose.yml isn't what this installer expected. Delete
     that 'ports:' line by hand, or report it."
     fi
-    say "${DIM}    port 3309 is taken, so the MySQL port is not published (add a 'ports:' line to docker-compose.yml to use it)${RST}"
+    # An installation for PostgreSQL servers never uses 3309: nothing to say.
+    [ "$FOR" = postgres ] || say "${DIM}    port 3309 is taken, so the MySQL port is not published (add a 'ports:' line to docker-compose.yml to use it)${RST}"
   fi
   # Only a file that publishes it: the file of an older release has no
   # PostgreSQL port, and there is then nothing to leave out or to say.
@@ -565,24 +590,24 @@ if [ -n "${INDEX_BUFFER_POOL+set}" ]; then
 elif env_has_pool; then
   say "${DIM}    INDEX_BUFFER_POOL is already in .env, so it was left as you set it${RST}"
 elif [ "$pool" = default ]; then
-  say "${DIM}    this machine is small, so DBTrail's MySQL keeps the 128 MB memory default${RST}"
+  say "${DIM}    this machine is small, so ${STORE} keeps the 128 MB memory default${RST}"
 elif [ -n "$pool" ] && [ -n "${FRESH:-}" ] && ! grep -q -- '--innodb-buffer-pool-size=' docker-compose.yml; then
-  say "${DIM}    this docker-compose.yml does not pass INDEX_BUFFER_POOL on, so DBTrail's MySQL keeps the 128 MB memory default${RST}"
+  say "${DIM}    this docker-compose.yml does not pass INDEX_BUFFER_POOL on, so ${STORE} keeps the 128 MB memory default${RST}"
 elif [ -n "$pool" ] && [ -n "${FRESH:-}" ]; then
   if [ -s .env ] && [ -n "$(tail -c 1 .env)" ]; then printf '\n' >> .env; fi
   printf 'INDEX_BUFFER_POOL=%s\n' "$pool" >> .env || die "Couldn't write ${DIR}/.env."
-  say "${DIM}    DBTrail's MySQL gets ${pool} of memory, a quarter of what Docker has and at most 32G (INDEX_BUFFER_POOL in .env)${RST}"
+  say "${DIM}    ${STORE} gets ${pool} of memory, a quarter of what Docker has and at most 32G (INDEX_BUFFER_POOL in .env)${RST}"
 elif grep -q 'pool-auto:begin' docker-compose.yml; then
-  say "${DIM}    DBTrail's MySQL works out its memory each time it starts, a quarter of what this machine has and at most 32G (INDEX_BUFFER_POOL in .env overrides it)${RST}"
+  say "${DIM}    ${STORE} works out its memory each time it starts, a quarter of what this machine has and at most 32G (INDEX_BUFFER_POOL in .env overrides it)${RST}"
 elif [ -n "$pool" ]; then
-  warn "DBTrail's MySQL may still run with the 128 MB memory default, which slows capture on a busy server."
+  warn "${STORE} may still run with the 128 MB memory default, which slows capture on a busy server."
   if grep -q -- '--innodb-buffer-pool-size=' docker-compose.yml; then
     warn "To give it ${pool}, add INDEX_BUFFER_POOL=${pool} to ${DIR}/.env and run: ${COMPOSE} up -d"
   else
     warn "To give it ${pool}, take the current docker-compose.yml (docs/docker.md 'Upgrading the stack'), then add INDEX_BUFFER_POOL=${pool} to ${DIR}/.env and run: ${COMPOSE} up -d"
   fi
 else
-  say "${DIM}    Docker did not say how much memory it has, so DBTrail's MySQL keeps the 128 MB memory default (set INDEX_BUFFER_POOL in .env to change it)${RST}"
+  say "${DIM}    Docker did not say how much memory it has, so ${STORE} keeps the 128 MB memory default (set INDEX_BUFFER_POOL in .env to change it)${RST}"
 fi
 
 # The dbtrail command, beside docker-compose.yml. Fetched on every run: it is
@@ -689,6 +714,59 @@ fi
 say ""
 fg 14 170 110 32; printf '%s✓ DBTrail is up.%s\n' "$B" "$RST"   # green check
 say ""
+# An installation for PostgreSQL servers (install-postgres.sh): its own five
+# steps, in the words of docs/postgres.md and of the web interface's
+# PostgreSQL clients page, and no other database named (#3319).
+if [ "$FOR" = postgres ]; then
+say "Have at hand: the ${B}host and port${RST} of your PostgreSQL, its dbname, and"
+say "${B}a PostgreSQL login that can create roles${RST} and publications."
+say "Prepare it once, first: wal_level = logical, REPLICA IDENTITY FULL on your"
+say "tables, a publication of them, and a dbtrail role. Every command: ${START_PG}"
+say ""
+say "${B}Next steps${RST}"
+say "  ${B}1. Sign in.${RST} Open ${B}${CONSOLE_URL}${RST} and create a username and password."
+say "     Installed on a remote machine, such as a cloud server? That address answers"
+say "     on that machine only. Open a tunnel from your own computer, then open the"
+say "     same address in your browser there:"
+say "       ssh -L ${PORT}:127.0.0.1:${PORT} <user>@<this machine's address>"
+say "  ${B}2. Connect.${RST} Click + Add server, then Open the full form, and pick PostgreSQL."
+say "     Fill in host, port, the dbtrail role and its password, the dbname and the"
+say "     publication. Tick the box that lets the PostgreSQL port send to your"
+say "     PostgreSQL, read-only, a SELECT the copy does not answer: without it, the"
+say "     port does not answer for this server. Press Save. DBTrail checks the rest"
+say "     by itself, and says what to fix."
+say "     Your PostgreSQL runs on this same machine? Use host ${B}host.docker.internal${RST}"
+say "     (on Linux, it must listen on more than 127.0.0.1)."
+say "  ${B}3. First copy.${RST} On Snapshots, press Read database now. DBTrail reads every"
+say "     table once."
+say "  ${B}4. PostgreSQL port.${RST} On Settings, PostgreSQL clients, press Turn on if the port"
+say "     is off. Copy the psql line it shows, and keep the password: it is shown only once."
+if [ -n "${PGPORT_SKIP:-}" ]; then
+  say "     Port 5433 was taken, so this machine does not publish it yet. In the pg-router's"
+  say "     'ports:' line, publish another free port, such as 127.0.0.1:5434:5433,"
+  say "     then use that number after port= in the psql line."
+fi
+say "  ${B}5. Heavy report.${RST} Run that psql line in a terminal, then a total or a ranking"
+say "     over one of your big tables. DBTrail answers it from the copy, without"
+say "     slowing down your PostgreSQL."
+say ""
+if [ -n "$CLI" ]; then
+  say "${B}Or from this terminal${RST}, with no browser. The same steps as commands, once your"
+  say "PostgreSQL is prepared:"
+  say "  ${DIR}/dbtrail server add --flavor postgres -h <host> -u dbtrail -p -d <dbname> --publication <name>"
+  say "  ${DIR}/dbtrail snapshot run <name>                  ${DIM}# first copy${RST}"
+  say "  ${DIR}/dbtrail --help"
+  say "server add asks once whether the PostgreSQL port may send to your PostgreSQL, read-only,"
+  say "a SELECT the copy does not answer (Enter is yes), and prints the psql line to query it."
+  case "$DIR" in
+    /*) say "To type just dbtrail instead, link it once:" ;;
+    *)  say "The commands above work from the folder you ran this installer in. To type just"
+        say "dbtrail from any folder, link it once:" ;;
+  esac
+  say "  sudo ln -s \"$PWD/dbtrail\" /usr/local/bin/dbtrail"
+  say ""
+fi
+else
 say "Have at hand: the ${B}host and port${RST} of your MySQL server,"
 say "and ${B}a MySQL login that can create users${RST} and grant them privileges."
 say ""
@@ -743,9 +821,14 @@ else
   say "Then add it with + Add server: Open the full form, and pick PostgreSQL."
 fi
 say ""
+fi
 say "Your change history lives on this machine, in this stack's Docker volumes,"
-say "with your login and your saved servers. Back them up. To keep the history on"
-say "a MySQL server of your own instead, set INDEX_DSN in ${DIR}/.env."
+if [ "$FOR" = postgres ]; then
+  say "with your login and your saved servers. Back them up."
+else
+  say "with your login and your saved servers. Back them up. To keep the history on"
+  say "a MySQL server of your own instead, set INDEX_DSN in ${DIR}/.env."
+fi
 say ""
 say "From ${B}${DIR}${RST}:"
 say "  ${COMPOSE} down                 ${DIM}# stop DBTrail; your history stays in the volumes${RST}"
@@ -775,7 +858,11 @@ else
   say "To stay on one version, set BINTRAIL_TAG in ${DIR}/.env (docs/upgrade.md)."
 fi
 say ""
-say "Every step in detail: ${B}${START_PAGE}${RST}"
+if [ "$FOR" = postgres ]; then
+  say "Every step in detail: ${B}${START_PG}${RST}"
+else
+  say "Every step in detail: ${B}${START_PAGE}${RST}"
+fi
 
 # ── 6. best-effort: open the browser ────────────────────────────────────
 if [ "${DBTRAIL_NO_OPEN:-}" != "1" ]; then
