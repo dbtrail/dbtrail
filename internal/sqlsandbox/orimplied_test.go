@@ -274,8 +274,8 @@ func TestImpliedInFilters_failedStepKeepsTheStatement(t *testing.T) {
 }
 
 // In the worker: the option rewrites only the text that runs, after the
-// join order is picked. Q19's OR at the top of its WHERE keeps it out of
-// the join order by shape, rewritten or not, and Q7 gets both.
+// join order is picked, which it does not change: Q19's OR at the top of
+// its WHERE keeps it out of the join order by shape, rewritten or not.
 func TestWorker_impliedInFilters(t *testing.T) {
 	if (Session{}).ImpliedInFilters {
 		t.Fatal("on by default")
@@ -293,7 +293,7 @@ func TestWorker_impliedInFilters(t *testing.T) {
 		order string
 	}{
 		{"Q19", chQ19, 1, ""},
-		{"Q7", chQ7, 2, JoinOrderByShapeWritten},
+		{"Q7", chQ7, 2, ""},
 		{"no OR", "SELECT count(*) AS n FROM t WHERE b = 1", 0, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
