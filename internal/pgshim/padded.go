@@ -2,6 +2,7 @@ package pgshim
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -697,12 +698,20 @@ func (s *session) paddedVeto(text string) string {
 	if s.argsPadded {
 		return "an argument of a declared type the copy would read as plain text (a bpchar, a domain, inet...)"
 	}
-	if s.bound == nil || s.bound.Catalog == nil {
-		return ""
-	}
 	toks, unlexed := lexSQL(text)
 	switch firstWord(toks) {
 	case "show", "describe", "summarize", "explain":
+		return ""
+	}
+	if !s.canFallBack() {
+		// Nothing else keeps such a value from the copy on a connection that
+		// cannot reach its source, whatever is known of its columns.
+		if unlexed == "" && paddedTypeNamed(toks) || unlexed != "" && paddedTypeInText(text) {
+			s.logger.Debug("pgshim: not answered by the copy", "construct", paddedCastWhy)
+			return paddedCastWhy
+		}
+	}
+	if s.bound == nil || s.bound.Catalog == nil {
 		return ""
 	}
 	types, unread := s.columnTypes(text)
@@ -746,6 +755,9 @@ func (s *session) paddedVeto(text string) string {
 // too: it was refused before, and the copy must not now answer it with text
 // sorted its own way.
 func paddedForNoSource(toks []rtToken, types map[string][]string) string {
+	if paddedTypeNamed(toks) {
+		return paddedCastWhy
+	}
 	veto := paddedUseOrdered(toks, types, false)
 	if padded, _ := paddedAmong(types); veto != "" || !padded {
 		return veto
@@ -754,6 +766,39 @@ func paddedForNoSource(toks []rtToken, types map[string][]string) string {
 		return screenWith(toks, types, false, true)
 	}
 	return ""
+}
+
+// paddedCastWhy is why a statement that names the padded type is refused.
+const paddedCastWhy = "a value cast to char(n) or \"char\" (PostgreSQL pads or cuts it and compares it without its trailing blanks, the copy does not)"
+
+// paddedTypeInText is paddedTypeNamed for a statement the port does not
+// read whole (an exponent, E'...', $$...$$): any of the padded type's names
+// as a word of the text, in or out of quotes, varchar's char varying
+// included: refusing more there is the safe side.
+func paddedTypeInText(text string) bool {
+	return paddedWordInText.MatchString(text)
+}
+
+var paddedWordInText = regexp.MustCompile(`(?i)(^|[^a-z0-9_$])(char|character|nchar|bpchar)($|[^a-z0-9_$])`)
+
+// paddedTypeNamed reports whether a statement names the padded type or the
+// one-byte "char" (#3233): a cast to one, CAST(... AS char(n)) or a typed
+// literal such as bpchar 'a '. PostgreSQL pads or cuts such a value and
+// compares it without its trailing blanks; the copy holds it as the text
+// written ('abc'::"char" is a there, abc here). On a connection that reaches
+// its source the general screen already sends every cast there; one that
+// cannot must refuse it. char varying and character varying are varchar.
+func paddedTypeNamed(toks []rtToken) bool {
+	for i, t := range toks {
+		if !paddedTypeWritten(t) || t.kind == rtParam {
+			continue
+		}
+		if t.kind == rtWord && i+1 < len(toks) && toks[i+1].kind == rtWord && toks[i+1].text == "varying" {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // paddedError is the error of a statement paddedVeto keeps from the copy.
