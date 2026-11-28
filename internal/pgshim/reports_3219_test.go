@@ -83,6 +83,8 @@ func TestCopyScreen_reportShapes3219(t *testing.T) {
 		"sorted by a sum, a text column selected":              `SELECT i.i_name, sum(ol.ol_amount) FROM order_line ol JOIN item i ON i.i_id = ol.ol_i_id GROUP BY i.i_name ORDER BY sum(ol.ol_amount) DESC, count(*)`,
 		"a char(n) key beside another key":                     `SELECT c_credit, c_w_id, count(*) FROM customer GROUP BY c_credit, c_w_id`,
 		"a char(n) key that is not selected":                   `SELECT count(*) FROM customer GROUP BY customer.c_credit HAVING count(*) > 1`,
+		// The statement of the issue: avg() of a WITH's sum of a numeric.
+		"an average of a numeric, compared": tpccAverage,
 	}
 	for what, q := range stays {
 		if why := CopyScreen(q, types); why != "" {
@@ -104,7 +106,6 @@ func TestCopyScreen_reportShapes3219(t *testing.T) {
 		"a char(n) key in a subquery":                              {`SELECT n FROM (SELECT c_credit, count(*) AS n FROM customer GROUP BY c_credit) s`, "char(n) column"},
 		"a char(n) key beside a UNION":                             {`SELECT c_credit FROM customer GROUP BY c_credit UNION ALL SELECT c_credit FROM customer`, "char(n) column"},
 		"a char(n) partition":                                      {`SELECT c_id, row_number() OVER (PARTITION BY c_credit) FROM customer`, "char(n) column"},
-		"an average of a numeric, compared":                        {tpccAverage, "_bintrail_pg_avg"},
 		"date_trunc of an hour":                                    {`SELECT date_trunc('hour', o_entry_d) FROM orders`, "date_trunc"},
 		"date_trunc of an expression":                              {`SELECT date_trunc('day', o_entry_d + INTERVAL '1 day') FROM orders`, "date_trunc"},
 		"date_trunc of a text column":                              {`SELECT date_trunc('day', i_name) FROM item`, "date_trunc"},

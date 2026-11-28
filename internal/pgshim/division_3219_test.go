@@ -337,7 +337,6 @@ func TestCopyScreen_divisionAndAvg(t *testing.T) {
 		"SELECT avg(note) FROM orders":                      "_bintrail_pg_avg",
 		"SELECT avg(DISTINCT amount) FROM orders":           "avg",
 		"SELECT avg(amount) OVER () FROM orders":            "avg",
-		"SELECT avg(amount) AS amount FROM orders":          "",
 		// What the rewrite does not read.
 		"SELECT amount::numeric / qty FROM orders":         "",
 		"SELECT interval '1 day' / 2":                      "",

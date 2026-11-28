@@ -1,5 +1,7 @@
 package pgshim
 
+import "strings"
+
 // What a name the statement defines is, as a number (#3219).
 //
 // exactClass reads a column's class from the copy's types for its name. A
@@ -126,8 +128,30 @@ func sumCall(toks []rtToken, i int, typesOf func(string) []string) (end int, ok 
 	if n := end + 1; n < len(toks) && toks[n].kind == rtWord && (toks[n].text == "filter" || toks[n].text == "over" || toks[n].text == "within") {
 		return 0, false
 	}
-	if exactClass(arg, typesOf) != clsWhole32 {
+	if exactClass(arg, typesOf) != clsWhole32 || insideOwnMacro(toks, i) {
 		return 0, false
 	}
 	return end, true
+}
+
+// insideOwnMacro reports whether toks[at] stands inside the arguments of one
+// of the copy's own macros (_bintrail_pg_round_div(sum(qty), ...)), which
+// are written for the engine's types: a sum there is left as it is.
+func insideOwnMacro(toks []rtToken, at int) bool {
+	depth := 0
+	for j := at - 1; j >= 0; j-- {
+		switch {
+		case isOpTok(toks, j, ")"):
+			depth++
+		case isOpTok(toks, j, "("):
+			if depth > 0 {
+				depth--
+				continue
+			}
+			if j > 0 && toks[j-1].kind == rtWord && strings.HasPrefix(toks[j-1].text, "_bintrail_pg_") {
+				return true
+			}
+		}
+	}
+	return false
 }
