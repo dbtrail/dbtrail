@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.151.0] - 2026-11-28
+
+- **The MySQL port no longer sends a statement to MySQL because a text column is compared inside a call that cuts text** (#3313). A comparison, BETWEEN, AND/OR, IN, IS NULL, NOT, LIKE or EXISTS answers true or false, so a call around it (a division, a CAST) never sees the column's text. Read routing held such a column to "no space at all" anyway, and CH-benCHmark Q8 (`SUM(CASE WHEN n2.n_name = 'Germany' ...) / SUM(ol_amount)`) went to MySQL whenever a nation name had an inner space. A column cut inside the comparison (`LEFT(n_name, 3) = 'Jo'`) is still held to that rule.
+
 ## [0.150.0] - 2026-11-27
 
 - **PostgreSQL port: a table with no change no longer makes an answer read as hours behind** (#3310). An answer that read a table from its snapshot alone, without its newest changes (right after the router starts, or in fast mode), is as old as the oldest instant its snapshot files record. A table nobody writes is carried from snapshot to snapshot as the file it was, with the instant of the update that last wrote it, so such an answer was counted as hours or days old, though nothing was missing: on a CH-benCHmark board the `data_age_max_seconds` of `/status` said 2 to 5 hours a minute after the snapshot, through the never-written `item` table. An update now records, beside the snapshot it publishes, the instant through which it found every carried table unchanged, and that instant is used: such an answer is as old as the update that carried the table. It moves the age `/status` and the log report and, where a server has a lag limit (`max_behind_source_seconds`), which side answers a statement that reads such a table. A snapshot published before upgrading has no such record and reads as before until the next update. MySQL and MariaDB are unchanged.
