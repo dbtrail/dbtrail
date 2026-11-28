@@ -317,10 +317,11 @@ type Session struct {
 	// ON whose every branch restricts one column to literals (col = 1, col
 	// IN (2, 3)), the IN of all those literals (orimplied.go): implied, so
 	// the answer does not change, and the copy filters the table as it
-	// reads it. Only the text that runs on the copy is rewritten, after the
-	// join order is picked; a statement it cannot rewrite runs as it is.
-	// Result.ImpliedInFilters says how many were added. Off, nothing
-	// changes.
+	// reads it. Only the text that runs on the copy is rewritten: before
+	// the join check (JoinNDV), so it judges the plan that runs, and after
+	// the join order by shape otherwise. A statement it cannot rewrite runs
+	// as it is. Result.ImpliedInFilters says how many were added. Off,
+	// nothing changes.
 	ImpliedInFilters bool
 	// RetryOutOfMemoryInWrittenOrder runs a statement that failed with the
 	// engine's out of memory error in the copy's own join order once more

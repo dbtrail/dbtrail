@@ -232,9 +232,9 @@ func TestImpliedInFilters_textComparesAsEquals(t *testing.T) {
 			}
 			for _, view := range []string{"txt", "txt_bin"} {
 				for _, q := range []string{
-					"SELECT id FROM " + view + " WHERE (s = 'ABC' AND k = 1) OR (s IN ('x') AND k = 2)",
-					"SELECT id FROM " + view + " WHERE (s = 'abc' AND k = 1) OR (s = 'X' AND k = 2)",
-					"SELECT id FROM " + view + " WHERE (s = 'abc ' AND k = 1) OR (s = 'x' AND k = 2)",
+					"SELECT id FROM " + view + " WHERE (s = 'ABC' AND k < 2) OR (s IN ('x') AND k > 1)",
+					"SELECT id FROM " + view + " WHERE (s = 'abc' AND k < 2) OR (s = 'X' AND k > 1)",
+					"SELECT id FROM " + view + " WHERE (s = 'abc ' AND k < 2) OR (s = 'x' AND k > 1)",
 				} {
 					got := impliedInFilters(ctx, conn, q)
 					if got.added != 1 || got.note != "" {
