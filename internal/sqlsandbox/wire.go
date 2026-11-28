@@ -54,6 +54,8 @@ type wireJob struct {
 	TryConnectedJoinOrder bool `json:"try_connected_join_order,omitempty"`
 	// JoinOrderByShape: see Session.JoinOrderByShape.
 	JoinOrderByShape bool `json:"join_order_by_shape,omitempty"`
+	// ImpliedInFilters: see Session.ImpliedInFilters.
+	ImpliedInFilters bool `json:"implied_in_filters,omitempty"`
 	// The worker's caps.
 	Threads     int    `json:"threads"`
 	MemoryLimit string `json:"memory_limit"`
@@ -137,6 +139,12 @@ type wireResult struct {
 	// its tables.
 	JoinOrderByShape     string `json:"join_order_by_shape,omitempty"`
 	JoinOrderByShapeNote string `json:"join_order_by_shape_note,omitempty"`
+	// ImpliedInFilters is how many filters Session.ImpliedInFilters added
+	// to the text that ran (orimplied.go); ImpliedInFiltersNote why it ran
+	// as it was when a step of adding them did not work, a fixed text that
+	// holds nothing of the statement.
+	ImpliedInFilters     int    `json:"implied_in_filters,omitempty"`
+	ImpliedInFiltersNote string `json:"implied_in_filters_note,omitempty"`
 	// ResidentBytes is the memory the worker holds after the statement, its
 	// DuckDB closed; 0 where the platform does not say. Sent by a worker that
 	// stays for another job (wireJob.More).

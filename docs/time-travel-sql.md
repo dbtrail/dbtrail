@@ -1775,6 +1775,27 @@ What this is and is not:
   failed on an error, which is also logged as a warning, and the statement
   ran in the copy's own order. The port without routing plans every
   statement as before.
+  **The filter an `OR` implies, added beside it.** When a routed statement's
+  `WHERE`, or the `ON` of an inner join, holds an `OR` whose every branch
+  says `col = literal` or `col IN (literals)` among its conditions, the copy
+  runs it with `col IN (every one of those literals)` added in `AND`, so it
+  can filter the table as it reads it. CH-benCHmark Q19 says
+  `ol_w_id IN (...)` in each of its three branches; with
+  `ol_w_id IN (1, 2, 3, 4, 5)` added it went from 1.07 s to 0.42 s on a
+  copy of 100 warehouses, with the same answer. The filter is implied by
+  the `OR`, so no row changes; and `IN` compares text exactly as `=` does on
+  the copy (case folded, a `_bin` column by its bytes, a trailing space
+  counted). It is left out when a branch does not restrict that column,
+  when the column is written differently in two branches (`ol_w_id` and
+  `order_line.ol_w_id`), when the column is a select item's alias, when a
+  value is a placeholder, `NULL`, a subquery, a cast or an expression, when
+  the literals are of two types or are numbers against a text column, and for
+  `NOT IN`, `<>`, `IS NULL`, an `OR` under `NOT`, in the select list, in a
+  `CASE`, in `HAVING`, and in the `ON` of an outer join. Each subquery, `WITH`
+  and part of a `UNION` is read on its own. The router decides with the
+  statement as written; only the text the copy runs changes, never what
+  MySQL, the client or the audit record see. If a step of the rewrite
+  fails, the statement runs as it is and the log says so in a warning.
   **LIKE without case, a switch per server, off by default.** MySQL
   compares `LIKE` without case under its default collations; the copy
   compares it with case, so `name LIKE 'pr%'` finds "PRODUCT" on one and

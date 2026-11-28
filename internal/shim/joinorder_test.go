@@ -101,6 +101,11 @@ func TestJoinOrderByShape_onlyForRoutedStatements(t *testing.T) {
 			if f.gotSess.JoinOrderByShape != c.shape || (c.routed && f.gotSess.KeepJoinOrder != c.keep) {
 				t.Errorf("text: JoinOrderByShape %v KeepJoinOrder %v, want %v %v", f.gotSess.JoinOrderByShape, f.gotSess.KeepJoinOrder, c.shape, c.keep)
 			}
+			// The filter an OR implies: every routed statement, whatever its
+			// join order.
+			if f.gotSess.ImpliedInFilters != c.routed {
+				t.Errorf("text: ImpliedInFilters %v, want %v", f.gotSess.ImpliedInFilters, c.routed)
+			}
 
 			f.gotStmt = ""
 			_, _, ctx, err := h.HandleStmtPrepare(strings.Replace(c.stmt, "GROUP BY", "AND a.y = ? GROUP BY", 1))
@@ -115,6 +120,11 @@ func TestJoinOrderByShape_onlyForRoutedStatements(t *testing.T) {
 			}
 			if f.gotSess.JoinOrderByShape != c.shape || (c.routed && f.gotSess.KeepJoinOrder != c.keep) {
 				t.Errorf("prepared: JoinOrderByShape %v KeepJoinOrder %v, want %v %v", f.gotSess.JoinOrderByShape, f.gotSess.KeepJoinOrder, c.shape, c.keep)
+			}
+			// The filter an OR implies: every routed statement, whatever its
+			// join order.
+			if f.gotSess.ImpliedInFilters != c.routed {
+				t.Errorf("prepared: ImpliedInFilters %v, want %v", f.gotSess.ImpliedInFilters, c.routed)
 			}
 		})
 	}

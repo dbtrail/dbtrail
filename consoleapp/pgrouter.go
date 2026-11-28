@@ -1331,7 +1331,10 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 				RetryOutOfMemoryInWrittenOrder: true, KeepJoinOrder: opts.KeepJoinOrder,
 				// A wide result is cut by its cells (#3286), so what it takes
 				// in this process's memory stays bounded at any row cap.
-				MaxCells: pgCopyMaxCells, CellsFloorRows: pgCopyCellsFloorRows}
+				MaxCells: pgCopyMaxCells, CellsFloorRows: pgCopyCellsFloorRows,
+				// The filter an OR implies, beside the OR (orimplied.go):
+				// the same rows, read with the table filtered as it is read.
+				ImpliedInFilters: true}
 			if opts.JoinNDV != nil {
 				sess.JoinNDV = &sqlsandbox.JoinCounts{NDV: opts.JoinNDV}
 				sess.TryConnectedJoinOrder = true

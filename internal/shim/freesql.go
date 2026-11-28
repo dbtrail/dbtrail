@@ -1430,6 +1430,10 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 	// with other joins), never reordered by shape. A port without routing
 	// runs as it always did.
 	sess.JoinOrderByShape = h.router != nil && !keepJoinOrder && !straightJoin
+	// And the filter an OR implies (sqlsandbox's ImpliedInFilters), added
+	// to the text the copy runs after the router has decided to send it
+	// there: what the router counted and decided is the statement's own.
+	sess.ImpliedInFilters = h.router != nil
 	sess.UnchangedWithin = unchangedWithin
 	sess.ResultToFile = toFile
 	sess.BinaryResult = toFile && binary // what it bounds is the file's

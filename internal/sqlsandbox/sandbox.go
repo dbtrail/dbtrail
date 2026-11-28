@@ -313,6 +313,16 @@ type Session struct {
 	// MySQL port sets it, for the statements its read router sends to the
 	// copy; off, nothing changes.
 	JoinOrderByShape bool
+	// ImpliedInFilters adds, beside an OR of a WHERE or of an INNER JOIN's
+	// ON whose every branch restricts one column to literals (col = 1, col
+	// IN (2, 3)), the IN of all those literals (orimplied.go): implied, so
+	// the answer does not change, and the copy filters the table as it
+	// reads it. Only the text that runs on the copy is rewritten: before
+	// the join check (JoinNDV), so it judges the plan that runs, and after
+	// the join order by shape otherwise. A statement it cannot rewrite runs
+	// as it is. Result.ImpliedInFilters says how many were added. Off,
+	// nothing changes.
+	ImpliedInFilters bool
 	// RetryOutOfMemoryInWrittenOrder runs a statement that failed with the
 	// engine's out of memory error in the copy's own join order once more
 	// in the order written, in the same slot and within what is left of its
@@ -554,6 +564,9 @@ type Result struct {
 	// statement ran in the copy's own order; "" when the shape does not
 	// apply or the option was off.
 	JoinOrderByShape string `json:"-"`
+	// ImpliedInFilters is how many filters Session.ImpliedInFilters added
+	// to the text that ran.
+	ImpliedInFilters int `json:"-"`
 	// Note is a sentence the caller adds for the reader, set by the parent
 	// and never by the worker (#2210: the answer came from an earlier copy).
 	Note string `json:"-"`
@@ -1838,7 +1851,7 @@ func marshalJob(job Job, limits Limits, spill spillSpec, spool string, more bool
 		TimeZone: job.Session.TimeZone, MySQLClock: job.Session.MySQLClock, SelectLimit: job.Session.SelectLimit, KeepJoinOrder: job.Session.KeepJoinOrder, PostgresRules: job.Session.PostgresRules, PostgresNames: job.Session.PostgresNames,
 		MaxCells: job.Session.MaxCells, CellsFloorRows: job.Session.CellsFloorRows,
 		JoinNDV: job.Session.joinNDV(), SkipCommonSubplan: job.Session.SkipCommonSubplan, TryConnectedJoinOrder: job.Session.TryConnectedJoinOrder, JoinOrderByShape: job.Session.JoinOrderByShape,
-		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
+		ImpliedInFilters: job.Session.ImpliedInFilters, Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
 		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes, More: more,
 		SpoolDir: spool, SpoolMaxBytes: spoolMax(spool, limits),
@@ -2140,6 +2153,7 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 		return Result{}, &WorkerError{Err: err, PID: pid, Stderr: w.stderr.text()}
 	}
 	logJoinOrderByShapeNote(out)
+	logImpliedInFilters(out)
 	if out.Error != nil {
 		switch out.Error.Kind {
 		case errRefused:
@@ -2176,6 +2190,7 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 			Spawn: spawnTook, Decode: time.Since(decodeStart),
 		}}
 	res.JoinOrderByShape = out.JoinOrderByShape
+	res.ImpliedInFilters = out.ImpliedInFilters
 	if out.JoinOrderByShape == JoinOrderByShapeConnected {
 		slog.Info("sql on the copy: a statement whose FROM is a list of tables ran with its tables in a connected order, picked by the shape of its FROM before it ran",
 			"order", out.JoinOrderTables)

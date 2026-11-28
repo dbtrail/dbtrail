@@ -2424,6 +2424,22 @@ output in proportion but builds a hash table from a side the engine thinks
 small: Q9 over fresh-mode views (order_line joined with stock first) is
 neither flagged nor changed by the check.
 
+**The filter an `OR` implies is added beside it.** When a statement's
+`WHERE`, or the `ON` of an inner join, holds an `OR` whose every branch says
+`col = literal` or `col IN (literals)` among its conditions, the copy runs it
+with `col IN (every one of those literals)` added in `AND`, so the table is
+filtered as it is read. The filter is implied by the `OR`, so the answer does
+not change; CH-benCHmark Q19 (`ol_w_id IN (...)` in each branch) went from
+1.07 s to 0.42 s on a copy of 100 warehouses. It is added before the join
+check, which judges the plan that runs. Anything less plain is left as it
+is: a branch without that column, the column written two ways, a
+placeholder, `NULL`, a subquery, a cast or an expression in place of a
+literal, literals of two types, numbers against a text column, a select
+item's alias, `NOT IN`, `<>`, and an `OR` in the select
+list, a `CASE`, `HAVING` or the `ON` of an outer join. Only the copy's text
+changes; the source, the client and the audit record keep the statement as
+written.
+
 **A statement that runs out of memory on the copy is tried once more in the
 order written.** When the copy's engine fails a statement with its
 `Out of Memory Error` in its own join order, the port runs it again on the
