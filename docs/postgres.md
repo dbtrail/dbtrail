@@ -1406,9 +1406,14 @@ listener, its own workers, its own memory.
   common types, psycopg on a binary cursor), they are sent in binary, the
   same bytes the source sends. Some columns are announced as `text`, with the
   text PostgreSQL writes:
-  - `json`, `jsonb`, `varchar(n)`, `char(n)`, enums and the other types the
-    copy keeps as text (the [table below](#how-each-type-reads-in-sql-on-the-copy)
-    lists them);
+  - `json`, `jsonb`, enums and the other types the copy keeps as text (the
+    [table below](#how-each-type-reads-in-sql-on-the-copy) lists them);
+  - `varchar(n)` and `char(n)`, except a column of one of those types that the
+    statement's own select list returns as it is, named by itself
+    (`c_last`, `c.c_credit`), which is announced with its type and length as
+    on the source. Not when a `UNION`, `VALUES` or a cast anywhere in the
+    statement may change it, or behind a `*`. A `char(n)` is sent without its
+    padding either way;
   - `interval`: JDBC reads a column of that type by asking the server's
     catalog about the type, which this port answers only for the types it
     announces, so `getObject` would fail; as text every driver reads it;
@@ -1427,7 +1432,9 @@ listener, its own workers, its own memory.
   connection (`avg()` of a `numeric` or of whole numbers and a division of a
   `numeric`, which PostgreSQL writes with 12 to 20 decimals, are a `numeric`
   of 16 decimals on the copy; on a server that hides tables or columns such an
-  `avg()` is refused), and an aggregate or a literal of a `numeric` keeps its
+  `avg()` is refused), `sum()` of a `smallint` or an `integer` is a `bigint`
+  as on PostgreSQL (on a connection that can reach its source; with
+  `DISTINCT`, `FILTER` or `OVER` it is a `numeric`), and an aggregate or a literal of a `numeric` keeps its
   precision and scale here (`numeric(10,2)`) where PostgreSQL reports none. A
   `numeric` declared without precision is a `numeric(38,18)` here and is
   written with its 18 decimals (`12345.678000000000000000` where the source
@@ -1998,7 +2005,7 @@ The source answers a cheap statement for:
   PostgreSQL divides them as whole numbers, and the copy's division answers
   a `numeric`), a division or an `avg()` with a side the statement does not
   show to be a `numeric` or a whole number (a `double precision` or a
-  `real`, a `numeric` without precision or past 20 digits or 8 decimals, a name from a subquery or a `WITH`, `sum()` of a `bigint`, which
+  `real`, a `numeric` without precision or past 20 digits or 8 decimals, a name from a subquery or a `WITH` (except as the argument of an `avg()`, when every definition of that name in the statement is a `numeric` or a whole number and no column has the name), `sum()` of a `bigint`, which
   PostgreSQL sums to a `numeric`, a function not in the list above, a
   `CASE` with such a value or with only `NULL`, a cast, a parameter), a
   division with a `CASE` just before or after its slash (`CASE ... END / 2`;
