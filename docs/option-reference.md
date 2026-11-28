@@ -876,9 +876,9 @@ Address where the router exposes Prometheus metrics and /status (its numbers as 
 
 ### `router-concurrency`
 
-How many statements run on the copy at the same time, 1 to 64 (similar to innodb_thread_concurrency). Empty or 0 lets the router work it out from the cores and memory it may use, one statement per two cores; the rest wait their turn.
+How many statements run on the copy at the same time, 1 to 64 (similar to innodb_thread_concurrency). Empty or 0 lets the router work it out from the vCPUs and memory it may use, one statement per two vCPUs; the rest wait their turn.
 
-- Default: worked out from the machine (one statement per two cores, limited by memory).
+- Default: worked out from the machine (one statement per two vCPUs, limited by memory).
 - Example: `router-concurrency = 8`
 - Environment variable: `BINTRAIL_ROUTER_CONCURRENCY`
 - Read by: router.
