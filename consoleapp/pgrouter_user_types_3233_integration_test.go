@@ -23,6 +23,7 @@ const (
 	pgUserDomain = "pguser_code"
 	pgUserOver   = "pguser_code2"
 	pgUserEnum   = "pguser_level"
+	pgUserNum    = "pguser_amount"
 )
 
 func pgUserSetup(table string) []string {
@@ -30,11 +31,13 @@ func pgUserSetup(table string) []string {
 		"DROP TYPE IF EXISTS " + pgUserEnum + " CASCADE",
 		"DROP DOMAIN IF EXISTS " + pgUserOver + " CASCADE",
 		"DROP DOMAIN IF EXISTS " + pgUserDomain + " CASCADE",
+		"DROP DOMAIN IF EXISTS " + pgUserNum + " CASCADE",
 		"CREATE DOMAIN " + pgUserDomain + " AS char(4)",
+		"CREATE DOMAIN " + pgUserNum + " AS numeric(10,2)",
 		"CREATE DOMAIN " + pgUserOver + " AS " + pgUserDomain,
 		"CREATE TYPE " + pgUserEnum + " AS ENUM ('z', 'a')",
-		"CREATE TABLE " + table + " (id int PRIMARY KEY, dc " + pgUserDomain + ", dd " + pgUserOver + ", lv " + pgUserEnum + ", n int, label text)",
-		"INSERT INTO " + table + " SELECT i, 'a', 'a', CASE WHEN i % 2 = 0 THEN 'z' ELSE 'a' END::" + pgUserEnum + ", i * 10, 'w' || i FROM generate_series(1, 9) i",
+		"CREATE TABLE " + table + " (id int PRIMARY KEY, dc " + pgUserDomain + ", dd " + pgUserOver + ", lv " + pgUserEnum + ", n int, label text, am " + pgUserNum + ")",
+		"INSERT INTO " + table + " SELECT i, 'a', 'a', CASE WHEN i % 2 = 0 THEN 'z' ELSE 'a' END::" + pgUserEnum + ", i * 10, 'w' || i, 1.5 FROM generate_series(1, 9) i",
 	}
 }
 
@@ -46,10 +49,23 @@ func pgUserCases(table string) (read []struct{ stmt, want string }, notRead []st
 		{"SELECT min(lv) FROM " + table, "z"},
 		{"SELECT id FROM " + table + " ORDER BY lv, id LIMIT 1", "2"},
 		{"SELECT count(*) FROM " + table + " AS \"a\"(i, x) WHERE x = 'a'", "9"},
+		// A join, a group key and DISTINCT over the domain over char(n), whose
+		// values are shorter than n.
+		{"SELECT count(*) FROM " + table + " a JOIN " + table + " b ON b.dc = a.dc", "81"},
+		{"SELECT dc, count(*) FROM " + table + " GROUP BY dc", "a   |9"},
+		{"SELECT count(DISTINCT dd) FROM " + table, "1"},
+		// A domain over numeric.
+		{"SELECT sum(am) FROM " + table, "13.50"},
+		// A cast to char(n) or to "char" pads or cuts on PostgreSQL, though
+		// no column of the table is of a type made after initdb.
+		{`SELECT 'abc'::"char" FROM ` + table + " WHERE id = 1", "a"},
+		{"SELECT 'a '::char(3) = 'a' FROM " + table + " WHERE id = 1", "t"},
+		{"SELECT length(CAST('ab' AS char(4))) FROM " + table + " WHERE id = 1", "2"},
+		{"SELECT 'abc'::char(2) FROM " + table + " WHERE id = 1", "ab"},
 	}
 	notRead = []string{
 		"SELECT id, n FROM " + table + " WHERE id > 2 ORDER BY id",
-		"SELECT dc, dd, lv FROM " + table + " WHERE id = 1",
+		"SELECT dc, dd, lv, am FROM " + table + " WHERE id = 1",
 		"SELECT * FROM " + table + " WHERE id = 1",
 		"SELECT count(*) FROM " + table,
 		"SELECT count(*) FROM (SELECT * FROM " + table + ") s",
@@ -92,7 +108,7 @@ func TestIntegrationPGRouterUserTypes_3233(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 	dropTypes := func(source *pgconn.PgConn) {
-		for _, s := range []string{"DROP TYPE IF EXISTS " + pgUserEnum + " CASCADE", "DROP DOMAIN IF EXISTS " + pgUserOver + " CASCADE", "DROP DOMAIN IF EXISTS " + pgUserDomain + " CASCADE"} {
+		for _, s := range []string{"DROP TYPE IF EXISTS " + pgUserEnum + " CASCADE", "DROP DOMAIN IF EXISTS " + pgUserOver + " CASCADE", "DROP DOMAIN IF EXISTS " + pgUserDomain + " CASCADE", "DROP DOMAIN IF EXISTS " + pgUserNum + " CASCADE"} {
 			_, _ = source.Exec(context.Background(), s).ReadAll()
 		}
 	}
