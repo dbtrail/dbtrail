@@ -390,3 +390,31 @@ func TestLogImpliedInFilters(t *testing.T) {
 		t.Errorf("logged:\n%s", buf.String())
 	}
 }
+
+// A column compared with literals of another type: the IN casts them as the
+// = does, so the rows do not change whether the filter is added or not.
+func TestImpliedInFilters_mixedTypesSameAnswer(t *testing.T) {
+	conn := orConn(t)
+	ctx := context.Background()
+	if _, err := conn.ExecContext(ctx, `CREATE TABLE m AS SELECT * FROM (VALUES
+		('01', DATE '2020-01-02', 1.50::DECIMAL(5,2), 1), ('1', DATE '2020-01-03', 2.25::DECIMAL(5,2), 2),
+		('2', DATE '2020-01-04', 1.00::DECIMAL(5,2), 1), ('02', DATE '2020-01-02', 2.50::DECIMAL(5,2), 2),
+		('2 ', DATE '2020-01-03', 1.5::DECIMAL(5,2), 2)) v(v, d, n, k)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		"SELECT v FROM m WHERE (v = 1 AND k < 2) OR (v = 2 AND k > 1)",
+		"SELECT v FROM m WHERE (v IN (1, 2) AND k < 2) OR (v = 2 AND k > 1)",
+		"SELECT v FROM m WHERE (d = '2020-01-02' AND k < 2) OR (d = '2020-1-3' AND k > 1)",
+		"SELECT v FROM m WHERE (n = 1.5 AND k < 2) OR (n = 2.25 AND k > 1)",
+		"SELECT v FROM m WHERE (n = 1.50 AND k < 2) OR (n IN (2.5, 1.5) AND k > 1)",
+	} {
+		got := impliedInFilters(ctx, conn, q)
+		if got.note != "" {
+			t.Fatalf("%s: %q", q, got.note)
+		}
+		if want, have := orRows(t, conn, q), orRows(t, conn, got.text); want != have {
+			t.Errorf("%s (added %d): rows changed:\n%s\nwant\n%s", q, got.added, have, want)
+		}
+	}
+}
