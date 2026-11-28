@@ -73,6 +73,7 @@ case "$url" in
     if [ -n "$out" ]; then printf '%s' "$STUB_RELEASE_BODY" > "$out"; else printf '%s' "$STUB_RELEASE_BODY"; fi;;
   *docker-compose.yml) [ -n "$STUB_COMPOSE_FAIL" ] && exit 22; cp "$COMPOSE_SRC" "$out";;
   *dbtrail.sh) [ -n "$STUB_NO_CLI" ] && exit 22; cp "$CLI_SRC" "$out";;
+  */install.sh) [ -n "$STUB_INSTALLER_BODY" ] && { printf '%s' "$STUB_INSTALLER_BODY" > "$out"; exit 0; }; cp "$INSTALLER_SRC" "$out";;
 esac
 exit 0
 `,
@@ -111,6 +112,13 @@ func install(t *testing.T, env ...string) run {
 // wrote before installing, or a compose file from an earlier run.
 func installWith(t *testing.T, prep func(dir string), env ...string) run {
 	t.Helper()
+	return installScript(t, "install.sh", prep, env...)
+}
+
+// installScript is installWith for another script of the repository's root
+// (install-postgres.sh), run the same way with the same stand-ins.
+func installScript(t *testing.T, script string, prep func(dir string), env ...string) run {
+	t.Helper()
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
@@ -134,7 +142,7 @@ func installWith(t *testing.T, prep func(dir string), env ...string) run {
 	}
 	log := filepath.Join(tmp, "docker.log")
 	curlLog := filepath.Join(tmp, "curl.log")
-	cmd := exec.Command("sh", filepath.Join(root, "install.sh"))
+	cmd := exec.Command("sh", filepath.Join(root, script))
 	cmd.Env = append([]string{
 		"PATH=" + bin + ":/usr/bin:/bin",
 		"HOME=" + tmp,
@@ -145,6 +153,7 @@ func installWith(t *testing.T, prep func(dir string), env ...string) run {
 		"STUB_RELEASE_BODY=" + releaseBody,
 		"COMPOSE_SRC=" + filepath.Join(root, "docker-compose.yml"),
 		"CLI_SRC=" + filepath.Join(root, "dbtrail.sh"),
+		"INSTALLER_SRC=" + filepath.Join(root, "install.sh"),
 	}, env...)
 	out, err := cmd.CombinedOutput()
 	calls, _ := os.ReadFile(log)
