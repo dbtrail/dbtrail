@@ -125,6 +125,8 @@ func TestImpliedInFilters(t *testing.T) {
 		// counted in the outer union.
 		{name: "levels do not mix", sql: "SELECT a FROM t WHERE (b = 1 AND EXISTS (SELECT 1 FROM u WHERE d = 7)) OR (b = 2 AND c < 4)", adds: []string{"(b IN (1, 2))"}, not: []string{"7)) AND", "IN (1, 2, 7)", "d IN"}},
 		{name: "only the subquery restricts", sql: "SELECT a FROM t WHERE (EXISTS (SELECT 1 FROM u WHERE d = 7) AND c > 0) OR (EXISTS (SELECT 1 FROM u WHERE d = 8) AND c < 4)"},
+		{name: "random() by its alias", sql: "SELECT (random() * 2)::INT AS r FROM t WHERE (r = 0 AND a > 1) OR (r = 1 AND a < 5)"},
+		{name: "random() anywhere", sql: "SELECT a, random() AS x FROM t WHERE (b = 1 AND c > 0) OR (b = 2 AND c < 4)"},
 		{name: "no OR", sql: "SELECT a FROM t WHERE b = 1 AND c > 0"},
 		{name: "no WHERE", sql: "SELECT a FROM t"},
 		{name: "'or' in a string only", sql: "SELECT a FROM t WHERE s = 'or' AND c > 0"},
@@ -230,7 +232,25 @@ func TestImpliedInFilters_textComparesAsEquals(t *testing.T) {
 					t.Fatalf("%s: %v", stmt, err)
 				}
 			}
-			for _, view := range []string{"txt", "txt_bin"} {
+			// And through Parquet files, as the copy reads its tables: one
+			// file per row, so each row group's min and max are that row's,
+			// where a filter pushed into the scan could skip it.
+			dir := t.TempDir()
+			for id := 1; id <= 6; id++ {
+				stmt := fmt.Sprintf("COPY (SELECT * FROM txt_raw WHERE id = %d) TO '%s/txt_%d.parquet' (FORMAT parquet)", id, dir, id)
+				if _, err := conn.ExecContext(ctx, stmt); err != nil {
+					t.Fatalf("%s: %v", stmt, err)
+				}
+			}
+			for _, stmt := range []string{
+				"CREATE VIEW txt_pq AS SELECT id, s, k FROM read_parquet('" + dir + "/*.parquet')",
+				"CREATE VIEW txt_pq_bin AS SELECT id, s COLLATE C AS s, k FROM read_parquet('" + dir + "/*.parquet')",
+			} {
+				if _, err := conn.ExecContext(ctx, stmt); err != nil {
+					t.Fatalf("%s: %v", stmt, err)
+				}
+			}
+			for _, view := range []string{"txt", "txt_bin", "txt_pq", "txt_pq_bin"} {
 				for _, q := range []string{
 					"SELECT id FROM " + view + " WHERE (s = 'ABC' AND k < 2) OR (s IN ('x') AND k > 1)",
 					"SELECT id FROM " + view + " WHERE (s = 'abc' AND k < 2) OR (s = 'X' AND k > 1)",
@@ -250,7 +270,8 @@ func TestImpliedInFilters_textComparesAsEquals(t *testing.T) {
 }
 
 // A statement DuckDB cannot parse comes back as it is, with a note of
-// fixed text: no error, and no part of the statement in the note.
+// fixed text: no error, and no part of the statement in the note. One
+// whose own columns do not bind comes back with no note.
 func TestImpliedInFilters_failedStepKeepsTheStatement(t *testing.T) {
 	conn := orConn(t)
 	ctx := context.Background()
@@ -266,9 +287,10 @@ func TestImpliedInFilters_failedStepKeepsTheStatement(t *testing.T) {
 			t.Fatalf("%s: %v", stmt, err)
 		}
 	}
+	// Its own error, not the rule's: no note, so no warning.
 	q := "SELECT a FROM vg WHERE (b = 1 AND a > 0) OR (b = 2 AND a < 4)"
 	got = impliedInFilters(ctx, conn, q)
-	if got.text != q || got.added != 0 || !strings.HasPrefix(got.note, impliedInFailedNote+": ") {
+	if got.text != q || got.added != 0 || got.note != "" {
 		t.Fatalf("%+v", got)
 	}
 }
@@ -410,11 +432,40 @@ func TestImpliedInFilters_mixedTypesSameAnswer(t *testing.T) {
 		"SELECT v FROM m WHERE (n = 1.50 AND k < 2) OR (n IN (2.5, 1.5) AND k > 1)",
 	} {
 		got := impliedInFilters(ctx, conn, q)
-		if got.note != "" {
-			t.Fatalf("%s: %q", q, got.note)
+		// Each is rewritten: the test is of the IN's casts.
+		if got.note != "" || got.added != 1 {
+			t.Fatalf("%s: %+v", q, got)
 		}
 		if want, have := orRows(t, conn, q), orRows(t, conn, got.text); want != have {
 			t.Errorf("%s (added %d): rows changed:\n%s\nwant\n%s", q, got.added, have, want)
+		}
+	}
+}
+
+// Q19 and Q7 over Parquet files, as the copy reads its tables, a few rows
+// per row group: the same answer with the filters pushed into the scan.
+func TestImpliedInFilters_q19q7OverParquet(t *testing.T) {
+	conn := orConn(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	for _, tb := range []string{"order_line", "item", "orders", "customer", "stock", "supplier", "nation"} {
+		for _, stmt := range []string{
+			fmt.Sprintf("COPY %[1]s TO '%[2]s/%[1]s.parquet' (FORMAT parquet, ROW_GROUP_SIZE 100)", tb, dir),
+			"DROP TABLE " + tb,
+			fmt.Sprintf("CREATE VIEW %[1]s AS SELECT * FROM read_parquet('%[2]s/%[1]s.parquet')", tb, dir),
+		} {
+			if _, err := conn.ExecContext(ctx, stmt); err != nil {
+				t.Fatalf("%s: %v", stmt, err)
+			}
+		}
+	}
+	for name, q := range map[string]string{"Q19": chQ19, "Q7": chQ7} {
+		got := impliedInFilters(ctx, conn, q)
+		if got.added == 0 || got.note != "" {
+			t.Fatalf("%s: not rewritten: %+v", name, got)
+		}
+		if want, have := orRows(t, conn, q), orRows(t, conn, got.text); want != have {
+			t.Errorf("%s: rows changed:\n%s\nwant\n%s", name, have, want)
 		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"reflect"
 	"regexp"
+	"strings"
 )
 
 // The filters an OR implies (Session.ImpliedInFilters): a condition an OR
@@ -63,7 +64,9 @@ import (
 // must parse to the tree asked for and give the statement's own columns
 // (DESCRIBE), as joinconnected.go asks of its own; when a step does not
 // work, the statement runs as it is, and the parent logs a warning with a
-// fixed note.
+// fixed note. A statement whose own columns do not bind runs as it is with
+// no note (its error is its own), and one that calls random() or another
+// function of a new value per call is left alone.
 
 // impliedInFailedNote begins the note of a rewrite that did not work. The
 // rest names the step, never the engine's text, which can quote a row's
@@ -105,8 +108,18 @@ func impliedInFilters(ctx context.Context, conn *sql.Conn, statement string) imp
 	if err != nil {
 		return failed("the template of an IN could not be parsed")
 	}
+	if callsVolatile(doc) {
+		return keep
+	}
 	added := addImpliedIns(doc, in, and)
 	if added == 0 {
+		return keep
+	}
+	// The statement's own columns first: one that does not bind (a column
+	// or a table misspelled) fails as it is, and that is not this rule's
+	// failure to report.
+	own, err := describeResult(ctx, conn, statement)
+	if err != nil {
 		return keep
 	}
 	want, err := json.Marshal(doc)
@@ -128,10 +141,6 @@ func impliedInFilters(ctx context.Context, conn *sql.Conn, statement string) imp
 	if !reflect.DeepEqual(withoutLocations(asked), withoutLocations(again)) {
 		return failed("the statement with the filters does not parse to the statement asked for")
 	}
-	own, err := describeResult(ctx, conn, statement)
-	if err != nil {
-		return failed("the statement's columns could not be had")
-	}
 	theirs, err := describeResult(ctx, conn, text)
 	if err != nil {
 		return failed("the columns of the statement with the filters could not be had")
@@ -140,6 +149,39 @@ func impliedInFilters(ctx context.Context, conn *sql.Conn, statement string) imp
 		return failed("the statement with the filters does not give the statement's own columns")
 	}
 	return impliedIn{text: text, added: added}
+}
+
+// volatileFunctions answer another value at each call. WHERE may name a
+// select item by its alias, which DuckDB binds by copying the item: over
+// one of these, the IN added would be one more call, apart from the
+// branches', and could drop a row the OR kept.
+var volatileFunctions = map[string]bool{
+	"random": true, "uuid": true, "gen_random_uuid": true, "uuidv4": true, "uuidv7": true, "nextval": true, "setseed": true,
+}
+
+// callsVolatile reports whether doc calls one of volatileFunctions
+// anywhere, its subqueries included.
+func callsVolatile(v any) bool {
+	switch t := v.(type) {
+	case map[string]any:
+		if t["class"] == "FUNCTION" {
+			if name, _ := t["function_name"].(string); volatileFunctions[strings.ToLower(name)] {
+				return true
+			}
+		}
+		for _, e := range t {
+			if callsVolatile(e) {
+				return true
+			}
+		}
+	case []any:
+		for _, e := range t {
+			if callsVolatile(e) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // impliedInTemplates are an IN of literals and an AND as DuckDB's parse
