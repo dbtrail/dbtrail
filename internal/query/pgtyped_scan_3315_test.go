@@ -52,4 +52,8 @@ func TestPGScanSourceReadsTypedFilesAsText(t *testing.T) {
 			t.Fatalf("%v: %s %s", tc.md, id, typ)
 		}
 	}
+	// A list of another version is refused, never read through the cast.
+	if _, err := pgScanSource(context.Background(), db, "'"+write(map[string]string{pgTypedColumnsKey: `{"v":2,"columns":{"n":"INTEGER"}}`})+"'"); err == nil {
+		t.Fatal("a list of another version was read")
+	}
 }

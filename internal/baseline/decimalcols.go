@@ -122,6 +122,8 @@ type TableFooter struct {
 	// could not be used ("" when it could, or the file has none): which of
 	// its columns are typed is not known, so its pinned view refuses.
 	PGTypedUnusable string `json:",omitempty"`
+	// Set alone (PG nil) on a file that stores columns typed and whose
+	// shape or column list could not be read (refuseUnreadPGTyped).
 }
 
 // DistinctColumns splits a parsed schema into the columns whose DISTINCT
@@ -463,6 +465,7 @@ func ReadTableFooters(ctx context.Context, paths []string) (FooterRead, error) {
 	}
 	st.applyPGTyped()
 	confirmColumnOrder(ctx, db, &st)
+	st.refuseUnreadPGTyped()
 	return st.result(paths, err), nil
 }
 

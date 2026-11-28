@@ -710,7 +710,8 @@ func processTable(ctx context.Context, conn *pgx.Conn, t tableInfo, outputDir, t
 	if notTyped := (copyNotTyped{}); errors.As(err, &notTyped) {
 		// Read again, in the same snapshot: the first COPY was read to its
 		// end, so the connection and its transaction are still open.
-		logger.Info("pgbaseline: a value of a column the snapshot stores as its type has no single spelling there; the table is written with every column as text",
+		// Warn: the table is read twice at every snapshot from now on.
+		logger.Warn("pgbaseline: a value of a column the snapshot stores as its type has no single spelling there; the table is read again and written with every column as text",
 			"table", t.Schema+"."+t.Table, "column", notTyped.column)
 		n, err = copyTable(ctx, conn, t, outPath, md, nil, compression, rowGroupSize, logger)
 	}

@@ -47,7 +47,9 @@ func BasePositions(ctx context.Context, db *sql.DB, basePath string, keyColumns 
 	}
 	cols := make([]string, len(keyColumns))
 	for i, c := range keyColumns {
-		cols[i] = `"` + strings.ReplaceAll(c, `"`, `""`) + `"`
+		// As text, whatever the file holds: a key column is never stored
+		// typed (#3315), and if one were, its text is what a key is.
+		cols[i] = baseline.PGTextSQL(`"` + strings.ReplaceAll(c, `"`, `""`) + `"`)
 	}
 	rows, err := db.QueryContext(ctx, "SELECT file_row_number, "+strings.Join(cols, ", ")+
 		" FROM read_parquet("+file(basePath)+", file_row_number=true"+noHive+")")

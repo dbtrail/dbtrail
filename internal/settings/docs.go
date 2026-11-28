@@ -295,7 +295,7 @@ var docs = map[string]Doc{
 	},
 	"BINTRAIL_PG_TYPED_COPY": {
 		Group:   "archives",
-		Text:    "For PostgreSQL servers only: a snapshot stores whole number, oid, date, uuid and numeric columns with a declared precision as their type instead of as text, which makes reports on the copy faster and the files smaller. Key columns, and every column of a table without a primary key, stay text. Every reader of the copy reads both kinds of file, mixed in one snapshot. 0, false, no or off turns it off: every column is stored as text, as before.",
+		Text:    "For PostgreSQL servers only: a snapshot stores whole number, oid, date and uuid columns, and numeric columns of up to 38 digits with a scale below their precision, as their type instead of as text, which makes reports on the copy faster and the files smaller. Key columns, and every column of a table without a primary key, stay text. Every reader of this version reads both kinds of file, mixed in one snapshot; a views file that follows later snapshots must be written again by this version. 0, false, no or off turns it off: every column is stored as text, as before.",
 		Default: "on",
 		Example: "off",
 		ReadBy:  "watch, bintrail-pg baseline (PostgreSQL servers)",

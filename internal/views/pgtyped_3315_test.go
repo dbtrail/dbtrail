@@ -526,7 +526,12 @@ func TestPGTypedAgreesWithTheViewsCasts(t *testing.T) {
 // it always read a PostgreSQL table: the same whether the snapshot it reads
 // stores columns typed or not, and whichever kind it was written over.
 func TestPGTypedFollowingViewSameAsText(t *testing.T) {
-	changes := map[string][]string{pgdelta.KeyOf([]string{"99", "new"}): {"99", "new", N, "1", N, "1", "infinity", "aaaaaaaa-bbbb-cccc-dddd-333333333333", "12.34", N, "0.0000", N, N, "inserted"}}
+	changes := map[string][]string{
+		pgdelta.KeyOf([]string{"99", "new"}): {"99", "new", N, "1", N, "1", "infinity", "aaaaaaaa-bbbb-cccc-dddd-333333333333", "12.34", N, "0.0000", N, N, "inserted"},
+		// Text no typed column could hold: a following view reads it as
+		// the text it is, over either kind of file.
+		pgdelta.KeyOf([]string{"1", "a|b"}): {"1", "a|b", "1", "1", "1", "1", "0044-03-15 BC", "aaaaaaaa-bbbb-cccc-dddd-444444444444", "NaN", "NaN", "NaN", N, "1", "bc"},
+	}
 	root := t.TempDir()
 	mk := func(stamp string, typed bool) string {
 		dir := t.TempDir()
@@ -590,6 +595,17 @@ func TestPGTypedUnusableListRefuses(t *testing.T) {
 	tbl.PGStored, tbl.PGTypedUnusable = nil, "version 2"
 	db := execViews(t, pgPairGenerate(root, FollowNone, tbl))
 	if _, err := viewRows(db); err == nil || !strings.Contains(err.Error(), "version 2") {
+		t.Fatalf("got %v", err)
+	}
+	// A footer kept for that alone (its shape could not be read): the
+	// table is not taken for a MySQL one, and its view refuses.
+	in := Input{Baselines: []BaselineTable{{Schema: "public", Table: "orders", Path: base, Rel: "public/orders.parquet"}}}
+	in.ApplyFooters(map[string]baseline.TableFooter{base: {PGTypedUnusable: "unread"}})
+	if b := in.Baselines[0]; b.SchemaKnown || b.PGTypedUnusable != "unread" {
+		t.Fatalf("got %+v", b)
+	}
+	db = execViews(t, pgPairGenerate(root, FollowNone, in.Baselines[0]))
+	if _, err := viewRows(db); err == nil || !strings.Contains(err.Error(), "unread") {
 		t.Fatalf("got %v", err)
 	}
 }

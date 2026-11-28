@@ -48,6 +48,46 @@ func writePGTypedPair(t *testing.T, cols []string, typed map[string]string, rows
 	return write(false), write(true)
 }
 
+// A file whose list of stored columns cannot be read is refused by the
+// readers of whole rows and by a fold, never read through the cast.
+func TestPGTypedUnusableListRefusedByReaders(t *testing.T) {
+	_, stored := writePGTypedPair(t, []string{"id", "n"}, map[string]string{"n": "INTEGER"}, [][]string{{"1", "2"}})
+	_ = stored
+	path := filepath.Join(t.TempDir(), "t.parquet")
+	w, err := baseline.NewWriter(path, []baseline.Column{{Name: "id", RawText: true}}, baseline.WriterConfig{Compression: "none", RowGroupSize: 2,
+		Metadata: map[string]string{baseline.MetaKeyPGTypedColumns: `{"v":2,"columns":{"n":"TIMESTAMP"}}`}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteRow([]string{"1"}, []bool{false}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadBaselineRows(context.Background(), path, map[string]string{"id": "1"}, 1); err == nil {
+		t.Fatal("ReadBaselineRows read a list of another version")
+	}
+	rel := baseline.PGRelation{OID: 1, PrimaryKey: []string{"id"}, Columns: []baseline.PGColumn{{Name: "id", TypeOID: 23, TypeMod: -1}, {Name: "n", TypeOID: 23, TypeMod: -1}}}
+	shape, _ := rel.Encode()
+	md := baseline.DumpMetadata{LSN: 1, PGRelation: shape, RenderGUCs: baseline.RenderGUCsPinned}
+	if _, err := checkPGFoldable("public", "t", md); err != nil {
+		t.Fatalf("a file of text: %v", err)
+	}
+	for _, v := range []string{`{"v":1,"columns":{"n":"INTEGER"}}`} {
+		md.PGTypedColumns = v
+		if _, err := checkPGFoldable("public", "t", md); err != nil {
+			t.Fatalf("%s: %v", v, err)
+		}
+	}
+	for _, v := range []string{`{"v":2,"columns":{"n":"INTEGER"}}`, `{"v":1,"columns":{"id":"INTEGER"}}`, `{"v":1,"columns":{"n":"BIGINT"}}`} {
+		md.PGTypedColumns = v
+		if _, err := checkPGFoldable("public", "t", md); err == nil {
+			t.Fatalf("%s: a fold starts from it", v)
+		}
+	}
+}
+
 // The row a single-row reconstruct starts from is the same text from a file
 // that stores columns typed as from the text file of the same rows.
 func TestReadBaselineRowsTypedPG(t *testing.T) {

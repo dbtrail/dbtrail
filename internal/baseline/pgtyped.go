@@ -206,13 +206,34 @@ func PGAllTextSQL(qualifier string, except ...string) string {
 // columns typed (MetaKeyPGTypedColumns), the same with every column as
 // PostgreSQL's text, so the reader gets what it got from a file of text.
 // Only the file's footer is read to tell.
+//
+// A list of another version is an error: this build checked the rendering
+// only of the types it stores itself.
 func PGScanSource(ctx context.Context, db *sql.DB, lit string) (string, error) {
-	var n int
-	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM parquet_kv_metadata("+lit+") WHERE key = "+sqlQuoteLiteral(MetaKeyPGTypedColumns)).Scan(&n); err != nil {
+	rows, err := db.QueryContext(ctx, "SELECT decode(value) FROM parquet_kv_metadata("+lit+") WHERE key = "+sqlQuoteLiteral(MetaKeyPGTypedColumns))
+	if err != nil {
 		return "", fmt.Errorf("read the footer of %s: %w", lit, err)
 	}
-	if n == 0 {
+	var values []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			rows.Close()
+			return "", fmt.Errorf("read the footer of %s: %w", lit, err)
+		}
+		values = append(values, v)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("read the footer of %s: %w", lit, err)
+	}
+	if len(values) == 0 {
 		return "parquet_scan(" + lit + ")", nil
+	}
+	for _, v := range values {
+		if _, err := ParsePGTypedColumns(v); err != nil {
+			return "", fmt.Errorf("%s: %w; update DBTrail to read it", lit, err)
+		}
 	}
 	return "(SELECT " + PGAllTextSQL("") + " FROM parquet_scan(" + lit + "))", nil
 }

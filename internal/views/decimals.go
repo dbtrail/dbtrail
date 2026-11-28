@@ -55,6 +55,12 @@ func (in *Input) ApplyFooters(footers map[string]baseline.TableFooter) {
 		if !ok {
 			continue
 		}
+		if f.PG == nil && f.PGTypedUnusable != "" {
+			// A PostgreSQL file that stores columns typed and whose footer
+			// could not be read whole: its view refuses (pgPairStateBody).
+			in.Baselines[i].PGTypedUnusable = f.PGTypedUnusable
+			continue
+		}
 		if f.PG != nil {
 			// A PostgreSQL source's file: its own casts and column order, and
 			// none of what follows, which is read from a MySQL CREATE TABLE.

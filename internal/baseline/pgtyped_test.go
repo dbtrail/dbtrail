@@ -252,3 +252,14 @@ func TestApplyPGTypedUnusable(t *testing.T) {
 		}
 	}
 }
+
+// A file that stores columns typed and lost its PostgreSQL entry keeps one
+// that refuses, and is not reported as having no schema.
+func TestRefuseUnreadPGTyped(t *testing.T) {
+	st := footerScan{footers: map[string]TableFooter{}, unparsable: map[string]bool{"f": true}, failed: map[string]bool{}}
+	st.collectPGTyped("f", `{"v":1,"columns":{"a":"INTEGER"}}`)
+	st.refuseUnreadPGTyped()
+	if f := st.footers["f"]; f.PGTypedUnusable == "" || f.PG != nil || st.unparsable["f"] {
+		t.Fatalf("got %+v, unparsable %v", f, st.unparsable["f"])
+	}
+}

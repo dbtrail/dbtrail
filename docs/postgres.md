@@ -3522,6 +3522,13 @@ text, read as before. A table that a refresh writes again in full is written
 as text. Setting `BINTRAIL_PG_TYPED_COPY=0` (or `false`, `no`, `off`) stores
 every column as text.
 
+Only this version and later read such a file as before. After upgrading,
+write again any views file that follows `current` or the newest snapshot
+(`bintrail views` without `--pin-snapshot`): one written by an older version
+reads the stored columns as their type. A DBTrail older than this one must
+not read the snapshots this one writes; until every reader is upgraded, set
+`BINTRAIL_PG_TYPED_COPY=0` where snapshots are taken.
+
 ---
 
 ### A proxy in front of the port

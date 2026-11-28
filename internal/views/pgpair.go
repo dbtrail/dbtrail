@@ -66,7 +66,7 @@ import (
 func pgPairStateBody(in Input, t BaselineTable) (body string, ok bool) {
 	if t.PGTypedUnusable != "" && !in.Follow.follows() {
 		return pgPairRefusal(t, fmt.Sprintf("%s.%s: which columns its file stores as their type cannot be read (%s); "+
-			"take a new snapshot of the table with this version", t.Schema, t.Table, t.PGTypedUnusable)), true
+			"update DBTrail, or take a new snapshot of the table with this version", t.Schema, t.Table, t.PGTypedUnusable)), true
 	}
 	body, ok = pgPairStateBodyOf(in, t)
 	if ok || in.Follow.follows() || t.Tail == nil || pgNewReplace(t) == "" {
