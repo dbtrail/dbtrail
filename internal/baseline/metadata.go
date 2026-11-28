@@ -235,6 +235,9 @@ type DumpMetadata struct {
 	// PGRelation is MetaKeyPGRelation, verbatim; "" when absent. Decode it
 	// with ParsePGRelation.
 	PGRelation string
+	// PGTypedColumns is MetaKeyPGTypedColumns, verbatim; "" when absent (the
+	// file holds every column as text). Decode it with ParsePGTypedColumns.
+	PGTypedColumns string
 }
 
 // StartedAtMarkerFile is a bintrail-authored sidecar written into the mydumper
@@ -534,6 +537,9 @@ func ReadParquetMetadata(path string) (DumpMetadata, error) {
 	if v, ok := pf.Lookup(MetaKeyPGRelation); ok {
 		m.PGRelation = v
 	}
+	if v, ok := pf.Lookup(MetaKeyPGTypedColumns); ok {
+		m.PGTypedColumns = v
+	}
 	readProvenance(path, &m, func(k string) (string, bool) { return pf.Lookup(k) })
 	if v, ok := pf.Lookup(MetaKeyDeltaChainStart); ok {
 		m.DeltaChainStart = parseFooterTime(path, MetaKeyDeltaChainStart, v)
@@ -691,6 +697,8 @@ func applyS3FooterKV(m *DumpMetadata, path, key, val string) (corrupt bool) {
 		m.LockMode = val
 	case MetaKeyPGRelation:
 		m.PGRelation = val
+	case MetaKeyPGTypedColumns:
+		m.PGTypedColumns = val
 	case MetaKeySnapshotProducer:
 		m.Producer = val
 	case MetaKeyDerivedFromPath:

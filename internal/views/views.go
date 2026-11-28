@@ -228,6 +228,16 @@ type BaselineTable struct {
 	// the PostgreSQL-protocol port's catalog reads it (#2769); the views do
 	// not.
 	PGRelation *baseline.PGRelation
+	// PGStored are the columns the table's file stores as their type
+	// (baseline.TableFooter.PGStored, #3315), set with PGCasts. Their casts
+	// are not applied to the file; they are applied to the text of the rows
+	// beside it (pgTextParts).
+	PGStored map[string]string
+	// PGTypedUnusable is baseline.TableFooter.PGTypedUnusable: why the list
+	// of the file's stored columns could not be used. A pinned view of the
+	// table refuses, with it; a following view reads every column as text and
+	// does not need the list.
+	PGTypedUnusable string
 	// TrimPadded reads each char(n) of the table without its padding
 	// (baseline.PGPaddedToTrim), above the join of the snapshot with its
 	// changes, so a key still matches by its stored value. Only the

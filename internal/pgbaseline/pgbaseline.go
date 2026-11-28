@@ -705,18 +705,69 @@ func processTable(ctx context.Context, conn *pgx.Conn, t tableInfo, outputDir, t
 	if err != nil {
 		return 0, err
 	}
-
-	cols := make([]baseline.Column, len(t.Columns))
-	for i, name := range t.Columns {
-		cols[i] = baseline.Column{Name: name, RawText: true}
+	typed := typedColumnsOf(t)
+	n, err := copyTable(ctx, conn, t, outPath, md, typed, compression, rowGroupSize, logger)
+	if notTyped := (copyNotTyped{}); errors.As(err, &notTyped) {
+		// Read again, in the same snapshot: the first COPY was read to its
+		// end, so the connection and its transaction are still open.
+		logger.Info("pgbaseline: a value of a column the snapshot stores as its type has no single spelling there; the table is written with every column as text",
+			"table", t.Schema+"."+t.Table, "column", notTyped.column)
+		n, err = copyTable(ctx, conn, t, outPath, md, nil, compression, rowGroupSize, logger)
 	}
-	w, err := baseline.NewWriter(outPath, cols, baseline.WriterConfig{
+	return n, err
+}
+
+// rowWriter is the file a table's COPY is written to: every column as text
+// (baseline.Writer), or some typed (baseline.PGWriter).
+type rowWriter interface {
+	WriteRow(values []string, nulls []bool) error
+	Close() error
+}
+
+// copyNotTyped is a COPY read through to its end without being written,
+// because a value of column, which typed stores as its type, is not one the
+// type holds with the same text (baseline.ErrPGNotTyped).
+type copyNotTyped struct{ column string }
+
+func (e copyNotTyped) Error() string {
+	return fmt.Sprintf("column %s holds a value that is not stored typed", e.column)
+}
+
+// copyTable COPYs one table into its Parquet file, the columns of typed
+// stored as their type and every other one as text. Returns rows written.
+func copyTable(ctx context.Context, conn *pgx.Conn, t tableInfo, outPath string, md map[string]string, typed map[string]string, compression string, rowGroupSize int, logger *slog.Logger) (int64, error) {
+	cfg := baseline.WriterConfig{
 		Compression:  compression,
 		RowGroupSize: rowGroupSize,
 		Metadata:     md,
-	})
-	if err != nil {
-		return 0, fmt.Errorf("create writer: %w", err)
+	}
+	var w rowWriter
+	if len(typed) > 0 {
+		enc, err := baseline.EncodePGTypedColumns(typed)
+		if err != nil {
+			return 0, err
+		}
+		withTyped := make(map[string]string, len(md)+1)
+		for k, v := range md {
+			withTyped[k] = v
+		}
+		withTyped[baseline.MetaKeyPGTypedColumns] = enc
+		cfg.Metadata = withTyped
+		pw, err := baseline.NewPGWriter(outPath, t.Columns, typed, cfg)
+		if err != nil {
+			return 0, fmt.Errorf("create writer: %w", err)
+		}
+		w = pw
+	} else {
+		cols := make([]baseline.Column, len(t.Columns))
+		for i, name := range t.Columns {
+			cols[i] = baseline.Column{Name: name, RawText: true}
+		}
+		bw, err := baseline.NewWriter(outPath, cols, cfg)
+		if err != nil {
+			return 0, fmt.Errorf("create writer: %w", err)
+		}
+		w = bw
 	}
 	var closed bool
 	defer func() {
@@ -728,11 +779,23 @@ func processTable(ctx context.Context, conn *pgx.Conn, t tableInfo, outputDir, t
 		}
 	}()
 
+	// A value a typed column cannot hold stops the writing, not the COPY:
+	// an error handed back to the COPY closes the connection, which holds
+	// the snapshot every other table is read in. The rest is read and
+	// dropped, and the caller writes the table again as text.
+	var notTyped *baseline.PGNotTypedError
 	sink := newCopyTextSink(len(t.Columns), func(values []string, nulls []bool) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		return w.WriteRow(values, nulls)
+		if notTyped != nil {
+			return nil
+		}
+		err := w.WriteRow(values, nulls)
+		if errors.As(err, &notTyped) {
+			return nil
+		}
+		return err
 	})
 
 	// COPY (SELECT <explicit columns> ...) rather than COPY <table>:
@@ -760,6 +823,9 @@ func processTable(ctx context.Context, conn *pgx.Conn, t tableInfo, outputDir, t
 	// mismatch instead of a truncated baseline that looks complete.
 	if want := tag.RowsAffected(); want != sink.rows {
 		return sink.rows, fmt.Errorf("copy %s.%s: parsed %d rows but the server reported %d — COPY parser desync, refusing to publish a truncated baseline", t.Schema, t.Table, sink.rows, want)
+	}
+	if notTyped != nil {
+		return 0, copyNotTyped{column: notTyped.Column}
 	}
 
 	closed = true

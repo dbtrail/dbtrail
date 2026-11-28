@@ -293,6 +293,13 @@ var docs = map[string]Doc{
 		Example: "off",
 		ReadBy:  "watch (PostgreSQL servers)",
 	},
+	"BINTRAIL_PG_TYPED_COPY": {
+		Group:   "archives",
+		Text:    "For PostgreSQL servers only: a snapshot stores whole number, oid, date, uuid and numeric columns with a declared precision as their type instead of as text, which makes reports on the copy faster and the files smaller. Key columns, and every column of a table without a primary key, stay text. Every reader of the copy reads both kinds of file, mixed in one snapshot. 0, false, no or off turns it off: every column is stored as text, as before.",
+		Default: "on",
+		Example: "off",
+		ReadBy:  "watch, bintrail-pg baseline (PostgreSQL servers)",
+	},
 	"BINTRAIL_S3_BUCKET": {
 		Group:   "archives",
 		Text:    "An S3 bucket name. For bintrail init: the bucket to create for archives (it gets a rule that deletes objects after 365 days). For bintrail agent: the bucket where captured row data is written in bring-your-own-storage mode.",

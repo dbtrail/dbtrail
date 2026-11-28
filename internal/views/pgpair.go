@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/dbtrail/dbtrail/internal/pgdelta"
 )
@@ -65,6 +64,23 @@ import (
 // before and reads the file alone: the views the console and the CLI write
 // for a snapshot in S3, which have no folder to look at.
 func pgPairStateBody(in Input, t BaselineTable) (body string, ok bool) {
+	if t.PGTypedUnusable != "" && !in.Follow.follows() {
+		return pgPairRefusal(t, fmt.Sprintf("%s.%s: which columns its file stores as their type cannot be read (%s); "+
+			"take a new snapshot of the table with this version", t.Schema, t.Table, t.PGTypedUnusable)), true
+	}
+	body, ok = pgPairStateBodyOf(in, t)
+	if ok || in.Follow.follows() || t.Tail == nil || pgNewReplace(t) == "" {
+		return body, ok
+	}
+	// A file that stores columns typed, with a tail and no pair: the
+	// tail's rows are text, and read through the casts of the file's
+	// stored columns (pgTypedTailBody).
+	return pgTypedTailBody(t), true
+}
+
+// pgPairStateBodyOf is pgPairStateBody but for a file that stores columns
+// typed and has a tail and no pair.
+func pgPairStateBodyOf(in Input, t BaselineTable) (body string, ok bool) {
 	if t.SchemaKnown || t.Delta || !strings.HasSuffix(t.Path, ".parquet") {
 		return "", false
 	}
@@ -121,14 +137,14 @@ func pgPairStateBody(in Input, t BaselineTable) (body string, ok bool) {
 		deadFiles[i] = pgPairBeside(t.Path, p.Dead)
 		newFiles[i] = pgPairBeside(t.Path, p.New)
 	}
-	state := pgdelta.StateSQL(t.Path, deadFiles, newFiles)
+	state := pgdelta.StateSQLTyped(t.Path, deadFiles, newFiles, pgNewReplace(t))
 	return ordered(t, func(replace string) string {
 		if t.Tail != nil {
 			segs := make([]string, len(t.Tail.Paths))
 			for i, p := range t.Tail.Paths {
 				segs[i] = sqlString(fileGlob(p))
 			}
-			return baseline.TableTailChainStateSQL(state, segs, t.Tail.PK, replace)
+			return pgTailChainStateSQL(state, segs, t.Tail.PK, replace, pgNewReplace(t))
 		}
 		if replace == "" {
 			return state

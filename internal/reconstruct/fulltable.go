@@ -2626,13 +2626,24 @@ func scanBaselinePass(ctx context.Context, ddb *sql.DB, in mergeCore, changes ma
 			slog.Warn("reading a backup file in one query, not by pages: the table has a column named file_row_number, so the read is not bounded in memory",
 				"schema", in.Schema, "table", in.Table)
 		}
-		_, err := scanBaselineQuery(ctx, ddb, "SELECT * FROM parquet_scan("+lit+")", in, changes, owns, emit, stats)
+		star := "*"
+		if in.PGTextPK {
+			star = baseline.PGAllTextSQL("")
+		}
+		_, err := scanBaselineQuery(ctx, ddb, "SELECT "+star+" FROM parquet_scan("+lit+")", in, changes, owns, emit, stats)
 		return err
+	}
+	// A PostgreSQL file's columns are read as PostgreSQL's text, whether
+	// the file holds them as text or stores some typed (#3315): the fold
+	// writes text, and its rows that no change touches are the file's own.
+	star := "* EXCLUDE (file_row_number)"
+	if in.PGTextPK {
+		star = baseline.PGAllTextSQL("", "file_row_number")
 	}
 	var read int64
 	for lo := int64(0); lo < total; lo += scanPageRows {
-		q := fmt.Sprintf("SELECT * EXCLUDE (file_row_number) FROM read_parquet(%s, file_row_number = true) "+
-			"WHERE file_row_number >= %d AND file_row_number < %d", lit, lo, lo+scanPageRows)
+		q := fmt.Sprintf("SELECT %s FROM read_parquet(%s, file_row_number = true) "+
+			"WHERE file_row_number >= %d AND file_row_number < %d", star, lit, lo, lo+scanPageRows)
 		n, err := scanBaselineQuery(ctx, ddb, q, in, changes, owns, emit, stats)
 		if err != nil {
 			return err

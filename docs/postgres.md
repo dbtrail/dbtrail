@@ -3331,7 +3331,8 @@ bintrail-pg captures every value as its PostgreSQL text representation (the
 quoted literal that the target column's input function coerces back. Because the
 value is stored verbatim as text — never reparsed through a numeric type in the
 index — the `numeric`-via-`float64` precision class that the MySQL path had to guard
-against simply cannot occur here.
+against simply cannot occur here. (A snapshot file may store some columns as
+their type, [read back as the same text](#columns-a-snapshot-stores-as-their-type).)
 
 The following types are **round-trip tested** two ways — insert → capture → index →
 `recover` → re-execute the reversal against live PostgreSQL, asserting the column's
@@ -3381,8 +3382,10 @@ coerce, but verify your own round-trip.
 
 ### How each type reads in SQL on the copy
 
-A snapshot of a PostgreSQL source holds every value as the text PostgreSQL
-wrote, which is what keeps recovery exact. SQL on the copy (the web
+A snapshot of a PostgreSQL source holds each value as the text PostgreSQL
+wrote, which is what keeps recovery exact, or, for some columns, as the
+value itself (see "Columns a snapshot stores as their type" below); either
+way it reads back as the same text. SQL on the copy (the web
 interface's SQL page, `bintrail views`, the views file inside each snapshot)
 reads each column as the type the table declares, in the table's own column
 order, from the shape the snapshot records beside the data. Nothing is
@@ -3485,6 +3488,39 @@ client that reads it as a number sees no difference. Writing the other value
 with the column's decimals (`coalesce(sum(amount), 0.00)`) makes both sides
 print the same. (Around a `round()` the port does check this, value by
 value, and sends a statement whose decimals would differ to the source.)
+
+### Columns a snapshot stores as their type
+
+Reading text costs most of what a report on the copy spends: every read
+turns each value back into its type. So a snapshot stores these columns as
+the value itself instead of as text:
+
+- `smallint`, `integer`, `bigint` and `oid`
+- `date`, `infinity` and `-infinity` included
+- `uuid`
+- `numeric(p,s)` up to 38 digits, with a scale below its precision
+
+The views read such a column with the same type and the same values as from
+text, so nothing changes in what a statement answers. The files are smaller
+and the reads faster. Every reader that needs PostgreSQL's text (recovery,
+reconstruct, refreshes, a views file that follows later snapshots) gets
+exactly the text the value was written from.
+
+Some columns stay text all the same:
+
+- the columns of the primary key, which the changes after the snapshot
+  find their rows by;
+- every column of a table with no primary key;
+- every column of a table that holds a value that would not read back as the
+  same text, such as a `date` before the common era or `NaN` in a `numeric`.
+  The table is then written as text, as before, and the log says which
+  column held such a value;
+- `numeric(p,p)` (no digit before the point) and every type not listed above.
+
+A snapshot can hold tables of both kinds, and old snapshots, written as
+text, read as before. A table that a refresh writes again in full is written
+as text. Setting `BINTRAIL_PG_TYPED_COPY=0` (or `false`, `no`, `off`) stores
+every column as text.
 
 ---
 

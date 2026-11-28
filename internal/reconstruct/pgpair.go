@@ -661,7 +661,7 @@ func pgFoldPairIntoFile(ctx context.Context, duck *sql.DB, base string, dead, ro
 		meta = ", KV_METADATA {" + strings.Join(kv, ", ") + "}"
 	}
 	q := fmt.Sprintf("COPY (%s) TO %s (FORMAT PARQUET, COMPRESSION '%s'%s)",
-		pgdelta.StateSQL(base, dead, rows), lit(tmp), ParquetWriterCompression, meta)
+		pgdelta.TextStateSQL(base, dead, rows), lit(tmp), ParquetWriterCompression, meta)
 	if _, err := duck.ExecContext(ctx, q); err != nil {
 		return fail(fmt.Errorf("fold the delta into its file: %w", localWriteErr(err)))
 	}
@@ -784,7 +784,7 @@ func materializePGBaseWithPair(ctx context.Context, basePath string, prev *pgPre
 	applyDuckDBTuning(ctx, duck, tuning)
 	lit := func(p string) string { return "'" + strings.ReplaceAll(p, "'", "''") + "'" }
 	q := fmt.Sprintf("COPY (%s) TO %s (FORMAT PARQUET, COMPRESSION '%s')",
-		pgdelta.StateSQL(basePath, prev.dead, prev.rows), lit(tmpPath), ParquetWriterCompression)
+		pgdelta.TextStateSQL(basePath, prev.dead, prev.rows), lit(tmpPath), ParquetWriterCompression)
 	if _, err := duck.ExecContext(ctx, q); err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf("apply the table delta to its file: %w", localWriteErr(err))
