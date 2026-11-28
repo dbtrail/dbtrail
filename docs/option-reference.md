@@ -1076,6 +1076,15 @@ Forces one mode for every server on the SQL ports. on (or fresh, true, 1, yes) p
 - Environment variable: `BINTRAIL_SQL_TAILS`
 - Read by: router, pg-router.
 
+### `sql-worker-nice`
+
+How many steps below its own process each statement on the copy runs on the CPU, 0 to 19 (Linux nice values). While the machine has idle cores nothing changes; when the copy's statements fill every core, the work next to them comes first: statements the router passes to the source, and capture in watch. off or 0 runs the statements at the same priority as the process. Lowering needs no privilege, in a container too.
+
+- Default: 10.
+- Example: `sql-worker-nice = off`
+- Environment variable: `BINTRAIL_SQL_WORKER_NICE`
+- Read by: watch, serve, router, pg-router.
+
 ### `sql-fresh-wait`
 
 In fresh mode on the MySQL port, makes a statement first wait until capture has caught up with where the source's binary log stands, so a row written a moment ago is visible. on waits up to 200ms, or give a time from 1ms to 10s; past it the statement answers with what is ready. Needs the REPLICATION CLIENT privilege on the source to read its position.

@@ -844,6 +844,12 @@ type Config struct {
 	// running or arriving; after it they are stopped, and the next statement
 	// starts its own worker. 0 means DefaultStandbyIdle.
 	StandbyIdle time.Duration
+	// WorkerNice is how many nice values below this process each worker
+	// runs, 0 to 19 (#3321): 0 keeps them at its priority. Linux only; a
+	// worker that cannot be lowered starts at this process's priority, and
+	// the log says why once per change. Callers take it from
+	// WorkerNiceFrom(os.Getenv(WorkerNiceEnv)).
+	WorkerNice int
 }
 
 // DefaultStandbyIdle is how long standby workers outlive the last statement:
@@ -1006,6 +1012,11 @@ type Runner struct {
 	// statement's cgroup has a new name every time, which is not a change.
 	fence          fence
 	fenceLastError string
+	// workerNice is Config.WorkerNice; niceLastError, under spillMu, the
+	// last reason a worker could not be lowered ("" when it could), logged
+	// once per change like the fence's.
+	workerNice    int
+	niceLastError string
 
 	mu       sync.Mutex
 	busy     map[string]bool
@@ -1071,6 +1082,7 @@ func New(cfg Config) *Runner {
 		spillRoot:   cfg.SpillDir,
 		standby:     cfg.Standby,
 		standbyIdle: cfg.StandbyIdle,
+		workerNice:  min(max(cfg.WorkerNice, 0), maxNice),
 		busy:        map[string]bool{},
 	}
 	if r.maxInFlight <= 0 {
@@ -1752,12 +1764,12 @@ func (r *Runner) startFenced(memoryLimit string) (*worker, error) {
 		args = []string{WorkerCommand}
 	}
 	if r.fence.root == "" {
-		return startWorkerProcess(exe, args, nil)
+		return r.startWorkerProcess(exe, args, nil)
 	}
 	wf, err := r.fence.make(memoryLimit)
 	if err == nil {
 		var w *worker
-		if w, err = startWorkerProcess(exe, args, wf); err == nil {
+		if w, err = r.startWorkerProcess(exe, args, wf); err == nil {
 			r.noteFence(nil)
 			return w, nil
 		}
@@ -1766,17 +1778,52 @@ func (r *Runner) startFenced(memoryLimit string) (*worker, error) {
 	}
 	// Noted only once the worker has started without its cgroup: a worker
 	// that cannot start either way failed for a reason of its own.
-	w, startErr := startWorkerProcess(exe, args, nil)
+	w, startErr := r.startWorkerProcess(exe, args, nil)
 	if startErr == nil {
 		r.noteFence(err)
 	}
 	return w, startErr
 }
 
+// startWorkerProcess is the package's startWorkerProcess at r.workerNice
+// steps below this process (#3321).
+func (r *Runner) startWorkerProcess(exe string, args []string, wf *workerFence) (*worker, error) {
+	return startWorkerProcess(exe, args, wf, func(start func() error) error {
+		niceErr, err := startLowered(r.workerNice, start)
+		if err == nil {
+			// Only a worker that started says anything about its
+			// priority: one that did not start has a reason of its own.
+			r.noteNice(niceErr)
+		}
+		return err
+	})
+}
+
+// noteNice logs, once per change, that workers run at this process's CPU
+// priority (err) or are lowered again (nil after an error).
+func (r *Runner) noteNice(err error) {
+	msg := ""
+	if err != nil {
+		msg = err.Error()
+	}
+	r.spillMu.Lock()
+	changed := msg != r.niceLastError
+	r.niceLastError = msg
+	r.spillMu.Unlock()
+	switch {
+	case !changed:
+	case err != nil:
+		slog.Warn("sql on the copy: statements run at the same CPU priority as this process, so a heavy one can slow the work it does next to them", "reason", msg, "setting", WorkerNiceEnv)
+	default:
+		slog.Info("sql on the copy: statements run at a lower CPU priority than this process again", "nice_step", r.workerNice)
+	}
+}
+
 // startWorkerProcess starts one worker process and, when wf is given, moves
 // it into that cgroup before returning it. wf is removed when the process
-// exits.
-func startWorkerProcess(exe string, args []string, wf *workerFence) (*worker, error) {
+// exits. launch, when given, runs the process start it is handed (startLowered
+// through Runner.startWorkerProcess); nil starts it directly.
+func startWorkerProcess(exe string, args []string, wf *workerFence, launch func(start func() error) error) (*worker, error) {
 	// The process is tied to its own context, not to a statement's: the
 	// statement's deadline does not exist yet when a worker starts.
 	wctx, kill := context.WithCancel(context.Background())
@@ -1803,7 +1850,10 @@ func startWorkerProcess(exe string, args []string, wf *workerFence) (*worker, er
 		stderr: &cappedBuffer{max: 64 << 10, drop: true},
 	}
 	cmd.Stdout, cmd.Stderr = w.stdout, w.stderr
-	if err := cmd.Start(); err != nil {
+	if launch == nil {
+		launch = func(start func() error) error { return start() }
+	}
+	if err := launch(cmd.Start); err != nil {
 		kill()
 		return nil, fmt.Errorf("start: %w", err)
 	}
