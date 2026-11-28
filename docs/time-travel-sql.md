@@ -1793,8 +1793,8 @@ What this is and is not:
   `CASE`, in `HAVING`, and in the `ON` of an outer join. Each subquery, `WITH`
   and part of a `UNION` is read on its own. The router decides with the
   statement as written; only the text the copy runs changes, never what
-  MySQL, the client or the audit record see. A statement the copy cannot
-  rewrite runs as it is, with a warning in the log.
+  MySQL, the client or the audit record see. If a step of the rewrite
+  fails, the statement runs as it is and the log says so in a warning.
   **LIKE without case, a switch per server, off by default.** MySQL
   compares `LIKE` without case under its default collations; the copy
   compares it with case, so `name LIKE 'pr%'` finds "PRODUCT" on one and
