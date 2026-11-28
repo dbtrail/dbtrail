@@ -944,7 +944,8 @@ idle cores nothing changes. When statements on the copy, capture and the
 snapshot update want the same cores, the kernel serves capture and the update
 first, and the statements take longer. Unlike the MySQL router, this service
 does not read its priority: how many statements run at once and their threads
-stay what `PG_ROUTER_WORKERS` and `PG_ROUTER_THREADS` say. Inside the service
+stay what `PG_ROUTER_WORKERS` and `PG_ROUTER_THREADS` say (the threads worked
+out from the vCPUs when unset). Inside the service
 the same holds one level down: each statement on the copy runs in a process of
 its own, 10 nice steps below the router's (`SQL_WORKER_NICE` in `.env`, the
 same in every service that runs SQL on the copy), so the short statements the

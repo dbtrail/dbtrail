@@ -42,8 +42,10 @@ Delegate=yes
 CPUWeight=25
 # Unless told otherwise: four statements at once, each with this machine's
 # vCPUs shared among the five that can run (BINTRAIL_PG_ROUTER_WORKERS and
-# BINTRAIL_PG_ROUTER_THREADS in the settings file). For a ceiling on the whole service, `systemctl edit
-# bintrail-pg-router` and set, under [Service], for example:
+# BINTRAIL_PG_ROUTER_THREADS in the settings file). A CPUQuota counts as the
+# vCPUs: 400% gives each statement 1 thread unless the threads are set. For a
+# ceiling on the whole service, `systemctl edit bintrail-pg-router` and set,
+# under [Service], for example:
 #   MemoryMax=8G
 #   CPUQuota=400%
 

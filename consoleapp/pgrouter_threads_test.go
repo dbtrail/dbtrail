@@ -108,12 +108,12 @@ func TestPGRouterSettings_threadsAutoByDefault(t *testing.T) {
 
 // The start-up lines say whether the threads were worked out and from what.
 func TestPGRouterThreadsWords(t *testing.T) {
-	auto := pgRouterThreadsWords(pgRouterSettings{Workers: 2, Threads: 3, ThreadsAuto: true, ThreadsVCPUs: 8})
 	t.Setenv("GOMAXPROCS", "")
-	if auto != "3 threads (auto at start: 8 vCPUs over 3 statements at once)" {
+	auto := pgRouterThreadsWords(pgRouterSettings{Workers: 2, Threads: 3, ThreadsAuto: true, ThreadsVCPUs: 8})
+	if auto != "3 threads (auto at start: 8 vCPUs over 3 statements at once, the workers and the one kept for short statements)" {
 		t.Errorf("auto: %q", auto)
 	}
-	if capped := pgRouterThreadsWords(pgRouterSettings{Workers: 1, Threads: 16, ThreadsAuto: true, ThreadsVCPUs: 64}); capped != "16 threads (auto at start: 64 vCPUs over 2 statements at once, at most 16)" {
+	if capped := pgRouterThreadsWords(pgRouterSettings{Workers: 1, Threads: 16, ThreadsAuto: true, ThreadsVCPUs: 64}); capped != "16 threads (auto at start: 64 vCPUs over 2 statements at once, the workers and the one kept for short statements, at most 16)" {
 		t.Errorf("capped: %q", capped)
 	}
 	if exact := pgRouterThreadsWords(pgRouterSettings{Workers: 1, Threads: 16, ThreadsAuto: true, ThreadsVCPUs: 32}); strings.Contains(exact, "at most") {
@@ -123,12 +123,19 @@ func TestPGRouterThreadsWords(t *testing.T) {
 	if g := pgRouterThreadsWords(pgRouterSettings{Workers: 2, Threads: 2, ThreadsAuto: true, ThreadsVCPUs: 6}); !strings.Contains(g, "GOMAXPROCS=6 over 3 statements") {
 		t.Errorf("GOMAXPROCS from the environment: %q", g)
 	}
+	t.Setenv("GOMAXPROCS", "abc")
+	if g := pgRouterThreadsWords(pgRouterSettings{Workers: 2, Threads: 3, ThreadsAuto: true, ThreadsVCPUs: 8}); strings.Contains(g, "GOMAXPROCS") {
+		t.Errorf("a GOMAXPROCS Go ignored is named: %q", g)
+	}
 	t.Setenv("GOMAXPROCS", "")
+	if one := pgRouterThreadsWords(pgRouterSettings{Workers: 4, Threads: 1, ThreadsAuto: true, ThreadsVCPUs: 1}); !strings.Contains(one, "1 vCPU over") {
+		t.Errorf("one vCPU: %q", one)
+	}
 	if set := pgRouterThreadsWords(pgRouterSettings{Workers: 2, Threads: 4}); set != "4 threads" {
 		t.Errorf("set: %q", set)
 	}
 	out := pgRouterStartupLines(pgRouterSettings{Listen: "127.0.0.1:5433", Workers: 2, Threads: 3, ThreadsAuto: true, ThreadsVCPUs: 8, MaxConns: 16}, "2GB", "the default", nil, 1, true)
-	if !strings.Contains(out, "3 threads (auto at start: 8 vCPUs over 3 statements at once)") || !strings.Contains(out, "while --threads is auto") {
+	if !strings.Contains(out, "3 threads (auto at start: 8 vCPUs over 3 statements at once") || !strings.Contains(out, "while --threads is auto") {
 		t.Errorf("the start-up lines do not say how the threads were set:\n%s", out)
 	}
 }

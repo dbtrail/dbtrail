@@ -33,7 +33,8 @@ func pgAutoThreads(vcpus, slots int) int {
 // runtime sets from the CPUs this process may run on and, since Go 1.25, from
 // a container's CPU ceiling, rounded up and, on a machine with 2 CPUs or
 // more, never below 2 (measured: 1.5 CPUs and 1 CPU both give 2, 3 gives 3). The MySQL port's
-// pool counts its cores the same way (console.ThisMachineForSQLPool). A
+// pool reads its cores from the same place (console.ThisMachineForSQLPool),
+// though it divides them its own way. A
 // GOMAXPROCS set in the environment is what the operator gave the process,
 // and it is used as it is.
 var pgRouterVCPUs = func() int { return runtime.GOMAXPROCS(0) }
@@ -88,12 +89,17 @@ func pgRouterThreadsWords(st pgRouterSettings) string {
 		return countOfThreads(st.Threads)
 	}
 	cpus := fmt.Sprintf("%d vCPUs", st.ThreadsVCPUs)
-	if g := strings.TrimSpace(os.Getenv("GOMAXPROCS")); g != "" {
-		cpus = fmt.Sprintf("GOMAXPROCS=%d", st.ThreadsVCPUs)
+	if st.ThreadsVCPUs == 1 {
+		cpus = "1 vCPU"
+	}
+	// Named only when the runtime took it: Go ignores a GOMAXPROCS that is
+	// not a positive whole number and counts the CPUs itself.
+	if g, err := strconv.Atoi(os.Getenv("GOMAXPROCS")); err == nil && g > 0 && g == st.ThreadsVCPUs {
+		cpus = fmt.Sprintf("GOMAXPROCS=%d", g)
 	}
 	capped := ""
 	if slots := pgCopySlots(st.Workers); (st.ThreadsVCPUs+slots-1)/slots > maxPGRouterThreads {
 		capped = fmt.Sprintf(", at most %d", maxPGRouterThreads)
 	}
-	return fmt.Sprintf("%s (auto at start: %s over %s at once%s)", countOfThreads(st.Threads), cpus, countOfStatements(pgCopySlots(st.Workers)), capped)
+	return fmt.Sprintf("%s (auto at start: %s over %s at once, the workers and the one kept for short statements%s)", countOfThreads(st.Threads), cpus, countOfStatements(pgCopySlots(st.Workers)), capped)
 }

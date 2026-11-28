@@ -91,9 +91,11 @@ certificate of --tls-cert and --tls-key, which a client can verify
 cannot. A client that asks for no TLS is answered in clear text: sslmode=require
 or stricter on the client is what makes it encrypted or nothing.
 
-How many statements run at once (--workers), with how many threads each
-(--threads) and how much memory each (--sql-memory), is what is said here: the
-defaults are small, so this process fits beside capture without asking.
+How many statements run at once (--workers) and how much memory each
+(--sql-memory) is what is said here. Their threads (--threads) are worked out
+from the vCPUs this process may use unless a number is given. Capture keeps
+its share through CPU priority: this service's (cpu_shares, CPUWeight) and its
+statements', which run below this process (BINTRAIL_SQL_WORKER_NICE).
 
 Example:
   bintrail-console pg-router --listen 127.0.0.1:5433
@@ -104,11 +106,11 @@ Example:
 
 const (
 	defaultPGRouterListen = "127.0.0.1:5433"
-	// Nobody sized this process for the machine, and it runs beside the one
-	// that captures: four statements of two threads fill the 8 cores of the
-	// recommended machine and leave capture its share of the minimum one. The
-	// clients are cheap, waiting for a worker: 16 refused the 50 of a
-	// measured dashboard load.
+	// Four statements at once, beside the process that captures; their
+	// threads are worked out from the vCPUs (pgAutoThreads: 2 each on the 8
+	// of the recommended machine), and capture keeps its share through CPU
+	// priority, not through idle cores. The clients are cheap, waiting for a
+	// worker: 16 refused the 50 of a measured dashboard load.
 	defaultPGRouterWorkers  = 4
 	defaultPGRouterMaxConns = 256
 	maxPGRouterWorkers      = 16

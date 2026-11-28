@@ -858,9 +858,10 @@ services:
   # needs each server's source to be reachable from this container, as
   # `bintrail` does.
   #
-  # It is sized to fit beside capture without asking: four statements at once,
-  # 256 clients, and each statement's threads worked out from the CPUs this
-  # service may use (2 each on 8 vCPUs, 4 on 16). PG_ROUTER_WORKERS,
+  # Unless told otherwise: four statements at once, 256 clients, and each
+  # statement's threads worked out from the CPUs this service may use, a CPU
+  # limit included (2 each on 8 vCPUs, 4 on 16, 1 with PG_ROUTER_CPUS=4).
+  # Capture keeps its share through CPU priority (cpu_shares below). PG_ROUTER_WORKERS,
   # PG_ROUTER_THREADS and PG_ROUTER_MAX_CONNECTIONS in .env change that, and
   # PG_ROUTER_MEMORY (e.g. 8g) and PG_ROUTER_CPUS (e.g. 4) give this service
   # ceilings of its own. Each statement may take the memory saved in the web
@@ -1004,8 +1005,8 @@ services:
     # update are quiet, and the kernel serves those two first when they need
     # them. It only matters while the machine's cores are all busy. Unlike the
     # router, this service does not read it: how many statements run at once
-    # and their threads are PG_ROUTER_WORKERS and PG_ROUTER_THREADS, whatever
-    # the priority. PG_ROUTER_CPU_SHARES=1024 in .env is the default priority,
+    # and their threads are PG_ROUTER_WORKERS and PG_ROUTER_THREADS (the
+    # threads worked out from the vCPUs when unset), whatever the priority. PG_ROUTER_CPU_SHARES=1024 in .env is the default priority,
     # as before. Leave the other services' priority alone: lowering capture's
     # too takes its protection away.
     cpu_shares: ${PG_ROUTER_CPU_SHARES:-256}

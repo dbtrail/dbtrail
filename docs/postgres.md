@@ -1580,8 +1580,9 @@ stays idle. Measured with 3 reports at once over a real copy, on a 16 vCPU
 Intel machine (two hyperthreads per core), 6 threads each answered 72.8
 reports a minute and 3 threads 58.8, with the machine 46 % idle. On Graviton
 and AMD, where a vCPU is a core, 3 or 4 threads gave the same (within 2 %).
-With fewer threads one report alone takes longer, but on a full machine the
-reports together finish sooner. The statements the router passes to your
+With fewer threads one report alone takes longer (21 % with 3 threads instead
+of 4 on Graviton); on a full machine the reports together kept the same pace
+there, and on Intel with hyperthreads more threads finished more. The statements the router passes to your
 PostgreSQL are kept fast by the workers' lower CPU priority (below), not by
 leaving cores free.
 
@@ -1591,7 +1592,7 @@ systemd unit run this process at a lower CPU priority than capture
 `CPUWeight=25` in the unit), as they run the MySQL router: when every core is
 busy, capture and the snapshot update are served first and the statements
 here take longer. The process does not read that priority; `--workers` and
-`--threads` stay as set. Started by hand it has the priority of whatever
+`--threads` stay as set (`--threads auto` counts the vCPUs, not the priority). Started by hand it has the priority of whatever
 starts it.
 
 Inside the process, the router's own work comes before the copy's. Each
