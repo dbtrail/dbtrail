@@ -64,3 +64,23 @@ func TestPostgresNames_onlyForTheSessionThatAsks(t *testing.T) {
 		}
 	}
 }
+
+// The port's macros for avg(x), sum(x) and a / b (#3219) are named as
+// PostgreSQL names what the client wrote: avg, sum, and ?column?.
+func TestPostgresNames_ownMacros(t *testing.T) {
+	f := newCopyFixture(t)
+	r := newTestRunner(t, testLimits())
+	job := f.job("SELECT _bintrail_pg_sum32(a), _bintrail_pg_avgn(a), _bintrail_pg_div(sum(a) * 1.5, 2), _bintrail_pg_avg(a * 1.5::double), _bintrail_pg_sum32(a) AS s FROM (VALUES (1, 'x'), (2, 'y')) t(a, b)")
+	job.Session = Session{PostgresRules: true, PostgresNames: true}
+	res, err := r.Run(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, c := range res.Columns {
+		got = append(got, c.Name)
+	}
+	if want := []string{"sum", "avg", "?column?", "avg", "s"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}

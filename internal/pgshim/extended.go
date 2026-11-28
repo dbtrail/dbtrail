@@ -590,6 +590,7 @@ func (s *session) describeFree(st *preparedStatement) (cols []string, types []co
 		if perr := s.untypedArgumentsAsText(st, types); perr != nil {
 			return nil, nil, false, perr
 		}
+		s.sourceTextTypes(st.query, types)
 		return columnNames(got), types, true, nil
 	}
 	perr = freeError(err, s.logger)

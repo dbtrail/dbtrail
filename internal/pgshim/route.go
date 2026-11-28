@@ -1120,6 +1120,9 @@ var copyFuncs = map[string]bool{
 	// decimals (#3219), where every side is shown to be a numeric or a whole
 	// number (divisionVeto, avgVeto).
 	pgAvgN: true, pgDiv: true,
+	// sum(x) of smallints or integers, as RewriteForCopyTyped writes it: a
+	// bigint, as PostgreSQL answers it (#3219).
+	pgSum32: true,
 	// floor(a / b), as RewriteForCopy writes it, and ntile(n), whose
 	// buckets pgcompare measured the same.
 	pgFloorDiv: true, "ntile": true,
@@ -1865,7 +1868,7 @@ func screenWith(in []rtToken, types map[string][]string, untyped, sortsLikeSourc
 						return why
 					}
 				case pgAvgN:
-					if why := avgVeto(a, func(name string) []string { return types[name] }); why != "" && !untyped {
+					if why := avgVeto(a, aliasClassOf(toks, func(name string) []string { return types[name] })); why != "" && !untyped {
 						return why
 					}
 				case pgRoundK, pgRoundNeg, pgRoundWhole:

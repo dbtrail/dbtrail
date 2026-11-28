@@ -311,8 +311,14 @@ func pgFunctionName(v map[string]any) (string, int, bool) {
 		name = "round"
 	} else if strings.HasPrefix(name, "_bintrail_pg_floor_") {
 		name = "floor"
-	} else if name == "_bintrail_pg_avg" {
+	} else if name == "_bintrail_pg_avg" || name == "_bintrail_pg_avgn" {
 		name = "avg"
+	} else if name == "_bintrail_pg_sum32" {
+		// sum(x) of smallints or integers, a bigint (#3219).
+		name = "sum"
+	} else if name == "_bintrail_pg_div" {
+		// a / b on its own: an operator, which PostgreSQL does not name.
+		return "", 0, true
 	} else if name == "_bintrail_pg_epoch" || name == "_bintrail_pg_extract_whole" {
 		name = "extract"
 	} else if name == "_bintrail_pg_to_timestamp" {

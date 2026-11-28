@@ -574,6 +574,7 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		cols[i] = c.Name
 		types[i] = columnType(c.Type)
 	}
+	s.sourceTextTypes(text, types)
 	rows = make([][][]byte, len(res.Rows))
 	for i, r := range res.Rows {
 		if len(r) != len(cols) {
