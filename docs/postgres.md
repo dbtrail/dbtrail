@@ -2434,7 +2434,8 @@ not change; CH-benCHmark Q19 (`ol_w_id IN (...)` in each branch) went from
 check, which judges the plan that runs. Anything less plain is left as it
 is: a branch without that column, the column written two ways, a
 placeholder, `NULL`, a subquery, a cast or an expression in place of a
-literal, literals of two types, `NOT IN`, `<>`, and an `OR` in the select
+literal, literals of two types, numbers against a text column, a select
+item's alias, `NOT IN`, `<>`, and an `OR` in the select
 list, a `CASE`, `HAVING` or the `ON` of an outer join. Only the copy's text
 changes; the source, the client and the audit record keep the statement as
 written.

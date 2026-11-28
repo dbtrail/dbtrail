@@ -57,10 +57,15 @@ import (
 // (TestImpliedInFilters_textComparesAsEquals), so text columns are not
 // set apart.
 //
-// It runs in the worker on the text that runs, after the join order is
-// picked (shapeorder.go, joinguard.go), so it changes neither the order
-// picked nor what the read router counted (refs_text.go) or decided: that
-// was done on the statement's own text, before it got here. The new text
+// It runs in the worker on the text that runs, after the read router
+// counted (refs_text.go) and decided on the statement's own text. Under
+// the join check (joinguard.go) it runs before the check, so the plan the
+// check judges is the plan that runs; otherwise after the join order by
+// shape (shapeorder.go), whose choice it does not change.
+//
+// Each literal must fit the column's type, which DuckDB is asked
+// (DESCRIBE): a string literal fits any column, a number only a number
+// column (see literalsFit). The new text
 // must parse to the tree asked for and give the statement's own columns
 // (DESCRIBE), as joinconnected.go asks of its own; when a step does not
 // work, the statement runs as it is, and the parent logs a warning with a
@@ -111,7 +116,11 @@ func impliedInFilters(ctx context.Context, conn *sql.Conn, statement string) imp
 	if callsVolatile(doc) {
 		return keep
 	}
-	added := addImpliedIns(doc, in, and)
+	probe, err := serializeSQL(ctx, conn, "SELECT a FROM t")
+	if err != nil {
+		return failed("the template of a column's type could not be parsed")
+	}
+	added := addImpliedIns(doc, in, and, columnTypeOf(ctx, conn, doc, probe))
 	if added == 0 {
 		return keep
 	}
@@ -210,38 +219,49 @@ func impliedInTemplates(ctx context.Context, conn *sql.Conn) (in, and map[string
 type impliedSite struct {
 	node map[string]any
 	key  string
+	// sel is the SELECT whose FROM the condition's columns are read in.
+	sel map[string]any
 }
+
+// typeOfColumn is the type DuckDB gives column in sel's FROM (DESCRIBE),
+// ok false when it cannot say.
+type typeOfColumn func(sel map[string]any, column any) (string, bool)
 
 // addImpliedIns adds to every WHERE and INNER JOIN ON of doc the filters
 // its ORs imply, and says how many.
-func addImpliedIns(doc map[string]any, in, and map[string]any) int {
+func addImpliedIns(doc map[string]any, in, and map[string]any, typeOf typeOfColumn) int {
 	var sites []impliedSite
-	var collect func(v any)
-	collect = func(v any) {
+	var collect func(v any, sel map[string]any)
+	collect = func(v any, sel map[string]any) {
 		switch t := v.(type) {
 		case map[string]any:
 			switch {
-			case t["type"] == "SELECT_NODE" && t["where_clause"] != nil:
-				sites = append(sites, impliedSite{t, "where_clause"})
-			case t["type"] == "JOIN" && t["join_type"] == "INNER" && t["ref_type"] == "REGULAR" && t["condition"] != nil:
-				sites = append(sites, impliedSite{t, "condition"})
+			case t["type"] == "SELECT_NODE":
+				sel = t
+				if t["where_clause"] != nil {
+					sites = append(sites, impliedSite{t, "where_clause", t})
+				}
+			case t["type"] == "JOIN" && t["join_type"] == "INNER" && t["ref_type"] == "REGULAR" && t["condition"] != nil && sel != nil:
+				sites = append(sites, impliedSite{t, "condition", sel})
 			}
 			for _, e := range t {
-				collect(e)
+				collect(e, sel)
 			}
 		case []any:
 			for _, e := range t {
-				collect(e)
+				collect(e, sel)
 			}
 		}
 	}
-	collect(doc)
+	collect(doc, nil)
 	added := 0
 	for _, s := range sites {
 		var adds []any
 		for _, c := range flatten(s.node[s.key], "CONJUNCTION_AND") {
 			if n, _ := c.(map[string]any); n != nil && n["type"] == "CONJUNCTION_OR" {
-				adds = append(adds, impliedByOr(flatten(n, "CONJUNCTION_OR"), in)...)
+				adds = append(adds, impliedByOr(flatten(n, "CONJUNCTION_OR"), in, func(column any) (string, bool) {
+					return typeOf(s.sel, column)
+				})...)
 			}
 		}
 		if len(adds) == 0 {
@@ -361,7 +381,7 @@ func columnLiterals(e any) (any, []any, bool) {
 
 // impliedByOr is the INs an OR of branches implies, one per column every
 // branch restricts, made from in.
-func impliedByOr(branches []any, in map[string]any) []any {
+func impliedByOr(branches []any, in map[string]any, typeOf func(column any) (string, bool)) []any {
 	if len(branches) < 2 {
 		return nil
 	}
@@ -393,8 +413,11 @@ func impliedByOr(branches []any, in map[string]any) []any {
 		if !every || onlyThis {
 			continue
 		}
-		union, ok := literalUnion(literals)
+		union, typ, ok := literalUnion(literals)
 		if !ok {
+			continue
+		}
+		if colType, ok := typeOf(per[0][key].column); !ok || !literalsFit(colType, typ) {
 			continue
 		}
 		node := cloneJSON(in).(map[string]any)
@@ -408,9 +431,9 @@ func impliedByOr(branches []any, in map[string]any) []any {
 	return out
 }
 
-// literalUnion is literals without repeats, in the order written; not ok
-// when they are not all of one type.
-func literalUnion(literals []any) ([]any, bool) {
+// literalUnion is literals without repeats, in the order written, and
+// their type; not ok when they are not all of one type.
+func literalUnion(literals []any) ([]any, string, bool) {
 	var typ string
 	seen := map[string]bool{}
 	var out []any
@@ -419,19 +442,103 @@ func literalUnion(literals []any) ([]any, bool) {
 		t, _ := v["type"].(map[string]any)
 		id, _ := t["id"].(string)
 		if id == "" || (i > 0 && id != typ) {
-			return nil, false
+			return nil, "", false
 		}
 		typ = id
 		raw, err := json.Marshal(withoutLocations(v))
 		if err != nil {
-			return nil, false
+			return nil, "", false
 		}
 		if !seen[string(raw)] {
 			seen[string(raw)] = true
 			out = append(out, l)
 		}
 	}
-	return out, len(out) > 0
+	return out, typ, len(out) > 0
+}
+
+// numericTypes are DuckDB's number types, as a literal's type id names
+// them and as DESCRIBE writes them (without a DECIMAL's width).
+var numericTypes = map[string]bool{
+	"TINYINT": true, "SMALLINT": true, "INTEGER": true, "BIGINT": true, "HUGEINT": true,
+	"UTINYINT": true, "USMALLINT": true, "UINTEGER": true, "UBIGINT": true, "UHUGEINT": true,
+	"DECIMAL": true, "FLOAT": true, "DOUBLE": true,
+}
+
+// baseType is a type as DESCRIBE writes it without what follows its name:
+// DECIMAL(6,2) is DECIMAL, VARCHAR COLLATE C is VARCHAR.
+func baseType(t string) string {
+	t = strings.ToUpper(strings.TrimSpace(t))
+	if i := strings.IndexAny(t, "( "); i >= 0 {
+		t = t[:i]
+	}
+	return t
+}
+
+// literalsFit says the IN of literals of type literal is evaluated over a
+// column of type column without casting the column: a string literal is
+// cast to the column's type, as the = of each does, and a number meets a
+// number. A number over a text column is not taken: there the column is
+// cast to the number, and the IN, read in the scan, would cast rows the OR
+// never reached, and fail on one that is not a number ('abc' = 1). Any
+// other literal only over a column of its own type.
+func literalsFit(column, literal string) bool {
+	col := baseType(column)
+	switch {
+	case literal == "VARCHAR":
+		return true
+	case numericTypes[literal]:
+		return numericTypes[col]
+	}
+	return col == literal
+}
+
+// columnTypeOf is typeOfColumn over the statement doc on conn: the
+// column's type in DESCRIBE of SELECT column FROM sel's FROM, with the
+// statement's WITHs. One that does not bind there (a select item's alias,
+// a column of an outer query) is not known, and its column is left alone.
+func columnTypeOf(ctx context.Context, conn *sql.Conn, doc, probe map[string]any) typeOfColumn {
+	root := doc
+	if stmts := listOf(doc["statements"]); len(stmts) == 1 {
+		if st, _ := stmts[0].(map[string]any); st != nil {
+			root, _ = st["node"].(map[string]any)
+		}
+	}
+	return func(sel map[string]any, column any) (string, bool) {
+		if sel == nil || sel["from_table"] == nil {
+			return "", false
+		}
+		q := cloneJSON(probe).(map[string]any)
+		st, _ := listOf(q["statements"])[0].(map[string]any)
+		node, _ := st["node"].(map[string]any)
+		if node == nil {
+			return "", false
+		}
+		node["from_table"] = cloneJSON(sel["from_table"])
+		node["select_list"] = []any{cloneJSON(column)}
+		ctes := sel["cte_map"]
+		if m, _ := ctes.(map[string]any); m == nil || len(listOf(m["map"])) == 0 {
+			if root != nil {
+				ctes = root["cte_map"]
+			}
+		}
+		if ctes != nil {
+			node["cte_map"] = cloneJSON(ctes)
+		}
+		raw, err := json.Marshal(q)
+		if err != nil {
+			return "", false
+		}
+		var text string
+		if err := conn.QueryRowContext(ctx, "SELECT json_deserialize_sql(?::JSON)::VARCHAR", string(raw)).Scan(&text); err != nil {
+			return "", false
+		}
+		cols, err := describeResult(ctx, conn, text)
+		if err != nil || len(cols) != 1 {
+			return "", false
+		}
+		return cols[0][1], true
+	}
 }
 
 // cloneJSON is a deep copy of a parsed JSON value.
@@ -454,12 +561,15 @@ func cloneJSON(v any) any {
 }
 
 // logImpliedInFilters says what the rule did with out's statement: a
-// warning when a step did not work (its fixed note), debug when it added
-// filters.
+// warning when a step did not work (its fixed note), info when the text
+// with filters added failed in the engine, debug when it added filters.
 func logImpliedInFilters(out wireResult) {
 	switch {
 	case out.ImpliedInFiltersNote != "":
 		slog.Warn("sql on the copy: the filters an OR of a statement implies were not added; the statement ran as it was", "why", out.ImpliedInFiltersNote)
+	case out.ImpliedInFilters > 0 && out.Error != nil && out.Error.Kind == errQuery:
+		// Not the engine's text, which can quote a row's value.
+		slog.Info("sql on the copy: a statement failed in the engine with the filters its ORs imply added", "added", out.ImpliedInFilters)
 	case out.ImpliedInFilters > 0:
 		slog.Debug("sql on the copy: added the filters the ORs of a statement imply", "added", out.ImpliedInFilters)
 	}

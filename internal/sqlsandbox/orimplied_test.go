@@ -53,6 +53,8 @@ var orTables = []string{
 	`CREATE TABLE nation AS SELECT range::INT AS n_nationkey, ['Germany', 'Cambodia', 'Peru', 'Chad', 'Fiji'][range + 1] AS n_name FROM range(5)`,
 	`CREATE TABLE t AS SELECT range::INT AS a, (range % 3)::INT AS b, (range % 5)::INT AS c, chr(97 + (range % 3)::INT) AS s FROM range(30)`,
 	`CREATE TABLE u AS SELECT range::INT AS a, (range % 4)::INT AS d FROM range(30)`,
+	// w.v is text, and 'abc' is on a row the join with u drops.
+	`CREATE TABLE w AS SELECT * FROM (VALUES (1, '1'), (2, '2'), (5, '1'), (99, 'abc')) v(a, v)`,
 }
 
 // chQ19 is the CH-benCHmark's Q19 as the benchmark writes it.
@@ -127,6 +129,14 @@ func TestImpliedInFilters(t *testing.T) {
 		{name: "only the subquery restricts", sql: "SELECT a FROM t WHERE (EXISTS (SELECT 1 FROM u WHERE d = 7) AND c > 0) OR (EXISTS (SELECT 1 FROM u WHERE d = 8) AND c < 4)"},
 		{name: "random() by its alias", sql: "SELECT (random() * 2)::INT AS r FROM t WHERE (r = 0 AND a > 1) OR (r = 1 AND a < 5)"},
 		{name: "random() anywhere", sql: "SELECT a, random() AS x FROM t WHERE (b = 1 AND c > 0) OR (b = 2 AND c < 4)"},
+		// A number over a text column casts the column, and the IN, read in
+		// the scan, would cast 'abc', a row the OR never reaches.
+		{name: "a number against a text column", sql: "SELECT w.a FROM w JOIN u ON w.a = u.a WHERE (w.v = 1 AND u.d > 0) OR (w.v = 2 AND u.d < 3)"},
+		{name: "a string against a text column", sql: "SELECT w.a FROM w JOIN u ON w.a = u.a WHERE (w.v = '1' AND u.d > 0) OR (w.v = '2' AND u.d < 3)", adds: []string{"(w.v IN ('1', '2'))"}},
+		{name: "a string against a number column", sql: "SELECT a FROM t WHERE (b = '1' AND c > 0) OR (b = '2' AND c < 4)", adds: []string{"(b IN ('1', '2'))"}},
+		// WHERE may name a select item; DuckDB binds it by copying the item.
+		{name: "a select item's alias", sql: "SELECT CAST(w.v AS INTEGER) AS r FROM w JOIN u ON w.a = u.a WHERE (r = 1 AND u.d > 0) OR (r = 2 AND u.d < 3)"},
+		{name: "a column of an outer query", sql: "SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE (t.b = 1 AND u.d > 0) OR (t.b = 2 AND u.d < 3))"},
 		{name: "no OR", sql: "SELECT a FROM t WHERE b = 1 AND c > 0"},
 		{name: "no WHERE", sql: "SELECT a FROM t"},
 		{name: "'or' in a string only", sql: "SELECT a FROM t WHERE s = 'or' AND c > 0"},
@@ -413,8 +423,8 @@ func TestLogImpliedInFilters(t *testing.T) {
 	}
 }
 
-// A column compared with literals of another type: the IN casts them as the
-// = does, so the rows do not change whether the filter is added or not.
+// A column compared with literals of another type: where the filter is
+// added the IN casts them as the = does, and the rows do not change.
 func TestImpliedInFilters_mixedTypesSameAnswer(t *testing.T) {
 	conn := orConn(t)
 	ctx := context.Background()
@@ -424,17 +434,19 @@ func TestImpliedInFilters_mixedTypesSameAnswer(t *testing.T) {
 		('2 ', DATE '2020-01-03', 1.5::DECIMAL(5,2), 2)) v(v, d, n, k)`); err != nil {
 		t.Fatal(err)
 	}
-	for _, q := range []string{
-		"SELECT v FROM m WHERE (v = 1 AND k < 2) OR (v = 2 AND k > 1)",
-		"SELECT v FROM m WHERE (v IN (1, 2) AND k < 2) OR (v = 2 AND k > 1)",
-		"SELECT v FROM m WHERE (d = '2020-01-02' AND k < 2) OR (d = '2020-1-3' AND k > 1)",
-		"SELECT v FROM m WHERE (n = 1.5 AND k < 2) OR (n = 2.25 AND k > 1)",
-		"SELECT v FROM m WHERE (n = 1.50 AND k < 2) OR (n IN (2.5, 1.5) AND k > 1)",
+	for q, added := range map[string]int{
+		// Numbers over a text column: left alone (literalsFit).
+		"SELECT v FROM m WHERE (v = 1 AND k < 2) OR (v = 2 AND k > 1)":       0,
+		"SELECT v FROM m WHERE (v IN (1, 2) AND k < 2) OR (v = 2 AND k > 1)": 0,
+		"SELECT v FROM m WHERE (v = '01' AND k < 2) OR (v = '2 ' AND k > 1)": 1,
+		"SELECT v FROM m WHERE (d = '2020-01-02' AND k < 2) OR (d = '2020-1-3' AND k > 1)": 1,
+		"SELECT v FROM m WHERE (n = 1.5 AND k < 2) OR (n = 2.25 AND k > 1)":                1,
+		"SELECT v FROM m WHERE (n = 1.50 AND k < 2) OR (n IN (2.5, 1.5) AND k > 1)":        1,
+		"SELECT v FROM m WHERE (n = 1 AND k < 2) OR (n = 2 AND k > 1)":                     1,
 	} {
 		got := impliedInFilters(ctx, conn, q)
-		// Each is rewritten: the test is of the IN's casts.
-		if got.note != "" || got.added != 1 {
-			t.Fatalf("%s: %+v", q, got)
+		if got.note != "" || got.added != added {
+			t.Fatalf("%s: %+v, want %d added", q, got, added)
 		}
 		if want, have := orRows(t, conn, q), orRows(t, conn, got.text); want != have {
 			t.Errorf("%s (added %d): rows changed:\n%s\nwant\n%s", q, got.added, have, want)

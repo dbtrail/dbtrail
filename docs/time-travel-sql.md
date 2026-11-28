@@ -1787,8 +1787,9 @@ What this is and is not:
   the copy (case folded, a `_bin` column by its bytes, a trailing space
   counted). It is left out when a branch does not restrict that column,
   when the column is written differently in two branches (`ol_w_id` and
-  `order_line.ol_w_id`), when a value is a placeholder, `NULL`, a subquery,
-  a cast or an expression, when the literals are of two types, and for
+  `order_line.ol_w_id`), when the column is a select item's alias, when a
+  value is a placeholder, `NULL`, a subquery, a cast or an expression, when
+  the literals are of two types or are numbers against a text column, and for
   `NOT IN`, `<>`, `IS NULL`, an `OR` under `NOT`, in the select list, in a
   `CASE`, in `HAVING`, and in the `ON` of an outer join. Each subquery, `WITH`
   and part of a `UNION` is read on its own. The router decides with the

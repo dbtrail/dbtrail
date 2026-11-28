@@ -230,9 +230,15 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 	// The order the join check chose travels with an engine error too, so
 	// the parent does not run the same plan again (oomretry.go).
 	ranOrder, ranTables := "", ""
+	ranImplied := 0
 	defer func() {
 		if ranOrder != "" && res.Error != nil && res.Error.Kind == errQuery {
 			res.JoinOrder, res.JoinOrderTables = ranOrder, ranTables
+		}
+		// And the filters added to the text that failed (orimplied.go),
+		// so the parent can say the text was not the client's.
+		if res.Error != nil && res.Error.Kind == errQuery && ranImplied > 0 {
+			res.ImpliedInFilters = ranImplied
 		}
 	}()
 	if sess.err != nil {
@@ -412,6 +418,7 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 		got := impliedInFilters(ctx, conn, runSQL)
 		runSQL = got.text
 		res.ImpliedInFilters, res.ImpliedInFiltersNote = got.added, got.note
+		ranImplied = got.added
 	}
 	if job.JoinNDV != nil {
 		if job.ImpliedInFilters {
