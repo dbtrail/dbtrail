@@ -62,6 +62,9 @@ func pgUserCases(table string) (read []struct{ stmt, want string }, notRead []st
 		{"SELECT 'a '::char(3) = 'a' FROM " + table + " WHERE id = 1", "t"},
 		{"SELECT length(CAST('ab' AS char(4))) FROM " + table + " WHERE id = 1", "2"},
 		{"SELECT 'abc'::char(2) FROM " + table + " WHERE id = 1", "ab"},
+		// The same in a statement the port does not read whole.
+		{"SELECT 'a '::char(3) = 'a', 1e0 FROM " + table + " WHERE id = 1", "t|1"},
+		{`SELECT E'abc'::"char" FROM ` + table + " WHERE id = 1", "a"},
 	}
 	notRead = []string{
 		"SELECT id, n FROM " + table + " WHERE id > 2 ORDER BY id",

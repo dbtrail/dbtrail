@@ -47,3 +47,22 @@ func TestPaddedForNoSource_castToPaddedType(t *testing.T) {
 		}
 	}
 }
+
+// A statement the port does not read whole is held to the same rule by its
+// text.
+func TestPaddedTypeInText(t *testing.T) {
+	for q, want := range map[string]bool{
+		`SELECT 'ab'::char(5) = 'ab   ', 1e0`:    true,
+		`SELECT E'abc'::"char"`:                  true,
+		`SELECT $$ab $$::BPCHAR = 'ab'`:          true,
+		`SELECT CAST(x AS Character(2)), 1e0`:    true,
+		`SELECT n.nchar_x, E'a', 1e0 FROM n`:     false,
+		`SELECT varchar_col, E'char_' FROM t`:    false,
+		`SELECT 1e0, $$text$$`:                   false,
+		`SELECT "my$char" FROM t WHERE x = E'a'`: false,
+	} {
+		if got := paddedTypeInText(q); got != want {
+			t.Errorf("%s: %v, want %v", q, got, want)
+		}
+	}
+}
