@@ -830,6 +830,7 @@ func settings(s sqlsandbox.Session) sqlsandbox.Session {
 	s.StrictStar = false
 	s.HeavyOnCopy = false // set with it for an expensive statement sent as text (heavy.go)
 	s.JoinOrderByShape = false // the routing connection's own too (freesql.go)
+	s.ImpliedInFilters = false // and this (freesql.go)
 	s.MySQLClock = false  // set on every port session (sessionVars.session)
 	s.MySQLText = false   // so is this
 	s.Types = nil
