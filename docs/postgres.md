@@ -1568,6 +1568,21 @@ here take longer. The process does not read that priority; `--workers` and
 `--threads` stay as set. Started by hand it has the priority of whatever
 starts it.
 
+Inside the process, the router's own work comes before the copy's. Each
+statement on the copy runs in a worker process of its own, started 10 nice
+steps below the router (`BINTRAIL_SQL_WORKER_NICE`, 0 to 19; `off` runs them
+at the router's priority). While the machine has idle cores this changes
+nothing. When reports fill every core, the statements the router passes to
+your PostgreSQL get a core first instead of waiting behind DuckDB's threads,
+and the reports take a little longer. The step is relative: a router that
+already runs at nice 5 starts its workers at 15, never higher than 19. Linux
+only; lowering a priority needs no privilege, so it works in an unprivileged
+container. A worker that cannot be lowered runs at the router's priority, and
+the log says why once (`statements run at the same CPU priority as this
+process`). Where the workers' cgroups have the `cpu` controller enabled (it is
+not the case in the compose stack or the packaged units, which enable memory
+only), each worker competes as a group of its own and the step has no effect.
+
 | Flag | Environment variable | Default | What it does |
 |---|---|---|---|
 | `--listen` | `BINTRAIL_PG_ROUTER_LISTEN` | `127.0.0.1:5433` | Where the port listens |

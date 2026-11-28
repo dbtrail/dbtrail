@@ -273,6 +273,7 @@ What a stale compose file costs:
 |---|---|---|
 | `BINTRAIL_TELEMETRY_DIR` on the `bintrail`, `router` and `shim` services (file version 5) | the usage telemetry choice lives inside the container, so the next `up -d` that recreates it deletes the choice | **Silent.** Telemetry you turned off in the web interface, or with `telemetry off`, is on again after the upgrade. `BINTRAIL_TELEMETRY=off` and `DO_NOT_TRACK=1` in the file are not affected |
 | the S3 variables, `BINTRAIL_TELEMETRY_DIR` and three `.env` settings on the `pg-router` service, and `BINTRAIL_TELEMETRY_DIR` on `iceberg-export-loop` (file version 13) | on the PostgreSQL port, time travel for a moment older than the local snapshots cannot read the server's S3 destination unless the machine has a role; `pg-router` and `iceberg-export-loop` do not follow the usage telemetry choice made in the web interface | **Silent** but for the time-travel query, which fails with an S3 credentials error. `PG_ROUTER_MAX_SOURCE_CONNECTIONS`, `PG_ROUTER_STATUS_STATEMENTS`, `SQL_PORT_MAX_ROWS` and `PG_ROUTER_AWS_*` in `.env` have no effect on `pg-router`. With MySQL or MariaDB servers only, the telemetry part is all that changes |
+| `SQL_WORKER_NICE` passed to the `bintrail`, `router` and `pg-router` services (file version 14) | nothing changes while `.env` does not set it: the statements on the copy run 10 nice steps below each service either way | `SQL_WORKER_NICE` in `.env` has no effect, so the step cannot be changed or turned off. Taking the version 14 file lets it through |
 | the `pg-router` service on port 5433 (file version 9) | nothing answers on the PostgreSQL port, where PostgreSQL clients read the copy of a PostgreSQL server | PostgreSQL clients that connect to 5433 are refused, with the port turned on or off. Nothing says so. An installation with MySQL or MariaDB servers only loses nothing |
 | the `router` service on port 3309 (file version 4) | nothing answers on the MySQL port. This version serves it from the `router` service only; the `bintrail` service no longer opens it | MySQL clients that connected to 3309 are refused. With the port turned on, `bintrail` prints a `WARNING` at startup that says so (below) |
 | the state paths on the `bintrail-state` volume | your username and password, the servers you added, and the AI connection token live inside the container, so the next `up -d` that recreates it deletes them | **Silent.** The web interface comes back asking you to create a password, exactly like a fresh install, and reports no loss. Fix this one first |
@@ -803,6 +804,9 @@ on runc 1.3, 10 on older ones; on cgroup v1 the share itself, where 512 or
 less counts). Above half the default weight, when the weight cannot be read,
 or on Kubernetes, it keeps half the cores for capture all the time,
 and its log and the web interface's router card say so and what they read.
+Inside the service, each statement runs in a process of its own 10 nice steps
+below the router's (`SQL_WORKER_NICE`), so the router's own work, which
+includes passing statements on to your MySQL, is served first.
 Two setups this does not protect: capture's service lowered as well (leave
 the other services at the default priority), and Kubernetes, where a
 container's weight competes only inside its pod, so the router ignores it
@@ -935,7 +939,11 @@ idle cores nothing changes. When statements on the copy, capture and the
 snapshot update want the same cores, the kernel serves capture and the update
 first, and the statements take longer. Unlike the MySQL router, this service
 does not read its priority: how many statements run at once and their threads
-stay what `PG_ROUTER_WORKERS` and `PG_ROUTER_THREADS` say. Two setups this
+stay what `PG_ROUTER_WORKERS` and `PG_ROUTER_THREADS` say. Inside the service
+the same holds one level down: each statement on the copy runs in a process of
+its own, 10 nice steps below the router's (`SQL_WORKER_NICE` in `.env`, the
+same in every service that runs SQL on the copy), so the short statements the
+router passes to your PostgreSQL do not wait for a core behind a report. Two setups this
 does not protect: capture's service lowered as well (leave the other services
 at the default priority), and Kubernetes, where a container's weight competes
 only inside its pod; set a CPU limit on the container there. A compose file
@@ -953,6 +961,7 @@ that is already there).
 | `PG_ROUTER_STATUS_STATEMENTS` | `true` keeps a row per statement shape and side in the service's status (values blanked). It names your tables and columns, and the status address asks for no password | off |
 | `PG_ROUTER_MEMORY`, `PG_ROUTER_CPUS` | ceilings for the whole service, e.g. `8g` and `4` | none |
 | `PG_ROUTER_CPU_SHARES` | CPU priority of the service against the others (`cpu_shares`); `1024` is the default priority, the same as capture's | 256, below capture |
+| `SQL_WORKER_NICE` | how many nice steps below the router's own process each statement on the copy runs (0 to 19); `off` runs them at its priority (shared with the other services) | 10 |
 | `SQL_MEMORY` | memory each statement may use (shared with the other services) | 2GB |
 | `SQL_PORT_MAX_ROWS` | most rows one statement returns; a result with more is refused, not cut (shared with the other services: set, it is the MySQL port's cap too). The PostgreSQL port also cuts a result past 1,000,000 cells, never under 10,000 rows | 200,000 (the MySQL port's is 10,000) |
 | `PG_ROUTER_AWS_ACCESS_KEY_ID`, `PG_ROUTER_AWS_SECRET_ACCESS_KEY`, `PG_ROUTER_AWS_SESSION_TOKEN` | S3 keys for this service alone, which only reads S3 ([below](#read-only-keys-for-the-router)) | the shared `AWS_*` keys |
@@ -1040,6 +1049,7 @@ surface, use the demo image ([demo.md](./demo.md)).
 | `KEY_INDEX` | compose `bintrail` service (optional) | Whether a snapshot refresh resolves the keys a window changed through the key index beside each table's file instead of scanning the file. Unset = on; a file with no index gets one built at its next refresh. `0` turns it off |
 | `ROUTER_CPUS` | compose `router` service (optional) | CPU ceiling of the router (e.g. `4`). Unset = none |
 | `ROUTER_CPU_SHARES` | compose `router` service (optional) | CPU priority of the router against the other services (`cpu_shares`). Unset = 256, well below the default, so statements use every core and capture takes them back when it needs them. The weight it becomes depends on the runtime; the router's log says what it read |
+| `SQL_WORKER_NICE` | compose `bintrail`, `router` and `pg-router` services (optional) | How many nice steps below its service's own process each SQL statement on the copy runs, 0 to 19 (Linux only). Unset = 10: while cores are idle nothing changes, and when the statements fill them the service's own work comes first (capture in `bintrail`, the statements a router passes to your database). `off` runs them at the service's priority. Lowering a priority needs no privilege, so it works in an unprivileged container |
 | `SQL_FRESH` | compose `router` service (optional) | Unset = each server's own choice on its Snapshots page, fresh by default: the newest captured changes laid over each table's snapshot, answers about as far behind as capture, for a fifth of the router's memory and an update every second. `off` = the fast mode for every server: each table's last snapshot, as old as its last refresh. `on` = the fresh mode for every server. The Snapshots page shows each server's choice locked while it is `on` or `off` |
 | `ROUTER_CONCURRENCY` | compose `router` service (optional) | How many statements run on the copy at once, 1 to 64. Unset = the router works it out: one per two of its cores, as many as its memory holds. The rest wait their turn. Needs the current `docker-compose.yml` |
 | `ROUTER_MAX_WAIT` | compose `router` service (optional) | How long a statement waits for its turn on the copy when every worker is busy (e.g. `30s`); past it the client gets an error. Unset = no limit: it waits for as long as its client stays connected |

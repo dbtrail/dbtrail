@@ -61,7 +61,7 @@
 # instead of leaving you to diff two files (#1529). It is passed to the
 # console service below through the YAML anchor, so there is one number to
 # bump: raise it whenever this file gains wiring a running stack would need.
-x-bintrail-compose-version: &compose_version 13
+x-bintrail-compose-version: &compose_version 14
 
 volumes:
   bintrail-index-data:    # MySQL 8.4 datadir — the forensic record (NEW volume:
@@ -459,6 +459,11 @@ services:
       # The changes a statement's tables may hold unmerged grow with it
       # (384 MB at 2GB, 768 MB at 4GB).
       BINTRAIL_CONSOLE_SQL_MEMORY: ${SQL_MEMORY:-}
+      # How many steps below this service's own process each SQL statement
+      # on the copy runs on the CPU (#3321), 0 to 19. Empty = 10; off = the
+      # same priority. Nothing changes while cores are idle; when statements
+      # fill them, the service's own work comes first.
+      BINTRAIL_SQL_WORKER_NICE: ${SQL_WORKER_NICE:-}
       # The fraction of this machine's memory this service plans with
       # (#2513): its snapshot work, the copy's tails and its SQL statements
       # are then sized from that share instead of from the whole machine.
@@ -715,6 +720,11 @@ services:
       # Memory each statement on the copy may use, and the most rows one
       # returns: the same two settings as `bintrail`, from the same .env.
       BINTRAIL_CONSOLE_SQL_MEMORY: ${SQL_MEMORY:-}
+      # How many steps below this service's own process each SQL statement
+      # on the copy runs on the CPU (#3321), 0 to 19. Empty = 10; off = the
+      # same priority. Nothing changes while cores are idle; when statements
+      # fill them, the service's own work comes first.
+      BINTRAIL_SQL_WORKER_NICE: ${SQL_WORKER_NICE:-}
       # The status log: one line a minute per server of the statements the
       # port saw and who answered them (docker compose logs -f router | grep
       # msg=status). STATUS_LOG_INTERVAL in .env changes how often, or off.
@@ -908,6 +918,11 @@ services:
       # Memory each statement on the copy may use, and the most rows one
       # returns: the same two settings as `bintrail`, from the same .env.
       BINTRAIL_CONSOLE_SQL_MEMORY: ${SQL_MEMORY:-}
+      # How many steps below this service's own process each SQL statement
+      # on the copy runs on the CPU (#3321), 0 to 19. Empty = 10; off = the
+      # same priority. Nothing changes while cores are idle; when statements
+      # fill them, the service's own work comes first.
+      BINTRAIL_SQL_WORKER_NICE: ${SQL_WORKER_NICE:-}
       BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS: ${SQL_PORT_MAX_ROWS:-}
       # The status log: one line a minute per PostgreSQL server of the
       # statements the port saw and who answered them (docker compose logs -f

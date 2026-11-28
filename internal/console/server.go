@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1020,8 +1021,15 @@ func New(cfg Config) (*Server, error) {
 	// its DuckDB open, so a short statement does not pay the start. They stop
 	// on their own after a few minutes with no statement, and with this
 	// process, whose exit closes their stdin.
+	// The workers run below this process's CPU priority (#3321), so the
+	// statements it passes on and capture in watch do not wait for a core
+	// behind DuckDB's threads.
+	workerNice, niceWarn := sqlsandbox.WorkerNiceFrom(os.Getenv(sqlsandbox.WorkerNiceEnv))
+	if niceWarn != "" {
+		slog.Warn(niceWarn)
+	}
 	runner := sqlsandbox.New(sqlsandbox.Config{Limits: s.sqlLimits, MaxInFlight: cfg.SQLMaxInFlight, Standby: true,
-		WorkerStatements: cfg.SQLWorkerStatements, MaxWaiters: cfg.SQLMaxWaiters, MaxWait: cfg.SQLMaxWait})
+		WorkerStatements: cfg.SQLWorkerStatements, MaxWaiters: cfg.SQLMaxWaiters, MaxWait: cfg.SQLMaxWait, WorkerNice: workerNice})
 	s.sqlPortSharedSlots = cfg.SQLPortSharedSlots
 	s.sqlRunner, s.sqlSpillState, s.sqlFenceState = sandboxRunner{runner}, runner.SpillState, runner.FenceState
 	s.fresh.pool, s.fresh.fastWorkers, s.fresh.freshWorkers = runner, cfg.SQLPoolFastWorkers, cfg.SQLPoolFreshWorkers
