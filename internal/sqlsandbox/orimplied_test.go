@@ -436,9 +436,9 @@ func TestImpliedInFilters_mixedTypesSameAnswer(t *testing.T) {
 	}
 	for q, added := range map[string]int{
 		// Numbers over a text column: left alone (literalsFit).
-		"SELECT v FROM m WHERE (v = 1 AND k < 2) OR (v = 2 AND k > 1)":       0,
-		"SELECT v FROM m WHERE (v IN (1, 2) AND k < 2) OR (v = 2 AND k > 1)": 0,
-		"SELECT v FROM m WHERE (v = '01' AND k < 2) OR (v = '2 ' AND k > 1)": 1,
+		"SELECT v FROM m WHERE (v = 1 AND k < 2) OR (v = 2 AND k > 1)":                     0,
+		"SELECT v FROM m WHERE (v IN (1, 2) AND k < 2) OR (v = 2 AND k > 1)":               0,
+		"SELECT v FROM m WHERE (v = '01' AND k < 2) OR (v = '2 ' AND k > 1)":               1,
 		"SELECT v FROM m WHERE (d = '2020-01-02' AND k < 2) OR (d = '2020-1-3' AND k > 1)": 1,
 		"SELECT v FROM m WHERE (n = 1.5 AND k < 2) OR (n = 2.25 AND k > 1)":                1,
 		"SELECT v FROM m WHERE (n = 1.50 AND k < 2) OR (n IN (2.5, 1.5) AND k > 1)":        1,
