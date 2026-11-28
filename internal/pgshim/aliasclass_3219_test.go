@@ -40,20 +40,20 @@ func TestAliasClassOf(t *testing.T) {
 func TestRetypeForCopy_sum32(t *testing.T) {
 	types := map[string][]string{"amount": {"DECIMAL(12,2)"}, "qty": {"INTEGER"}, "small": {"SMALLINT"}, "id": {"BIGINT"}, "ratio": {"DOUBLE"}}
 	for q, want := range map[string]string{
-		"SELECT sum(qty) FROM t":                                            "SELECT " + pgSum32 + "(qty) FROM t",
-		"SELECT sum(small), SUM(t.qty) FROM t":                              "SELECT " + pgSum32 + "(small), " + pgSum32 + "(t.qty) FROM t",
-		"SELECT sum(CASE WHEN qty > 1 THEN 1 ELSE 0 END) FROM t":            "SELECT " + pgSum32 + "(CASE WHEN qty > 1 THEN 1 ELSE 0 END) FROM t",
-		"SELECT x, sum(qty) + 1 FROM t GROUP BY x HAVING sum(qty) > 2":      "SELECT x, " + pgSum32 + "(qty) + 1 FROM t GROUP BY x HAVING " + pgSum32 + "(qty) > 2",
-		"SELECT sum(id) FROM t":                                             "SELECT sum(id) FROM t",
-		"SELECT sum(amount) FROM t":                                         "SELECT sum(amount) FROM t",
-		"SELECT sum(ratio) FROM t":                                          "SELECT sum(ratio) FROM t",
-		"SELECT sum(DISTINCT qty) FROM t":                                   "SELECT sum(DISTINCT qty) FROM t",
-		"SELECT sum(qty) FILTER (WHERE qty > 1) FROM t":                     "SELECT sum(qty) FILTER (WHERE qty > 1) FROM t",
-		"SELECT sum(qty) OVER () FROM t":                                    "SELECT sum(qty) OVER () FROM t",
-		"SELECT sum(qty ORDER BY qty) FROM t":                               "SELECT sum(qty ORDER BY qty) FROM t",
-		"SELECT sum(qty + id) FROM t":                                       "SELECT sum(qty + id) FROM t",
-		"SELECT sum(nothere) FROM t":                                        "SELECT sum(nothere) FROM t",
-		"SELECT t.sum(qty) FROM t":                                          "SELECT t.sum(qty) FROM t",
+		"SELECT sum(qty) FROM t":                                       "SELECT " + pgSum32 + "(qty) FROM t",
+		"SELECT sum(small), SUM(t.qty) FROM t":                         "SELECT " + pgSum32 + "(small), " + pgSum32 + "(t.qty) FROM t",
+		"SELECT sum(CASE WHEN qty > 1 THEN 1 ELSE 0 END) FROM t":       "SELECT " + pgSum32 + "(CASE WHEN qty > 1 THEN 1 ELSE 0 END) FROM t",
+		"SELECT x, sum(qty) + 1 FROM t GROUP BY x HAVING sum(qty) > 2": "SELECT x, " + pgSum32 + "(qty) + 1 FROM t GROUP BY x HAVING " + pgSum32 + "(qty) > 2",
+		"SELECT sum(id) FROM t":                                        "SELECT sum(id) FROM t",
+		"SELECT sum(amount) FROM t":                                    "SELECT sum(amount) FROM t",
+		"SELECT sum(ratio) FROM t":                                     "SELECT sum(ratio) FROM t",
+		"SELECT sum(DISTINCT qty) FROM t":                              "SELECT sum(DISTINCT qty) FROM t",
+		"SELECT sum(qty) FILTER (WHERE qty > 1) FROM t":                "SELECT sum(qty) FILTER (WHERE qty > 1) FROM t",
+		"SELECT sum(qty) OVER () FROM t":                               "SELECT sum(qty) OVER () FROM t",
+		"SELECT sum(qty ORDER BY qty) FROM t":                          "SELECT sum(qty ORDER BY qty) FROM t",
+		"SELECT sum(qty + id) FROM t":                                  "SELECT sum(qty + id) FROM t",
+		"SELECT sum(nothere) FROM t":                                   "SELECT sum(nothere) FROM t",
+		"SELECT t.sum(qty) FROM t":                                     "SELECT t.sum(qty) FROM t",
 	} {
 		if got := retypeForCopy(q, types); got != want {
 			t.Errorf("%s:\n got  %s\n want %s", q, got, want)
