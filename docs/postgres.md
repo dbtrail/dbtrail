@@ -56,9 +56,15 @@ CLI deployment).
 
 ### The web interface: "+ Add server" (recommended)
 
-If you brought up the [Docker Compose stack](install.md) — the *same*
-`install.sh` MySQL uses — you already have everything. Do the [source-side
-setup](#postgresql-side-setup) below first, then:
+Install DBTrail with the installer for PostgreSQL servers, which sets up the
+same [Docker Compose stack](install.md) and prints the next steps for
+PostgreSQL:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dbtrail/dbtrail/main/install-postgres.sh | sh
+```
+
+Do the [source-side setup](#postgresql-side-setup) below first, then:
 
 1. Open the web interface (**http://127.0.0.1:8090**) and sign in.
 2. **+ Add server** → **Open the full form** (the link at the foot of the
@@ -75,12 +81,13 @@ setup](#postgresql-side-setup) below first, then:
    failure, and the server is not added until it is fixed). Capture resumes
    automatically on restart.
 
-The form also holds one box, unticked: **Let the PostgreSQL port send to this
-PostgreSQL, read-only and as the source user above, a SELECT the copy does not
-answer**. It is the question `server add` asks on a terminal
-([forwarding with the capture account](#forwarding-with-the-capture-account)),
-and nothing is sent to your PostgreSQL until somebody ticks it. Tick it when
-adding the server, or later (**Servers**, **Edit**); unticking takes it back.
+The form also holds one box, ticked on a new server: **Let the PostgreSQL port
+send to this PostgreSQL, read-only and as the source user above, a SELECT the
+copy does not answer**. It is the question `server add` asks on a terminal
+([forwarding with the capture account](#forwarding-with-the-capture-account)).
+Leave it ticked: without it, or a forwarding user of its own, the
+[PostgreSQL port does not serve the server](#the-port-serves-a-server-only-when-it-can-forward).
+Unticking it later (**Servers**, **Edit**) takes it back.
 No second role is needed for it. A forwarding user of its own, for a port that
 should send more than that, is behind **Advanced: use a separate forwarding
 user** in the same form.
