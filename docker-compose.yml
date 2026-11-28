@@ -61,7 +61,7 @@
 # instead of leaving you to diff two files (#1529). It is passed to the
 # console service below through the YAML anchor, so there is one number to
 # bump: raise it whenever this file gains wiring a running stack would need.
-x-bintrail-compose-version: &compose_version 13
+x-bintrail-compose-version: &compose_version 14
 
 volumes:
   bintrail-index-data:    # MySQL 8.4 datadir — the forensic record (NEW volume:

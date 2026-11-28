@@ -52,21 +52,29 @@ func taskNices(t *testing.T, pid int) map[int]int {
 }
 
 // oneNice is the nice value every thread of pid has; it fails the test when
-// they differ.
+// they still differ after two seconds. The wait is for a lowered thread of
+// this process that has done its work and is about to end (startLowered
+// returns a moment before the runtime ends it), never for one that stays.
 func oneNice(t *testing.T, pid int) int {
 	t.Helper()
-	nices := taskNices(t, pid)
-	v, first := 0, true
-	for tid, n := range nices {
-		if first {
-			v, first = n, false
-			continue
+	var nices map[int]int
+	for range 100 {
+		nices = taskNices(t, pid)
+		v, same, first := 0, true, true
+		for _, n := range nices {
+			if first {
+				v, first = n, false
+			} else if n != v {
+				same = false
+			}
 		}
-		if n != v {
-			t.Fatalf("process %d: threads at different nice values: %v (thread %d)", pid, nices, tid)
+		if same {
+			return v
 		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	return v
+	t.Fatalf("process %d: threads at different nice values: %v", pid, nices)
+	return 0
 }
 
 // #3321: the worker, and every thread it has, DuckDB's included, runs step
@@ -114,10 +122,10 @@ func TestWorkerNice_theWorkerAndAllItsThreadsRunLowerAndThisProcessDoesNot(t *te
 			break
 		}
 	}
+	// How many threads the worker has depends on the machine (the Go
+	// runtime's own grow with the cores), so it is said, not checked: what
+	// is checked is that every one of them was lowered.
 	t.Logf("worker %d: up to %d threads seen, all at nice %d", pid, most, before+3)
-	if most < 8 {
-		t.Errorf("worker %d had at most %d threads; with DuckDB running at 4 threads it should have more", pid, most)
-	}
 	if after := oneNice(t, os.Getpid()); after != before {
 		t.Errorf("this process went from nice %d to %d", before, after)
 	}
@@ -128,6 +136,28 @@ func TestWorkerNice_theWorkerAndAllItsThreadsRunLowerAndThisProcessDoesNot(t *te
 	r.spillMu.Unlock()
 	if last != "" {
 		t.Errorf("a reason was noted for a worker that was lowered: %q", last)
+	}
+}
+
+// The console's own setup: standby workers, which open DuckDB before their
+// statement comes. Every thread of every standby is lowered.
+func TestWorkerNice_standbysRunLowerToo(t *testing.T) {
+	before := oneNice(t, os.Getpid())
+	if before+3 > maxNice {
+		t.Skipf("this process already runs at nice %d", before)
+	}
+	f := newCopyFixture(t)
+	r := newStandbyRunner(t, Config{WorkerNice: 3})
+	mustRun(t, r, f.job("SELECT 1"))
+	for _, pid := range waitStandbys(t, r, DefaultMaxInFlight) {
+		for tid, n := range taskNices(t, pid) {
+			if n != before+3 {
+				t.Errorf("standby %d thread %d at nice %d, want %d", pid, tid, n, before+3)
+			}
+		}
+	}
+	if after := oneNice(t, os.Getpid()); after != before {
+		t.Errorf("this process went from nice %d to %d", before, after)
 	}
 }
 
@@ -232,29 +262,37 @@ func TestStartLowered_aPanicInTheStartIsAnError(t *testing.T) {
 	}
 }
 
-// The process's main thread is never the one lowered, even when the
-// goroutine that starts the worker lands on it: the runtime parks that thread
-// instead of ending it. Run from the main goroutine's own thread, locked, so
-// the start's goroutine is placed with the main thread busy or free in turn.
-func TestStartLowered_theMainThreadIsNeverLowered(t *testing.T) {
-	main := os.Getpid()
-	before, err := threadNice(main)
-	if err != nil {
-		t.Fatal(err)
+// The process's main thread is never the one lowered: the runtime parks that
+// thread instead of ending it. The main thread's path is taken here from the
+// test's own locked thread, which must come out of it untouched while the
+// start runs, lowered, on another one.
+func TestStartLowered_theMainThreadsPathLowersAnotherThread(t *testing.T) {
+	orig := onMainThread
+	t.Cleanup(func() { onMainThread = orig })
+	outer := make(chan int, 1)
+	onMainThread = func() bool { outer <- syscall.Gettid(); return true }
+
+	var startTid, startNice int
+	niceErr, err := startLowered(2, func() error {
+		startTid = syscall.Gettid()
+		startNice, _ = threadNice(startTid)
+		return nil
+	})
+	if niceErr != nil || err != nil {
+		t.Fatalf("niceErr %v, err %v", niceErr, err)
 	}
-	if before+1 > maxNice {
-		t.Skipf("this process already runs at nice %d", before)
+	held := <-outer
+	if startTid == held {
+		t.Fatalf("the start ran on the thread that took the main thread's path (%d)", held)
 	}
-	for range 200 {
-		var tid int
-		if _, err := startLowered(1, func() error { tid = syscall.Gettid(); return nil }); err != nil {
-			t.Fatal(err)
-		}
-		if tid == main {
-			t.Fatal("the start ran on the main thread")
-		}
+	before := oneNice(t, os.Getpid())
+	if startNice != min(before+2, maxNice) {
+		t.Errorf("the start ran at nice %d, want %d", startNice, min(before+2, maxNice))
 	}
-	if after, _ := threadNice(main); after != before {
-		t.Fatalf("the main thread went from nice %d to %d", before, after)
+	if n, err := threadNice(held); err == nil && n != before {
+		t.Errorf("the held thread %d is at nice %d after its path, want %d", held, n, before)
+	}
+	if after := oneNice(t, os.Getpid()); after != before {
+		t.Errorf("this process's threads moved from nice %d to %d", before, after)
 	}
 }

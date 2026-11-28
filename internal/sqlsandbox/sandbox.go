@@ -1017,6 +1017,8 @@ type Runner struct {
 	// once per change like the fence's.
 	workerNice    int
 	niceLastError string
+	// niceSaid, under spillMu: the first lowered worker has been logged.
+	niceSaid bool
 
 	mu       sync.Mutex
 	busy     map[string]bool
@@ -1808,9 +1810,17 @@ func (r *Runner) noteNice(err error) {
 	}
 	r.spillMu.Lock()
 	changed := msg != r.niceLastError
+	first := err == nil && !r.niceSaid
+	if err == nil {
+		r.niceSaid = true
+	}
 	r.niceLastError = msg
 	r.spillMu.Unlock()
 	switch {
+	case first && !changed:
+		// The first worker, lowered: said once, so the log shows the
+		// setting at work and not only its failures.
+		slog.Info("sql on the copy: statements run at a lower CPU priority than this process", "nice_step", r.workerNice, "setting", WorkerNiceEnv)
 	case !changed:
 	case err != nil:
 		slog.Warn("sql on the copy: statements run at the same CPU priority as this process, so a heavy one can slow the work it does next to them", "reason", msg, "setting", WorkerNiceEnv)

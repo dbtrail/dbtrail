@@ -11,6 +11,10 @@ import (
 
 // setProcessGroup puts the child in its own process group, so a kill can
 // take the whole group without touching the parent's.
+//
+// No Pdeathsig here: a worker is started from a thread that ends right after
+// (startLowered, #3321), and Pdeathsig fires when the thread that started the
+// child ends, not the process, so it would kill every worker at once.
 func setProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }

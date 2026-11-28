@@ -2,8 +2,10 @@ package sqlsandbox
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"syscall"
 )
 
@@ -22,6 +24,10 @@ var threadNice = func(tid int) (int, error) {
 var setThreadNice = func(tid, nice int) error {
 	return syscall.Setpriority(syscall.PRIO_PROCESS, tid, nice)
 }
+
+// onMainThread says whether the calling thread is the process's main thread.
+// A variable so a test can take the main thread's path from any thread.
+var onMainThread = func() bool { return syscall.Gettid() == os.Getpid() }
 
 // startLowered runs start, which starts one process, step nice values below
 // the thread that calls it (#3321).
@@ -47,7 +53,7 @@ func startLowered(step int, start func() error) (niceErr, startErr error) {
 	go func() {
 		defer close(done)
 		runtime.LockOSThread()
-		if syscall.Gettid() == os.Getpid() {
+		if onMainThread() {
 			// The process's main thread, which the runtime parks instead of
 			// ending when a goroutine locked to it returns: lowered, it would
 			// stay lowered, and it is the thread ps and top show for the whole
@@ -83,6 +89,7 @@ func lowerAndStart(step int, start func() error) (niceErr, startErr error) {
 func startOnThisThread(step int, start func() error) (niceErr, startErr error) {
 	defer func() {
 		if p := recover(); p != nil {
+			slog.Error("sql on the copy: starting a worker panicked", "panic", p, "stack", string(debug.Stack()))
 			startErr = fmt.Errorf("start the worker: panic: %v", p)
 		}
 	}()
