@@ -922,7 +922,12 @@ certificate is read when the service starts: restart `pg-router` to serve a
 renewed one.
 
 **Size.** The service is sized to fit beside capture without asking: four
-statements at once, two threads each, 256 clients. Each statement may take the
+statements at once and 256 clients. Each statement's threads are worked out
+from the vCPUs the service may use (the container's CPU limit included): the
+vCPUs over the statements that can run at once, which are `PG_ROUTER_WORKERS`
+plus the one kept for short statements, rounded up. That is 2 threads on
+8 vCPUs and 4 on 16 with the default 4 workers, and 3 on 8 vCPUs with 2
+workers. A number in `PG_ROUTER_THREADS` is used exactly as it is. Each statement may take the
 SQL memory (2GB unless set), so four at once can take 8GB, plus the recent
 changes fresh mode holds for each server in fresh mode: on a machine with
 16GB, set `PG_ROUTER_WORKERS=2` or `PG_ROUTER_MEMORY`. The service adds its
@@ -954,7 +959,7 @@ that is already there).
 | `.env` | What it sets | Unset |
 |---|---|---|
 | `PG_ROUTER_WORKERS` | statements that run on the copy at once (1 to 16) | 4 |
-| `PG_ROUTER_THREADS` | threads each statement may use (1 to 16) | 2 |
+| `PG_ROUTER_THREADS` | threads each statement may use (1 to 16), or `auto` | `auto`: the vCPUs over `PG_ROUTER_WORKERS` + 1, rounded up |
 | `PG_ROUTER_MAX_CONNECTIONS` | clients connected at once; one more is refused | 256 |
 | `PG_ROUTER_MAX_SOURCE_CONNECTIONS` | connections to the servers' own PostgreSQL held at once, every server together (1 to 1024); past it a statement that needs one waits up to 30 seconds and is then refused | 16 |
 | `PG_ROUTER_MAX_WAIT` | how long a statement waits for its turn, e.g. `30s` | no limit of its own |

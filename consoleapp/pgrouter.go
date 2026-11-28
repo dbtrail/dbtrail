@@ -110,7 +110,6 @@ const (
 	// clients are cheap, waiting for a worker: 16 refused the 50 of a
 	// measured dashboard load.
 	defaultPGRouterWorkers  = 4
-	defaultPGRouterThreads  = 2
 	defaultPGRouterMaxConns = 256
 	maxPGRouterWorkers      = 16
 	maxPGRouterThreads      = 16
@@ -138,7 +137,7 @@ func addPGRouterFlags(cmd *cobra.Command) {
 	f.String("mcp-token-file", "", "Path to the managed MCP token file, when it is not the default: for the same reason as --auth-file. Env BINTRAIL_CONSOLE_MCP_TOKEN_FILE.")
 	f.String("sql-memory", "", "Memory each statement on the copy may use, e.g. 4GB; default 2GB, at least 512MB. Unset, the memory saved in the web interface is used, read when this starts. Env BINTRAIL_CONSOLE_SQL_MEMORY.")
 	f.Int("workers", defaultPGRouterWorkers, fmt.Sprintf("How many statements run on the copy at once, 1 to %d. The rest wait their turn. Env BINTRAIL_PG_ROUTER_WORKERS.", maxPGRouterWorkers))
-	f.Int("threads", defaultPGRouterThreads, fmt.Sprintf("How many threads each statement may use, 1 to %d. Env BINTRAIL_PG_ROUTER_THREADS.", maxPGRouterThreads))
+	f.String("threads", pgRouterThreadsAuto, fmt.Sprintf("How many threads each statement may use, 1 to %d, or auto: the vCPUs this process may use (its container's CPU limit included) shared among the statements that can run at once (--workers plus the one kept for short statements), rounded up; empty is auto too. Env BINTRAIL_PG_ROUTER_THREADS.", maxPGRouterThreads))
 	f.Int("max-connections", defaultPGRouterMaxConns, fmt.Sprintf("How many clients may be connected at once, 1 to %d; one more is refused with an error. Env BINTRAIL_PG_ROUTER_MAX_CONNECTIONS.", maxPGRouterMaxConns))
 	f.Int("max-source-connections", defaultPGRouterMaxSourceConns, fmt.Sprintf("How many connections to the servers' own PostgreSQL this process holds at once, across every server, 1 to %d. A client holds one while a statement the source answers, or its transaction block, runs there; past the limit, the statement that needed one waits for one to be given back, up to 30 seconds, and is then refused with an error (53300). Env BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS.", maxPGRouterMaxSourceConns))
 	f.String("status-addr", "", "Address to serve the port's status on (host:port, e.g. 127.0.0.1:9092): /status, as JSON, says per server which side answered each statement and why, and /metrics this process's Prometheus metrics. Empty: none. It asks for no password. Env BINTRAIL_PG_ROUTER_STATUS_ADDR.")
@@ -152,14 +151,18 @@ func addPGRouterFlags(cmd *cobra.Command) {
 // pgRouterSettings is what pg-router starts with, flags and environment
 // resolved.
 type pgRouterSettings struct {
-	Listen         string
-	Token          string
-	ServersFile    string
-	AuthFile       string
-	MCPTokenFile   string
-	SQLMemory      string
-	Workers        int
-	Threads        int
+	Listen       string
+	Token        string
+	ServersFile  string
+	AuthFile     string
+	MCPTokenFile string
+	SQLMemory    string
+	Workers      int
+	Threads      int
+	// ThreadsAuto: Threads was worked out from ThreadsVCPUs (#3321), not
+	// set by the operator.
+	ThreadsAuto    bool
+	ThreadsVCPUs   int
 	MaxConns       int
 	MaxSourceConns int
 	MaxWait        time.Duration
@@ -234,9 +237,11 @@ func pgRouterSettingsFrom(cmd *cobra.Command) (pgRouterSettings, error) {
 	if st.Workers, err = num("workers", "BINTRAIL_PG_ROUTER_WORKERS", 1, maxPGRouterWorkers, "how many statements run on the copy at once"); err != nil {
 		return st, err
 	}
-	if st.Threads, err = num("threads", "BINTRAIL_PG_ROUTER_THREADS", 1, maxPGRouterThreads, "how many threads each statement may use"); err != nil {
+	threadsFlag, _ := f.GetString("threads")
+	if st.Threads, st.ThreadsVCPUs, err = pgRouterThreadsFrom(threadsFlag, f.Changed("threads"), "BINTRAIL_PG_ROUTER_THREADS", st.Workers); err != nil {
 		return st, err
 	}
+	st.ThreadsAuto = st.ThreadsVCPUs > 0
 	if st.MaxConns, err = num("max-connections", "BINTRAIL_PG_ROUTER_MAX_CONNECTIONS", 1, maxPGRouterMaxConns, "how many clients may be connected at once"); err != nil {
 		return st, err
 	}
@@ -447,8 +452,8 @@ func pgRouterStartupLines(st pgRouterSettings, memory, memoryFrom string, memory
 	} else {
 		fmt.Fprintf(&b, "PostgreSQL router: %s listed in %s, read again when it changes; the PostgreSQL ones are served here.\n", countOfServers(servers), st.ServersFile)
 	}
-	fmt.Fprintf(&b, "PostgreSQL router: %s on the copy at once, %s and up to %s of memory each (%s), and at most %d clients connected. These are set where this is started (--workers, --threads, --sql-memory, --max-connections); nothing is worked out from the machine.\n",
-		countOfStatements(st.Workers), countOfThreads(st.Threads), memory, memoryFrom, st.MaxConns)
+	fmt.Fprintf(&b, "PostgreSQL router: %s on the copy at once, %s and up to %s of memory each (%s), and at most %d clients connected. These are set where this is started (--workers, --threads, --sql-memory, --max-connections); only the threads are worked out from the machine, and only while --threads is auto.\n",
+		countOfStatements(st.Workers), pgRouterThreadsWords(st), memory, memoryFrom, st.MaxConns)
 	b.WriteString(pgFastLaneLine(st.Workers))
 	fmt.Fprintf(&b, "PostgreSQL router: the results being sent to clients are held in memory up to %d MB in all; past that a statement is refused with an error (53000) until clients have read their answers.\n", int64(defaultFlashbackResultBudget)>>20)
 	if memoryErr != nil {

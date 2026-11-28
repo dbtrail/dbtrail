@@ -778,8 +778,8 @@ var docs = map[string]Doc{
 	},
 	"BINTRAIL_PG_ROUTER_THREADS": {
 		Group:   "pgrouter",
-		Text:    "How many CPU threads each statement on the copy may use in the PostgreSQL router, 1 to 16.",
-		Default: "2",
+		Text:    "How many CPU threads each statement on the copy may use in the PostgreSQL router, 1 to 16, or auto. auto shares the vCPUs the router may use (a container's CPU limit included) among the statements that can run at once, the workers plus the one kept for short statements, rounded up: 2 each on 8 vCPUs with 4 workers, 3 with 2. A number is used exactly as it is.",
+		Default: "auto",
 		Example: "4",
 		ReadBy:  "pg-router",
 	},

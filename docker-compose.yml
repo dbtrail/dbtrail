@@ -858,8 +858,9 @@ services:
   # needs each server's source to be reachable from this container, as
   # `bintrail` does.
   #
-  # It is sized to fit beside capture without asking: four statements at once
-  # with two threads each, 256 clients. PG_ROUTER_WORKERS,
+  # It is sized to fit beside capture without asking: four statements at once,
+  # 256 clients, and each statement's threads worked out from the CPUs this
+  # service may use (2 each on 8 vCPUs, 4 on 16). PG_ROUTER_WORKERS,
   # PG_ROUTER_THREADS and PG_ROUTER_MAX_CONNECTIONS in .env change that, and
   # PG_ROUTER_MEMORY (e.g. 8g) and PG_ROUTER_CPUS (e.g. 4) give this service
   # ceilings of its own. Each statement may take the memory saved in the web
@@ -937,7 +938,9 @@ services:
       # where the kernel stops DBTrail's processes for memory.
       BINTRAIL_MEMORY_SHARE: ${PG_ROUTER_MEMORY_SHARE:-}
       # How many statements run at once, with how many threads each, and how
-      # many clients may be connected. Unset, the small defaults above.
+      # many clients may be connected. Unset, the defaults above; the threads
+      # are then the vCPUs over the statements at once (workers plus one),
+      # rounded up, and a number set here is used exactly as it is.
       BINTRAIL_PG_ROUTER_WORKERS: ${PG_ROUTER_WORKERS:-}
       BINTRAIL_PG_ROUTER_THREADS: ${PG_ROUTER_THREADS:-}
       BINTRAIL_PG_ROUTER_MAX_CONNECTIONS: ${PG_ROUTER_MAX_CONNECTIONS:-}

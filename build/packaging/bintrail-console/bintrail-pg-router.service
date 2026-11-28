@@ -40,9 +40,9 @@ Delegate=yes
 # served first when they and the statements on the copy want the same cores.
 # It only matters while the machine's cores are all busy.
 CPUWeight=25
-# Unless told otherwise: four statements at once, two threads each
-# (BINTRAIL_PG_ROUTER_WORKERS and BINTRAIL_PG_ROUTER_THREADS in the settings
-# file). For a ceiling on the whole service, `systemctl edit
+# Unless told otherwise: four statements at once, each with this machine's
+# vCPUs shared among the five that can run (BINTRAIL_PG_ROUTER_WORKERS and
+# BINTRAIL_PG_ROUTER_THREADS in the settings file). For a ceiling on the whole service, `systemctl edit
 # bintrail-pg-router` and set, under [Service], for example:
 #   MemoryMax=8G
 #   CPUQuota=400%
