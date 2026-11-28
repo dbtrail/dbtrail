@@ -38,8 +38,8 @@ HEALTH_URL="http://127.0.0.1:${PORT}/api/healthz"
 CONSOLE_URL="http://127.0.0.1:${PORT}"
 START_PAGE="https://www.dbtrail.com/docs/quickstart/"
 START_PG="https://www.dbtrail.com/docs/postgres/"
-# The promise, word for word the headline of the README's header and of the
-# dbtrail.com home page (#2637); test/installer pins it.
+# The promise of the MySQL path (#2637); the README's header speaks to both
+# paths and has its own (#3319). test/installer pins both.
 PROMISE="Heavy MySQL queries, from minutes to seconds."
 # An installation for PostgreSQL servers speaks of PostgreSQL alone (#3319):
 # its promise is the headline of dbtrail.com/postgresql, and what keeps the
