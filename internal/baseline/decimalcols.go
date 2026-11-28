@@ -114,6 +114,16 @@ type TableFooter struct {
 	// PGRelation is that recorded shape, for a PostgreSQL file whose PG is
 	// set: the catalog the PostgreSQL-protocol port answers from (#2769).
 	PGRelation *PGRelation
+	// PGStored are the columns of a PostgreSQL file that it stores as their
+	// type, by name, each with that type (MetaKeyPGTypedColumns, #3315): its
+	// PG cast, which the views then do not apply. Nil when it stores none.
+	PGStored map[string]string `json:",omitempty"`
+	// PGTypedUnusable says why a PostgreSQL file's MetaKeyPGTypedColumns
+	// could not be used ("" when it could, or the file has none): which of
+	// its columns are typed is not known, so its pinned view refuses.
+	PGTypedUnusable string `json:",omitempty"`
+	// Set alone (PG nil) on a file that stores columns typed and whose
+	// shape or column list could not be read (refuseUnreadPGTyped).
 }
 
 // DistinctColumns splits a parsed schema into the columns whose DISTINCT
@@ -453,7 +463,9 @@ func ReadTableFooters(ctx context.Context, paths []string) (FooterRead, error) {
 		collectDecimalRows(rows, &st)
 		rows.Close()
 	}
+	st.applyPGTyped()
 	confirmColumnOrder(ctx, db, &st)
+	st.refuseUnreadPGTyped()
 	return st.result(paths, err), nil
 }
 
@@ -474,6 +486,9 @@ type footerScan struct {
 	orderUnread []string
 	// orderErr is the last error of that read, for the one warning about it.
 	orderErr error
+	// pgTyped are the MetaKeyPGTypedColumns values read, by file, for
+	// applyPGTyped once every key of every file is in.
+	pgTyped map[string]string
 }
 
 // result sorts every path into read, no schema, or unread, and logs the last
@@ -576,9 +591,10 @@ func warnNoSchema(paths []string) {
 // footer, or, for a file of a PostgreSQL source, the shape it records in its
 // place (the third column says which). parquet_kv_metadata reads footers only, never row data.
 func decimalFooterQuery(paths []string) string {
-	return "SELECT file_name, value, key = " + sqlQuoteLiteral(MetaKeyPGRelation) + " FROM parquet_kv_metadata(" +
+	return "SELECT file_name, value, CASE key WHEN " + sqlQuoteLiteral(MetaKeyPGRelation) + " THEN 1 WHEN " +
+		sqlQuoteLiteral(MetaKeyPGTypedColumns) + " THEN 2 ELSE 0 END FROM parquet_kv_metadata(" +
 		fileListLiteral(paths) + ") WHERE key IN (" + sqlQuoteLiteral(MetaKeyCreateTableSQL) + ", " +
-		sqlQuoteLiteral(MetaKeyPGRelation) + ")"
+		sqlQuoteLiteral(MetaKeyPGRelation) + ", " + sqlQuoteLiteral(MetaKeyPGTypedColumns) + ")"
 }
 
 // decimalColumnsPerFile is the batched read's fallback: one query per file, so
@@ -612,14 +628,18 @@ func collectDecimalRows(rows *sql.Rows, st *footerScan) {
 		var file string
 		// parquet_kv_metadata types both key and value as BLOB.
 		var createSQL []byte
-		var pgRelation bool
-		if err := rows.Scan(&file, &createSQL, &pgRelation); err != nil {
+		var pgKey int
+		if err := rows.Scan(&file, &createSQL, &pgKey); err != nil {
 			st.lostRows++
 			slog.Debug("baseline: could not scan Parquet footer metadata", "error", err)
 			continue
 		}
-		if pgRelation {
+		switch pgKey {
+		case 1:
 			st.collectPGRelation(file, string(createSQL))
+			continue
+		case 2:
+			st.collectPGTyped(file, string(createSQL))
 			continue
 		}
 		cols, err := ParseSchemaText(string(createSQL))

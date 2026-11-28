@@ -55,6 +55,12 @@ func (in *Input) ApplyFooters(footers map[string]baseline.TableFooter) {
 		if !ok {
 			continue
 		}
+		if f.PG == nil && f.PGTypedUnusable != "" {
+			// A PostgreSQL file that stores columns typed and whose footer
+			// could not be read whole: its view refuses (pgPairStateBody).
+			in.Baselines[i].PGTypedUnusable = f.PGTypedUnusable
+			continue
+		}
 		if f.PG != nil {
 			// A PostgreSQL source's file: its own casts and column order, and
 			// none of what follows, which is read from a MySQL CREATE TABLE.
@@ -62,6 +68,8 @@ func (in *Input) ApplyFooters(footers map[string]baseline.TableFooter) {
 			// about that CREATE TABLE.
 			in.Baselines[i].PGCasts = f.PG
 			in.Baselines[i].PGRelation = f.PGRelation
+			in.Baselines[i].PGStored = f.PGStored
+			in.Baselines[i].PGTypedUnusable = f.PGTypedUnusable
 			in.Baselines[i].Columns = f.Columns
 			continue
 		}
@@ -171,6 +179,11 @@ func writePGCastNote(b *strings.Builder, in Input) {
 		b.WriteString("-- first element) unless it is named below; one of more dimensions fails the\n")
 		b.WriteString("-- statement that reads it. Columns of any other type stay text and are named\n")
 		b.WriteString("-- below.\n")
+		if pgAnyStored(in) {
+			b.WriteString("-- Some files store whole numbers, oid, date, uuid and numeric columns as their\n")
+			b.WriteString("-- type instead of as text; the views read those as they are, with the same\n")
+			b.WriteString("-- types and the same values.\n")
+		}
 		return
 	}
 }
@@ -360,13 +373,32 @@ func replaceParts(t BaselineTable) []retyped {
 // The names come from the file's own footer and are checked against its
 // column list before they reach here (baseline.ReadTableFooters), which is
 // the invariant replaceClause states.
+//
+// A column the file stores as its type (BaselineTable.PGStored, #3315) is
+// read as it is, and is not listed: the file holds what the cast would give.
 func pgParts(t BaselineTable) []retyped {
+	return pgPartsOf(t, false)
+}
+
+// pgTextParts are the expressions pgParts gives the columns the file
+// stores typed, as if the file held them as text: for the rows that come
+// from beside the file (a table delta's .pgnew files, a tail), which hold
+// every column as text, so that they read as the file's own.
+func pgTextParts(t BaselineTable) []retyped {
+	return pgPartsOf(t, true)
+}
+
+// pgPartsOf is pgParts (stored false), or pgTextParts (stored true).
+func pgPartsOf(t BaselineTable, stored bool) []retyped {
 	var parts []retyped
 	var trim map[string]bool
 	if t.TrimPadded {
 		trim = baseline.PGPaddedToTrim(t.PGRelation)
 	}
 	for _, c := range t.PGCasts {
+		if (t.PGStored[c.Name] != "") != stored {
+			continue
+		}
 		q := quoteIdent(c.Name)
 		refuse := func(what string) string {
 			return "error(" + sqlString(fmt.Sprintf("%s.%s: column %s holds %s, which the copy does not read", t.Schema, t.Table, c.Name, what)) + ")"

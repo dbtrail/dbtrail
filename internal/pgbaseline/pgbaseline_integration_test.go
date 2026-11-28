@@ -4,6 +4,7 @@ package pgbaseline_test
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/duckdb/duckdb-go/v2"
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
 	"github.com/parquet-go/parquet-go"
@@ -495,47 +497,50 @@ func readParquetMetadata(t *testing.T, path string) map[string]string {
 	return md
 }
 
-// readRawRows reads every row of a RawText Parquet file as column→value maps;
-// a nil pointer means SQL NULL (distinguished from the empty string).
+// readRawRows reads every row of a snapshot file as column→value maps, each
+// value PostgreSQL's text; a nil pointer means SQL NULL (distinguished from
+// the empty string). A column the file stores as its type (#3315) is read as
+// every reader of the copy reads it as text, CAST to VARCHAR, which is the
+// text it was written from.
 func readRawRows(t *testing.T, path string) []map[string]*string {
 	t.Helper()
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatalf("open %s: %v", path, err)
-	}
-	defer f.Close()
-	fi, err := f.Stat()
+	db, err := sql.Open("duckdb", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	pf, err := parquet.OpenFile(f, fi.Size())
+	defer db.Close()
+	rows, err := db.Query("SELECT " + baseline.PGAllTextSQL("") + " FROM read_parquet('" + strings.ReplaceAll(path, "'", "''") + "')")
 	if err != nil {
-		t.Fatalf("OpenFile %s: %v", path, err)
+		t.Fatalf("read %s: %v", path, err)
 	}
-	fields := pf.Schema().Fields()
-	reader := parquet.NewReader(pf)
-	defer reader.Close()
-
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		t.Fatal(err)
+	}
 	var out []map[string]*string
-	for {
-		rows := make([]parquet.Row, 64)
-		n, err := reader.ReadRows(rows)
-		for _, r := range rows[:n] {
-			m := make(map[string]*string, len(fields))
-			for i, field := range fields {
-				v := r[i]
-				if v.IsNull() {
-					m[field.Name()] = nil
-					continue
-				}
-				s := string(v.ByteArray())
-				m[field.Name()] = &s
+	for rows.Next() {
+		vals := make([]sql.NullString, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			t.Fatal(err)
+		}
+		m := make(map[string]*string, len(cols))
+		for i, c := range cols {
+			if vals[i].Valid {
+				s := vals[i].String
+				m[c] = &s
+			} else {
+				m[c] = nil
 			}
-			out = append(out, m)
 		}
-		if err != nil || n == 0 {
-			break
-		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read %s: %v", path, err)
 	}
 	return out
 }

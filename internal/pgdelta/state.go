@@ -30,6 +30,15 @@ import (
 // linked folder) is two files to this function, and each of its keys would
 // be there twice: a chain's files are named from one listing of one folder.
 func StateSQL(base string, dead, rows []string) string {
+	return StateSQLTyped(base, dead, rows, "")
+}
+
+// StateSQLTyped is StateSQL for a base file that stores some columns as
+// their type (#3315; baseline.MetaKeyPGTypedColumns): newReplace is a
+// REPLACE list, applied to the rows of the .pgnew files, that reads those
+// columns' text as the types the base holds them in, so the two sides of the
+// union have one type per column. Empty, it is StateSQL to the byte.
+func StateSQLTyped(base string, dead, rows []string, newReplace string) string {
 	dead, rows = unique(dead), unique(rows)
 	if len(dead) == 0 && len(rows) == 0 {
 		return "SELECT * FROM read_parquet(" + file(base) + noHive + ")"
@@ -42,13 +51,32 @@ func StateSQL(base string, dead, rows []string) string {
 	}
 	if len(rows) > 0 {
 		src := "read_parquet(" + list(rows) + ", union_by_name=true" + noHive + ")"
-		b.WriteString(" UNION ALL BY NAME SELECT bintrail_n.* EXCLUDE (" + KeyColumn + ", " + OpColumn + ", " + SeqColumn + ")" +
+		newest := "SELECT bintrail_n.* EXCLUDE (" + KeyColumn + ", " + OpColumn + ", " + SeqColumn + ")" +
 			" FROM " + src + " AS bintrail_n" +
 			" JOIN (SELECT encode(" + KeyColumn + ") AS bintrail_k, max(" + SeqColumn + ") AS bintrail_s FROM " + src + " GROUP BY 1) AS bintrail_m" +
 			" ON encode(bintrail_n." + KeyColumn + ") = bintrail_m.bintrail_k AND bintrail_n." + SeqColumn + " = bintrail_m.bintrail_s" +
-			" WHERE bintrail_n." + OpColumn + " = '" + OpPut + "'")
+			" WHERE bintrail_n." + OpColumn + " = '" + OpPut + "'"
+		if newReplace != "" {
+			newest = "SELECT * REPLACE (" + newReplace + ") FROM (" + newest + ")"
+		}
+		b.WriteString(" UNION ALL BY NAME " + newest)
 	}
 	return b.String()
+}
+
+// TextStateSQL is StateSQL with every column of the base read as
+// PostgreSQL's text (baseline.PGAllTextSQL), as the .pgnew files hold them:
+// for a fold that writes the table again as text, whether its base stores
+// some columns typed (#3315) or not. Over a base of text it reads what
+// StateSQL reads.
+func TextStateSQL(base string, dead, rows []string) string {
+	dead, rows = unique(dead), unique(rows)
+	if len(dead) == 0 && len(rows) == 0 {
+		return "SELECT " + baseline.PGAllTextSQL("") + " FROM read_parquet(" + file(base) + noHive + ")"
+	}
+	s := StateSQL(base, dead, rows)
+	const from = "SELECT bintrail_b.* EXCLUDE (file_row_number) FROM "
+	return "SELECT " + baseline.PGAllTextSQL("bintrail_b", "file_row_number") + " FROM " + strings.TrimPrefix(s, from)
 }
 
 // noHive is the read_parquet option that keeps folder names out of the

@@ -96,15 +96,23 @@ func followNameFilter(basePath, suffix string) string {
 //
 // Like the MySQL following views, it does not check at read time that the
 // chain is whole: what the patterns find is what is read.
+//
+// The base's columns are read as PostgreSQL's text (baseline.PGAllTextSQL),
+// as the .pgnew files hold them: a following view is read across snapshots
+// whose files may store some columns as their type (#3315) and may not, and
+// the text of a stored column is the text it was written from, so the view
+// reads every snapshot alike. So are the .pgnew rows: the pattern they are
+// read through matches the base too, and a read by name takes some types
+// from it (a uuid's text is read as UUID).
 func FollowStateSQL(base, deadGlob, rowsGlob, basePath string) string {
 	pos := `"` + baseline.TableDeltaPosColumn + `"`
 	dead := "SELECT CAST(" + pos + " AS BIGINT) AS " + pos + " FROM (SELECT * FROM read_parquet(" + deadGlob + ", filename=true" + noHive + ")" +
 		" WHERE " + followNameFilter(basePath, DeadSuffix) +
 		" UNION ALL BY NAME SELECT NULL::BIGINT AS " + pos + " WHERE false)"
-	src := "(SELECT * FROM read_parquet(" + rowsGlob + ", filename=true, union_by_name=true" + noHive + ")" +
+	src := "(SELECT " + baseline.PGAllTextSQL("") + " FROM read_parquet(" + rowsGlob + ", filename=true, union_by_name=true" + noHive + ")" +
 		" WHERE " + followNameFilter(basePath, NewSuffix) +
 		" UNION ALL BY NAME SELECT NULL::VARCHAR AS " + KeyColumn + ", NULL::VARCHAR AS " + OpColumn + ", NULL::VARCHAR AS " + SeqColumn + " WHERE false)"
-	return "SELECT bintrail_b.* EXCLUDE (file_row_number) FROM read_parquet(" + base + ", file_row_number=true" + noHive + ") AS bintrail_b" +
+	return "SELECT " + baseline.PGAllTextSQL("bintrail_b", "file_row_number") + " FROM read_parquet(" + base + ", file_row_number=true" + noHive + ") AS bintrail_b" +
 		" WHERE NOT EXISTS (SELECT 1 FROM (" + dead + ") AS bintrail_d WHERE bintrail_d." + pos + " = bintrail_b.file_row_number)" +
 		" UNION ALL BY NAME SELECT bintrail_n.* EXCLUDE (" + KeyColumn + ", " + OpColumn + ", " + SeqColumn + ", filename)" +
 		" FROM " + src + " AS bintrail_n" +

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/pgdelta"
 )
 
@@ -144,5 +145,7 @@ func pgFollowGuardedBody(in Input, t BaselineTable, why string) string {
 	if replace := replaceClause(t); replace != "" {
 		return "SELECT * REPLACE (" + replace + ")\n  FROM " + read
 	}
-	return "SELECT * FROM " + read
+	// Every column as PostgreSQL's text, as pgdelta.FollowStateSQL reads
+	// the base: the snapshot followed may store some columns typed.
+	return "SELECT " + baseline.PGAllTextSQL("") + " FROM " + read
 }

@@ -96,7 +96,13 @@ func FetchSnapshot(ctx context.Context, path string, opts Options) ([]ResultRow,
 		return nil, err
 	}
 	safePath := strings.ReplaceAll(duckdbutil.FileGlob(path), "'", "''")
-	q := "SELECT * FROM parquet_scan('" + safePath + "')"
+	// A PostgreSQL file that stores columns typed (#3315) is read as the
+	// text it was written from, as every PostgreSQL file was.
+	src, err := pgScanSource(ctx, db, "'"+safePath+"'")
+	if err != nil {
+		return nil, err
+	}
+	q := "SELECT * FROM " + src
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
 	}
@@ -327,4 +333,28 @@ func looksLikeJSONContainer(b []byte) bool {
 		}
 	}
 	return false
+}
+
+// pgTypedColumnsKey is baseline.MetaKeyPGTypedColumns, which this package
+// cannot import (baseline's tests import it); a test holds the two equal.
+const pgTypedColumnsKey = "bintrail.pg_typed_columns"
+
+// pgScanSource is baseline.PGScanSource: parquet_scan(lit), or, for a file
+// of a PostgreSQL source that stores columns typed (#3315), the same with
+// every column as PostgreSQL's text, so a snapshot read returns what it
+// returned from a file of text.
+func pgScanSource(ctx context.Context, db *sql.DB, lit string) (string, error) {
+	var n, other int
+	if err := db.QueryRowContext(ctx, "SELECT count(*), count(*) FILTER (WHERE NOT starts_with(decode(value), '{\"v\":1,')) FROM parquet_kv_metadata("+lit+") WHERE key = '"+pgTypedColumnsKey+"'").Scan(&n, &other); err != nil {
+		return "", fmt.Errorf("read the footer of %s: %w", lit, err)
+	}
+	if n == 0 {
+		return "parquet_scan(" + lit + ")", nil
+	}
+	if other > 0 {
+		// Another version of the list: this build checked the rendering
+		// only of the types it stores itself.
+		return "", fmt.Errorf("%s stores columns as their type in a way this version does not read; update DBTrail to read it", lit)
+	}
+	return "(SELECT CAST(COLUMNS(*) AS VARCHAR) FROM parquet_scan(" + lit + "))", nil
 }

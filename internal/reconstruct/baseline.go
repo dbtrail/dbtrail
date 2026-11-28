@@ -253,7 +253,13 @@ func ReadBaselineRows(ctx context.Context, path string, filter map[string]string
 	// Build sorted conditions for deterministic SQL + arg ordering.
 	conds := buildCondsList(filter)
 	safePath := strings.ReplaceAll(duckdbutil.FileGlob(path), "'", "''")
-	q := "SELECT * FROM parquet_scan('" + safePath + "')"
+	// A PostgreSQL file that stores columns typed (#3315) is read as the
+	// text it was written from, as every PostgreSQL file was.
+	src, err := baseline.PGScanSource(ctx, db, "'"+safePath+"'")
+	if err != nil {
+		return nil, err
+	}
+	q := "SELECT * FROM " + src
 	if len(conds) > 0 {
 		parts := make([]string, len(conds))
 		for i, c := range conds {

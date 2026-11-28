@@ -51,6 +51,18 @@ func checkPGFoldable(schema, table string, md baseline.DumpMetadata) (baseline.P
 	if !ok {
 		return baseline.PGRelation{}, fmt.Errorf("%s: the snapshot records no table shape (it was taken by a version before this one); %s", name, pgRebaseline)
 	}
+	// A file that stores columns typed (#3315) is read as text through a
+	// cast whose rendering this build checked only for the types it
+	// stores itself: a list it cannot read is refused, never guessed.
+	if md.PGTypedColumns != "" {
+		typed, err := baseline.ParsePGTypedColumns(md.PGTypedColumns)
+		if err == nil {
+			err = baseline.CheckPGTypedColumns(rel, typed)
+		}
+		if err != nil {
+			return baseline.PGRelation{}, fmt.Errorf("%s: which columns the snapshot stores as their type cannot be read (%v); update DBTrail, or %s", name, err, pgRebaseline)
+		}
+	}
 	if md.RenderGUCs != baseline.RenderGUCsPinned {
 		return baseline.PGRelation{}, fmt.Errorf("%s: the snapshot's values were rendered under other settings (%q) than the changes captured now (%q), so its rows would not match theirs; %s",
 			name, md.RenderGUCs, baseline.RenderGUCsPinned, pgRebaseline)

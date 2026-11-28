@@ -257,6 +257,7 @@ func TestFooterReaders_agreeOnEveryKey(t *testing.T) {
 		"MetaKeyFoldGeneration":    "4",
 		"MetaKeyLockMode":          "no-lock",
 		"MetaKeyPGRelation":        `{"oid":16411,"columns":[{"name":"id","type_oid":23,"typmod":-1,"type":"integer"}]}`,
+		"MetaKeyPGTypedColumns":    `{"v":1,"columns":{"n":"INTEGER"}}`,
 	}
 	keys := footerKeyConstants(t)
 	if len(keys) < len(values) {

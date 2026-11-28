@@ -47,7 +47,9 @@ func BasePositions(ctx context.Context, db *sql.DB, basePath string, keyColumns 
 	}
 	cols := make([]string, len(keyColumns))
 	for i, c := range keyColumns {
-		cols[i] = `"` + strings.ReplaceAll(c, `"`, `""`) + `"`
+		// As text, whatever the file holds: a key column is never stored
+		// typed (#3315), and if one were, its text is what a key is.
+		cols[i] = baseline.PGTextSQL(`"` + strings.ReplaceAll(c, `"`, `""`) + `"`)
 	}
 	rows, err := db.QueryContext(ctx, "SELECT file_row_number, "+strings.Join(cols, ", ")+
 		" FROM read_parquet("+file(basePath)+", file_row_number=true"+noHive+")")
@@ -249,9 +251,9 @@ var ErrBaseValuesTooLarge = errors.New("the values to read from the table file a
 // named columns in that key's row: nil for a NULL. A key the file does not
 // hold is absent from the answer. Keys are found as BasePositionsOf finds
 // them, with its errors (a key held twice, a row with a NULL in a key
-// column); a column the file does not have is an error. The values are the
-// file's own bytes: a PostgreSQL table's file holds PostgreSQL's text for
-// every column.
+// column); a column the file does not have is an error. The values are
+// PostgreSQL's text: a column the file holds as text is read as its bytes,
+// and one it stores as its type (#3315) as the text it was written from.
 //
 // Without a key index, two reads: the key columns, for the rows, then the
 // named columns of those rows by their number, so no other column and no key
@@ -337,7 +339,9 @@ func baseValuesAt(ctx context.Context, db *sql.DB, basePath string, positions ma
 	src := "read_parquet(" + file(basePath) + ", file_row_number=true" + noHive + ")"
 	sel := make([]string, len(columns))
 	for i, c := range columns {
-		sel[i] = "encode(bintrail_b." + quoteIdent(c) + ")"
+		// The column's PostgreSQL text, whether the file holds it as
+		// text or as its type (#3315, baseline.PGTextSQL).
+		sel[i] = "encode(" + baseline.PGTextSQL("bintrail_b."+quoteIdent(c)) + ")"
 	}
 	keyAt := make(map[int64]string, len(positions))
 	nums := make([]string, 0, len(positions))
