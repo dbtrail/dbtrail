@@ -708,8 +708,8 @@ var docs = map[string]Doc{
 	},
 	"BINTRAIL_ROUTER_CONCURRENCY": {
 		Group:   "router",
-		Text:    "How many statements run on the copy at the same time, 1 to 64 (similar to innodb_thread_concurrency). Empty or 0 lets the router work it out from the cores and memory it may use, one statement per two cores; the rest wait their turn.",
-		Default: "worked out from the machine (one statement per two cores, limited by memory)",
+		Text:    "How many statements run on the copy at the same time, 1 to 64 (similar to innodb_thread_concurrency). Empty or 0 lets the router work it out from the vCPUs and memory it may use, one statement per two vCPUs; the rest wait their turn.",
+		Default: "worked out from the machine (one statement per two vCPUs, limited by memory)",
 		Example: "8",
 		ReadBy:  "router",
 	},
