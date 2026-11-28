@@ -59,7 +59,7 @@ func aliasClassOf(toks []rtToken, typesOf func(string) []string) func(string) []
 			if _, ok := known[name]; ok {
 				continue
 			}
-			if len(typesOf(name)) > 0 {
+			if isColumnName(typesOf(name)) {
 				// Also a column's name: where the statement means which is
 				// not followed here, so the name keeps the column's types
 				// alone (sum(qty) AS qty is still a sum of integers).
@@ -158,6 +158,17 @@ func insideOwnMacro(toks []rtToken, at int) bool {
 			if j > 0 && toks[j-1].kind == rtWord && strings.HasPrefix(toks[j-1].text, "_bintrail_pg_") {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// isColumnName reports whether a name's types hold a column's, beside the
+// screen's mark of a name the statement defines (withAliasTypes).
+func isColumnName(ts []string) bool {
+	for _, ty := range ts {
+		if ty != notTextType {
+			return true
 		}
 	}
 	return false
