@@ -11,8 +11,9 @@ import "strings"
 // went to the source. aliasClassOf gives such a name the class of what it
 // stands for, when every definition of it in the statement has one and they
 // agree: sum(ol_amount) is a numeric wherever spent is read. A column of the
-// same name keeps its own types beside it, and classOfTypes then wants both
-// to agree, so a name used where the column is meant is judged by both.
+// same name is left to the column's types: which one a use means is not
+// followed here, and a wrong class only costs a macro refused when the
+// statement runs (the source answers then).
 
 // classTypes are the copy's types aliasClassOf gives a defined name of each
 // class, as classOfTypes reads them back.
@@ -56,6 +57,12 @@ func aliasClassOf(toks []rtToken, typesOf func(string) []string) func(string) []
 		changed := false
 		for name, exprs := range defs {
 			if _, ok := known[name]; ok {
+				continue
+			}
+			if len(typesOf(name)) > 0 {
+				// Also a column's name: where the statement means which is
+				// not followed here, so the name keeps the column's types
+				// alone (sum(qty) AS qty is still a sum of integers).
 				continue
 			}
 			cls := clsUnknown

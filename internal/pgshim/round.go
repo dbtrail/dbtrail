@@ -35,6 +35,13 @@ func (s *session) copyText(text string) (string, error) {
 				return "", &Error{Code: "0A000", Message: "the copy does not answer this as PostgreSQL would: a division or an avg(), written for the copy by its columns' types, which could not be read now"}
 			}
 			out, screened = retypeForCopy(out, types), retypeForCopy(screened, types)
+		} else if holdsSum(out) || holdsSum(screened) {
+			// A sum of smallints or integers is written as a bigint by the
+			// columns' types; unread, it stays the engine's numeric, as the
+			// screen left it (routeFree).
+			if types, unread := s.columnTypes(out); !unread {
+				out, screened = retypeForCopy(out, types), retypeForCopy(screened, types)
+			}
 		}
 		if s.screened != "" && !writtenAsScreened(screened, out) {
 			return "", &Error{Code: "0A000", Message: "the copy does not answer this as PostgreSQL would: with this argument the statement is not written for the copy as it was when the port chose the copy for it (an argument inside round(), avg(), floor(), extract() or to_timestamp() or beside a division, or one that leaves the statement's text unread)"}

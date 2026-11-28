@@ -26,8 +26,12 @@ func (s *session) sourceTextTypes(text string, types []colType) {
 	if !some || s.bound == nil || s.bound.Catalog == nil {
 		return
 	}
+	busy := s.catalogBusy
 	v, perr := s.catalog()
+	s.catalogBusy = busy
 	if perr != nil {
+		// The copy's text type stays: right, only less precise.
+		s.logger.Debug("pgshim: a text column keeps the copy's type, the catalog could not be read", "err", perr.msg)
 		return
 	}
 	for i, t := range textItemTypes(text, v.tables, len(types)) {
@@ -40,11 +44,15 @@ func (s *session) sourceTextTypes(text string, types []colType) {
 // textItemTypes is, for each of the n items of the select list of the
 // statement text, the source type of the varchar or char(n) column the item
 // returns as it is, or a zero colType. nil when the list is not read here:
-// a star, a UNION, INTERSECT or EXCEPT (whose columns' type comes from
-// every branch), a column list beside a table (AS t(a, b)), or not n items.
+// a statement that is not a SELECT or a WITH, a star, a UNION, INTERSECT,
+// EXCEPT or VALUES anywhere (whose columns' type comes from every branch), a
+// cast anywhere, a column list beside a table (AS t(a, b)), or not n items.
 func textItemTypes(text string, tables []CatalogTable, n int) []colType {
 	toks, why := lexSQL(text)
 	if why != "" || columnListBesidesWith(toks) {
+		return nil
+	}
+	if w := firstWord(toks); w != "select" && w != "with" {
 		return nil
 	}
 	sel, depth := -1, 0
@@ -54,7 +62,15 @@ func textItemTypes(text string, tables []CatalogTable, n int) []colType {
 			depth++
 		case isOpTok(toks, i, ")"):
 			depth--
-		case depth == 0 && t.kind == rtWord && (t.text == "union" || t.text == "intersect" || t.text == "except"):
+		case t.kind == rtWord && (t.text == "union" || t.text == "intersect" || t.text == "except" || t.text == "values" || t.text == "cast"):
+			// Anywhere: a branch of a UNION in a subquery gives its column
+			// another length (or none), and a cast keeps the column's name
+			// for another type (SELECT c FROM (SELECT c::text ...) s).
+			return nil
+		case isOpTok(toks, i, "::"):
+			return nil
+		case isOpTok(toks, i, "*") && i > 0 && (isOpTok(toks, i-1, ",") || isOpTok(toks, i-1, ".") || toks[i-1].kind == rtWord && (toks[i-1].text == "select" || toks[i-1].text == "distinct" || toks[i-1].text == "all")):
+			// A star may stand for any number of columns before an item.
 			return nil
 		case depth == 0 && t.kind == rtWord && t.text == "select":
 			sel = i

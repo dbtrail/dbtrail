@@ -23,7 +23,8 @@ func TestAliasClassOf(t *testing.T) {
 		{"WITH p AS (SELECT sum(ratio) AS s FROM t) SELECT s FROM p", "s", clsUnknown},
 		{"SELECT x FROM (SELECT amount AS x FROM t UNION ALL SELECT qty AS x FROM t) u", "x", clsUnknown},
 		{"SELECT s FROM (SELECT sum(amount) FROM t) AS u(s)", "s", clsUnknown},
-		{"SELECT qty FROM (SELECT sum(amount) AS qty FROM t) u", "qty", clsUnknown},
+		// Also a column's name: the column's types alone.
+		{"SELECT qty FROM (SELECT sum(amount) AS qty FROM t) u", "qty", clsWhole32},
 	} {
 		toks, why := lexSQL(tc.q)
 		if why != "" {
@@ -53,6 +54,7 @@ func TestRetypeForCopy_sum32(t *testing.T) {
 		"SELECT sum(qty ORDER BY qty) FROM t":                          "SELECT sum(qty ORDER BY qty) FROM t",
 		"SELECT sum(qty + id) FROM t":                                  "SELECT sum(qty + id) FROM t",
 		"SELECT sum(nothere) FROM t":                                   "SELECT sum(nothere) FROM t",
+		"SELECT sum(qty) AS qty FROM t":                                "SELECT " + pgSum32 + "(qty) AS qty FROM t",
 		"SELECT t.sum(qty) FROM t":                                     "SELECT t.sum(qty) FROM t",
 	} {
 		if got := retypeForCopy(q, types); got != want {
@@ -110,6 +112,13 @@ func TestTextItemTypes(t *testing.T) {
 		"SELECT * FROM customer",
 		"SELECT c_last FROM customer UNION SELECT i_name FROM item",
 		"SELECT s FROM (SELECT c_last FROM customer) AS t(s)",
+		"SELECT c_last FROM (SELECT c_last FROM customer UNION ALL SELECT i_name FROM item) s",
+		"WITH u AS (SELECT c_last FROM customer EXCEPT SELECT c_last FROM item) SELECT c_last FROM u",
+		"SELECT c_last FROM (SELECT c_last::text FROM customer) s",
+		"SELECT c_last FROM (SELECT CAST(c_last AS char(20)) FROM customer) s",
+		"SELECT c.*, c_last FROM customer c",
+		"DESCRIBE SELECT c_last, c_credit, c_id, note FROM customer",
+		"SELECT c_last FROM (VALUES ('x')) v(c_last)",
 	} {
 		if got := textItemTypes(q, tables, 4); got != nil {
 			t.Errorf("%s: %v, want nil", q, got)

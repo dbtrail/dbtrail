@@ -538,7 +538,21 @@ func retypeForCopy(text string, types map[string][]string) string {
 func needsTypes(text string) bool {
 	toks, _ := lexSQL(text)
 	for i, t := range toks {
-		if isOpTok(toks, i, "/") || t.kind == rtWord && (t.text == pgAvg || t.text == "sum") {
+		if isOpTok(toks, i, "/") || t.kind == rtWord && t.text == pgAvg {
+			return true
+		}
+	}
+	return false
+}
+
+// holdsSum reports whether text holds a sum(), which retypeForCopy writes
+// as pgSum32 when its argument is smallints or integers. Unlike a division
+// or an avg, a sum left as the engine's is answered right, only announced
+// as a numeric: when the columns' types cannot be read it is left so.
+func holdsSum(text string) bool {
+	toks, _ := lexSQL(text)
+	for i, t := range toks {
+		if t.kind == rtWord && t.text == "sum" && isOpTok(toks, i+1, "(") {
 			return true
 		}
 	}
