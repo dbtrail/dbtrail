@@ -73,6 +73,7 @@ case "$url" in
     if [ -n "$out" ]; then printf '%s' "$STUB_RELEASE_BODY" > "$out"; else printf '%s' "$STUB_RELEASE_BODY"; fi;;
   *docker-compose.yml) [ -n "$STUB_COMPOSE_FAIL" ] && exit 22; cp "$COMPOSE_SRC" "$out";;
   *dbtrail.sh) [ -n "$STUB_NO_CLI" ] && exit 22; cp "$CLI_SRC" "$out";;
+  */install.sh) [ -n "$STUB_INSTALLER_BODY" ] && { printf '%s' "$STUB_INSTALLER_BODY" > "$out"; exit 0; }; cp "$INSTALLER_SRC" "$out";;
 esac
 exit 0
 `,
@@ -152,6 +153,7 @@ func installScript(t *testing.T, script string, prep func(dir string), env ...st
 		"STUB_RELEASE_BODY=" + releaseBody,
 		"COMPOSE_SRC=" + filepath.Join(root, "docker-compose.yml"),
 		"CLI_SRC=" + filepath.Join(root, "dbtrail.sh"),
+		"INSTALLER_SRC=" + filepath.Join(root, "install.sh"),
 	}, env...)
 	out, err := cmd.CombinedOutput()
 	calls, _ := os.ReadFile(log)

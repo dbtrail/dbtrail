@@ -201,6 +201,13 @@ rerun_cmd() {
   envs="$1"
   [ "$DIR" != "./dbtrail" ] && envs="DBTRAIL_DIR=$DIR $envs"
   [ -n "${DBTRAIL_REF:-}" ] && [ "$DBTRAIL_REF" != "main" ] && envs="DBTRAIL_REF=$DBTRAIL_REF $envs"
+  # The PostgreSQL path is pasted back through its own door (#3319), from
+  # main: a tag older than install-postgres.sh has no such file, and the
+  # installer it runs pins the stack to DBTRAIL_REF all the same.
+  if [ "$FOR" = postgres ]; then
+    printf 'curl -fsSL https://raw.githubusercontent.com/dbtrail/dbtrail/main/install-postgres.sh | %s sh' "$envs"
+    return
+  fi
   printf 'curl -fsSL https://raw.githubusercontent.com/dbtrail/dbtrail/%s/install.sh | %s sh' "${DBTRAIL_REF:-main}" "$envs"
 }
 
@@ -731,10 +738,10 @@ say "     same address in your browser there:"
 say "       ssh -L ${PORT}:127.0.0.1:${PORT} <user>@<this machine's address>"
 say "  ${B}2. Connect.${RST} Click + Add server, then Open the full form, and pick PostgreSQL."
 say "     Fill in host, port, the dbtrail role and its password, the dbname and the"
-say "     publication. Tick the box that lets the PostgreSQL port send to your"
-say "     PostgreSQL, read-only, a SELECT the copy does not answer: without it, the"
-say "     port does not answer for this server. Press Save. DBTrail checks the rest"
-say "     by itself, and says what to fix."
+say "     publication. Leave ticked the box that lets the PostgreSQL port send to"
+say "     your PostgreSQL, read-only, a SELECT the copy does not answer: without it,"
+say "     the port does not answer for this server. Press Save. DBTrail checks the"
+say "     rest by itself, and says what to fix."
 say "     Your PostgreSQL runs on this same machine? Use host ${B}host.docker.internal${RST}"
 say "     (on Linux, it must listen on more than 127.0.0.1)."
 say "  ${B}3. First copy.${RST} On Snapshots, press Read database now. DBTrail reads every"

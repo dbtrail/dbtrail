@@ -14,10 +14,13 @@ const pgPromise = "Heavy PostgreSQL reports, on a copy of your tables."
 // The start page of the PostgreSQL path.
 const pgStartPage = "https://www.dbtrail.com/docs/postgres/"
 
-// otherDatabaseRE finds a database other than PostgreSQL named in what a
-// person reads. People who come for PostgreSQL leave when its installer
-// talks about MySQL, so nothing printed on that path may name one, not even
-// the store that keeps DBTrail's history ("DBTrail's history store").
+// otherDatabaseRE finds a database other than PostgreSQL named in the
+// installer's own text. People who come for PostgreSQL leave when its
+// installer talks about MySQL, so nothing it prints on that path may name
+// one, not even the store that keeps DBTrail's history ("DBTrail's history
+// store"). Docker's own progress lines (`compose pull`, `compose up`) name
+// the stack's services and images, index-mysql among them; the stand-in
+// Docker prints none, so they are not checked here.
 var otherDatabaseRE = regexp.MustCompile(`(?i)mysql|mariadb|percona|binlog`)
 
 // pgRun runs install.sh for PostgreSQL servers and checks it finished.
@@ -59,6 +62,10 @@ func TestInstallerPostgres_namesNoOtherDatabase(t *testing.T) {
 			if strings.Contains(r.out, promise) {
 				t.Errorf("the install for PostgreSQL makes the MySQL promise:\n%s", r.out)
 			}
+			// 3309 taken: said nowhere, so the compose file shows the branch ran.
+			if strings.Contains(strings.Join(env, " "), "3309") && strings.Contains(r.compose(t), `"127.0.0.1:3309:3309"`) {
+				t.Errorf("with 3309 taken its line is still in docker-compose.yml")
+			}
 		})
 	}
 }
@@ -78,7 +85,7 @@ func TestInstallerPostgres_saysItsOwnSteps(t *testing.T) {
 		"wal_level = logical",
 		"REPLICA IDENTITY FULL",
 		"Open the full form, and pick PostgreSQL",
-		"Tick the box",
+		"Leave ticked the box",
 		"Read database now",
 		"4. PostgreSQL port.",
 		"PostgreSQL clients",
@@ -155,5 +162,53 @@ func TestInstallPostgresScript_runsTheInstallerForPostgreSQL(t *testing.T) {
 	}
 	for _, h := range otherDatabaseLines(r.out, r.dir) {
 		t.Errorf("install-postgres.sh names another database: %q", h)
+	}
+}
+
+// A refusal on the PostgreSQL path suggests a command that comes back
+// through the same door: install-postgres.sh, with the knobs on `sh`.
+func TestInstallerPostgres_aRefusalSuggestsTheSameDoor(t *testing.T) {
+	r := install(t, "DBTRAIL_FOR=postgres", "BUSY_PORTS=8090 8091")
+	if !r.failed || r.upCalls != 0 {
+		t.Fatalf("the installer went on with port 8090 taken:\n%s", r.out)
+	}
+	want := "curl -fsSL https://raw.githubusercontent.com/dbtrail/dbtrail/main/install-postgres.sh | DBTRAIL_DIR=" + r.dir + " DBTRAIL_PORT=8092 sh"
+	if !strings.Contains(r.out, want) {
+		t.Errorf("a taken port does not suggest the PostgreSQL door.\nwant: %s\ngot:\n%s", want, r.out)
+	}
+	r = install(t, "DBTRAIL_FOR=postgres", "STUB_RELEASE_FAIL=1")
+	if !r.failed || !strings.Contains(r.out, "main/install-postgres.sh | DBTRAIL_DIR="+r.dir+" DBTRAIL_REF=vX.Y.Z sh") {
+		t.Errorf("a release not found does not suggest the PostgreSQL door:\n%s", r.out)
+	}
+	for _, rr := range []run{r} {
+		if strings.Contains(rr.out, "/install.sh |") {
+			t.Errorf("the PostgreSQL path suggests install.sh:\n%s", rr.out)
+		}
+	}
+}
+
+// install-postgres.sh downloads install.sh from main and runs it for
+// PostgreSQL.
+func TestInstallPostgresScript_downloadsTheInstaller(t *testing.T) {
+	r := installScript(t, "install-postgres.sh", nil)
+	if r.failed || !strings.Contains(r.out, "DBTrail is up.") || !strings.Contains(r.out, pgPromise) {
+		t.Fatalf("install-postgres.sh did not download and run the installer for PostgreSQL:\n%s", r.out)
+	}
+	if !strings.Contains(r.urls, "https://raw.githubusercontent.com/dbtrail/dbtrail/main/install.sh") {
+		t.Errorf("install-postgres.sh did not download main's install.sh:\n%s", r.urls)
+	}
+}
+
+// What comes back is checked before it runs: an empty answer or a page (a
+// proxy, a sign-in portal) is refused, and nothing reaches Docker.
+func TestInstallPostgresScript_refusesWhatIsNotTheInstaller(t *testing.T) {
+	for _, body := range []string{"\n", "<html>sign in</html>", "#!/bin/sh\necho hi\n"} {
+		r := installScript(t, "install-postgres.sh", nil, "STUB_INSTALLER_BODY="+body)
+		if !r.failed || !strings.Contains(r.out, "is not the DBTrail installer") {
+			t.Errorf("body %q: not refused with its reason:\n%s", body, r.out)
+		}
+		if strings.Contains(r.calls, "compose") {
+			t.Errorf("body %q: Docker was reached:\n%s", body, r.calls)
+		}
 	}
 }
