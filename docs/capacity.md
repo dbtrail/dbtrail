@@ -10,9 +10,9 @@ The machine that runs the stack (capture, the index MySQL and the router that an
 
 ### CPU: count physical cores, not vCPUs
 
-- **On most cloud instances a vCPU is half a core.** Intel instances and most AMD ones run two hardware threads per core, so 4 vCPUs are 2 cores. On those, 4 cores means 8 vCPUs. On AWS Graviton and on the AMD c7a, m7a and r7a families one vCPU is one core.
-- **SQL on the copy runs on cores, and two threads of one core do not add up to two cores.** An analytical query (a full-table aggregate over tens of millions of rows) runs noticeably faster on 4 physical cores than on 4 vCPUs that are 2 cores.
-- **4 physical cores** is the smallest machine we support. **8** leave room for capture and the snapshot refresh, which also use the cores, without slowing the statements down while they run. How the router shares the cores with capture is in [Docker](docker.md#the-router-the-service-that-answers-the-mysql-port).
+- **On many cloud instances a vCPU is one of the two hyperthreads of a core.** Intel instances, and AMD instances before the 7th generation, run two hardware threads per core, so 4 vCPUs are 2 cores. On those, 4 cores means 8 vCPUs. On AWS Graviton and on the AMD c7a, c8a, m7a and r7a families one vCPU is one core.
+- **SQL on the copy runs on cores, and the two hyperthreads of one core do not add up to two cores.** On Intel, with 3 reports at once, 8 vCPUs on 8 different cores answered 42 reports a minute, and 8 vCPUs that were 4 cores with both hyperthreads answered 27.4: each hyperthread did 0.61 to 0.65 of a core's work. For SQL on the copy, count a vCPU that is a hyperthread as about 0.6 of a core.
+- **4 physical cores** is the smallest machine we support, and **8** are recommended. Capture and the snapshot refresh use the cores too, and they come first: the router runs below capture's CPU priority, so when cores run short it is the reports that slow down. How many cores for how many reports is [below](#cores-for-each-heavy-report); how the router shares the cores with capture is in [Docker](docker.md#the-router-the-service-that-answers-the-mysql-port).
 
 ### Memory
 
@@ -21,6 +21,58 @@ The machine that runs the stack (capture, the index MySQL and the router that an
 - **8 GB is for evaluation on a small database only.** With a database of tens of GB under constant writes, an 8 GB machine runs out of memory: capture is the first process to stop, and a stopped capture is a gap in what you can recover. Below 16 GB, a problem caused by memory is not something we tune for.
 
 The machine's memory is shared: the index MySQL's buffer pool, capture, and the router's statements all come out of it. How the router splits its part is in [Docker](docker.md) (`ROUTER_MEMORY`, `SQL_MEMORY`, `ROUTER_MEMORY_SHARE`).
+
+### CPU for reports on the copy
+
+CPU and memory do different jobs for SQL on the copy. The CPU decides how fast reports come back, and whether the short queries a router passes to your database wait behind them. Memory decides whether a report fits: one that does not fit in its memory spills to disk or stops.
+
+Almost all of that CPU is the SQL engine. In a profile of an 8 vCPU machine running the PostgreSQL router under a CH-benCHmark load (0.152.0, [#3321](https://github.com/dbtrail/dbtrail/issues/3321)), the processes that run SQL on the copy took 94 % of the CPU. About 25 % of the machine went to turning the copy's text columns back into numbers, dates and times, and 23 % to joining tables. DBTrail's own code, the network and the hop through the router took under 3 % together.
+
+A PostgreSQL snapshot now stores whole number, `date`, `uuid` and `numeric(p,s)` columns as their type instead of as text (the primary key's columns stay text), so reports on them skip that conversion ([postgres.md](postgres.md#columns-a-snapshot-stores-as-their-type)). In a test on a 6-million-row table, one report went from about 220 ms to about 115 ms. The measurements below were taken before this change, on a copy where every column is text.
+
+#### Which machine
+
+The 22 CH-benCHmark reports, 3 at once for 5 minutes, on seven AWS instances. Prices are us-west-2, on-demand, Linux, as of 2026-11-28.
+
+| Instance | CPU | vCPU | Physical cores | USD an hour | Reports a minute | Median per report | Reports per dollar |
+|---|---|---|---|---|---|---|---|
+| c8a.2xlarge | AMD EPYC 9R45 | 8 | 8 | 0.43108 | 59.4 | 2.4 s | 8,268 |
+| c8g.2xlarge | Graviton4 | 8 | 8 | 0.31904 | 38.2 | 3.8 s | 7,184 |
+| c7g.2xlarge | Graviton3 | 8 | 8 | 0.29000 | 32.0 | 4.6 s | 6,621 |
+| c7a.2xlarge | AMD EPYC 9R14 | 8 | 8 | 0.41056 | 40.8 | 3.6 s | 5,963 |
+| c8i.2xlarge | Xeon 6975P-C | 8 | 4 | 0.37484 | 33.2 | 4.2 s | 5,314 |
+| c7i.2xlarge | Xeon Platinum 8488C | 8 | 4 | 0.35700 | 30.6 | 4.6 s | 5,143 |
+| c7i.4xlarge | Xeon Platinum 8488C | 16 | 8 | 0.71400 | 52.4 | 2.7 s | 4,403 |
+
+Reports per dollar is reports a minute × 60 ÷ USD an hour.
+
+- **c8a** answered the most reports a minute and the most for each dollar. Start there.
+- **c8g** costs the least an hour and comes second per report. Take it when the hourly bill matters more than how fast reports come back.
+- **Intel costs more per report for this work.** An 8 vCPU Intel instance has 4 cores. c7i.4xlarge, with 8 cores, answered fewer reports a minute than c8a.2xlarge with 8, at 1.7 times the price an hour.
+
+What was measured: DuckDB 1.5.6, the engine 0.152.0 runs SQL on the copy with, over one frozen copy of a PostgreSQL server under a CH-benCHmark load, about 8.5 GB of Parquet in 15 tables. Each report had 2 GB of memory (the default `SQL_MEMORY`) and vCPUs ÷ 3 threads, rounded up. Every machine returned the same rows, and the same rows the PostgreSQL router returned for the 22 reports.
+
+What was not measured: the rest of DBTrail. Capture, the index MySQL and the router itself were not running on these machines, and on a real install they share the CPU. One size of data, one memory limit, one 5-minute run for each setup.
+
+#### Cores for each heavy report
+
+On the 8-core machines, 3 reports at once kept every core busy. Plan about **2.7 physical cores for each heavy report you want running at once** at the speeds above (8 ÷ 3), and cores of their own on top for capture and the index MySQL, which this test did not measure. That is the shape of the test, not a minimum found by trying fewer cores.
+
+A hyperthread is not worthless: the second hyperthread of a busy core added 22 to 28 % more work. So buy by physical cores, and let DBTrail give work to every vCPU, which it does by itself (next section).
+
+#### Threads and CPU priority
+
+Each statement on the copy runs in a worker process of its own, with some number of SQL engine threads. Both routers work their numbers out from the vCPUs the process may use, as the Go runtime counts them (`GOMAXPROCS`): the CPUs it may run on, and a container's CPU limit. Both aim to give every vCPU they count some work, and they divide them differently:
+
+| | MySQL router (`router`) | PostgreSQL router (`pg-router`) |
+|---|---|---|
+| Statements at once | One per two vCPUs, fewer when the memory the router may use does not hold that many at `SQL_MEMORY` plus a quarter each | `PG_ROUTER_WORKERS` (4 unless set), plus one kept for short statements |
+| Threads for each | vCPUs ÷ statements at once, at least 2 | `auto` (the default): vCPUs ÷ statements at once, rounded up, at most 16 |
+| Set it yourself | `ROUTER_CONCURRENCY` (`--concurrency`): statements at once; the threads follow, down to 1 | `PG_ROUTER_WORKERS` (`--workers`) and `PG_ROUTER_THREADS` (`--threads`, 1 to 16 or `auto`). A number you set is used as it is |
+
+- **The MySQL router counts all the vCPUs** in the Docker stack and the Linux packages, because it runs below capture's CPU priority there. With neither a CPU limit nor a lower priority of its own, and on Kubernetes, it takes half and leaves the rest to capture. Its startup lines say which ([time-travel-sql.md](time-travel-sql.md#the-router-the-process-that-serves-the-port)).
+- **On the PostgreSQL router, `auto`** gives 2 threads on 8 vCPUs and 4 on 16 with the default 4 workers, and 3 on 8 vCPUs with `PG_ROUTER_WORKERS=2`. In the measurement above, vCPUs ÷ reports at once, rounded up, did as well as or better than every other number of threads tried, on all seven machines. Counting physical cores instead lost 10 to 11 % on the 8 vCPU Intel instances and 18 % on c7i.4xlarge. More threads for a statement also let it use more of its memory, so on a large machine a large join can spill or fail where it fit with 2. To keep 2 whatever the machine, set `PG_ROUTER_THREADS=2`.
+- **The workers run 10 nice steps below the process that starts them** (the router, or capture in `watch`). While cores are idle nothing changes. When reports fill every core, the short statements a router passes to your database, and capture, get a core first. On a test machine with 8 cores full of reports, the median short statement went from 1.3 ms to 0.6 ms, and the reports kept their pace. `SQL_WORKER_NICE` in `.env` (`BINTRAIL_SQL_WORKER_NICE` with the packages) sets the step, 0 to 19, and `off` runs the workers at the router's priority. Changing it needs the current `docker-compose.yml` (version 14). Linux only. More in [Docker](docker.md#the-postgresql-router-the-service-that-answers-the-postgresql-port).
 
 ## What one event costs
 
