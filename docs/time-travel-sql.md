@@ -3412,19 +3412,24 @@ Why it is a process of its own:
 - **A statement that runs out of memory cannot take capture with it.** It is
   another process, under its own ceiling.
 - **It sizes itself.** How many statements run on the copy at once is worked
-  out from the cores and the memory the router may use: one worker per two
-  cores or per statement's memory, whichever is fewer, and the cores are
-  divided among the workers. Nothing has to be set by hand. Give the service its own
+  out from the vCPUs and the memory the router may use: one worker per two
+  vCPUs or per statement's memory, whichever is fewer, and the vCPUs are
+  divided among the workers, at least 2 threads each. The vCPUs are what the
+  Go runtime counts for the process, so on Intel, where 2 vCPUs are one core,
+  that is one worker per core
+  ([capacity.md](capacity.md#threads-and-cpu-priority)). Nothing has to be set by hand. Give the service its own
   ceilings (`cpus` and `mem_limit` in Docker, `CPUQuota=` and `MemoryMax=`
-  under systemd) and it uses all of them. With none it takes half of the
-  machine, since capture uses the machine too. The numbers and where they
+  under systemd) and it uses all of them. With none it plans with half of the
+  machine's memory, since capture uses the machine too. It uses every vCPU
+  when it runs below capture's CPU priority, as the Docker stack and the
+  packages set it, and half of them otherwise. The numbers and where they
   came from are printed when it starts.
 - **Or you say how many.** `--concurrency 16` (`BINTRAIL_ROUTER_CONCURRENCY`,
   `ROUTER_CONCURRENCY` in the Docker stack's `.env`) sets how many statements
   run on the copy at once, from 1 to 64, the way `innodb_thread_concurrency`
   does on a MySQL server. The number is taken as said. Above one per two
-  cores each statement runs with fewer threads, down to one, so more run
-  at once and each is slower; above the number of cores they take turns. Each statement keeps its own memory (2 GB by default, plus a
+  vCPUs each statement runs with fewer threads, down to one, so more run
+  at once and each is slower; above the number of vCPUs they take turns. Each statement keeps its own memory (2 GB by default, plus a
   quarter), so the startup lines print a `WARNING` with the sum when the
   number can ask for more memory than the router may use: lower the number,
   or the memory each may use. Two more things grow with the number. The temporary disk a
