@@ -70,7 +70,7 @@ func TestPostgresNames_onlyForTheSessionThatAsks(t *testing.T) {
 func TestPostgresNames_ownMacros(t *testing.T) {
 	f := newCopyFixture(t)
 	r := newTestRunner(t, testLimits())
-	job := f.job("SELECT _bintrail_pg_sum32(a), _bintrail_pg_avgn(a), _bintrail_pg_div(sum(a), 2), _bintrail_pg_avg(a * 1.5::double), _bintrail_pg_sum32(a) AS s FROM (VALUES (1, 'x'), (2, 'y')) t(a, b)")
+	job := f.job("SELECT _bintrail_pg_sum32(a), _bintrail_pg_avgn(a), _bintrail_pg_div(sum(a) * 1.5, 2), _bintrail_pg_avg(a * 1.5::double), _bintrail_pg_sum32(a) AS s FROM (VALUES (1, 'x'), (2, 'y')) t(a, b)")
 	job.Session = Session{PostgresRules: true, PostgresNames: true}
 	res, err := r.Run(context.Background(), job)
 	if err != nil {
