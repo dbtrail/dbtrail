@@ -113,6 +113,30 @@ func TestCollectRefs_textUse(t *testing.T) {
 		{"SELECT CAST(name AS VARCHAR) FROM t", TextUse{Wrapped: []ColumnRef{c("", "name")}}},
 		{"SELECT lower(name), coalesce(code, 'x'), concat(a, b), length(c) FROM t", TextUse{}},
 		{"SELECT upper(substring(name, 1, 2)) FROM t", TextUse{Wrapped: []ColumnRef{c("", "name")}}},
+		// A node that answers true or false hides its operands' text from a
+		// call around it (CH-benCHmark Q8: the division sees a number, never
+		// n_name). A call inside it that can cut text still marks its own.
+		{"SELECT sum(CASE WHEN n2.n_name = 'Germany' THEN ol_amount ELSE 0 END) / sum(ol_amount) FROM t",
+			TextUse{Wrapped: []ColumnRef{c("", "ol_amount"), c("", "ol_amount")}}},
+		{"SELECT sum(CASE WHEN LEFT(name, 3) = 'x' THEN 1 END) / count(*) FROM t", TextUse{Wrapped: []ColumnRef{c("", "name")}}},
+		{"SELECT 1 FROM t WHERE CAST(name AS VARCHAR) = 'x'", TextUse{Wrapped: []ColumnRef{c("", "name")}}},
+		{"SELECT 1 FROM t WHERE LEFT(coalesce(name, 'x'), 3) = 'x'", TextUse{Wrapped: []ColumnRef{c("", "name")}}},
+		{"SELECT CAST(coalesce(name, code) AS INT) FROM t", TextUse{Wrapped: []ColumnRef{c("", "name"), c("", "code")}}},
+		// The THEN is what a CASE answers: a cut around the CASE cuts it, and
+		// not the WHEN's comparison.
+		{"SELECT LEFT(CASE WHEN code = 'x' THEN name END, 3) FROM t", TextUse{Wrapped: []ColumnRef{c("", "name")}}},
+		{"SELECT LEFT(any_value(CASE WHEN code = 'x' THEN name END), 3) FROM t", TextUse{Wrapped: []ColumnRef{c("", "name")}}},
+		{"SELECT LEFT((SELECT code FROM u), 3) FROM t", TextUse{Wrapped: []ColumnRef{c("", "code")}}},
+		{"SELECT sum(CASE WHEN name IN ('a', 'b') THEN 1 END) / count(*), sum(CASE WHEN code NOT IN ('a') THEN 1 END) / count(*) FROM t",
+			TextUse{}},
+		{"SELECT CAST(name IS NULL AS INT), CAST(code IS NOT NULL AS INT), CAST(NOT flag AS INT) FROM t", TextUse{}},
+		{"SELECT CAST(name LIKE 'jo' AS INT), CAST(code NOT LIKE 'x' AS INT), CAST(a ILIKE 'x' AS INT), CAST(b NOT ILIKE 'x' AS INT) FROM t",
+			TextUse{}},
+		{"SELECT CAST(a AND b OR c AS INT), CAST(name IS DISTINCT FROM code AS INT) FROM t", TextUse{}},
+		{"SELECT CAST(name BETWEEN 'a' AND 'm' AS INT), CAST(code < 'm' AS INT) FROM t",
+			TextUse{Ordered: []ColumnRef{c("", "name"), c("", "code")}}},
+		{"SELECT CAST(name IN (SELECT code FROM u) AS INT), CAST(EXISTS (SELECT a FROM u) AS INT), CAST(b = ANY (SELECT d FROM u) AS INT) FROM t",
+			TextUse{}},
 		// A comment is not a literal.
 		{"SELECT name FROM t /* José */ WHERE id = 1", TextUse{}},
 	}

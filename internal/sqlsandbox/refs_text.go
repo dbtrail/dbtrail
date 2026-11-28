@@ -60,7 +60,8 @@ type TextUse struct {
 	// rebuild text (LEFT, SUBSTRING, REPLACE, a CAST, ...: every function
 	// but keepsEnds). What it returns can end with a space the value held
 	// inside ('Jo Ann' cut to three is 'Jo '), which a PAD SPACE collation
-	// does not see and the copy does.
+	// does not see and the copy does. Not through a node that answers true
+	// or false (answersTruth): the call sees that value, not the text.
 	Wrapped []ColumnRef `json:"wrapped,omitempty"`
 }
 
@@ -107,6 +108,40 @@ var orderingComparisons = map[string]bool{
 	"COMPARE_LESSTHAN": true, "COMPARE_GREATERTHAN": true,
 	"COMPARE_LESSTHANOREQUALTO": true, "COMPARE_GREATERTHANOREQUALTO": true,
 	"COMPARE_BETWEEN": true, "COMPARE_NOT_BETWEEN": true,
+}
+
+// truthOperators are the operators that answer true or false (DuckDB's
+// OPERATOR class also holds COALESCE, which answers one of its operands, so
+// not every operator is one).
+var truthOperators = map[string]bool{
+	"COMPARE_IN": true, "COMPARE_NOT_IN": true,
+	"OPERATOR_IS_NULL": true, "OPERATOR_IS_NOT_NULL": true, "OPERATOR_NOT": true,
+}
+
+// truthFunctions are the functions that answer true or false: LIKE and
+// ILIKE, and their NOT forms.
+var truthFunctions = map[string]bool{"~~": true, "!~~": true, "~~*": true, "!~~*": true}
+
+// answersTruth reports whether a node answers true or false: a comparison,
+// a BETWEEN, an AND or an OR, IN, IS NULL, NOT, LIKE, an EXISTS or a
+// comparison with a subquery. What is around it sees that truth value, never
+// its operands' text, so a call around it that can cut text cuts none of
+// theirs: SUM(CASE WHEN name = 'x' THEN 1 END) / COUNT(*) divides a number.
+func answersTruth(v map[string]any) bool {
+	switch v["class"] {
+	case "COMPARISON", "BETWEEN", "CONJUNCTION":
+		return true
+	case "OPERATOR":
+		t, _ := v["type"].(string)
+		return truthOperators[t]
+	case "FUNCTION":
+		f, _ := v["function_name"].(string)
+		return truthFunctions[f]
+	case "SUBQUERY":
+		t, _ := v["subquery_type"].(string)
+		return t == "EXISTS" || t == "NOT_EXISTS" || t == "ANY"
+	}
+	return false
 }
 
 // textWalk is where collectTextUse stands: under something that puts its
@@ -170,6 +205,12 @@ func walkText(node any, at textWalk, u *TextUse) {
 		}
 		if v["type"] == "SET_OPERATION_NODE" {
 			u.SetOperation = true
+		}
+		if answersTruth(v) {
+			// Its operands are not inside the call around it: only its truth
+			// value is. A call inside it that can cut text still marks its
+			// own operands (LEFT(name, 3) = 'Jo').
+			at.wrapped = false
 		}
 		switch v["class"] {
 		case "COLUMN_REF":
