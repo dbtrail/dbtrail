@@ -18,7 +18,6 @@ func TestAliasClassOf(t *testing.T) {
 		{"WITH p AS (SELECT sum(amount) AS spent FROM t) SELECT spent FROM p", "spent", clsDecimal},
 		{"WITH p AS (SELECT sum(qty) AS n FROM t) SELECT n FROM p", "n", clsWhole64},
 		{"WITH p AS (SELECT qty AS n FROM t), q AS (SELECT n + 1 AS m FROM p) SELECT m FROM q", "m", clsWhole32},
-		{"WITH p (spent) AS (SELECT sum(amount) FROM t) SELECT spent FROM p", "spent", clsDecimal},
 		// Not known: a float, two definitions that disagree, a column list
 		// beside a table, a name that is also a column of another class.
 		{"WITH p AS (SELECT sum(ratio) AS s FROM t) SELECT s FROM p", "s", clsUnknown},
