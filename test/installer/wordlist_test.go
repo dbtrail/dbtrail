@@ -285,17 +285,35 @@ func cleanRunSpeaksTheWordList(t *testing.T, env ...string) {
 	}
 }
 
-// The README makes the same promise, in its header. It is the header image's
-// headline and the first words of that image's alt text, which is where this
-// finds it.
-func TestPromise_theREADMEMakesTheSamePromise(t *testing.T) {
+// The README speaks to both doors, so its header names no database: its
+// promise is readmePromise, the headline of the header image and the first
+// words of that image's alt text (#3319). The installer's banner keeps its own
+// door's promise (promise, pgPromise).
+const readmePromise = "Heavy reports, from minutes to seconds."
+
+func TestPromise_theREADMEMakesItsPromise(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	readme := string(b)
-	if !strings.Contains(readme, `alt="`+promise) {
-		t.Errorf("README.md's header image does not open with the promise word for word: %q", promise)
+	if !strings.Contains(readme, `alt="`+readmePromise) {
+		t.Errorf("README.md's header image does not open with its promise word for word: %q", readmePromise)
+	}
+	// Both images of the header exist: GitHub shows the one of the reader's theme.
+	for _, img := range []string{"docs/img/dbtrailheader-dark.png", "docs/img/dbtrailheader-light.png"} {
+		if !strings.Contains(readme, img) {
+			t.Errorf("README.md does not name %s", img)
+		}
+		if _, err := os.Stat(filepath.Join("..", "..", img)); err != nil {
+			t.Errorf("%s: %v", img, err)
+		}
+	}
+	// A door per database, and the line under the header names neither.
+	for _, door := range []string{"](#postgresql)", "](#mysql-and-mariadb)", "\n## PostgreSQL\n", "\n## MySQL and MariaDB\n", "install-postgres.sh"} {
+		if !strings.Contains(readme, door) {
+			t.Errorf("README.md has no %q", door)
+		}
 	}
 	if !strings.Contains(readme, startPage) {
 		t.Errorf("README.md does not link the start page %s", startPage)

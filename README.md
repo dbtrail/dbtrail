@@ -1,8 +1,13 @@
 <div align="center">
 
-<img src="docs/img/dbtrailheader.png" alt="Heavy MySQL queries, from minutes to seconds. For your MySQL 8.0, 8.4 or 9.7, RDS, Aurora, Percona or MariaDB, and anything else that writes a MySQL binlog: DBTrail follows your binlog and answers from a copy in Parquet with DuckDB. Works with your mysql client and drivers, and installs nothing on your MySQL." width="100%">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/dbtrailheader-dark.png">
+  <img src="docs/img/dbtrailheader-light.png" alt="Heavy reports, from minutes to seconds. Your reports run on a columnar copy that DBTrail keeps up to date, not on your server. Connect with the client you already use. For PostgreSQL 15 to 18, RDS and Aurora; for MySQL 8.0+, RDS, Aurora, Percona and MariaDB." width="100%">
+</picture>
 
-**HTAP for MySQL and MariaDB. Transactions stay on your server; heavy queries come back in seconds from a columnar copy that follows your binlog, routed automatically on the same connection, with no ETL and nothing installed on your MySQL.**
+**Transactions stay on your server. Heavy reports come back in seconds from a near real time columnar copy, routed on the same connection, with no ETL and nothing installed on your server.**
+
+**[PostgreSQL →](#postgresql)** &nbsp;&nbsp; **[MySQL and MariaDB →](#mysql-and-mariadb)**
 
 [![Release](https://img.shields.io/github/v/release/dbtrail/dbtrail)](https://github.com/dbtrail/dbtrail/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
@@ -11,6 +16,26 @@
 [Website](https://dbtrail.com) · [Quick Start](https://www.dbtrail.com/docs/quickstart/) · [Docs](https://www.dbtrail.com/docs/) · [Blog](https://blog.dbtrail.com)
 
 </div>
+
+## PostgreSQL
+
+Reports run on a near real time columnar copy of your tables, and your
+application keeps one connection: DBTrail's port 5433 answers as PostgreSQL,
+sends small questions to your database and answers heavy reports from the
+copy. DBTrail reads your changes with the built-in `pgoutput`; nothing is
+installed in PostgreSQL. PostgreSQL 15 to 18, Amazon RDS and Aurora.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/dbtrail/dbtrail/main/install-postgres.sh | sh
+```
+
+```sh
+psql "host=<dbtrail host> port=5433 dbname=shop user=app sslmode=require"
+```
+
+[dbtrail.com/postgresql](https://www.dbtrail.com/postgresql/) · [Get started with PostgreSQL](https://www.dbtrail.com/docs/postgres/)
+
+## MySQL and MariaDB
 
 ```sh
 mysql -h <dbtrail host> -P 3309 -u shop -p
@@ -26,7 +51,7 @@ GROUP BY c.tier ORDER BY revenue DESC;
 
 ---
 
-## What you can do
+### What you can do
 
 - **Run heavy queries in seconds.** Totals and rankings over whole tables,
   trends over years of data, page 5,000 of a listing. In our test, the
@@ -54,7 +79,7 @@ GROUP BY c.tier ORDER BY revenue DESC;
   only read, and it never runs SQL on your MySQL.
   [Connect Claude](https://www.dbtrail.com/docs/claude/setup/)
 
-## Where it runs
+### Where it runs
 
 DBTrail reads your binlog over the replication protocol, the way a replica
 does. Nothing is installed on your MySQL: no plugin, no agent, no triggers.
@@ -62,7 +87,7 @@ You don't move to another database or another cloud. DBTrail runs on your own
 machines, next to MySQL, Percona Server, MariaDB, Amazon RDS or Aurora, and
 the copy is plain Parquet files on your disk or in your S3 bucket.
 
-## Install
+### Install
 
 You need Docker with Compose, and the `mysql` client.
 
@@ -79,9 +104,9 @@ calls you can keep in your automation:
 [In production](https://www.dbtrail.com/docs/production/). Linux packages and
 Amazon ECS too.
 
-## Limits
+### Limits
 
-- **The copy is almost real time.** A query that must see a write made a
+- **The copy is near real time.** A query that must see a write made a
   second ago belongs on your MySQL, and routing keeps transactions there.
 - **Lookups stay on your MySQL.** A read by key takes a few milliseconds on
   MySQL and about 100 on the copy, so routing leaves it on your MySQL.
