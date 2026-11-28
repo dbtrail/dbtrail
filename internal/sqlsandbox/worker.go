@@ -402,12 +402,26 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 	// the job (its parse, the column names, the select limit) is the
 	// statement's own, which that text keeps.
 	runSQL := job.SQL
+	// The filters the statement's ORs imply (orimplied.go), on the text
+	// that runs. Under the join check they are added first, so the plan it
+	// judges is the plan that runs: the check may leave the copy's own
+	// order on, and a filter added after it could move that order.
+	// Otherwise they are added after the join order by shape picks the
+	// order, from the statement's own shape (below).
+	impliedIn := func() {
+		got := impliedInFilters(ctx, conn, runSQL)
+		runSQL = got.text
+		res.ImpliedInFilters, res.ImpliedInFiltersNote = got.added, got.note
+	}
 	if job.JoinNDV != nil {
+		if job.ImpliedInFilters {
+			impliedIn()
+		}
 		var check joinCheck
 		if job.KeepJoinOrder {
-			check = checkJoinsWritten(ctx, conn, job.SQL, job.JoinNDV)
+			check = checkJoinsWritten(ctx, conn, runSQL, job.JoinNDV)
 		} else {
-			check = checkJoins(ctx, conn, job.SQL, job.JoinNDV, job.SkipCommonSubplan, job.TryConnectedJoinOrder)
+			check = checkJoins(ctx, conn, runSQL, job.JoinNDV, job.SkipCommonSubplan, job.TryConnectedJoinOrder)
 		}
 		switch {
 		case check.err != nil:
@@ -463,6 +477,13 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 		default:
 			res.JoinOrderByShapeNote = pick.note
 		}
+	}
+	// Without the join check, after the order is picked: an OR at the top
+	// of WHERE keeps a statement out of the join order by shape, and the
+	// AND the filter makes there must not bring it in (CH-benCHmark Q19
+	// was measured in the copy's own order).
+	if job.ImpliedInFilters && job.JoinNDV == nil {
+		impliedIn()
 	}
 	if _, err := conn.ExecContext(ctx, lockLast); err != nil {
 		return sessionErr("%s: %v", lockLast, err)
