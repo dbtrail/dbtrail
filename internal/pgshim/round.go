@@ -639,7 +639,7 @@ func scaleMacro(t rtToken) bool {
 		return false
 	}
 	switch t.text {
-	case pgAvg, pgAvgN, pgDiv, pgToTimestampMacro, pgPack, pgPackN:
+	case pgAvg, pgAvgN, pgDiv, pgSum32, pgToTimestampMacro, pgPack, pgPackN:
 		return false
 	}
 	return true

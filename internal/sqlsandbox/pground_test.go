@@ -130,6 +130,11 @@ func TestPGRoundMacros(t *testing.T) {
 		// avg of numerics and of whole numbers (#3219): the exact sum over the
 		// count, on the same terms. PostgreSQL writes 7.5000000000000000,
 		// 0.50000000000000000000, 3.3333333333333333 and -2.5000000000000000.
+		// sum of smallints and integers (#3219): a bigint, as PostgreSQL's.
+		{"sum of integers", "(SELECT _bintrail_pg_sum32(x) FROM (VALUES (2147483647), (2147483647)) v(x))", "4294967294", "BIGINT"},
+		{"sum of smallints", "(SELECT _bintrail_pg_sum32(x) FROM (VALUES (CAST(3 AS SMALLINT)), (CAST(-1 AS SMALLINT))) v(x))", "2", "BIGINT"},
+		{"sum of NULLs", "(SELECT _bintrail_pg_sum32(x) FROM (VALUES (CAST(NULL AS INTEGER)), (NULL)) v(x))", "<nil>", "BIGINT"},
+		{"sum of no rows", "(SELECT _bintrail_pg_sum32(x) FROM (VALUES (1)) v(x) WHERE x > 5)", "<nil>", "BIGINT"},
 		{"avg of numerics", "(SELECT _bintrail_pg_avgn(x) FROM (VALUES (CAST(5.00 AS DECIMAL(3,2))), (10.00)) v(x))", "7.5000000000000000", "DECIMAL(38,16)"},
 		{"avg of whole numbers", "(SELECT _bintrail_pg_avgn(x) FROM (VALUES (0), (1)) v(x))", "0.5000000000000000", "DECIMAL(38,16)"},
 		{"avg of bigints", "(SELECT _bintrail_pg_avgn(x) FROM (VALUES (CAST(9007199254740993 AS BIGINT)), (9007199254740994)) v(x))", "9007199254740993.5000000000000000", "DECIMAL(38,16)"},
@@ -208,6 +213,8 @@ func TestPGRoundMacros(t *testing.T) {
 		{"a quotient under the floor", "_bintrail_pg_div(CAST(0.999 AS DECIMAL(4,3)), 1000000)", "under 0.000001"},
 		{"a quotient that would round to zero", "_bintrail_pg_div(CAST(0.0000000001 AS DECIMAL(18,10)), 3000000)", "under 0.000001"},
 		{"a negative quotient under the floor", "_bintrail_pg_div(CAST(-0.0000000001 AS DECIMAL(18,10)), 3)", "under 0.000001"},
+		{"sum of a numeric", "(SELECT _bintrail_pg_sum32(x) FROM (VALUES (CAST(1.50 AS DECIMAL(3,2)))) v(x))", "not a smallint or an integer"},
+		{"sum of bigints", "(SELECT _bintrail_pg_sum32(x) FROM (VALUES (CAST(1 AS BIGINT))) v(x))", "not a smallint or an integer"},
 		{"avg under the floor", "(SELECT _bintrail_pg_avgn(x) FROM (VALUES (CAST(0.0000001 AS DECIMAL(18,10))), (0.0000001)) v(x))", "under 0.000001"},
 		{"a quotient past the copy's numeric", "_bintrail_pg_div(CAST(99999999999999999999999.0 AS DECIMAL(24,1)), CAST(0.1 AS DECIMAL(2,1)))", ""},
 		{"avgn of floats", "(SELECT _bintrail_pg_avgn(x) FROM (VALUES (CAST(0.5 AS DOUBLE)), (0.25)) v(x))", "not a numeric or a whole number"},

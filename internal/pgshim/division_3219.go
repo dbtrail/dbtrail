@@ -274,7 +274,7 @@ func inOwnMacro(toks []rtToken, at int) bool {
 			}
 			if j > 0 && (toks[j-1].kind == rtWord || toks[j-1].kind == rtQuoted) {
 				name := strings.ToLower(toks[j-1].text)
-				if roundsItsValue[name] || strings.HasPrefix(name, "_bintrail_pg_") && name != pgDiv && name != pgAvg && name != pgAvgN {
+				if roundsItsValue[name] || strings.HasPrefix(name, "_bintrail_pg_") && name != pgDiv && name != pgAvg && name != pgAvgN && name != pgSum32 {
 					return true
 				}
 			}
@@ -501,14 +501,24 @@ func retypeForCopy(text string, types map[string][]string) string {
 	if why != "" || len(spans) != len(toks) {
 		return text
 	}
+	// A name the statement defines is read as what it stands for
+	// (aliasClassOf): avg(spent) of a WITH's sum(amount) AS spent.
+	named := aliasClassOf(toks, of)
 	var b strings.Builder
 	last := 0
 	for i, t := range toks {
+		if _, ok := sumCall(toks, i, named); ok {
+			// sum of smallints or integers is a bigint on PostgreSQL.
+			b.WriteString(text[last:spans[i][0]])
+			b.WriteString(pgSum32)
+			last = spans[i][1]
+			continue
+		}
 		if t.kind != rtWord || t.text != pgAvg || !isOpTok(toks, i+1, "(") {
 			continue
 		}
 		end := closingParen(toks, i+1)
-		if end < 0 || exactClass(toks[i+2:end], of) == clsUnknown {
+		if end < 0 || exactClass(toks[i+2:end], named) == clsUnknown {
 			continue
 		}
 		b.WriteString(text[last:spans[i][0]])
@@ -528,7 +538,7 @@ func retypeForCopy(text string, types map[string][]string) string {
 func needsTypes(text string) bool {
 	toks, _ := lexSQL(text)
 	for i, t := range toks {
-		if isOpTok(toks, i, "/") || t.kind == rtWord && t.text == pgAvg {
+		if isOpTok(toks, i, "/") || t.kind == rtWord && (t.text == pgAvg || t.text == "sum") {
 			return true
 		}
 	}
@@ -714,6 +724,8 @@ func callClass(name string, args []rtToken, typesOf func(string) []string) exact
 		return clsWhole32
 	case pgDiv, pgAvgN, pgRoundDiv, pgRoundAvg, pgRoundK, pgRoundNeg, pgRoundWhole:
 		return clsDecimal
+	case pgSum32:
+		return clsWhole64
 	case pgAvg:
 		// Not yet renamed when a division around it is decided
 		// (retypeForCopy): of numerics or whole numbers it will be pgAvgN.

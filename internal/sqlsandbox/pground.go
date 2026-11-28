@@ -104,6 +104,10 @@ package sqlsandbox
 //     20 and more (500.0000000000000000, 0.50000000000000000000), which is
 //     not one type the copy can give a column: refused. It is the avg of a
 //     connection the copy answers alone, and of a float everywhere.
+//   - sum(x) of smallints or integers on a connection that can reach its
+//     source is _bintrail_pg_sum32 (pgshim.retypeForCopy, #3219): the
+//     engine's sum, a HUGEINT, cast to a BIGINT, the type PostgreSQL
+//     answers it with. Of any other type it is refused.
 //   - avg(x) of numerics or whole numbers on a connection that can reach
 //     its source is _bintrail_pg_avgn (pgshim.retypeForCopy, #3219), and
 //     n / d on its own is _bintrail_pg_div (pgshim.rewriteDivisions): the
@@ -300,6 +304,11 @@ CREATE OR REPLACE TEMP MACRO _bintrail_pg_avgn(x) AS (
     WHEN count(x) = 0 THEN NULL
     ELSE _bintrail_pg_q16(_bintrail_pg_uns(sum(x)), _bintrail_pg_scale(sum(x)), count(x), 0)
   END AS DECIMAL(38,0)) * CAST(0.0000000000000001 AS DECIMAL(16,16))
+);
+CREATE OR REPLACE TEMP MACRO _bintrail_pg_sum32(x) AS (
+  CASE WHEN typeof(min(x)) NOT IN ('TINYINT', 'SMALLINT', 'INTEGER', 'UTINYINT', 'USMALLINT')
+    THEN error('the copy cannot write sum() of this as PostgreSQL does: it is not a smallint or an integer')
+    ELSE CAST(sum(x) AS BIGINT) END
 );
 CREATE OR REPLACE TEMP MACRO _bintrail_pg_tscale(t) AS (
   CASE WHEN t LIKE 'DECIMAL(%' THEN CAST(regexp_extract(t, ',([0-9]+)[)]$', 1) AS INTEGER)
